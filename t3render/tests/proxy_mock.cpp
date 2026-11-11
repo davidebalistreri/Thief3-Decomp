@@ -25,27 +25,33 @@ static const void* observed_vertices;
 static t3render::DrawCall observed_call;
 static IDirect3D8 factory;
 static int real_calls = 0;
+static thread_local DWORD last_error = 0;
+static DWORD draw_up_input_error = 0;
+static DWORD create_input_error = 0, reset_input_error = 0, present_input_error = 0;
 
 extern "C" size_t VirtualQuery(void* p,MEMORY_BASIC_INFORMATION* out,size_t) { if(!writable) return 0; out->BaseAddress=p; out->RegionSize=sizeof(void*); out->State=MEM_COMMIT; out->Protect=PAGE_READWRITE; return sizeof(*out); }
 extern "C" void* InterlockedCompareExchangePointer(void* volatile* p,void* x,void* compare) { void* prior=*p; if(reject_swap && x) {reject_swap=false; return reinterpret_cast<void*>(1);} if(prior==compare) *p=x; return prior; }
 extern "C" void OutputDebugStringA(const char*) { ++failures; }
+extern "C" DWORD GetLastError() { return last_error; }
+extern "C" void SetLastError(DWORD value) { last_error = value; }
 extern "C" UINT GetSystemDirectoryW(wchar_t* out,UINT) { const wchar_t path[]=L"sys"; std::memcpy(out,path,sizeof path); return 3; }
 extern "C" HMODULE LoadLibraryW(const wchar_t*) { return reinterpret_cast<void*>(1); }
 extern "C" int FreeLibrary(HMODULE) { return 1; }
 extern "C" int GetModuleHandleExW(DWORD,LPCWSTR,HMODULE* out) { *out=reinterpret_cast<void*>(2); return 1; }
-static IDirect3D8* real_create(UINT version) { ++real_calls; assert(version==220); if(recursive) {recursive=false; assert(Proxy_Direct3DCreate8(version)==nullptr);} return &factory; }
+static IDirect3D8* real_create(UINT version) { ++real_calls; assert(version==220); create_input_error=GetLastError(); if(recursive) {recursive=false; assert(Proxy_Direct3DCreate8(version)==nullptr);} SetLastError(4242); return &factory; }
 extern "C" void* GetProcAddress(HMODULE,const char*) { return reinterpret_cast<void*>(&real_create); }
 namespace t3render {
-bool CaptureConfigured() { return enabled; }
+bool CaptureConfigured() { SetLastError(991); return enabled; }
 void CaptureDevice(IDirect3DDevice8*,const D3DPRESENT_PARAMETERS* p) { observed_params=const_cast<D3DPRESENT_PARAMETERS*>(p); events.push_back("capture-device"); }
 void CaptureDeviceReleased(IDirect3DDevice8* d) { assert(d==last_freed); events.push_back("capture-release"); }
 void CaptureDraw(IDirect3DDevice8*,const DrawCall& d) {
+ SetLastError(991);
  if (stress) { ++captured_draws; return; }
  if (throw_capture) throw std::runtime_error("capture failed");
  observed_call=d; events.push_back("capture-draw");
 }
-void CaptureReset(IDirect3DDevice8*,const D3DPRESENT_PARAMETERS* p,HRESULT hr) { assert(hr==12); observed_params=const_cast<D3DPRESENT_PARAMETERS*>(p); events.push_back("capture-reset"); }
-void CapturePresent(IDirect3DDevice8*,HRESULT hr) { assert(hr==13); events.push_back("capture-present"); }
+void CaptureReset(IDirect3DDevice8*,const D3DPRESENT_PARAMETERS* p,HRESULT hr) { SetLastError(991); assert(hr==12); observed_params=const_cast<D3DPRESENT_PARAMETERS*>(p); events.push_back("capture-reset"); }
+void CapturePresent(IDirect3DDevice8*,HRESULT hr) { SetLastError(991); assert(hr==13); events.push_back("capture-present"); }
 }
 static HRESULT query_factory(IDirect3D8* f,REFIID,void** out) { *out=f; ++f->refs; return 0; }
 static ULONG add_factory(IDirect3D8* f) { return ++f->refs; }
@@ -58,20 +64,22 @@ static HRESULT make_device(IDirect3D8*,UINT,D3DDEVTYPE,HWND,DWORD,D3DPRESENT_PAR
 static HRESULT query_device(IDirect3DDevice8* d,REFIID,void** out) { *out=d; ++d->refs; return 0; }
 static ULONG add_device(IDirect3DDevice8* d) { return ++d->refs; }
 static ULONG release_device(IDirect3DDevice8* d) { ULONG refs=--d->refs; if (!refs) last_freed=d; return refs; }
-static HRESULT reset(IDirect3DDevice8*,D3DPRESENT_PARAMETERS*) { events.push_back("reset"); return 12; }
-static HRESULT present(IDirect3DDevice8*,const RECT*,const RECT*,HWND,const RGNDATA*) { events.push_back("present"); return 13; }
+static HRESULT reset(IDirect3DDevice8*,D3DPRESENT_PARAMETERS*) { reset_input_error=GetLastError(); SetLastError(912); events.push_back("reset"); return 12; }
+static HRESULT present(IDirect3DDevice8*,const RECT*,const RECT*,HWND,const RGNDATA*) { present_input_error=GetLastError(); SetLastError(913); events.push_back("present"); return 13; }
 static HRESULT draw(IDirect3DDevice8*,int,UINT,UINT) {
  if (stress) { ++forwarded_draws; return 14; }
  events.push_back("draw"); return 14;
 }
 static HRESULT draw_indexed(IDirect3DDevice8*,int,UINT,UINT,UINT,UINT) { events.push_back("draw-indexed"); return 15; }
-static HRESULT draw_up(IDirect3DDevice8*,int,UINT,const void* v,UINT) { observed_vertices=v; events.push_back("draw-up"); return 16; }
+static HRESULT draw_up(IDirect3DDevice8*,int,UINT,const void* v,UINT) { draw_up_input_error=GetLastError(); SetLastError(909); observed_vertices=v; events.push_back("draw-up"); return 16; }
 static HRESULT draw_indexed_up(IDirect3DDevice8*,int,UINT,UINT,UINT,const void* i,int,const void* v,UINT) { observed_indices=i; observed_vertices=v; events.push_back("draw-indexed-up"); return 17; }
 static IDirect3D8Vtbl factory_vt{query_factory,add_factory,release_factory,make_device};
 static IDirect3DDevice8Vtbl device_vt{query_device,add_device,release_device,reset,present,draw,draw_indexed,draw_up,draw_indexed_up};
 int main() {
  factory={&factory_vt,1}; devices[0]={&device_vt,1}; devices[1]={&device_vt,1};
+ SetLastError(101);
  assert(Proxy_Direct3DCreate8(220)==&factory && factory.lpVtbl==&factory_vt);
+ assert(create_input_error==101 && GetLastError()==4242);
  enabled=true; writable=false; assert(Proxy_Direct3DCreate8(220)==&factory && factory.lpVtbl==&factory_vt);
  writable=true; reject_swap=true; assert(Proxy_Direct3DCreate8(220)==&factory && factory.lpVtbl==&factory_vt);
  recursive=true; assert(Proxy_Direct3DCreate8(220)==&factory && factory.lpVtbl!=&factory_vt); assert(real_calls==4);
@@ -99,12 +107,16 @@ int main() {
  assert(d->lpVtbl->DrawIndexedPrimitive(d,4,5,6,7,8)==15); assert(observed_call.kind==t3render::DrawKind::IndexedPrimitive && observed_call.min_vertex_index==5 && observed_call.num_vertices==6 && observed_call.start_index==7 && observed_call.primitive_count==8);
  assert(events==std::vector<std::string>({"capture-draw","draw-indexed"})); events.clear();
  int vertices=1, indices=2;
- assert(d->lpVtbl->DrawPrimitiveUP(d,4,5,&vertices,24)==16); assert(observed_vertices==&vertices && observed_call.kind==t3render::DrawKind::PrimitiveUP && observed_call.vertex_stride==24);
+ SetLastError(123);
+ assert(d->lpVtbl->DrawPrimitiveUP(d,4,5,&vertices,24)==16); assert(observed_vertices==&vertices && observed_call.vertex_data==&vertices && !observed_call.index_data && observed_call.kind==t3render::DrawKind::PrimitiveUP && observed_call.vertex_stride==24);
+ assert(draw_up_input_error==123 && GetLastError()==909);
  assert(events==std::vector<std::string>({"capture-draw","draw-up"})); events.clear();
- assert(d->lpVtbl->DrawIndexedPrimitiveUP(d,4,5,6,7,&indices,9,&vertices,24)==17); assert(observed_indices==&indices && observed_vertices==&vertices && observed_call.kind==t3render::DrawKind::IndexedPrimitiveUP && observed_call.index_format==9);
+ assert(d->lpVtbl->DrawIndexedPrimitiveUP(d,4,5,6,7,&indices,9,&vertices,24)==17); assert(observed_indices==&indices && observed_vertices==&vertices && observed_call.vertex_data==&vertices && observed_call.index_data==&indices && observed_call.kind==t3render::DrawKind::IndexedPrimitiveUP && observed_call.index_format==9);
  assert(events==std::vector<std::string>({"capture-draw","draw-indexed-up"})); events.clear();
- assert(d->lpVtbl->Reset(d,&params)==12); assert(observed_params==&params); assert(events==std::vector<std::string>({"reset","capture-reset"})); events.clear();
- assert(d->lpVtbl->Present(d,nullptr,nullptr,nullptr,nullptr)==13); assert(events==std::vector<std::string>({"present","capture-present"})); events.clear();
+ SetLastError(102);
+ assert(d->lpVtbl->Reset(d,&params)==12); assert(reset_input_error==102 && GetLastError()==912); assert(observed_params==&params); assert(events==std::vector<std::string>({"reset","capture-reset"})); events.clear();
+ SetLastError(103);
+ assert(d->lpVtbl->Present(d,nullptr,nullptr,nullptr,nullptr)==13); assert(present_input_error==103 && GetLastError()==913); assert(events==std::vector<std::string>({"present","capture-present"})); events.clear();
  next_device=1; IDirect3DDevice8* d2=nullptr; assert(f->lpVtbl->CreateDevice(f,0,0,nullptr,0,&params,&d2)==0 && d2==&devices[1]); assert(d2->lpVtbl!=d->lpVtbl);
  events.clear(); assert(d->lpVtbl->Release(d)==0);
  assert(events==std::vector<std::string>({"capture-release"}));

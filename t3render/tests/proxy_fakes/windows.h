@@ -31,6 +31,8 @@ extern const IID IID_IDirect3D8, IID_IDirect3DDevice8;
 size_t VirtualQuery(void*,MEMORY_BASIC_INFORMATION*,size_t);
 void* InterlockedCompareExchangePointer(void* volatile*,void*,void*);
 void OutputDebugStringA(const char*);
+DWORD GetLastError(void);
+void SetLastError(DWORD);
 UINT GetSystemDirectoryW(wchar_t*, UINT);
 HMODULE LoadLibraryW(const wchar_t*);
 int FreeLibrary(HMODULE);

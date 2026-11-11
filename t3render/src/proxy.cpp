@@ -191,17 +191,31 @@ bool Bind(void* object, bool device) noexcept {
 // Capture must not change the result of the call the application made.
 template <typename Function>
 void Observe(Function&& function) noexcept {
+    const DWORD previous_error = GetLastError();
     try {
         function();
     } catch (...) {
         Diagnostic("T3Render: capture raised an exception; continuing with the real runtime\n");
     }
+    SetLastError(previous_error);
 }
 
+// Preserve the caller's last-error across binding lookup and restore the real
+// method's last-error after capture and shared-pointer cleanup.
+struct ErrorState {
+    DWORD value = GetLastError();
+    ~ErrorState() { SetLastError(value); }
+    void Restore() const { SetLastError(value); }
+    void Capture() { value = GetLastError(); }
+};
+
 HRESULT STDMETHODCALLTYPE FactoryQuery(IDirect3D8* object, REFIID iid, void** result) {
+    ErrorState error;
     auto binding = Find(object, false);
     if (!binding) return E_FAIL;
+    error.Restore();
     HRESULT hr = reinterpret_cast<QueryFactory>(binding->original[Layout().factory_query])(object, iid, result);
+    error.Capture();
     if (SUCCEEDED(hr) && result && *result && IsEqualIID(iid, IID_IDirect3D8) && !Bind(*result, false)) {
         Diagnostic("T3Render: could not instrument a Direct3D8 interface alias\n");
     }
@@ -209,9 +223,12 @@ HRESULT STDMETHODCALLTYPE FactoryQuery(IDirect3D8* object, REFIID iid, void** re
 }
 
 ULONG STDMETHODCALLTYPE FactoryRelease(IDirect3D8* object) {
+    ErrorState error;
     auto binding = Find(object, false);
     if (!binding) return 0;
+    error.Restore();
     ULONG refs = reinterpret_cast<ReleaseFactory>(binding->original[Layout().factory_release])(object);
+    error.Capture();
     if (refs == 0) Forget(object, false, binding);
     return refs;
 }
@@ -219,10 +236,13 @@ ULONG STDMETHODCALLTYPE FactoryRelease(IDirect3D8* object) {
 HRESULT STDMETHODCALLTYPE FactoryCreateDevice(IDirect3D8* object, UINT adapter, D3DDEVTYPE type, HWND focus,
                                                DWORD behavior, D3DPRESENT_PARAMETERS* params,
                                                IDirect3DDevice8** device) {
+    ErrorState error;
     auto binding = Find(object, false);
     if (!binding) return D3DERR_INVALIDCALL;
+    error.Restore();
     HRESULT hr = reinterpret_cast<CreateDevice>(binding->original[Layout().factory_create_device])(
         object, adapter, type, focus, behavior, params, device);
+    error.Capture();
     if (SUCCEEDED(hr) && device && *device) {
         if (Bind(*device, true)) {
             Observe([&] { t3render::CaptureDevice(*device, params); });
@@ -234,9 +254,12 @@ HRESULT STDMETHODCALLTYPE FactoryCreateDevice(IDirect3D8* object, UINT adapter, 
 }
 
 HRESULT STDMETHODCALLTYPE DeviceQuery(IDirect3DDevice8* device, REFIID iid, void** result) {
+    ErrorState error;
     auto binding = Find(device, true);
     if (!binding) return E_FAIL;
+    error.Restore();
     HRESULT hr = reinterpret_cast<QueryDevice>(binding->original[Layout().device_query])(device, iid, result);
+    error.Capture();
     if (SUCCEEDED(hr) && result && *result && IsEqualIID(iid, IID_IDirect3DDevice8) && !Bind(*result, true)) {
         Diagnostic("T3Render: could not instrument a Direct3DDevice8 interface alias\n");
     }
@@ -244,9 +267,12 @@ HRESULT STDMETHODCALLTYPE DeviceQuery(IDirect3DDevice8* device, REFIID iid, void
 }
 
 ULONG STDMETHODCALLTYPE DeviceRelease(IDirect3DDevice8* device) {
+    ErrorState error;
     auto binding = Find(device, true);
     if (!binding) return 0;
+    error.Restore();
     ULONG refs = reinterpret_cast<ReleaseDevice>(binding->original[Layout().device_release])(device);
+    error.Capture();
     if (refs == 0) {
         // The object is already destroyed; capture may compare the address but
         // must never dereference it.
@@ -257,24 +283,31 @@ ULONG STDMETHODCALLTYPE DeviceRelease(IDirect3DDevice8* device) {
 }
 
 HRESULT STDMETHODCALLTYPE DeviceReset(IDirect3DDevice8* device, D3DPRESENT_PARAMETERS* params) {
+    ErrorState error;
     auto binding = Find(device, true);
     if (!binding) return D3DERR_INVALIDCALL;
+    error.Restore();
     HRESULT hr = reinterpret_cast<ResetDevice>(binding->original[Layout().device_reset])(device, params);
+    error.Capture();
     Observe([&] { t3render::CaptureReset(device, params, hr); });
     return hr;
 }
 
 HRESULT STDMETHODCALLTYPE DevicePresent(IDirect3DDevice8* device, const RECT* source, const RECT* dest,
                                         HWND window, const RGNDATA* dirty) {
+    ErrorState error;
     auto binding = Find(device, true);
     if (!binding) return D3DERR_INVALIDCALL;
+    error.Restore();
     HRESULT hr = reinterpret_cast<PresentDevice>(binding->original[Layout().device_present])(
         device, source, dest, window, dirty);
+    error.Capture();
     Observe([&] { t3render::CapturePresent(device, hr); });
     return hr;
 }
 
 HRESULT STDMETHODCALLTYPE DeviceDraw(IDirect3DDevice8* device, D3DPRIMITIVETYPE primitive, UINT start, UINT count) {
+    ErrorState error;
     auto binding = Find(device, true);
     if (!binding) return D3DERR_INVALIDCALL;
     DrawCall call{};
@@ -283,11 +316,15 @@ HRESULT STDMETHODCALLTYPE DeviceDraw(IDirect3DDevice8* device, D3DPRIMITIVETYPE 
     call.start_vertex = start;
     call.primitive_count = count;
     Observe([&] { t3render::CaptureDraw(device, call); });
-    return reinterpret_cast<DrawPrimitive>(binding->original[Layout().device_draw])(device, primitive, start, count);
+    error.Restore();
+    HRESULT hr = reinterpret_cast<DrawPrimitive>(binding->original[Layout().device_draw])(device, primitive, start, count);
+    error.Capture();
+    return hr;
 }
 
 HRESULT STDMETHODCALLTYPE DeviceDrawIndexed(IDirect3DDevice8* device, D3DPRIMITIVETYPE primitive, UINT min_index,
                                              UINT vertices, UINT start_index, UINT count) {
+    ErrorState error;
     auto binding = Find(device, true);
     if (!binding) return D3DERR_INVALIDCALL;
     DrawCall call{};
@@ -298,12 +335,16 @@ HRESULT STDMETHODCALLTYPE DeviceDrawIndexed(IDirect3DDevice8* device, D3DPRIMITI
     call.start_index = start_index;
     call.primitive_count = count;
     Observe([&] { t3render::CaptureDraw(device, call); });
-    return reinterpret_cast<DrawIndexed>(binding->original[Layout().device_draw_indexed])(
+    error.Restore();
+    HRESULT hr = reinterpret_cast<DrawIndexed>(binding->original[Layout().device_draw_indexed])(
         device, primitive, min_index, vertices, start_index, count);
+    error.Capture();
+    return hr;
 }
 
 HRESULT STDMETHODCALLTYPE DeviceDrawUp(IDirect3DDevice8* device, D3DPRIMITIVETYPE primitive, UINT count,
                                         const void* vertices, UINT stride) {
+    ErrorState error;
     auto binding = Find(device, true);
     if (!binding) return D3DERR_INVALIDCALL;
     DrawCall call{};
@@ -311,14 +352,19 @@ HRESULT STDMETHODCALLTYPE DeviceDrawUp(IDirect3DDevice8* device, D3DPRIMITIVETYP
     call.primitive_type = primitive;
     call.primitive_count = count;
     call.vertex_stride = stride;
+    call.vertex_data = vertices;
     Observe([&] { t3render::CaptureDraw(device, call); });
-    return reinterpret_cast<DrawPrimitiveUp>(binding->original[Layout().device_draw_up])(
+    error.Restore();
+    HRESULT hr = reinterpret_cast<DrawPrimitiveUp>(binding->original[Layout().device_draw_up])(
         device, primitive, count, vertices, stride);
+    error.Capture();
+    return hr;
 }
 
 HRESULT STDMETHODCALLTYPE DeviceDrawIndexedUp(IDirect3DDevice8* device, D3DPRIMITIVETYPE primitive, UINT min_index,
                                                UINT vertices, UINT count, const void* indices, D3DFORMAT format,
                                                const void* vertex_data, UINT stride) {
+    ErrorState error;
     auto binding = Find(device, true);
     if (!binding) return D3DERR_INVALIDCALL;
     DrawCall call{};
@@ -329,9 +375,14 @@ HRESULT STDMETHODCALLTYPE DeviceDrawIndexedUp(IDirect3DDevice8* device, D3DPRIMI
     call.primitive_count = count;
     call.index_format = format;
     call.vertex_stride = stride;
+    call.vertex_data = vertex_data;
+    call.index_data = indices;
     Observe([&] { t3render::CaptureDraw(device, call); });
-    return reinterpret_cast<DrawIndexedUp>(binding->original[Layout().device_draw_indexed_up])(
+    error.Restore();
+    HRESULT hr = reinterpret_cast<DrawIndexedUp>(binding->original[Layout().device_draw_indexed_up])(
         device, primitive, min_index, vertices, count, indices, format, vertex_data, stride);
+    error.Capture();
+    return hr;
 }
 
 using Direct3DCreate8Fn = decltype(&Direct3DCreate8);
@@ -369,6 +420,7 @@ Direct3DCreate8Fn RealCreate8() noexcept {
 }  // namespace
 
 extern "C" IDirect3D8* WINAPI Proxy_Direct3DCreate8(UINT sdk_version) {
+    ErrorState error;
     Direct3DCreate8Fn real = RealCreate8();
     if (!real) {
         Diagnostic("T3Render: system d3d8.dll or Direct3DCreate8 unavailable\n");
@@ -385,7 +437,9 @@ extern "C" IDirect3D8* WINAPI Proxy_Direct3DCreate8(UINT sdk_version) {
         ~Guard() { active = false; }
     } guard{creating};
     creating = true;
+    error.Restore();
     IDirect3D8* factory = real(sdk_version);
+    error.Capture();
     bool configured = false;
     Observe([&] { configured = t3render::CaptureConfigured(); });
     // Without a valid opt-in, there is no change to the returned object.

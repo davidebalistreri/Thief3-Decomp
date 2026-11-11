@@ -78,11 +78,18 @@ It preserves missing data and legacy state; it is not yet the runtime IR.
 For each observed draw, the snapshot includes its parameters, available
 camera/world/texture matrices, viewport, render and texture-stage states,
 material, a bounded set of lights, texture and buffer bindings/descriptors,
-and shader handles. The header records the exact limits. IDs are transient
-process addresses, not stable T3 asset names. It does not include texture or
-buffer bytes, UP geometry, shader code/declarations/constants, all light or
-world indices, render-target operations, resource lifetime, or the outcome of
-draw calls. Snapshot order under concurrent device calls is not guaranteed to
+and shader handles. For UP draws, it also attempts a bounded, fault-safe copy
+of the supplied vertex and index bytes before the draw. Each component records
+whether it was captured, empty, unreadable or exceeded a limit; the maximum is
+256 KiB per component and 8 MiB per frame. The captured memory may change
+before the real draw. The indexed vertex range uses `MinVertexIndex * stride`,
+which still needs a nonzero-index runtime test.
+
+The header records the exact limits. IDs are transient process addresses, not
+stable T3 asset names. Capture does not include texture or buffered-resource
+bytes, shader code/declarations/constants, all light or world indices,
+render-target operations, resource lifetime, or the outcome of draw calls.
+Snapshot order under concurrent device calls is not guaranteed to
 be the final GPU submission order. The first device is observed until its
 final intercepted release; a subsequently created device can then be observed,
 but a second device already alive at that point is not adopted. Device

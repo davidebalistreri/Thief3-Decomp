@@ -2,6 +2,8 @@
 #include "capture.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -15,6 +17,12 @@ bool key_down = false;
 unsigned writes = 0;
 unsigned opens = 0;
 bool bad_create_options = false;
+constexpr uintptr_t kVertexAddress = 0x01000000;
+constexpr uintptr_t kIndexAddress = 0x02000000;
+constexpr uintptr_t kGuardAddress = 0x03000000;
+std::array<BYTE, 256 * 1024> fake_vertex{};
+std::array<BYTE, 64> fake_index{};
+unsigned memory_reads = 0;
 
 std::string Narrow(const wchar_t* source) {
     std::string result;
@@ -167,6 +175,50 @@ BOOL GetKeyboardState(BYTE* keys) {
     if (key_down) keys[VK_F11] = 0x80;
     return TRUE;
 }
+SIZE_T VirtualQuery(const void* pointer, MEMORY_BASIC_INFORMATION* info, SIZE_T size) {
+    const uintptr_t address = reinterpret_cast<uintptr_t>(pointer);
+    if (size != sizeof(*info)) return 0;
+    uintptr_t base = 0;
+    SIZE_T length = 0;
+    DWORD protection = PAGE_READWRITE;
+    if (address >= kVertexAddress && address - kVertexAddress < fake_vertex.size()) {
+        // Expose two adjacent readable regions so the writer must walk both.
+        const size_t half = fake_vertex.size() / 2;
+        const bool second = address - kVertexAddress >= half;
+        base = kVertexAddress + (second ? half : 0); length = half;
+    } else if (address >= kIndexAddress && address - kIndexAddress < fake_index.size()) {
+        base = kIndexAddress; length = fake_index.size();
+    } else if (address >= kGuardAddress && address - kGuardAddress < 4096) {
+        base = kGuardAddress; length = 4096; protection |= PAGE_GUARD;
+    } else return 0;
+    *info = {reinterpret_cast<void*>(base), length, MEM_COMMIT, protection};
+    return sizeof(*info);
+}
+HANDLE GetCurrentProcess() { return 123; }
+BOOL ReadProcessMemory(HANDLE process, const void* source, void* dest, SIZE_T size, SIZE_T* copied) {
+    ++memory_reads;
+    if (process != 123) return FALSE;
+    const uintptr_t address = reinterpret_cast<uintptr_t>(source);
+    const BYTE* buffer = nullptr;
+    SIZE_T available = 0;
+    if (address >= kVertexAddress && address - kVertexAddress < fake_vertex.size()) {
+        const size_t offset = address - kVertexAddress;
+        buffer = fake_vertex.data() + offset; available = fake_vertex.size() - offset;
+    } else if (address >= kIndexAddress && address - kIndexAddress < fake_index.size()) {
+        const size_t offset = address - kIndexAddress;
+        buffer = fake_index.data() + offset; available = fake_index.size() - offset;
+    }
+    if (!buffer || size > available) return FALSE;
+    const char* partial = std::getenv("T3_TEST_PARTIAL_READ");
+    if (partial && size) {
+        *copied = size - 1;
+        std::memcpy(dest, buffer, *copied);
+        return std::strcmp(partial, "success") == 0 ? TRUE : FALSE;
+    }
+    std::memcpy(dest, buffer, size);
+    *copied = size;
+    return TRUE;
+}
 
 int main(int argc, char** argv) {
     if (argc != 2) return 2;
@@ -185,8 +237,81 @@ int main(int argc, char** argv) {
     const auto up = MakeDraw(t3render::DrawKind::PrimitiveUP);
     const auto indexed_up = MakeDraw(t3render::DrawKind::IndexedPrimitiveUP);
 
+    for (size_t i = 0; i < fake_vertex.size(); ++i) fake_vertex[i] = static_cast<BYTE>(i & 0xff);
+    fake_index[0] = 2; fake_index[2] = 3; fake_index[4] = 4;
+    fake_index[32] = 3; fake_index[36] = 4; fake_index[40] = 5;
+
     bool second_used = false;
-    if (scenario == "release_before" || scenario == "release_key" || scenario == "release_key_held") {
+    if (scenario == "up" || scenario == "up_budget" || scenario == "up_mixed_budget") {
+        t3render::CapturePresent(&device, S_OK);  // target frame 1
+        auto call = up;
+        call.vertex_data = reinterpret_cast<void*>(kVertexAddress);
+        call.vertex_stride = 4;
+        if (scenario == "up_budget" || scenario == "up_mixed_budget") {
+            call.primitive_type = D3DPT_POINTLIST;
+            call.primitive_count = 65536; // 256 KiB, exactly the per-component limit
+            const unsigned iterations = scenario == "up_budget" ? 33 : 31;
+            for (unsigned i = 0; i < iterations; ++i) t3render::CaptureDraw(&device, call);
+            if (scenario == "up_mixed_budget") {
+                call = indexed_up; call.primitive_count = 1; call.num_vertices = 65534;
+                call.vertex_stride = 4; call.vertex_data = reinterpret_cast<void*>(kVertexAddress);
+                call.index_data = reinterpret_cast<void*>(kIndexAddress);
+                t3render::CaptureDraw(&device, call);
+                call.num_vertices = 0;
+                t3render::CaptureDraw(&device, call);
+            }
+        } else {
+            call.primitive_count = 2;
+            for (unsigned topology = 1; topology <= 6; ++topology) {
+                call.primitive_type = static_cast<D3DPRIMITIVETYPE>(topology);
+                t3render::CaptureDraw(&device, call);
+            }
+            call = indexed_up;
+            call.primitive_type = D3DPT_TRIANGLELIST; call.primitive_count = 1;
+            call.min_vertex_index = 2; call.num_vertices = 3; call.vertex_stride = 4;
+            call.vertex_data = reinterpret_cast<void*>(kVertexAddress);
+            call.index_data = reinterpret_cast<void*>(kIndexAddress);
+            t3render::CaptureDraw(&device, call);
+            call.index_format = D3DFMT_INDEX32; call.min_vertex_index = 3;
+            call.index_data = reinterpret_cast<void*>(kIndexAddress + 32);
+            t3render::CaptureDraw(&device, call);
+            call = up; call.primitive_count = 1; call.vertex_stride = 4;
+            const unsigned before_invalid_reads = memory_reads;
+            call.vertex_data = nullptr; t3render::CaptureDraw(&device, call);
+            call.vertex_data = reinterpret_cast<void*>(uintptr_t(0xdeadbeef)); t3render::CaptureDraw(&device, call);
+            call.vertex_data = reinterpret_cast<void*>(kGuardAddress); t3render::CaptureDraw(&device, call);
+            call.vertex_data = reinterpret_cast<void*>(kVertexAddress + fake_vertex.size() - 2); t3render::CaptureDraw(&device, call);
+            if (memory_reads != before_invalid_reads) return 6;
+            call.vertex_data = reinterpret_cast<void*>(kVertexAddress); call.vertex_stride = 0; t3render::CaptureDraw(&device, call);
+            call.vertex_stride = 4; call.primitive_type = D3DPT_FAKE; t3render::CaptureDraw(&device, call);
+            call.primitive_type = D3DPT_TRIANGLELIST; call.primitive_count = std::numeric_limits<UINT>::max();
+            call.vertex_stride = std::numeric_limits<UINT>::max(); t3render::CaptureDraw(&device, call);
+            call.primitive_count = 1; call.vertex_stride = 4;
+            call.vertex_data = reinterpret_cast<void*>(std::numeric_limits<uintptr_t>::max() - 2); t3render::CaptureDraw(&device, call);
+            call.primitive_type = D3DPT_POINTLIST; call.primitive_count = 65537;
+            call.vertex_data = reinterpret_cast<void*>(kVertexAddress); t3render::CaptureDraw(&device, call);
+            call = indexed_up; call.primitive_count = 1; call.num_vertices = 3; call.vertex_stride = 4;
+            call.vertex_data = reinterpret_cast<void*>(kVertexAddress); call.index_format = D3DFMT_UNKNOWN;
+            call.index_data = reinterpret_cast<void*>(kIndexAddress); t3render::CaptureDraw(&device, call);
+            call.primitive_count = 0; call.vertex_data = nullptr; call.index_data = nullptr;
+            call.index_format = D3DFMT_INDEX16; call.vertex_stride = 0;
+            const unsigned before_empty_reads = memory_reads;
+            t3render::CaptureDraw(&device, call);
+            if (memory_reads != before_empty_reads) return 7;
+            call = indexed_up; call.primitive_count = 2; call.num_vertices = 8;
+            call.min_vertex_index = 2; call.vertex_stride = 4;
+            call.vertex_data = reinterpret_cast<void*>(kVertexAddress);
+            call.index_data = reinterpret_cast<void*>(kIndexAddress);
+            for (unsigned topology = 1; topology <= 6; ++topology) {
+                call.primitive_type = static_cast<D3DPRIMITIVETYPE>(topology);
+                t3render::CaptureDraw(&device, call);
+            }
+            call = up; call.primitive_count = 1; call.vertex_stride = 4;
+            call.vertex_data = reinterpret_cast<void*>(kVertexAddress + fake_vertex.size() / 2 - 2);
+            t3render::CaptureDraw(&device, call);
+        }
+        t3render::CapturePresent(&device, S_OK);
+    } else if (scenario == "release_before" || scenario == "release_key" || scenario == "release_key_held") {
         if (scenario != "release_before") key_down = true;
         t3render::CapturePresent(&device, S_OK);  // F11 can arm the first device.
         if (opens != 0) return 4;

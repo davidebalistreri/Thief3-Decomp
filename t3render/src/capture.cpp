@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <cwchar>
 #include <iomanip>
 #include <limits>
@@ -25,6 +26,8 @@ constexpr unsigned kLightLimit = 32;
 constexpr unsigned kStageLimit = 8;
 constexpr unsigned kStreamLimit = 16;
 constexpr unsigned kWorldLimit = 4;
+constexpr uint64_t kUpComponentLimit = 256 * 1024;
+constexpr uint64_t kUpFrameLimit = 8 * 1024 * 1024;
 
 // The writer owns no D3D objects; resource interfaces returned by getters are
 // released immediately. All state is protected because Present can be called
@@ -42,6 +45,7 @@ struct CaptureState {
     uint64_t frame = 0;
     uint64_t target = 0;
     uint64_t draws = 0;
+    uint64_t up_bytes = 0;  // successfully emitted raw bytes, not hex characters
     HANDLE file = INVALID_HANDLE_VALUE;
     std::wstring path;
     IDirect3DDevice8* device = nullptr;  // identity only; never dereferenced after replacement
@@ -154,9 +158,11 @@ bool Open(CaptureState& s) {
     auto out = Json();
     out << "{\"event\":\"header\",\"format\":\"t3render-d3d8-diagnostic\",\"version\":1,"
         << "\"trigger\":\"" << (s.key_trigger ? "F11" : "frame") << "\","
-        << "\"replayable\":false,\"limitations\":["
+        << "\"replayable\":false,\"up_capture\":{\"encoding\":\"hex\",\"component_limit_bytes\":"
+        << kUpComponentLimit << ",\"frame_limit_bytes\":" << kUpFrameLimit << "},\"limitations\":["
         << "\"resource bytes and T3 asset names are not captured\","
-        << "\"UP vertex and index data are not captured\","
+        << "\"UP data is bounded, may be unavailable, and may change between snapshot and draw\","
+        << "\"indexed UP vertex window uses MinVertexIndex times stride; nonzero behavior is not runtime verified\","
         << "\"draws are attempted calls; draw return values are not captured\","
         << "\"shader programs, declarations and constants are not captured\","
         << "\"light indices 0 through 31 only\","
@@ -434,7 +440,151 @@ constexpr D3DTEXTURESTAGESTATETYPE kStageStates[] = {
     D3DTSS_RESULTARG,
 };
 
+// These copies are diagnostic snapshots, not a promise that the driver saw the
+// same bytes: game threads may change the memory between our read and draw.
+struct UpBytes {
+    const char* status = "unreadable";
+    uint64_t byte_count = 0;
+    bool byte_count_known = false;
+    std::string hex;
+};
+
+bool Product(uint64_t a, uint64_t b, uint64_t& result) {
+    if (a && b > std::numeric_limits<uint64_t>::max() / a) return false;
+    result = a * b;
+    return true;
+}
+
+bool PrimitiveElements(D3DPRIMITIVETYPE type, UINT primitives, uint64_t& elements) {
+    if (!primitives) {
+        switch (type) {
+        case D3DPT_POINTLIST: case D3DPT_LINELIST: case D3DPT_LINESTRIP:
+        case D3DPT_TRIANGLELIST: case D3DPT_TRIANGLESTRIP: case D3DPT_TRIANGLEFAN:
+            elements = 0; return true;
+        default: return false;
+        }
+    }
+    switch (type) {
+    case D3DPT_POINTLIST: elements = primitives; return true;
+    case D3DPT_LINELIST: elements = uint64_t(primitives) * 2; return true;
+    case D3DPT_LINESTRIP: elements = uint64_t(primitives) + 1; return true;
+    case D3DPT_TRIANGLELIST: elements = uint64_t(primitives) * 3; return true;
+    case D3DPT_TRIANGLESTRIP: case D3DPT_TRIANGLEFAN:
+        elements = uint64_t(primitives) + 2; return true;
+    default: return false;
+    }
+}
+
+// Inspect every page before ReadProcessMemory: reject guard, uncommitted and
+// non-readable pages. A concurrent unmap/protection change remains possible;
+// the kernel read is still checked for failure and short copies and no caller
+// memory is dereferenced by this code.
+bool ReadableRange(uintptr_t address, size_t length) {
+    size_t remaining = length;
+    while (remaining) {
+        MEMORY_BASIC_INFORMATION info{};
+        if (!VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info))) return false;
+        const DWORD protection = info.Protect;
+        if (info.State != MEM_COMMIT || (protection & (PAGE_GUARD | PAGE_NOACCESS))) return false;
+        switch (protection & 0xff) {
+        case PAGE_READONLY: case PAGE_READWRITE: case PAGE_WRITECOPY:
+        case PAGE_EXECUTE_READ: case PAGE_EXECUTE_READWRITE: case PAGE_EXECUTE_WRITECOPY: break;
+        default: return false;
+        }
+        const uintptr_t start = reinterpret_cast<uintptr_t>(info.BaseAddress);
+        if (info.RegionSize > std::numeric_limits<uintptr_t>::max() - start) return false;
+        const uintptr_t end = start + info.RegionSize;
+        if (address < start || address >= end) return false;
+        const size_t step = std::min<size_t>(remaining, end - address);
+        if (!step) return false;
+        address += step;
+        remaining -= step;
+    }
+    return true;
+}
+
+UpBytes ReadUp(CaptureState& s, const void* pointer, uint64_t offset, uint64_t count) {
+    UpBytes result;
+    result.byte_count = count;
+    result.byte_count_known = true;
+    if (!count) { result.status = "empty"; return result; }
+    if (!pointer) { result.status = "null_pointer"; return result; }
+    const auto base = reinterpret_cast<uintptr_t>(pointer);
+    const auto max_address = std::numeric_limits<uintptr_t>::max();
+    if (offset > max_address || base > max_address - static_cast<uintptr_t>(offset)) {
+        result.status = "overflow"; return result;
+    }
+    const uintptr_t address = base + static_cast<uintptr_t>(offset);
+    if (count > max_address - address) { result.status = "overflow"; return result; }
+    if (count > kUpComponentLimit) { result.status = "per_draw_limit"; return result; }
+    if (count > kUpFrameLimit - s.up_bytes) { result.status = "frame_limit"; return result; }
+    const size_t size = static_cast<size_t>(count);
+    if (!ReadableRange(address, size)) { result.status = "unreadable"; return result; }
+    std::vector<BYTE> copy(size);
+    SIZE_T copied = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address),
+                           copy.data(), size, &copied) || copied != size) {
+        result.status = "unreadable"; return result;
+    }
+    constexpr char digits[] = "0123456789abcdef";
+    result.hex.reserve(size * 2);
+    for (BYTE value : copy) {
+        result.hex.push_back(digits[value >> 4]);
+        result.hex.push_back(digits[value & 0x0f]);
+    }
+    s.up_bytes += count;
+    result.status = "captured";
+    return result;
+}
+
+void BytesJson(std::ostream& out, const UpBytes& data) {
+    out << "\"status\":\"" << data.status << "\",\"byte_count\":";
+    if (data.byte_count_known) out << data.byte_count; else out << "null";
+    out << ",\"encoding\":\"hex\",\"data\":";
+    if (std::strcmp(data.status, "captured") == 0 || std::strcmp(data.status, "empty") == 0)
+        out << '"' << data.hex << '"';
+    else out << "null";
+}
+
+void CaptureUp(CaptureState& s, const DrawCall& draw, UpBytes& vertex, UpBytes& index,
+               uint64_t& vertex_count, uint64_t& vertex_offset, uint64_t& index_count,
+               bool& vertex_count_known, bool& offset_known, bool& index_count_known) {
+    uint64_t elements = 0;
+    const bool known = PrimitiveElements(draw.primitive_type, draw.primitive_count, elements);
+    const bool indexed = draw.kind == DrawKind::IndexedPrimitiveUP;
+    vertex_count_known = indexed || known;
+    vertex_count = indexed ? (draw.primitive_count ? draw.num_vertices : 0) : elements;
+    const uint64_t first = indexed ? draw.min_vertex_index : 0;
+    offset_known = Product(first, draw.vertex_stride, vertex_offset);
+    if (!vertex_count_known) vertex.status = "unsupported_topology";
+    else if (!offset_known || (indexed && first + vertex_count > UINT64_C(0x100000000)))
+        vertex.status = "overflow";
+    else if (vertex_count && !draw.vertex_stride) vertex.status = "invalid_stride";
+    else {
+        uint64_t size = 0;
+        if (!Product(vertex_count, draw.vertex_stride, size)) vertex.status = "overflow";
+        else vertex = ReadUp(s, draw.vertex_data, vertex_offset, size);
+    }
+    if (!indexed) return;
+    index_count_known = known;
+    index_count = elements;
+    if (!known) { index.status = "unsupported_topology"; return; }
+    uint64_t width = 0;
+    if (draw.index_format == D3DFMT_INDEX16) width = 2;
+    else if (draw.index_format == D3DFMT_INDEX32) width = 4;
+    else { index.status = "unsupported_index_format"; return; }
+    uint64_t size = 0;
+    if (!Product(index_count, width, size)) index.status = "overflow";
+    else index = ReadUp(s, draw.index_data, 0, size);
+}
+
 void Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw) {
+    const bool up = draw.kind == DrawKind::PrimitiveUP || draw.kind == DrawKind::IndexedPrimitiveUP;
+    UpBytes vertex, index;
+    uint64_t vertex_count = 0, vertex_offset = 0, index_count = 0;
+    bool vertex_count_known = false, offset_known = false, index_count_known = false;
+    if (up) CaptureUp(s, draw, vertex, index, vertex_count, vertex_offset, index_count,
+                      vertex_count_known, offset_known, index_count_known);
     auto out = Json();
     out << "{\"event\":\"draw\",\"frame\":" << s.frame << ",\"call\":\"" << CallName(draw.kind)
         << "\",\"primitive_type\":" << static_cast<unsigned>(draw.primitive_type)
@@ -509,6 +659,24 @@ void Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw) {
     out << ',';
     const unsigned streams = s.has_caps ? std::min<unsigned>(s.caps.MaxStreams, kStreamLimit) : kStreamLimit;
     BufferBindings(out, device, streams);
+    if (up) {
+        out << ",\"up_data\":{\"vertex\":{";
+        BytesJson(out, vertex);
+        out << ",\"first_vertex\":" << (draw.kind == DrawKind::IndexedPrimitiveUP ? draw.min_vertex_index : 0)
+            << ",\"vertex_count\":";
+        if (vertex_count_known) out << vertex_count; else out << "null";
+        out << ",\"stride\":" << draw.vertex_stride << ",\"byte_offset\":";
+        if (offset_known) out << vertex_offset; else out << "null";
+        out << "},\"index\":";
+        if (draw.kind != DrawKind::IndexedPrimitiveUP) out << "null";
+        else {
+            out << '{'; BytesJson(out, index);
+            out << ",\"index_count\":";
+            if (index_count_known) out << index_count; else out << "null";
+            out << ",\"index_format\":" << static_cast<unsigned>(draw.index_format) << '}';
+        }
+        out << '}';
+    }
     out << "}\n";
     if (Write(s, out.str())) ++s.draws;
 }
@@ -578,6 +746,7 @@ void CaptureDeviceReleased(IDirect3DDevice8* device) {
         s.has_caps = false;
         s.frame = 0;
         s.draws = 0;
+        s.up_bytes = 0;
         s.had_reset = false;
         if (s.key_trigger) {
             s.triggered = false;

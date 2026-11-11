@@ -122,6 +122,94 @@ class CaptureHostTests(unittest.TestCase):
         self.assertEqual(summary["calls"], {"DrawIndexedPrimitive": 1})
         self.assertEqual(self.records()[0]["trigger"], "F11")
 
+    def test_up_geometry_snapshots_and_failure_states(self):
+        self.run_capture("up", frame="1")
+        events = self.records()
+        draws = [event for event in events if event["event"] == "draw"]
+        self.assertEqual(len(draws), 26)
+        self.assertEqual(events[0]["up_capture"]["component_limit_bytes"], 256 * 1024)
+        expected_counts = [2, 4, 3, 6, 4, 4]
+        for draw, count in zip(draws[:6], expected_counts):
+            vertex = draw["up_data"]["vertex"]
+            self.assertEqual(vertex["status"], "captured")
+            self.assertEqual(vertex["first_vertex"], 0)
+            self.assertEqual(vertex["vertex_count"], count)
+            self.assertEqual(vertex["byte_offset"], 0)
+            self.assertEqual(bytes.fromhex(vertex["data"]), bytes(range(count * 4)))
+            self.assertIsNone(draw["up_data"]["index"])
+        v16 = draws[6]["up_data"]["vertex"]
+        self.assertEqual((v16["first_vertex"], v16["vertex_count"], v16["byte_offset"]), (2, 3, 8))
+        self.assertEqual(bytes.fromhex(v16["data"]), bytes(range(8, 20)))
+        i16 = draws[6]["up_data"]["index"]
+        self.assertEqual((i16["index_count"], i16["index_format"]), (3, 101))
+        self.assertEqual(bytes.fromhex(i16["data"]), b"\x02\x00\x03\x00\x04\x00")
+        v32 = draws[7]["up_data"]["vertex"]
+        self.assertEqual((v32["first_vertex"], v32["vertex_count"], v32["byte_offset"]), (3, 3, 12))
+        self.assertEqual(bytes.fromhex(v32["data"]), bytes(range(12, 24)))
+        i32 = draws[7]["up_data"]["index"]
+        self.assertEqual((i32["index_count"], i32["index_format"]), (3, 102))
+        self.assertEqual(bytes.fromhex(i32["data"]), b"\x03\x00\x00\x00\x04\x00\x00\x00\x05\x00\x00\x00")
+        self.assertEqual([d["up_data"]["vertex"]["status"] for d in draws[8:17]], [
+            "null_pointer", "unreadable", "unreadable", "unreadable", "invalid_stride",
+            "unsupported_topology", "overflow", "overflow", "per_draw_limit",
+        ])
+        for draw in draws[8:17]:
+            self.assertIsNone(draw["up_data"]["vertex"]["data"])
+        self.assertEqual(draws[17]["up_data"]["index"]["status"], "unsupported_index_format")
+        self.assertEqual(draws[18]["up_data"]["vertex"]["status"], "empty")
+        self.assertEqual(draws[18]["up_data"]["index"]["status"], "empty")
+        self.assertEqual(draws[18]["up_data"]["vertex"]["data"], "")
+        for draw, count in zip(draws[19:25], expected_counts):
+            index = draw["up_data"]["index"]
+            self.assertEqual(index["status"], "captured")
+            self.assertEqual(index["index_count"], count)
+            self.assertEqual(index["byte_count"], count * 2)
+            self.assertEqual(len(bytes.fromhex(index["data"])), count * 2)
+        self.assertEqual(bytes.fromhex(draws[25]["up_data"]["vertex"]["data"]),
+                         bytes([254, 255, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9]))
+        self.assertFalse(events[-2]["replayable"])
+
+    def test_up_partial_kernel_copy_is_never_emitted(self):
+        self.run_capture("up", frame="1", extra={"T3_TEST_PARTIAL_READ": "1"})
+        draws = [event for event in self.records() if event["event"] == "draw"]
+        for draw in draws[:8]:
+            self.assertEqual(draw["up_data"]["vertex"]["status"], "unreadable")
+            self.assertIsNone(draw["up_data"]["vertex"]["data"])
+        for draw in draws[6:8]:
+            self.assertEqual(draw["up_data"]["index"]["status"], "unreadable")
+            self.assertIsNone(draw["up_data"]["index"]["data"])
+
+    def test_up_short_successful_kernel_copy_is_also_rejected(self):
+        self.run_capture("up", frame="1", extra={"T3_TEST_PARTIAL_READ": "success"})
+        draws = [event for event in self.records() if event["event"] == "draw"]
+        self.assertTrue(all(d["up_data"]["vertex"]["status"] == "unreadable" for d in draws[:8]))
+        self.assertTrue(all(d["up_data"]["vertex"]["data"] is None for d in draws[:8]))
+
+    def test_up_frame_budget_counts_only_captured_raw_bytes(self):
+        self.run_capture("up_budget", frame="1")
+        draws = [event for event in self.records() if event["event"] == "draw"]
+        self.assertEqual(len(draws), 33)
+        self.assertTrue(all(d["up_data"]["vertex"]["status"] == "captured" for d in draws[:32]))
+        self.assertEqual(draws[32]["up_data"]["vertex"]["status"], "frame_limit")
+        self.assertIsNone(draws[32]["up_data"]["vertex"]["data"])
+
+    def test_failed_up_reads_do_not_consume_frame_budget(self):
+        self.run_capture("up_budget", frame="1", extra={"T3_TEST_PARTIAL_READ": "1"})
+        draws = [event for event in self.records() if event["event"] == "draw"]
+        self.assertEqual(len(draws), 33)
+        self.assertTrue(all(d["up_data"]["vertex"]["status"] == "unreadable" for d in draws))
+        self.assertTrue(all(d["up_data"]["vertex"]["data"] is None for d in draws))
+
+    def test_up_frame_budget_includes_indices(self):
+        self.run_capture("up_mixed_budget", frame="1")
+        draws = [event for event in self.records() if event["event"] == "draw"]
+        self.assertEqual(len(draws), 33)
+        self.assertEqual(draws[31]["up_data"]["vertex"]["byte_count"], 262136)
+        self.assertEqual(draws[31]["up_data"]["index"]["status"], "captured")
+        self.assertEqual(draws[32]["up_data"]["vertex"]["status"], "empty")
+        self.assertEqual(draws[32]["up_data"]["index"]["status"], "frame_limit")
+        self.assertIsNone(draws[32]["up_data"]["index"]["data"])
+
     def test_release_before_capture_restarts_with_second_device(self):
         self.run_capture("release_before", frame="1")
         summary = trace_summary.summarize(self.path)

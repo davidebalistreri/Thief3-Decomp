@@ -7,13 +7,15 @@ namespace t3render {
 
 enum class DrawKind { Primitive, IndexedPrimitive, PrimitiveUP, IndexedPrimitiveUP };
 
-// Parameters passed by the caller. UP draws are observed before the call;
-// their transient vertex and index contents are not included in this contract.
+// Parameters passed by the caller. UP pointers remain owned by the caller and
+// are observed synchronously before forwarding; they are never retained.
 struct DrawCall {
     DrawKind kind;
     D3DPRIMITIVETYPE primitive_type;
     UINT start_vertex, min_vertex_index, num_vertices, start_index, primitive_count, vertex_stride;
     D3DFORMAT index_format;
+    const void* vertex_data = nullptr;
+    const void* index_data = nullptr;
 };
 
 bool CaptureConfigured();

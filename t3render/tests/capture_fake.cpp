@@ -74,7 +74,11 @@ struct Device : IDirect3DDevice8 {
     }
     HRESULT GetViewport(D3DVIEWPORT8* out) override { ++getters; *out = viewport; return S_OK; }
     HRESULT GetRenderState(D3DRENDERSTATETYPE name, DWORD* out) override {
-        ++getters; if (static_cast<int>(name) != 7) return E_FAIL;
+        ++getters;
+        // Some real runtimes accept unknown numeric IDs, so in this mode the
+        // fixture succeeds even for invalid states. The writer must filter.
+        if (std::getenv("T3_TEST_ALL_STATES")) { *out = static_cast<DWORD>(name); return S_OK; }
+        if (name != D3DRS_ZENABLE) return E_FAIL;
         *out = render_state; return S_OK;
     }
     HRESULT GetMaterial(D3DMATERIAL8* out) override {
@@ -90,7 +94,9 @@ struct Device : IDirect3DDevice8 {
         ++getters; if (index_number != 1) return E_FAIL; *out = TRUE; return S_OK;
     }
     HRESULT GetTextureStageState(DWORD stage, D3DTEXTURESTAGESTATETYPE name, DWORD* out) override {
-        ++getters; if (stage != 0 || static_cast<int>(name) != 1) return E_FAIL;
+        ++getters;
+        if (std::getenv("T3_TEST_ALL_STATES")) { *out = stage * 1000 + static_cast<DWORD>(name); return S_OK; }
+        if (stage != 0 || name != D3DTSS_COLOROP) return E_FAIL;
         *out = 9; return S_OK;
     }
     HRESULT GetTexture(DWORD stage, IDirect3DBaseTexture8** out) override {

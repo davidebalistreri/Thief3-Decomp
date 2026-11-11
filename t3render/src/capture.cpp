@@ -322,19 +322,116 @@ const char* CallName(DrawKind kind) {
     return "unknown";
 }
 
-// Selected D3D8 render-state identifiers. Store DWORDs raw: many are
-// floats or packed colours. Failed/unsupported getters are omitted.
-constexpr unsigned kRenderStates[] = {
-    7, 8, 9, 14, 15, 16, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
-    34, 35, 36, 37, 38, 40, 41, 42, 43, 44, 45, 46, 47, 48,
-    52, 53, 54, 55, 56, 57, 58, 59, 60,
-    128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 139, 140, 141,
-    142, 143, 144, 145, 146, 147, 148, 151, 152, 153, 154, 155, 156, 157,
-    158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 170, 171, 172, 173
+// SDK-defined observable D3D8 state identifiers. The debug-monitor token is a
+// special command, not an ordinary render state, and is intentionally omitted.
+// Getters that fail are omitted. Values remain raw DWORDs (some are float bits
+// or packed colors), never silently converted into modern material parameters.
+constexpr D3DRENDERSTATETYPE kRenderStates[] = {
+    D3DRS_ZENABLE,
+    D3DRS_FILLMODE,
+    D3DRS_SHADEMODE,
+    D3DRS_LINEPATTERN,
+    D3DRS_ZWRITEENABLE,
+    D3DRS_ALPHATESTENABLE,
+    D3DRS_LASTPIXEL,
+    D3DRS_SRCBLEND,
+    D3DRS_DESTBLEND,
+    D3DRS_CULLMODE,
+    D3DRS_ZFUNC,
+    D3DRS_ALPHAREF,
+    D3DRS_ALPHAFUNC,
+    D3DRS_DITHERENABLE,
+    D3DRS_ALPHABLENDENABLE,
+    D3DRS_FOGENABLE,
+    D3DRS_SPECULARENABLE,
+    D3DRS_ZVISIBLE,
+    D3DRS_FOGCOLOR,
+    D3DRS_FOGTABLEMODE,
+    D3DRS_FOGSTART,
+    D3DRS_FOGEND,
+    D3DRS_FOGDENSITY,
+    D3DRS_EDGEANTIALIAS,
+    D3DRS_ZBIAS,
+    D3DRS_RANGEFOGENABLE,
+    D3DRS_STENCILENABLE,
+    D3DRS_STENCILFAIL,
+    D3DRS_STENCILZFAIL,
+    D3DRS_STENCILPASS,
+    D3DRS_STENCILFUNC,
+    D3DRS_STENCILREF,
+    D3DRS_STENCILMASK,
+    D3DRS_STENCILWRITEMASK,
+    D3DRS_TEXTUREFACTOR,
+    D3DRS_WRAP0,
+    D3DRS_WRAP1,
+    D3DRS_WRAP2,
+    D3DRS_WRAP3,
+    D3DRS_WRAP4,
+    D3DRS_WRAP5,
+    D3DRS_WRAP6,
+    D3DRS_WRAP7,
+    D3DRS_CLIPPING,
+    D3DRS_LIGHTING,
+    D3DRS_AMBIENT,
+    D3DRS_FOGVERTEXMODE,
+    D3DRS_COLORVERTEX,
+    D3DRS_LOCALVIEWER,
+    D3DRS_NORMALIZENORMALS,
+    D3DRS_DIFFUSEMATERIALSOURCE,
+    D3DRS_SPECULARMATERIALSOURCE,
+    D3DRS_AMBIENTMATERIALSOURCE,
+    D3DRS_EMISSIVEMATERIALSOURCE,
+    D3DRS_VERTEXBLEND,
+    D3DRS_CLIPPLANEENABLE,
+    D3DRS_SOFTWAREVERTEXPROCESSING,
+    D3DRS_POINTSIZE,
+    D3DRS_POINTSIZE_MIN,
+    D3DRS_POINTSPRITEENABLE,
+    D3DRS_POINTSCALEENABLE,
+    D3DRS_POINTSCALE_A,
+    D3DRS_POINTSCALE_B,
+    D3DRS_POINTSCALE_C,
+    D3DRS_MULTISAMPLEANTIALIAS,
+    D3DRS_MULTISAMPLEMASK,
+    D3DRS_PATCHEDGESTYLE,
+    D3DRS_PATCHSEGMENTS,
+    D3DRS_POINTSIZE_MAX,
+    D3DRS_INDEXEDVERTEXBLENDENABLE,
+    D3DRS_COLORWRITEENABLE,
+    D3DRS_TWEENFACTOR,
+    D3DRS_BLENDOP,
+    D3DRS_POSITIONORDER,
+    D3DRS_NORMALORDER,
 };
-constexpr unsigned kStageStates[] = {
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19,
-    20, 21, 22, 23, 24, 25, 26, 27, 28
+
+constexpr D3DTEXTURESTAGESTATETYPE kStageStates[] = {
+    D3DTSS_COLOROP,
+    D3DTSS_COLORARG1,
+    D3DTSS_COLORARG2,
+    D3DTSS_ALPHAOP,
+    D3DTSS_ALPHAARG1,
+    D3DTSS_ALPHAARG2,
+    D3DTSS_BUMPENVMAT00,
+    D3DTSS_BUMPENVMAT01,
+    D3DTSS_BUMPENVMAT10,
+    D3DTSS_BUMPENVMAT11,
+    D3DTSS_TEXCOORDINDEX,
+    D3DTSS_ADDRESSU,
+    D3DTSS_ADDRESSV,
+    D3DTSS_BORDERCOLOR,
+    D3DTSS_MAGFILTER,
+    D3DTSS_MINFILTER,
+    D3DTSS_MIPFILTER,
+    D3DTSS_MIPMAPLODBIAS,
+    D3DTSS_MAXMIPLEVEL,
+    D3DTSS_MAXANISOTROPY,
+    D3DTSS_BUMPENVLSCALE,
+    D3DTSS_BUMPENVLOFFSET,
+    D3DTSS_TEXTURETRANSFORMFLAGS,
+    D3DTSS_ADDRESSW,
+    D3DTSS_COLORARG0,
+    D3DTSS_ALPHAARG0,
+    D3DTSS_RESULTARG,
 };
 
 void Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw) {
@@ -365,12 +462,12 @@ void Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw) {
     }
     out << "]},\"render_states\":{";
     bool comma = false;
-    for (unsigned name : kRenderStates) {
+    for (D3DRENDERSTATETYPE name : kRenderStates) {
         DWORD value = 0;
-        if (FAILED(device->GetRenderState(static_cast<D3DRENDERSTATETYPE>(name), &value))) continue;
+        if (FAILED(device->GetRenderState(name, &value))) continue;
         if (comma) out << ',';
         comma = true;
-        out << '"' << name << "\":" << value;
+        out << '"' << static_cast<unsigned>(name) << "\":" << value;
     }
     out << "},\"material\":";
     D3DMATERIAL8 material{};
@@ -389,12 +486,12 @@ void Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw) {
         if (stage) out << ',';
         out << "{\"stage\":" << stage << ",\"states\":{";
         comma = false;
-        for (unsigned name : kStageStates) {
+        for (D3DTEXTURESTAGESTATETYPE name : kStageStates) {
             DWORD value = 0;
-            if (FAILED(device->GetTextureStageState(stage, static_cast<D3DTEXTURESTAGESTATETYPE>(name), &value))) continue;
+            if (FAILED(device->GetTextureStageState(stage, name, &value))) continue;
             if (comma) out << ',';
             comma = true;
-            out << '"' << name << "\":" << value;
+            out << '"' << static_cast<unsigned>(name) << "\":" << value;
         }
         out << "},\"texture\":";
         ComRef<IDirect3DBaseTexture8> texture;

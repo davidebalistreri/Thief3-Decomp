@@ -94,6 +94,26 @@ class CaptureHostTests(unittest.TestCase):
         self.assertTrue(events[-2]["had_reset"])
         self.assertEqual(events[-2]["draws"], 4)
 
+    def test_only_sdk_defined_observable_state_ids_are_queried(self):
+        # The fake deliberately accepts *every* numeric ID, like a permissive
+        # driver, so this verifies the writer's filtering rather than the fake's.
+        self.run_capture(frame="1", extra={"T3_TEST_ALL_STATES": "1"})
+        draw = next(event for event in self.records() if event["event"] == "draw")
+        render_ids = {
+            7, 8, 9, 10, 14, 15, 16, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+            34, 35, 36, 37, 38, 40, 47, 48, 52, 53, 54, 55, 56, 57, 58, 59, 60,
+            *range(128, 138), *range(139, 144), *range(145, 149), *range(151, 165),
+            *range(166, 169), *range(170, 174),
+        }
+        self.assertEqual({int(key) for key in draw["render_states"]}, render_ids)
+        for key, value in draw["render_states"].items():
+            self.assertEqual(value, int(key))
+        stage_ids = {*range(1, 12), *range(13, 29)}
+        for stage in draw["stages"]:
+            self.assertEqual({int(key) for key in stage["states"]}, stage_ids)
+            for key, value in stage["states"].items():
+                self.assertEqual(value, stage["stage"] * 1000 + int(key))
+
     def test_f11_arms_the_next_frame(self):
         output = self.run_capture("key", key="F11")
         self.assertIn("configured=1", output)

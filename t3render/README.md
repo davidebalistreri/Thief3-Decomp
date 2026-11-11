@@ -38,9 +38,8 @@ target, draws a synthetic triangle, waits on a fence and validates readback.
 `--warp` explicitly selects the software adapter; `--output <new-image.ppm>`
 optionally saves the result. It requires the Windows D3D12 and DXGI runtimes
 and `d3dcompiler_47.dll`, and uses SM 5.0 shaders. Capability queries are
-capped by the available SDK headers; DXR is not tested. The x86 executable has
-been cross-compiled, but its D3D12 GPU execution has not yet been verified.
-This probe is not the D3D8 compatibility backend.
+capped by the available SDK headers; DXR is not tested. This probe is not the
+D3D8 compatibility backend.
 
 To test a 64-bit D3D12 runtime, build the probe alone in a separate directory:
 
@@ -56,6 +55,22 @@ With Visual Studio, use `-A x64 -DT3RENDER_D3D12_PROBE_ONLY=ON` in a new
 build directory instead. Probe-only mode also supports Win32, does not require
 `d3d8.h`, and never builds the proxy. The normal TDS proxy remains x86-only;
 an x64 probe result does not validate that proxy or the game's x86 runtime.
+
+On 2026-11-12 the x86 probe passed on Apple M5 Pro through Highball's Wine
+D3D12/vkd3d, Vulkan, MoltenVK and Metal. Its process used Wine's DXGI by
+excluding the DXMT path; with the original Highball path the mixed DXMT/Wine
+interfaces failed to create a device, and WARP was unavailable. The x64 probe
+also passed through D3DMetal. Both produced identical synthetic pixels. See
+the [result manifest](benchmarks/d3d12/2026-11-12/result.json) and
+[image](benchmarks/d3d12/2026-11-12/triangle.png). Neither run is a native
+Windows test, a TDS frame, or a replay.
+
+To repeat the x86 test on the same Highball setup, pass the engine directory,
+the bottle directory, the built x86 executable and an unused absolute output
+prefix to `tools/run_highball_probe.sh`. It omits DXMT from the child process's
+DLL search path, writes `<prefix>.log` and `<prefix>.ppm` without overwriting
+existing files, and leaves the bottle configuration unchanged. It does not
+establish that the same DLL selection is suitable for TDS.
 
 The proxy forwards to the system D3D8 implementation and, when capture is
 enabled, observes the original COM objects. It is specific to T3Main's

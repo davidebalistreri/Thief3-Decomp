@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "test": "synthetic_offscreen_d3d12_triangle",
+  "date": "2026-11-12",
+  "host": {"os": "macOS 27.2.1", "cpu_arch": "arm64", "gpu": "Apple M5 Pro"},
+  "runtime": {"environment": "Highball", "engine": "CrossOver 26.3 r30"},
+  "source_sha256": "fa9ab47fc5c48ed45fd3a2d76a3a108c67969540e4a88816918af123a756ad4b",
+  "image": {
+    "width": 256,
+    "height": 256,
+    "red_pixels": 19738,
+    "fnv1a64_rgba": "ec4518014c93a329",
+    "ppm_sha256": "9efbbc31cd40793ca50fc7ec3a6e0fcdecf4e468197b9628a3e44fb163920e0b",
+    "png": "triangle.png",
+    "png_sha256": "3ef6ec1d683d9823c0f9c7278bd2f4b14316fc65910a641cee71d84f65990719"
+  },
+  "runs": [
+    {
+      "architecture": "x86",
+      "executable_sha256": "12eba1fb0e0133d53076836748ed4ca055de4e525d3328bd33f4c690e9b0ba75",
+      "result": "PASS",
+      "chain": "Wine D3D12/vkd3d -> Vulkan -> MoltenVK -> Metal",
+      "dxmt_path_excluded_for_process": true,
+      "reported_adapter": "Radeon RX 6800/6800 XT / 6900 XT",
+      "reported_adapter_vendor_id": "0x1002",
+      "reported_adapter_device_id": "0x73bf",
+      "reported_software": false,
+      "feature_level": "11_0",
+      "device_shader_model": "6_0",
+      "shader_compiler_target": "5_0",
+      "ppm_sha256": "9efbbc31cd40793ca50fc7ec3a6e0fcdecf4e468197b9628a3e44fb163920e0b",
+      "repeat_ppm_sha256": "9efbbc31cd40793ca50fc7ec3a6e0fcdecf4e468197b9628a3e44fb163920e0b"
+    },
+    {
+      "architecture": "x86_64",
+      "executable_sha256": "53aaa1fc1fa3c693716a559988de179e2a3c0d9081dc1317296e1f7d50783132",
+      "result": "PASS",
+      "chain": "Highball D3DMetal -> Metal",
+      "reported_adapter": "AMD Compatibility Mode",
+      "reported_adapter_vendor_id": "0x10de",
+      "reported_adapter_device_id": "0x2684",
+      "reported_software": false,
+      "feature_level": "12_2",
+      "device_shader_model": "6_7 or higher; query capped at 6_7",
+      "shader_compiler_target": "5_0",
+      "ppm_sha256": "9efbbc31cd40793ca50fc7ec3a6e0fcdecf4e468197b9628a3e44fb163920e0b"
+    }
+  ],
+  "limitations": [
+    "This is synthetic geometry, not a T3 frame or a D3D8 replay.",
+    "Adapter names and vendor/device IDs are compatibility values; the host GPU was identified separately as Apple M5 Pro.",
+    "Wine/MoltenVK and D3DMetal are translation layers; these runs are not native Windows D3D12 tests.",
+    "No swapchain, presentation, GPU timing, DXR, modern material or gameplay behavior was tested."
+  ]
+}

@@ -42,6 +42,21 @@ capped by the available SDK headers; DXR is not tested. The x86 executable has
 been cross-compiled, but its D3D12 GPU execution has not yet been verified.
 This probe is not the D3D8 compatibility backend.
 
+To test a 64-bit D3D12 runtime, build the probe alone in a separate directory:
+
+```sh
+cmake -S t3render -B build/t3render-d3d12-x64 -G Ninja \
+  -DCMAKE_SYSTEM_NAME=Windows -DT3RENDER_D3D12_PROBE_ONLY=ON \
+  -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
+  -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++
+cmake --build build/t3render-d3d12-x64
+```
+
+With Visual Studio, use `-A x64 -DT3RENDER_D3D12_PROBE_ONLY=ON` in a new
+build directory instead. Probe-only mode also supports Win32, does not require
+`d3d8.h`, and never builds the proxy. The normal TDS proxy remains x86-only;
+an x64 probe result does not validate that proxy or the game's x86 runtime.
+
 The proxy forwards to the system D3D8 implementation and, when capture is
 enabled, observes the original COM objects. It is specific to T3Main's
 `Direct3DCreate8` import and does not implement every possible D3D8 export or

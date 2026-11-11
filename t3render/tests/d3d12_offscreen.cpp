@@ -95,10 +95,26 @@ bool SelectDevice(IDXGIFactory4* factory, bool request_warp, ComPtr<IDXGIAdapter
             if (!Check(enumerated, "EnumAdapters1")) return false;
             DXGI_ADAPTER_DESC1 info{};
             if (!Check(adapter->GetDesc1(&info), "GetDesc1")) return false;
-            if (info.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
+            const std::string name = Utf8(info.Description);
+            if (info.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
+                std::fprintf(stderr, "Skipping software adapter=%s vendor=0x%04lx device=0x%04lx\n",
+                             name.c_str(), static_cast<unsigned long>(info.VendorId),
+                             static_cast<unsigned long>(info.DeviceId));
+                continue;
+            }
             ID3D12Device* candidate = nullptr;
             const HRESULT hr = D3D12CreateDevice(adapter.value, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&candidate));
-            if (FAILED(hr) || !candidate) { if (candidate) candidate->Release(); continue; }
+            if (FAILED(hr) || !candidate) {
+                std::fprintf(stderr,
+                             "D3D12CreateDevice rejected adapter=%s vendor=0x%04lx device=0x%04lx "
+                             "HRESULT=0x%08lx%s\n",
+                             name.c_str(), static_cast<unsigned long>(info.VendorId),
+                             static_cast<unsigned long>(info.DeviceId),
+                             static_cast<unsigned long>(static_cast<std::uint32_t>(hr)),
+                             !candidate && SUCCEEDED(hr) ? " (null device)" : "");
+                if (candidate) candidate->Release();
+                continue;
+            }
             device.value = candidate;
             selected.value = adapter.value;
             adapter.value = nullptr;

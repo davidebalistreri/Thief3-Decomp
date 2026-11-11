@@ -69,6 +69,10 @@ var _slots := {}
 ## light RID, volume instance RID, other light RID, other instance RID]}.
 var _standins := {}
 
+## Optional per-light shadow-map caster layers for volume-lit surfaces.
+## Contributions are scoped to their owner and combined when maps coexist.
+var _volume_shadow_map_masks := {}
+
 ## Settings changed: maps and lights are brought in line next frame.
 var _dirty := true
 
@@ -146,6 +150,25 @@ func status_text() -> String:
 			shadowed += 1
 	return 'Shadows: volumes for %d of %d lights, %d casters, %d draws' % [_slots.size(), shadowed, casters,
 		_effect.draws]
+
+## Add shadow-map casters to volume-lit surfaces without changing Light3D.
+## `masks` maps each Light3D to the geometry layers to include. Clear the
+## contribution with an empty dictionary when the owning scene exits.
+func set_volume_shadow_map_masks(owner: Object, masks: Dictionary) -> void:
+	if not is_instance_valid(owner): return
+	if masks.is_empty():
+		_volume_shadow_map_masks.erase(owner)
+	else:
+		_volume_shadow_map_masks[owner] = masks.duplicate()
+
+func _volume_shadow_map_mask(light: Light3D) -> int:
+	var result := 0
+	for owner in _volume_shadow_map_masks.keys():
+		if not is_instance_valid(owner):
+			_volume_shadow_map_masks.erase(owner)
+		else:
+			result |= int(_volume_shadow_map_masks[owner].get(light, 0))
+	return result
 
 # --- Tree ---
 
@@ -362,13 +385,17 @@ func _update_standins(l: Light3D, slot: int) -> void:
 			l.distance_fade_length)
 		RenderingServer.light_set_projector(base, l.light_projector.get_rid() if l.light_projector != null else RID())
 		RenderingServer.light_set_reverse_cull_face_mode(base, l.shadow_reverse_cull_face)
-		RenderingServer.light_set_shadow_caster_mask(base, l.shadow_caster_mask)
+		if k == 1:
+			RenderingServer.light_set_shadow_caster_mask(base, l.shadow_caster_mask)
 		if l is OmniLight3D:
 			var mode := int((l as OmniLight3D).omni_shadow_mode) as RenderingServer.LightOmniShadowMode
 			RenderingServer.light_omni_set_shadow_mode(base, mode)
-	# Volume stand-in: t3_lit surfaces only, no shadow map, the channel in the specular.
+	# Volume stand-in: t3_lit surfaces, optional replacement shadow maps, and
+	# the channel in the specular. With no contribution this stays unchanged.
 	RenderingServer.light_set_cull_mask(ids[0], l.light_cull_mask & ShadowVolumes.LIT_LAYER)
-	RenderingServer.light_set_shadow(ids[0], false)
+	var shadow_map_mask := _volume_shadow_map_mask(l)
+	RenderingServer.light_set_shadow_caster_mask(ids[0], shadow_map_mask)
+	RenderingServer.light_set_shadow(ids[0], l.shadow_enabled and shadow_map_mask != 0)
 	RenderingServer.light_set_param(ids[0], RenderingServer.LIGHT_PARAM_SPECULAR,
 		clampf(l.light_specular, 0.0, SLOT_SPECULAR * 0.5 - 0.01) + SLOT_SPECULAR * (slot + 1))
 	# The other stand-in: everything else, as the light itself.
@@ -421,6 +448,7 @@ func _exit_tree() -> void:
 	for m in _maps.keys():
 		_unregister(m)
 	_release_lights()
+	_volume_shadow_map_masks.clear()
 	_attach(null)
 	_compositor.compositor_effects = []
 	_effect.release()

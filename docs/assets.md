@@ -906,10 +906,17 @@ everything, in the game and in the editor:
 - Each frame, the nearest shadowed lights whose range is in view get a mask
   channel. Such a light is hidden on the RenderingServer and drawn by two
   stand-in lights made there, copies of it. One lights layer 20 only,
-  without a shadow map, and carries the channel in its specular amount
+  normally without a shadow map, and carries the channel in its specular amount
   (the light's own specular plus 32 × (channel + 1); `t3_lit` takes the two
   apart). The other lights every other layer as the light itself would,
   shadow map included. The `Light3D` node and its properties never change.
+- A visual replacement can request shadow-map casters for layer 20 using
+  `T3Shadows.set_volume_shadow_map_masks(owner, masks)`, where `masks` maps
+  lights to caster-layer masks. Contributions from owners are combined; an
+  empty dictionary removes one owner's contribution. The requesting scene
+  must avoid also drawing the original volume for the same replacement and
+  must remove its contribution on exit. Shadow maps add GPU cost and do not
+  alter the game's stealth data. Without contributions, behaviour is unchanged.
 - A light draws the casters whose bounding sphere meets its range. It skips
   its own actor, the actor it is attached to, and any caster that encloses
   it with outward faces. Such a shell would otherwise shadow everything

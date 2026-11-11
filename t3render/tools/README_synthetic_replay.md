@@ -39,7 +39,9 @@ nonzero base vertex, minimum vertex and start index. Its D3D8 reference and
 proxy images matched on the tested runtime; see the
 [buffered fixture result](../benchmarks/d3d8/2026-11-12-buffered/result.json).
 This is a capture test only: buffer bytes and buffered DX12 replay are not yet
-implemented. Do not pass this mode to the UP replay runner.
+implemented. The host runner's `--buffered` mode compares the two D3D8 images
+and validates the indexed draw, buffer bindings and offsets in the trace. It
+does not invoke the converter or DX12 replay.
 
 Neither replay mode exercises buffered or indexed draws, depth, textures, game shader
 programs, lighting, PBR, or TDS gameplay. The pixel-center adjustment is
@@ -89,6 +91,16 @@ This uses Wine and the bottle; it does not test launching TDS. Inspect its
 result manifest and logs along with the images. On a different runtime,
 compare results and image differences before inferring any parity failure.
 Add `--camera` and use another new output directory to exercise the second mode.
+For the indexed buffer capture test, use a new output directory and pass
+`--buffered` instead. The manifest records `dx12_replay: not_run` and the
+observed draw parameters; no replay executable is required in this mode.
+`--camera` and `--buffered` are mutually exclusive.
+
+With `--buffered`, adding `--buffer-tracking` sets
+`T3RENDER_CAPTURE_BUFFERS=1` only for the proxy capture process. The manifest
+records this as a tracking request; the test checks image parity and observed
+bindings, not the correctness of buffer bytes, which are not serialized in the
+trace. Neither option establishes that an older proxy implements tracking.
 
 ## Replay the saved packet on Windows
 

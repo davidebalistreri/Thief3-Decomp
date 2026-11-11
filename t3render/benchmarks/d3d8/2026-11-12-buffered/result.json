@@ -13,6 +13,7 @@
     "architecture": "x86"
   },
   "fixture": {
+    "source_commit": "36b13d87",
     "mode": "--buffered",
     "source_sha256": "c2da2e0c0a3513603284f492a38877253b99b31801527e600cd0a04f4c773344",
     "executable_sha256": "560c5c557b4de22d3608757d50840c0292a8d75dc5fab35f1b6190af8642c2d7",

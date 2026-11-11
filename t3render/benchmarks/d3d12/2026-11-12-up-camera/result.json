@@ -8,6 +8,7 @@
     "d3d12_chain": "Wine D3D12/vkd3d -> Vulkan -> MoltenVK -> Metal"
   },
   "fixture": {
+    "source_commit": "0d89e00d",
     "description": "One untextured flat opaque D3D8 XYZ|DIFFUSE DrawPrimitiveUP triangle, with captured nonidentity world, view and perspective projection matrices.",
     "packet": "fixture.txt",
     "packet_sha256": "fd064ca180b499a1794d9544db7bf980ac6247e530767d2796fa3a6a3b35c1c5",

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare the synthetic D3D8 UP fixture, proxy capture and DX12 replay.
+"""Compare synthetic D3D8 fixture runs; optionally replay UP draws on DX12.
 
 All paths must be absolute. Output is created in a new directory and partial
 artifacts are retained on failure. This does not launch TDS or validate a game
@@ -12,18 +12,22 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import struct
 import subprocess
 import sys
 
+import trace_summary
+import trace_to_up_packet
+
 
 CONVERTER = Path(__file__).resolve().with_name("trace_to_up_packet.py")
 PPM_HEADER = b"P6\n256 256\n255\n"
 PPM_SIZE = len(PPM_HEADER) + 256 * 256 * 3
 LIMITATIONS = [
-    "Synthetic single DrawPrimitiveUP triangle, 256x256, uniform opaque color.",
+    "Synthetic single triangle, 256x256, uniform opaque color.",
     "This is not a general T3 frame replay, gameplay parity, a PBR test, or a native Windows test.",
     "Unobserved D3D8 operations and other shader, geometry, texture and lighting cases are not validated.",
     "Parity is specific to the selected engine, bottle, build and runtime environment.",
@@ -118,7 +122,68 @@ def image_data(path):
     return data
 
 
-def execute(engine, bottle, build, output, timeout, camera=False):
+def validate_buffered_trace(path):
+    """Validate only the observed binding and draw metadata, not resource bytes."""
+    try:
+        records = trace_to_up_packet.validated_records(path)
+        expected = ["header", "frame_begin", "clear", "clear_result", "draw", "draw_result", "frame_end", "capture_end"]
+        if [item.get("event") for item in records] != expected:
+            raise RunError("buffered fixture requires one complete ordered clear and draw")
+        header, begin, clear, clear_result, draw, draw_result, end, _ = records
+        integer = trace_to_up_packet.integer
+        succeeded = trace_to_up_packet.hresult_succeeded
+        if integer(header.get("operation_results")) != 1 or integer(begin.get("frame")) != 0:
+            raise RunError("buffered fixture requires operation results in frame 0")
+        if (integer(clear.get("rect_count")) != 0 or clear.get("rects_status") != "none" or
+                clear.get("rects") != [] or integer(clear.get("flags")) != 1 or
+                integer(clear.get("color")) != 0xff000000):
+            raise RunError("buffered fixture clear differs from the expected target clear")
+        if not all(succeeded(item.get("hr")) for item in (clear_result, draw_result)) or not succeeded(end.get("present_hr")):
+            raise RunError("buffered fixture clear, draw or Present failed")
+        if integer(end.get("draws")) != 1 or end.get("concurrent_operations") is not False or end.get("had_reset") is not False:
+            raise RunError("buffered fixture requires one draw without concurrency or reset")
+        expected_draw = {"primitive_type": 4, "min_vertex_index": 1, "num_vertices": 3,
+                         "start_index": 2, "primitive_count": 1, "vertex_shader": 0x44, "pixel_shader": 0}
+        if draw.get("call") != "DrawIndexedPrimitive" or any(integer(draw.get(k)) != v for k, v in expected_draw.items()):
+            raise RunError("buffered fixture indexed draw parameters differ")
+        streams = draw.get("streams")
+        if not isinstance(streams, list):
+            raise RunError("buffered fixture vertex streams are missing")
+        stream_zero = [item for item in streams if isinstance(item, dict) and integer(item.get("stream")) == 0]
+        if len(stream_zero) != 1:
+            raise RunError("buffered fixture requires exactly one stream 0")
+        stream = stream_zero[0]
+        index = draw.get("indices")
+
+        def bound(item):
+            if not isinstance(item, dict) or not succeeded(item.get("hr")):
+                return False
+            buffer_id = item.get("buffer")
+            if not isinstance(buffer_id, str) or not re.fullmatch(r"0x[0-9a-fA-F]+", buffer_id):
+                return False
+            try:
+                return int(buffer_id[2:], 16) > 0
+            except ValueError:
+                return False
+
+        vertex_desc = stream.get("description")
+        if (not bound(stream) or integer(stream.get("stride")) != 20 or not isinstance(vertex_desc, dict) or
+                integer(vertex_desc.get("size")) != 100 or integer(vertex_desc.get("fvf")) != 0x44):
+            raise RunError("buffered fixture stream 0 binding, stride or vertex description differs")
+        index_desc = index.get("description") if isinstance(index, dict) else None
+        if (not bound(index) or integer(index.get("base_vertex_index")) != 1 or not isinstance(index_desc, dict) or
+                integer(index_desc.get("format")) != 101 or integer(index_desc.get("size")) != 10):
+            raise RunError("buffered fixture index binding, base or description differs")
+        return {"call": "DrawIndexedPrimitive", **expected_draw, "stream": 0, "stride": 20,
+                "vertex_buffer_size": 100, "index_format": 101, "index_buffer_size": 10,
+                "base_vertex_index": 1}
+    except (trace_summary.TraceError, OSError, UnicodeError, ValueError) as exc:
+        raise RunError(f"invalid buffered fixture trace: {exc}") from exc
+
+
+def execute(engine, bottle, build, output, timeout, camera=False, buffered=False, buffer_tracking=False):
+    if camera and buffered or buffer_tracking and not buffered:
+        raise RunError("camera and buffered are exclusive; buffer tracking requires buffered mode")
     engine, bottle, build, output = map(valid_path, (engine, bottle, build, output))
     wine = engine / "engine/bin/wine"
     wineserver = engine / "engine/bin/wineserver"
@@ -130,7 +195,10 @@ def execute(engine, bottle, build, output, timeout, camera=False):
     fixture = build / "d3d8_up_fixture/t3render_d3d8_up_fixture.exe"
     proxy = build / "d3d8.dll"
     replay = build / "t3render_d3d12_replay_up.exe"
-    for path, dll in ((fixture, False), (proxy, True), (replay, False)):
+    binaries = [(fixture, False), (proxy, True)]
+    if not buffered:
+        binaries.append((replay, False))
+    for path, dll in binaries:
         check_pe32(path, dll)
     if not math.isfinite(timeout) or timeout <= 0:
         raise RunError("timeout must be a positive finite number of seconds")
@@ -147,10 +215,16 @@ def execute(engine, bottle, build, output, timeout, camera=False):
     except OSError as exc:
         raise RunError(f"cannot create new output directory {output}: {exc}") from exc
 
-    mode_limit = ("Camera mode uses a single XYZ triangle and captured world, view and projection matrices."
-                  if camera else "Screen-space mode is restricted to z=0 and rhw=1.")
-    result = {"schema": 1, "test": "synthetic_d3d8_up_dx12_replay", "status": "FAIL",
-              "fixture_mode": "camera" if camera else "screen_space",
+    if buffered:
+        mode_limit = "Buffered capture records draw and binding metadata only; buffer bytes and DX12 replay are not available."
+    elif camera:
+        mode_limit = "Camera mode uses one DrawPrimitiveUP XYZ triangle and captured world, view and projection matrices."
+    else:
+        mode_limit = "Screen-space DrawPrimitiveUP mode is restricted to z=0 and rhw=1."
+    result = {"schema": 1, "test": "synthetic_d3d8_indexed_buffer_capture" if buffered else "synthetic_d3d8_up_dx12_replay",
+              "status": "FAIL", "dx12_replay": "not_run" if buffered else "performed_on_success",
+              "fixture_mode": "buffered" if buffered else ("camera" if camera else "screen_space"),
+              "buffer_tracking": "requested" if buffer_tracking else "disabled",
               "engine": str(engine), "bottle": str(bottle), "build_dir": str(build),
               "limitations": [mode_limit, *LIMITATIONS], "stages": [], "sha256": {}}
     stage = "setup"
@@ -164,7 +238,10 @@ def execute(engine, bottle, build, output, timeout, camera=False):
         shutil.copyfile(fixture, baseline_exe)
         shutil.copyfile(fixture, captured_exe)
         shutil.copyfile(proxy, captured / "d3d8.dll")
-        for name, path in (("fixture_exe", baseline_exe), ("proxy_dll", captured / "d3d8.dll"), ("replay_exe", replay)):
+        used_binaries = [("fixture_exe", baseline_exe), ("proxy_dll", captured / "d3d8.dll")]
+        if not buffered:
+            used_binaries.append(("replay_exe", replay))
+        for name, path in used_binaries:
             result["sha256"][name] = sha256(path)
         if result["sha256"]["fixture_exe"] != sha256(captured_exe):
             raise RunError("baseline and captured fixture copies differ")
@@ -182,7 +259,7 @@ def execute(engine, bottle, build, output, timeout, camera=False):
         })
         baseline_ppm, captured_ppm, replay_ppm = (output / name for name in ("baseline.ppm", "captured.ppm", "replay.ppm"))
         trace, packet = output / "capture.jsonl", output / "packet.txt"
-        fixture_args = ["--camera"] if camera else []
+        fixture_args = ["--buffered"] if buffered else (["--camera"] if camera else [])
         stage = "baseline"
         run_stage(stage, [wine, baseline_exe, *fixture_args, "--output", windows_path(baseline_ppm)], baseline, env,
                   output / "baseline.log", timeout)
@@ -190,29 +267,39 @@ def execute(engine, bottle, build, output, timeout, camera=False):
         capture_env = env.copy()
         capture_env.update({"WINEDLLOVERRIDES": "d3d8=n,b;nvapi64,nvngx=n,b;winemenubuilder.exe=d",
                             "T3RENDER_CAPTURE_FRAME": "0", "T3RENDER_CAPTURE_PATH": windows_path(trace)})
+        if buffer_tracking:
+            capture_env["T3RENDER_CAPTURE_BUFFERS"] = "1"
         stage = "capture"
         run_stage(stage, [wine, captured_exe, *fixture_args, "--output", windows_path(captured_ppm)], captured,
                   capture_env, output / "capture.log", timeout)
         result["stages"].append(stage)
-        stage = "convert"
-        run_stage(stage, [sys.executable, "-B", CONVERTER, trace, "--synthetic-fixture", "-o", packet],
-                  output, env, output / "convert.log", timeout)
-        with packet.open("rb") as source:
-            header = source.readline(32).rstrip(b"\r\n")
-        if header != (b"T3R_XYZ_V1" if camera else b"T3R_UP_V1"):
-            raise RunError("converted packet does not match the selected fixture mode")
-        result["stages"].append(stage)
-        stage = "replay"
-        run_stage(stage, [wine, replay, windows_path(packet), "--output", windows_path(replay_ppm)],
-                  output, env, output / "replay.log", timeout)
-        result["stages"].append(stage)
+        if buffered:
+            stage = "trace_validation"
+            result["buffered_draw"] = validate_buffered_trace(trace)
+            result["stages"].append(stage)
+        else:
+            stage = "convert"
+            run_stage(stage, [sys.executable, "-B", CONVERTER, trace, "--synthetic-fixture", "-o", packet],
+                      output, env, output / "convert.log", timeout)
+            with packet.open("rb") as source:
+                header = source.readline(32).rstrip(b"\r\n")
+            if header != (b"T3R_XYZ_V1" if camera else b"T3R_UP_V1"):
+                raise RunError("converted packet does not match the selected fixture mode")
+            result["stages"].append(stage)
+            stage = "replay"
+            run_stage(stage, [wine, replay, windows_path(packet), "--output", windows_path(replay_ppm)],
+                      output, env, output / "replay.log", timeout)
+            result["stages"].append(stage)
         stage = "compare"
-        images = [image_data(path) for path in (baseline_ppm, captured_ppm, replay_ppm)]
-        for name, path in (("baseline_ppm", baseline_ppm), ("captured_ppm", captured_ppm),
-                           ("replay_ppm", replay_ppm), ("trace", trace), ("packet", packet)):
+        image_paths = [baseline_ppm, captured_ppm] + ([] if buffered else [replay_ppm])
+        images = [image_data(path) for path in image_paths]
+        artifacts = [("baseline_ppm", baseline_ppm), ("captured_ppm", captured_ppm), ("trace", trace)]
+        if not buffered:
+            artifacts.extend([("replay_ppm", replay_ppm), ("packet", packet)])
+        for name, path in artifacts:
             result["sha256"][name] = sha256(path)
-        if not images[0] == images[1] == images[2]:
-            raise RunError("baseline, proxy capture and replay images differ byte for byte")
+        if not all(image == images[0] for image in images[1:]):
+            raise RunError("fixture images differ byte for byte")
         result["stages"].append(stage)
         result["status"] = "PASS"
     except (RunError, OSError) as exc:
@@ -236,14 +323,22 @@ def main(argv=None):
     parser.add_argument("--build-dir", required=True, help="absolute x86 CMake build directory")
     parser.add_argument("--output-dir", required=True, help="new absolute output directory")
     parser.add_argument("--timeout", type=float, default=120, help="per-stage timeout in seconds (default: 120)")
-    parser.add_argument("--camera", action="store_true", help="replay the synthetic XYZ camera fixture")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--camera", action="store_true", help="replay the synthetic XYZ camera fixture")
+    modes.add_argument("--buffered", action="store_true", help="compare indexed D3D8 draws; no DX12 replay")
+    parser.add_argument("--buffer-tracking", action="store_true",
+                        help="request experimental buffer tracking in the capture process (requires --buffered)")
     args = parser.parse_args(argv)
+    if args.buffer_tracking and not args.buffered:
+        parser.error("--buffer-tracking requires --buffered")
     try:
-        result = execute(args.engine, args.bottle, args.build_dir, args.output_dir, args.timeout, args.camera)
+        result = execute(args.engine, args.bottle, args.build_dir, args.output_dir, args.timeout,
+                         args.camera, args.buffered, args.buffer_tracking)
     except RunError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(f"PASS: identical PPM SHA-256 {result['sha256']['baseline_ppm']}; results: {args.output_dir}")
+    suffix = "; DX12 replay not run" if args.buffered else ""
+    print(f"PASS: identical PPM SHA-256 {result['sha256']['baseline_ppm']}{suffix}; results: {args.output_dir}")
     return 0
 
 

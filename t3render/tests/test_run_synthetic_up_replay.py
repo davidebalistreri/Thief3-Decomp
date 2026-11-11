@@ -23,7 +23,8 @@ print(json.dumps({{"kind": kind, "cwd": os.getcwd(), "args": args,
  "prefix": os.environ.get("WINEPREFIX"), "server": os.environ.get("WINESERVER"),
  "overrides": os.environ.get("WINEDLLOVERRIDES"), "dllpath": os.environ.get("WINEDLLPATH_PREPEND"),
  "inherited": [os.environ.get(x) for x in ("WINEDLLPATH", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH")],
- "capture_key": os.environ.get("T3RENDER_CAPTURE_KEY"), "frame": os.environ.get("T3RENDER_CAPTURE_FRAME")}}), flush=True)
+ "capture_key": os.environ.get("T3RENDER_CAPTURE_KEY"), "frame": os.environ.get("T3RENDER_CAPTURE_FRAME"),
+ "buffer_tracking": os.environ.get("T3RENDER_CAPTURE_BUFFERS")}}), flush=True)
 if os.environ.get("FAKE_TIMEOUT") == kind:
     time.sleep(30)
 if os.environ.get("FAKE_FAIL") == kind:
@@ -41,7 +42,8 @@ out.write_bytes(data)
 if kind == "capture":
     trace = host(os.environ["T3RENDER_CAPTURE_PATH"])
     assert not trace.exists()
-    shutil.copyfile(os.environ["FAKE_TRACE_CAMERA" if "--camera" in args else "FAKE_TRACE"], trace)
+    name = "FAKE_TRACE_BUFFERED" if "--buffered" in args else ("FAKE_TRACE_CAMERA" if "--camera" in args else "FAKE_TRACE")
+    shutil.copyfile(os.environ[name], trace)
 if kind == "replay":
     assert host(args[1]).read_text().splitlines()[0] in ("T3R_UP_V1", "T3R_XYZ_V1")
 '''
@@ -57,6 +59,19 @@ def write_pe(path, *, machine=0x14c, dll=False, magic=0x10b):
     optional = bytearray(96)
     struct.pack_into("<H", optional, 0, magic)
     path.write_bytes(dos + header + optional)
+
+
+def buffered_fixture():
+    events = fixture()
+    draw = events[4]
+    draw.update(call="DrawIndexedPrimitive", min_vertex_index=1, num_vertices=3, start_index=2,
+                vertex_stride=0, index_format=0,
+                streams=[{"stream": 0, "hr": 0, "buffer": "0x1234", "stride": 20,
+                          "description": {"size": 100, "fvf": 0x44}}],
+                indices={"hr": 0, "buffer": "0x5678", "base_vertex_index": 1,
+                         "description": {"format": 101, "size": 10}})
+    draw.pop("up_data")
+    return events
 
 
 class SyntheticReplayRunnerTests(unittest.TestCase):
@@ -84,22 +99,30 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
         self.trace.write_text("".join(json.dumps(event) + "\n" for event in fixture()), encoding="utf-8")
         self.camera_trace = self.root / "camera.jsonl"
         self.camera_trace.write_text("".join(json.dumps(event) + "\n" for event in camera_fixture()), encoding="utf-8")
+        self.buffered_trace = self.root / "buffered.jsonl"
+        self.buffered_trace.write_text("".join(json.dumps(event) + "\n" for event in buffered_fixture()), encoding="utf-8")
         self.output = self.root / "output with spaces"
 
     def run_runner(self, *, output=None, extra_env=None, timeout="5", engine=None, bottle=None, build=None,
-                   camera=False):
+                   camera=False, buffered=False, buffer_tracking=False):
         env = os.environ.copy()
         env.update({"FAKE_TRACE": str(self.trace), "FAKE_TRACE_CAMERA": str(self.camera_trace),
+                    "FAKE_TRACE_BUFFERED": str(self.buffered_trace),
                     "WINEDLLPATH": "poison/dxmt",
                     "WINEDLLPATH_PREPEND": "poison/dxmt", "DYLD_LIBRARY_PATH": "poison",
                     "DYLD_FRAMEWORK_PATH": "poison", "T3RENDER_CAPTURE_KEY": "F11",
-                    "T3RENDER_CAPTURE_FRAME": "12", "T3RENDER_CAPTURE_PATH": "poison"})
+                    "T3RENDER_CAPTURE_FRAME": "12", "T3RENDER_CAPTURE_PATH": "poison",
+                    "T3RENDER_CAPTURE_BUFFERS": "poison"})
         env.update(extra_env or {})
         args = [sys.executable, "-B", str(RUNNER), "--engine", str(engine or self.engine),
                                "--bottle", str(bottle or self.bottle), "--build-dir", str(build or self.build),
                                "--output-dir", str(output or self.output), "--timeout", timeout]
         if camera:
             args.append("--camera")
+        if buffered:
+            args.append("--buffered")
+        if buffer_tracking:
+            args.append("--buffer-tracking")
         return subprocess.run(args, env=env, text=True, capture_output=True, timeout=20)
 
     def manifest(self):
@@ -130,6 +153,7 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
             self.assertEqual(log["inherited"], [None, None, None])
             self.assertNotIn("dxmt", log["dllpath"].lower())
             self.assertIsNone(log["capture_key"])
+            self.assertIsNone(log["buffer_tracking"])
             self.assertEqual(log["frame"], "0" if name == "capture" else None)
             self.assertTrue(log["overrides"].startswith("d3d8=n,b;" if name == "capture" else "d3d8=b;"))
             self.assertTrue(log["args"][-1].startswith("Z:\\"))
@@ -151,6 +175,82 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.manifest()["failed_stage"], "convert")
         self.assertIn("does not match the selected fixture mode", result.stderr)
+
+    def test_buffered_mode_compares_images_and_validates_metadata_without_replay(self):
+        (self.build / "t3render_d3d12_replay_up.exe").unlink()
+        result = self.run_runner(buffered=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("DX12 replay not run", result.stdout)
+        manifest = self.manifest()
+        self.assertEqual(manifest["status"], "PASS")
+        self.assertEqual(manifest["fixture_mode"], "buffered")
+        self.assertEqual(manifest["dx12_replay"], "not_run")
+        self.assertEqual(manifest["buffer_tracking"], "disabled")
+        self.assertEqual(manifest["stages"], ["baseline", "capture", "trace_validation", "compare"])
+        self.assertEqual(manifest["sha256"]["baseline_ppm"], manifest["sha256"]["captured_ppm"])
+        self.assertNotIn("replay_exe", manifest["sha256"])
+        self.assertEqual(manifest["buffered_draw"]["base_vertex_index"], 1)
+        self.assertEqual(manifest["buffered_draw"]["stride"], 20)
+        self.assertTrue(any("buffer bytes and DX12 replay" in line for line in manifest["limitations"]))
+        for name in ("baseline", "capture"):
+            self.assertIn("--buffered", self.log(name)["args"])
+            self.assertIsNone(self.log(name)["buffer_tracking"])
+        for name in ("replay.log", "replay.ppm", "convert.log", "packet.txt"):
+            self.assertFalse((self.output / name).exists())
+
+    def test_buffered_tracking_is_opt_in_and_capture_only(self):
+        result = self.run_runner(buffered=True, buffer_tracking=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.manifest()["buffer_tracking"], "requested")
+        self.assertIsNone(self.log("baseline")["buffer_tracking"])
+        self.assertEqual(self.log("capture")["buffer_tracking"], "1")
+        self.assertEqual(self.manifest()["dx12_replay"], "not_run")
+
+    def test_mode_options_are_exclusive(self):
+        for kwargs in ({"camera": True, "buffered": True}, {"buffer_tracking": True},
+                       {"camera": True, "buffer_tracking": True}):
+            with self.subTest(kwargs=kwargs):
+                result = self.run_runner(**kwargs)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.output.exists())
+
+    def test_buffered_trace_malformed_or_wrong_bindings_fail(self):
+        def remove_stream(draw): draw.pop("streams")
+        def duplicate_stream(draw): draw["streams"].append(dict(draw["streams"][0]))
+        def invalid_base(draw): draw["indices"]["base_vertex_index"] = 0
+        def invalid_stride(draw): draw["streams"][0]["stride"] = 24
+        def index_format(draw): draw["indices"]["description"]["format"] = 102
+        def absent_ib(draw): draw["indices"]["buffer"] = None
+        def failed_getter(draw): draw["streams"][0]["hr"] = 0x80004005
+        def wrong_start(draw): draw["start_index"] = 0
+        def wrong_vertices(draw): draw["num_vertices"] = True
+        def wrong_call(draw): draw["call"] = "DrawPrimitiveUP"
+        for mutate in (remove_stream, duplicate_stream, invalid_base, invalid_stride, index_format,
+                       absent_ib, failed_getter, wrong_start, wrong_vertices, wrong_call):
+            with self.subTest(mutation=mutate.__name__):
+                events = buffered_fixture()
+                mutate(events[4])
+                self.buffered_trace.write_text("".join(json.dumps(event) + "\n" for event in events))
+                output = self.root / mutate.__name__
+                result = self.run_runner(output=output, buffered=True)
+                self.assertNotEqual(result.returncode, 0)
+                manifest = json.loads((output / "result.json").read_text())
+                self.assertEqual(manifest["failed_stage"], "trace_validation")
+                self.assertFalse((output / "replay.log").exists())
+                self.assertFalse((output / "packet.txt").exists())
+
+    def test_buffered_truncated_trace_and_image_difference_fail(self):
+        self.buffered_trace.write_text("{}\n")
+        result = self.run_runner(buffered=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.manifest()["failed_stage"], "trace_validation")
+        self.buffered_trace.write_text("".join(json.dumps(event) + "\n" for event in buffered_fixture()))
+        output = self.root / "mismatched"
+        result = self.run_runner(buffered=True, output=output, extra_env={"FAKE_DIFFER": "capture"})
+        self.assertNotEqual(result.returncode, 0)
+        manifest = json.loads((output / "result.json").read_text())
+        self.assertEqual(manifest["failed_stage"], "compare")
+        self.assertNotEqual(manifest["sha256"]["baseline_ppm"], manifest["sha256"]["captured_ppm"])
 
     def test_failure_and_partial_output_are_reported(self):
         result = self.run_runner(extra_env={"FAKE_FAIL": "capture"})

@@ -11,6 +11,7 @@
     "adapter_identity_note": "The reported Radeon adapter is a compatibility identity, not the host GPU."
   },
   "fixture": {
+    "source_commit": "84e22dd5",
     "description": "One untextured flat opaque D3D8 XYZRHW|DIFFUSE DrawPrimitiveUP triangle on a black clear target.",
     "packet": "fixture.txt",
     "packet_sha256": "e1db18a81787457bd1197227484a5aa635551f222b88fef0c43d3ef0b9d946e5",

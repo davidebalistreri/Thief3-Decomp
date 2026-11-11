@@ -115,11 +115,14 @@ An [offline Render IR prototype](tools/README_render_ir.md) translates these
 snapshots into API-independent camera, mesh, material, light and draw records.
 It preserves missing data and legacy state; it is not yet the runtime IR.
 
-`ir/buffer_shadow.hpp` provides a separate CPU-side model for partially known
-buffer contents. Partial writes and invalidation preserve unknown regions;
-discard invalidates the whole buffer. Its budget is per buffer and it is not
-thread-safe. It is not yet connected to D3D8 resource locks, so buffered
-geometry still cannot be recovered from a trace.
+`ir/buffer_shadow.hpp` and `ir/buffer_registry.hpp` provide a separate
+CPU-side model for partially known buffer contents and resource generations.
+The registry bounds resources and the shared shadow/staging byte budget. It
+invalidates writable ranges at lock and commits staged bytes only after a
+successful unlock; ambiguous resource identity or lock state is abandoned.
+The caller must synchronize all operations and provide a fault-safe copy.
+Neither model is connected to D3D8 resource locks, so buffered geometry still
+cannot be recovered from a trace.
 
 ## Scope and next steps
 
@@ -163,8 +166,9 @@ writable lock's range immediately, invalidate the entire buffer on DISCARD,
 copy through fault-safe staging before Unlock, and mark bytes known only after
 a successful Unlock. Unknown aliases, GPU writes, ambiguous locks, resets and
 untracked resources must remain unknown. Resource generations, synchronization
-and a process-wide memory budget are still required; `BufferShadow` alone does
-not implement them.
+and a process-wide memory budget are still required in the adapter. The isolated
+`BufferRegistry` models generations and a shared budget, but does not itself
+instrument COM objects or enforce process-wide synchronization.
 
 The existing Godot bedroom benchmark is useful visual reference; its
 “Original” images are a Godot export, not captures from Legacy D3D8. A

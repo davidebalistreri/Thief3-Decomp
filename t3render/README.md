@@ -133,11 +133,16 @@ whether it was captured, empty, unreadable or exceeded a limit; the maximum is
 before the real draw. The indexed vertex range uses `MinVertexIndex * stride`,
 which still needs a nonzero-index runtime test.
 
+Clear operations and their rectangles are recorded before the driver call, and
+each clear/draw attempt is paired with its HRESULT. A frame is left incomplete
+if Present occurs while such an operation is pending; overlapping operations
+are flagged because their actual submission order may differ from the log.
+
 The header records the exact limits. IDs are transient process addresses, not
 stable T3 asset names. Capture does not include texture or buffered-resource
 bytes, shader code/declarations/constants, all light or world indices,
-render-target operations, resource lifetime, or the outcome of draw calls.
-Snapshot order under concurrent device calls is not guaranteed to
+render-target operations or resource lifetime. Snapshot order under concurrent
+device calls is not guaranteed to
 be the final GPU submission order. The first device is observed until its
 final intercepted release; a subsequently created device can then be observed,
 but a second device already alive at that point is not adopted. Device

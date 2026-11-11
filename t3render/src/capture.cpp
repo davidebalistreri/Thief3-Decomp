@@ -17,6 +17,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace t3render {
@@ -28,6 +29,9 @@ constexpr unsigned kStreamLimit = 16;
 constexpr unsigned kWorldLimit = 4;
 constexpr uint64_t kUpComponentLimit = 256 * 1024;
 constexpr uint64_t kUpFrameLimit = 8 * 1024 * 1024;
+constexpr DWORD kClearRectLimit = 256;
+constexpr size_t kPendingOperationLimit = 4096;
+enum class OperationKind { Draw, Clear };
 
 // The writer owns no D3D objects; resource interfaces returned by getters are
 // released immediately. All state is protected because Present can be called
@@ -46,6 +50,9 @@ struct CaptureState {
     uint64_t target = 0;
     uint64_t draws = 0;
     uint64_t up_bytes = 0;  // successfully emitted raw bytes, not hex characters
+    uint64_t next_operation = 1;
+    bool concurrent_operations = false;
+    std::unordered_map<uint64_t, OperationKind> pending_operations;
     HANDLE file = INVALID_HANDLE_VALUE;
     std::wstring path;
     IDirect3DDevice8* device = nullptr;  // identity only; never dereferenced after replacement
@@ -158,12 +165,14 @@ bool Open(CaptureState& s) {
     auto out = Json();
     out << "{\"event\":\"header\",\"format\":\"t3render-d3d8-diagnostic\",\"version\":1,"
         << "\"trigger\":\"" << (s.key_trigger ? "F11" : "frame") << "\","
+        << "\"operation_results\":1,\"clear_rect_limit\":" << kClearRectLimit << ','
         << "\"replayable\":false,\"up_capture\":{\"encoding\":\"hex\",\"component_limit_bytes\":"
         << kUpComponentLimit << ",\"frame_limit_bytes\":" << kUpFrameLimit << "},\"limitations\":["
         << "\"resource bytes and T3 asset names are not captured\","
         << "\"UP data is bounded, may be unavailable, and may change between snapshot and draw\","
         << "\"indexed UP vertex window uses MinVertexIndex times stride; nonzero behavior is not runtime verified\","
-        << "\"draws are attempted calls; draw return values are not captured\","
+        << "\"draw and clear events describe attempts; results are paired by op_id\","
+        << "\"concurrent device calls may have a different driver submission order\","
         << "\"shader programs, declarations and constants are not captured\","
         << "\"light indices 0 through 31 only\","
         << "\"world transform indices 0 through 3 only\","
@@ -578,7 +587,7 @@ void CaptureUp(CaptureState& s, const DrawCall& draw, UpBytes& vertex, UpBytes& 
     else index = ReadUp(s, draw.index_data, 0, size);
 }
 
-void Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw) {
+bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint64_t operation) {
     const bool up = draw.kind == DrawKind::PrimitiveUP || draw.kind == DrawKind::IndexedPrimitiveUP;
     UpBytes vertex, index;
     uint64_t vertex_count = 0, vertex_offset = 0, index_count = 0;
@@ -586,7 +595,8 @@ void Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw) {
     if (up) CaptureUp(s, draw, vertex, index, vertex_count, vertex_offset, index_count,
                       vertex_count_known, offset_known, index_count_known);
     auto out = Json();
-    out << "{\"event\":\"draw\",\"frame\":" << s.frame << ",\"call\":\"" << CallName(draw.kind)
+    out << "{\"event\":\"draw\",\"frame\":" << s.frame << ",\"op_id\":" << operation
+        << ",\"call\":\"" << CallName(draw.kind)
         << "\",\"primitive_type\":" << static_cast<unsigned>(draw.primitive_type)
         << ",\"start_vertex\":" << draw.start_vertex << ",\"min_vertex_index\":" << draw.min_vertex_index
         << ",\"num_vertices\":" << draw.num_vertices << ",\"start_index\":" << draw.start_index
@@ -678,7 +688,64 @@ void Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw) {
         out << '}';
     }
     out << "}\n";
-    if (Write(s, out.str())) ++s.draws;
+    if (!Write(s, out.str())) return false;
+    ++s.draws;
+    return true;
+}
+
+// Prepare a bounded copy of rectangles before calling the driver. The input
+// pointer is never dereferenced: a failed or partial kernel read stays unknown.
+const char* ClearRectangles(DWORD count, const D3DRECT* source, std::vector<D3DRECT>& rectangles) {
+    if (!count) return source ? "inconsistent" : "none";
+    if (!source) return "null_pointer";
+    if (count > kClearRectLimit) return "count_limit";
+    const auto address = reinterpret_cast<uintptr_t>(source);
+    const size_t bytes = static_cast<size_t>(count) * sizeof(D3DRECT);
+    if (bytes > std::numeric_limits<uintptr_t>::max() - address) return "address_overflow";
+    if (!ReadableRange(address, bytes)) return "unreadable";
+    rectangles.resize(count);
+    SIZE_T copied = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), source, rectangles.data(), bytes, &copied) || copied != bytes) {
+        rectangles.clear();
+        return "unreadable";
+    }
+    return "captured";
+}
+
+// Tokens are unique within the capture and the pending table pairs each
+// attempt with its result. Overflow or excessive overlap makes the trace partial.
+uint64_t BeginOperation(CaptureState& s, OperationKind kind) {
+    if (!s.enabled || !s.begun || s.pending_operations.size() >= kPendingOperationLimit ||
+        s.next_operation == std::numeric_limits<uint64_t>::max()) {
+        Stop(s);
+        return 0;
+    }
+    if (!s.pending_operations.empty()) s.concurrent_operations = true;
+    const uint64_t token = s.next_operation++;
+    s.pending_operations.emplace(token, kind);
+    return token;
+}
+
+void Fail() noexcept;
+
+void FinishOperation(IDirect3DDevice8* device, uint64_t token, HRESULT result, OperationKind kind) {
+    if (!token) return;
+    try {
+        auto& s = State();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (!s.enabled || s.complete || !device || device != s.device || !s.begun ||
+            !s.triggered || s.frame != s.target) return;
+        const auto pending = s.pending_operations.find(token);
+        if (pending == s.pending_operations.end() || pending->second != kind) {
+            Stop(s);
+            return;
+        }
+        auto out = Json();
+        out << "{\"event\":\"" << (kind == OperationKind::Draw ? "draw_result" : "clear_result")
+            << "\",\"frame\":" << s.frame << ",\"op_id\":" << token
+            << ",\"hr\":" << static_cast<int32_t>(result) << "}\n";
+        if (Write(s, out.str())) s.pending_operations.erase(pending);
+    } catch (...) { Fail(); }
 }
 
 // Captures keyboard state from the calling thread's input queue, without
@@ -748,6 +815,9 @@ void CaptureDeviceReleased(IDirect3DDevice8* device) {
         s.draws = 0;
         s.up_bytes = 0;
         s.had_reset = false;
+        s.next_operation = 1;
+        s.pending_operations.clear();
+        s.concurrent_operations = false;
         if (s.key_trigger) {
             s.triggered = false;
             s.target = 0;
@@ -760,14 +830,60 @@ void CaptureDeviceReleased(IDirect3DDevice8* device) {
     } catch (...) { Fail(); }
 }
 
-void CaptureDraw(IDirect3DDevice8* device, const DrawCall& draw) {
+uint64_t CaptureDraw(IDirect3DDevice8* device, const DrawCall& draw) {
     try {
         auto& s = State();
         std::lock_guard<std::mutex> lock(s.mutex);
-        if (!s.enabled || s.complete || !device || device != s.device || !s.triggered || s.frame != s.target) return;
+        if (!s.enabled || s.complete || !device || device != s.device || !s.triggered || s.frame != s.target) return 0;
         Begin(s);
-        if (s.enabled) Draw(s, device, draw);
-    } catch (...) { Fail(); }
+        if (!s.enabled) return 0;
+        const uint64_t token = BeginOperation(s, OperationKind::Draw);
+        if (!token || !Draw(s, device, draw, token)) return 0;
+        return token;
+    } catch (...) { Fail(); return 0; }
+}
+
+void CaptureDrawResult(IDirect3DDevice8* device, uint64_t token, HRESULT result) {
+    FinishOperation(device, token, result, OperationKind::Draw);
+}
+
+uint64_t CaptureClear(IDirect3DDevice8* device, DWORD count, const D3DRECT* source,
+                      DWORD flags, D3DCOLOR color, float depth, DWORD stencil) {
+    try {
+        auto& s = State();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (!s.enabled || s.complete || !device || device != s.device || !s.triggered || s.frame != s.target) return 0;
+        Begin(s);
+        if (!s.enabled) return 0;
+        const uint64_t token = BeginOperation(s, OperationKind::Clear);
+        if (!token) return 0;
+        std::vector<D3DRECT> rectangles;
+        const char* status = ClearRectangles(count, source, rectangles);
+        uint32_t depth_bits = 0;
+        static_assert(sizeof(depth_bits) == sizeof(depth), "D3D8 clear depth must be 32-bit");
+        std::memcpy(&depth_bits, &depth, sizeof(depth_bits));
+        auto out = Json();
+        out << "{\"event\":\"clear\",\"frame\":" << s.frame << ",\"op_id\":" << token
+            << ",\"rect_count\":" << count << ",\"rects_status\":\"" << status << "\",\"rects\":";
+        if (std::strcmp(status, "none") == 0 || std::strcmp(status, "captured") == 0) {
+            out << '[';
+            for (size_t i = 0; i < rectangles.size(); ++i) {
+                if (i) out << ',';
+                const auto& rect = rectangles[i];
+                out << "{\"x1\":" << static_cast<int32_t>(rect.x1) << ",\"y1\":" << static_cast<int32_t>(rect.y1)
+                    << ",\"x2\":" << static_cast<int32_t>(rect.x2) << ",\"y2\":" << static_cast<int32_t>(rect.y2) << '}';
+            }
+            out << ']';
+        } else out << "null";
+        out << ",\"flags\":" << flags << ",\"color\":" << color << ",\"depth\":";
+        Number(out, depth);
+        out << ",\"depth_bits\":" << depth_bits << ",\"stencil\":" << stencil << "}\n";
+        return Write(s, out.str()) ? token : 0;
+    } catch (...) { Fail(); return 0; }
+}
+
+void CaptureClearResult(IDirect3DDevice8* device, uint64_t token, HRESULT result) {
+    FinishOperation(device, token, result, OperationKind::Clear);
 }
 
 void CapturePresent(IDirect3DDevice8* device, HRESULT result) {
@@ -778,10 +894,19 @@ void CapturePresent(IDirect3DDevice8* device, HRESULT result) {
         if (s.triggered && s.frame == s.target) {
             Begin(s);
             if (!s.enabled) return;
+            if (!s.pending_operations.empty()) {
+                auto incomplete = Json();
+                incomplete << "{\"event\":\"capture_incomplete\",\"frame\":" << s.frame
+                           << ",\"reason\":\"pending_operations\",\"count\":" << s.pending_operations.size() << "}\n";
+                Write(s, incomplete.str());
+                Stop(s);
+                return;
+            }
             auto out = Json();
             out << "{\"event\":\"frame_end\",\"frame\":" << s.frame
                 << ",\"present_hr\":" << static_cast<int32_t>(result) << ",\"draws\":" << s.draws
                 << ",\"had_reset\":" << (s.had_reset ? "true" : "false")
+                << ",\"concurrent_operations\":" << (s.concurrent_operations ? "true" : "false")
                 << ",\"replayable\":false}\n";
             if (Write(s, out.str()) && Write(s, "{\"event\":\"capture_end\",\"frames\":1}\n")) {
                 s.complete = true;

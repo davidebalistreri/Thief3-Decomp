@@ -8,6 +8,7 @@ counted but deliberately not interpreted.
 import argparse
 from collections import Counter
 import json
+import math
 from pathlib import Path
 import sys
 
@@ -42,6 +43,8 @@ def summarize(path):
     current = None
     header_seen = False
     capture_ended = False
+    operation_results = False
+    clear_rect_limit = None
     lines = 0
 
     try:
@@ -66,6 +69,13 @@ def summarize(path):
                         raise TraceError(f"line {lines}: unsupported trace format")
                     if not _is_int(item.get("version")) or item["version"] != 1:
                         raise TraceError(f"line {lines}: unsupported trace version")
+                    if "operation_results" in item:
+                        if not _is_int(item["operation_results"]) or item["operation_results"] != 1:
+                            raise TraceError(f"line {lines}: unsupported operation result capability")
+                        clear_rect_limit = item.get("clear_rect_limit")
+                        if not _is_int(clear_rect_limit) or clear_rect_limit <= 0:
+                            raise TraceError(f"line {lines}: clear_rect_limit must be a positive integer")
+                        operation_results = True
                     header_seen = True
                 elif event == "header":
                     raise TraceError(f"line {lines}: duplicate header")
@@ -86,8 +96,9 @@ def summarize(path):
                         raise TraceError(f"line {lines}: frame must be an integer")
                     if current is not None:
                         raise TraceError(f"line {lines}: frame_begin before previous frame_end")
-                    current = {"frame": frame, "draws": 0, "calls": Counter()}
-                elif event in ("draw", "frame_end"):
+                    current = {"frame": frame, "draws": 0, "calls": Counter(), "pending": {},
+                               "last_op": 0, "overlap": False}
+                elif event in ("draw", "draw_result", "clear", "clear_result", "frame_end"):
                     if current is None:
                         raise TraceError(f"line {lines}: {event} outside a frame")
                     frame = item.get("frame")
@@ -97,6 +108,53 @@ def summarize(path):
                         raise TraceError(
                             f"line {lines}: frame {frame} does not match active frame {current['frame']}"
                         )
+                    if event in ("draw", "clear"):
+                        if event == "clear":
+                            if not operation_results:
+                                raise TraceError(f"line {lines}: clear requires operation result capability")
+                            count = item.get("rect_count")
+                            status = item.get("rects_status")
+                            rects = item.get("rects")
+                            if not _is_int(count) or not 0 <= count <= 0xffffffff:
+                                raise TraceError(f"line {lines}: invalid clear rect_count")
+                            if status == "none":
+                                if count != 0 or rects != []:
+                                    raise TraceError(f"line {lines}: invalid empty clear rectangles")
+                            elif status == "captured":
+                                if not 0 < count <= clear_rect_limit or not isinstance(rects, list) or len(rects) != count:
+                                    raise TraceError(f"line {lines}: invalid captured clear rectangles")
+                                for rect in rects:
+                                    if not isinstance(rect, dict) or set(rect) != {"x1", "y1", "x2", "y2"} or any(
+                                        not _is_int(value) or not -(1 << 31) <= value < (1 << 31)
+                                        for value in rect.values()
+                                    ):
+                                        raise TraceError(f"line {lines}: invalid clear rectangle")
+                            elif status in ("inconsistent", "null_pointer", "count_limit", "unreadable", "address_overflow"):
+                                if rects is not None:
+                                    raise TraceError(f"line {lines}: unknown clear rectangles must be null")
+                                if ((status == "inconsistent" and count != 0) or
+                                    (status == "null_pointer" and count == 0) or
+                                    (status == "count_limit" and count <= clear_rect_limit) or
+                                    (status in ("unreadable", "address_overflow") and not 0 < count <= clear_rect_limit)):
+                                    raise TraceError(f"line {lines}: clear rectangle status does not match count")
+                            else:
+                                raise TraceError(f"line {lines}: invalid clear rectangle status")
+                            for field in ("flags", "color", "depth_bits", "stencil"):
+                                value = item.get(field)
+                                if not _is_int(value) or not 0 <= value <= 0xffffffff:
+                                    raise TraceError(f"line {lines}: invalid clear {field}")
+                            depth = item.get("depth")
+                            if depth is not None and (isinstance(depth, bool) or not isinstance(depth, (int, float)) or
+                                                      (isinstance(depth, float) and not math.isfinite(depth))):
+                                raise TraceError(f"line {lines}: invalid clear depth")
+                        if operation_results or event == "clear" or "op_id" in item:
+                            op_id = item.get("op_id")
+                            if not _is_int(op_id) or not current["last_op"] < op_id < (1 << 64) - 1:
+                                raise TraceError(f"line {lines}: operation id must increase within the frame")
+                            if current["pending"]:
+                                current["overlap"] = True
+                            current["last_op"] = op_id
+                            current["pending"][op_id] = event
                     if event == "draw":
                         call = item.get("call")
                         if not isinstance(call, str) or not call:
@@ -104,12 +162,30 @@ def summarize(path):
                         current["draws"] += 1
                         current["calls"][call] += 1
                         calls[call] += 1
-                    else:
+                    elif event in ("draw_result", "clear_result"):
+                        op_id = item.get("op_id")
+                        if not _is_int(op_id) or current["pending"].get(op_id) != event.removesuffix("_result"):
+                            raise TraceError(f"line {lines}: result has no matching operation")
+                        if not _is_int(item.get("hr")) or not -(1 << 31) <= item["hr"] < (1 << 32):
+                            raise TraceError(f"line {lines}: operation hr must be an integer")
+                        del current["pending"][op_id]
+                    elif event == "frame_end":
                         hr = item.get("present_hr")
                         if not _is_int(hr):
                             raise TraceError(f"line {lines}: present_hr must be an integer")
+                        if current["pending"]:
+                            raise TraceError(f"line {lines}: frame ends with pending operations")
+                        if operation_results and not isinstance(item.get("concurrent_operations"), bool):
+                            raise TraceError(f"line {lines}: concurrent_operations must be a boolean")
+                        if current["overlap"] and item.get("concurrent_operations") is not True:
+                            raise TraceError(f"line {lines}: overlapping operations were not flagged")
+                        if "concurrent_operations" in item:
+                            current["concurrent_operations"] = item["concurrent_operations"]
                         current["present_hr"] = hr
                         current["calls"] = dict(sorted(current["calls"].items()))
+                        del current["pending"]
+                        del current["last_op"]
+                        del current["overlap"]
                         frames.append(current)
                         current = None
                 events[event] += 1
@@ -124,8 +200,8 @@ def summarize(path):
         raise TraceError("unexpected EOF: missing capture_end")
     if not frames:
         raise TraceError("trace has no complete frames")
-    if not calls:
-        raise TraceError("trace has no draw events")
+    if not calls and not events["clear"]:
+        raise TraceError("trace has no draw events or clear events")
 
     return {
         "format": "t3render-d3d8-diagnostic",

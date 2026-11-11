@@ -3,8 +3,9 @@
 `trace_to_ir.py` converts a **complete diagnostic v1 JSONL trace** into a
 versioned, API-independent JSON representation for inspection. This is an
 offline prototype, not a runtime renderer interface or a replay: decoded
-geometry, buffered resource contents, shader programs and draw results are
-not captured. Some newer diagnostic traces can contain opaque UP bytes.
+geometry, buffered resource contents and shader programs are not captured.
+Newer diagnostic traces can contain opaque UP bytes and paired operation
+results; older traces may lack them.
 Neither visual parity nor gameplay behavior can be established from this IR.
 
 ```sh
@@ -53,7 +54,8 @@ data is removed after validation. No third-party modules are needed.
   explicitly incomplete even when empty, since capture samples a limited range
   and failed getters are omitted. `null` means unavailable or unknown, never a
   generated default.
-- Draw calls are attempted operations; their success is not captured. Unknown
+- Draw calls are attempted operations; newer traces retain their outcomes in
+  `draw_result` events, while older traces do not. Unknown
   call types and primitive types stay `null` in the portable representation.
   Source-specific raw draw, frame, light and miscellaneous events are preserved
   under `compatibility.d3d8`; `source_line` allows original event order to be

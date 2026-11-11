@@ -15,6 +15,7 @@ static bool enabled = false, writable = true, reject_swap = false, recursive = f
 static bool create_fails = false, throw_capture = false;
 static std::atomic<bool> stress{false};
 static std::atomic<int> captured_draws{0}, forwarded_draws{0};
+static std::atomic<std::uint64_t> next_token{1};
 static int failures = 0;
 static IDirect3DDevice8 devices[2];
 static IDirect3DDevice8* last_freed;
@@ -28,6 +29,10 @@ static int real_calls = 0;
 static thread_local DWORD last_error = 0;
 static DWORD draw_up_input_error = 0;
 static DWORD create_input_error = 0, reset_input_error = 0, present_input_error = 0;
+static DWORD clear_input_error = 0;
+static const D3DRECT* clear_rectangles = nullptr;
+static DWORD clear_count = 0, clear_flags = 0, clear_color = 0, clear_stencil = 0;
+static float clear_depth = 0;
 
 extern "C" size_t VirtualQuery(void* p,MEMORY_BASIC_INFORMATION* out,size_t) { if(!writable) return 0; out->BaseAddress=p; out->RegionSize=sizeof(void*); out->State=MEM_COMMIT; out->Protect=PAGE_READWRITE; return sizeof(*out); }
 extern "C" void* InterlockedCompareExchangePointer(void* volatile* p,void* x,void* compare) { void* prior=*p; if(reject_swap && x) {reject_swap=false; return reinterpret_cast<void*>(1);} if(prior==compare) *p=x; return prior; }
@@ -44,11 +49,20 @@ namespace t3render {
 bool CaptureConfigured() { SetLastError(991); return enabled; }
 void CaptureDevice(IDirect3DDevice8*,const D3DPRESENT_PARAMETERS* p) { observed_params=const_cast<D3DPRESENT_PARAMETERS*>(p); events.push_back("capture-device"); }
 void CaptureDeviceReleased(IDirect3DDevice8* d) { assert(d==last_freed); events.push_back("capture-release"); }
-void CaptureDraw(IDirect3DDevice8*,const DrawCall& d) {
+std::uint64_t CaptureDraw(IDirect3DDevice8*,const DrawCall& d) {
  SetLastError(991);
- if (stress) { ++captured_draws; return; }
+ if (stress) { ++captured_draws; return next_token++; }
  if (throw_capture) throw std::runtime_error("capture failed");
  observed_call=d; events.push_back("capture-draw");
+ return next_token++;
+}
+void CaptureDrawResult(IDirect3DDevice8*,std::uint64_t token,HRESULT) { SetLastError(991); if (!token || stress) return; events.push_back("capture-draw-result"); }
+std::uint64_t CaptureClear(IDirect3DDevice8*,DWORD count,const D3DRECT* rectangles,DWORD flags,D3DCOLOR color,float depth,DWORD stencil) {
+ SetLastError(991); clear_count=count; clear_rectangles=rectangles; clear_flags=flags; clear_color=color;
+ clear_depth=depth; clear_stencil=stencil; events.push_back("capture-clear"); return next_token++;
+}
+void CaptureClearResult(IDirect3DDevice8*,std::uint64_t token,HRESULT hr) {
+ SetLastError(991); assert(token && hr==-71); events.push_back("capture-clear-result");
 }
 void CaptureReset(IDirect3DDevice8*,const D3DPRESENT_PARAMETERS* p,HRESULT hr) { SetLastError(991); assert(hr==12); observed_params=const_cast<D3DPRESENT_PARAMETERS*>(p); events.push_back("capture-reset"); }
 void CapturePresent(IDirect3DDevice8*,HRESULT hr) { SetLastError(991); assert(hr==13); events.push_back("capture-present"); }
@@ -66,6 +80,10 @@ static ULONG add_device(IDirect3DDevice8* d) { return ++d->refs; }
 static ULONG release_device(IDirect3DDevice8* d) { ULONG refs=--d->refs; if (!refs) last_freed=d; return refs; }
 static HRESULT reset(IDirect3DDevice8*,D3DPRESENT_PARAMETERS*) { reset_input_error=GetLastError(); SetLastError(912); events.push_back("reset"); return 12; }
 static HRESULT present(IDirect3DDevice8*,const RECT*,const RECT*,HWND,const RGNDATA*) { present_input_error=GetLastError(); SetLastError(913); events.push_back("present"); return 13; }
+static HRESULT clear(IDirect3DDevice8*,DWORD count,const D3DRECT* rectangles,DWORD flags,D3DCOLOR color,float depth,DWORD stencil) {
+ clear_input_error=GetLastError(); assert(count==2 && rectangles==clear_rectangles && flags==7 && color==0x12345678 && depth==0.75f && stencil==9);
+ SetLastError(914); events.push_back("clear"); return -71;
+}
 static HRESULT draw(IDirect3DDevice8*,int,UINT,UINT) {
  if (stress) { ++forwarded_draws; return 14; }
  events.push_back("draw"); return 14;
@@ -74,7 +92,7 @@ static HRESULT draw_indexed(IDirect3DDevice8*,int,UINT,UINT,UINT,UINT) { events.
 static HRESULT draw_up(IDirect3DDevice8*,int,UINT,const void* v,UINT) { draw_up_input_error=GetLastError(); SetLastError(909); observed_vertices=v; events.push_back("draw-up"); return 16; }
 static HRESULT draw_indexed_up(IDirect3DDevice8*,int,UINT,UINT,UINT,const void* i,int,const void* v,UINT) { observed_indices=i; observed_vertices=v; events.push_back("draw-indexed-up"); return 17; }
 static IDirect3D8Vtbl factory_vt{query_factory,add_factory,release_factory,make_device};
-static IDirect3DDevice8Vtbl device_vt{query_device,add_device,release_device,reset,present,draw,draw_indexed,draw_up,draw_indexed_up};
+static IDirect3DDevice8Vtbl device_vt{query_device,add_device,release_device,reset,present,clear,draw,draw_indexed,draw_up,draw_indexed_up};
 int main() {
  factory={&factory_vt,1}; devices[0]={&device_vt,1}; devices[1]={&device_vt,1};
  SetLastError(101);
@@ -96,7 +114,7 @@ int main() {
  assert(events==std::vector<std::string>({"create-device","capture-device"})); assert(observed_params==&params); events.clear();
  assert(d->lpVtbl->QueryInterface(d,IID_IDirect3DDevice8,&queried)==0 && queried==d); assert(d->lpVtbl->Release(d)==1);
  assert(d->lpVtbl->DrawPrimitive(d,4,8,9)==14); assert(observed_call.kind==t3render::DrawKind::Primitive && observed_call.start_vertex==8 && observed_call.primitive_count==9);
- assert(events==std::vector<std::string>({"capture-draw","draw"})); events.clear();
+ assert(events==std::vector<std::string>({"capture-draw","draw","capture-draw-result"})); events.clear();
  throw_capture=true; assert(d->lpVtbl->DrawPrimitive(d,4,8,9)==14); throw_capture=false;
  assert(events==std::vector<std::string>({"draw"})); events.clear();
  stress=true;
@@ -105,14 +123,20 @@ int main() {
  for (auto& worker : workers) worker.join();
  stress=false; assert(captured_draws==800 && forwarded_draws==800);
  assert(d->lpVtbl->DrawIndexedPrimitive(d,4,5,6,7,8)==15); assert(observed_call.kind==t3render::DrawKind::IndexedPrimitive && observed_call.min_vertex_index==5 && observed_call.num_vertices==6 && observed_call.start_index==7 && observed_call.primitive_count==8);
- assert(events==std::vector<std::string>({"capture-draw","draw-indexed"})); events.clear();
+ assert(events==std::vector<std::string>({"capture-draw","draw-indexed","capture-draw-result"})); events.clear();
  int vertices=1, indices=2;
  SetLastError(123);
  assert(d->lpVtbl->DrawPrimitiveUP(d,4,5,&vertices,24)==16); assert(observed_vertices==&vertices && observed_call.vertex_data==&vertices && !observed_call.index_data && observed_call.kind==t3render::DrawKind::PrimitiveUP && observed_call.vertex_stride==24);
  assert(draw_up_input_error==123 && GetLastError()==909);
- assert(events==std::vector<std::string>({"capture-draw","draw-up"})); events.clear();
+ assert(events==std::vector<std::string>({"capture-draw","draw-up","capture-draw-result"})); events.clear();
  assert(d->lpVtbl->DrawIndexedPrimitiveUP(d,4,5,6,7,&indices,9,&vertices,24)==17); assert(observed_indices==&indices && observed_vertices==&vertices && observed_call.vertex_data==&vertices && observed_call.index_data==&indices && observed_call.kind==t3render::DrawKind::IndexedPrimitiveUP && observed_call.index_format==9);
- assert(events==std::vector<std::string>({"capture-draw","draw-indexed-up"})); events.clear();
+ assert(events==std::vector<std::string>({"capture-draw","draw-indexed-up","capture-draw-result"})); events.clear();
+ D3DRECT rects[2]{};
+ SetLastError(104);
+ assert(d->lpVtbl->Clear(d,2,rects,7,0x12345678,0.75f,9)==-71);
+ assert(clear_input_error==104 && GetLastError()==914 && clear_count==2 && clear_rectangles==rects);
+ assert(clear_flags==7 && clear_color==0x12345678 && clear_depth==0.75f && clear_stencil==9);
+ assert(events==std::vector<std::string>({"capture-clear","clear","capture-clear-result"})); events.clear();
  SetLastError(102);
  assert(d->lpVtbl->Reset(d,&params)==12); assert(reset_input_error==102 && GetLastError()==912); assert(observed_params==&params); assert(events==std::vector<std::string>({"reset","capture-reset"})); events.clear();
  SetLastError(103);

@@ -17,6 +17,13 @@ BEGIN = {"event": "frame_begin", "frame": 7}
 DRAW = {"event": "draw", "frame": 7, "call": "DrawIndexedPrimitive"}
 END = {"event": "frame_end", "frame": 7, "present_hr": 0}
 CAPTURE_END = {"event": "capture_end", "frames": 1}
+HEADER_OPS = dict(HEADER, operation_results=1, clear_rect_limit=256)
+DRAW_OP = dict(DRAW, op_id=2)
+DRAW_RESULT = {"event": "draw_result", "frame": 7, "op_id": 2, "hr": 0}
+CLEAR = {"event": "clear", "frame": 7, "op_id": 1, "rect_count": 0, "rects_status": "none",
+         "rects": [], "flags": 1, "color": 0xff000000, "depth": 1.0, "depth_bits": 0x3f800000, "stencil": 0}
+CLEAR_RESULT = {"event": "clear_result", "frame": 7, "op_id": 1, "hr": 0}
+END_OPS = dict(END, concurrent_operations=False)
 
 
 class TraceSummaryTests(unittest.TestCase):
@@ -147,6 +154,52 @@ class TraceSummaryTests(unittest.TestCase):
         for events, message in cases:
             with self.subTest(events=events):
                 self.assert_invalid(events, message)
+
+    def test_operation_results_are_required_when_advertised(self):
+        self.write_events(HEADER_OPS, BEGIN, CLEAR, CLEAR_RESULT, DRAW_OP, DRAW_RESULT, END_OPS, CAPTURE_END)
+        result = trace_summary.summarize(self.trace)
+        self.assertEqual((result["events"]["clear"], result["events"]["draw_result"]), (1, 1))
+        self.assertFalse(result["frames"][0]["concurrent_operations"])
+        cases = [
+            ([dict(HEADER_OPS, operation_results=True)], "unsupported operation result capability"),
+            ([dict(HEADER_OPS, clear_rect_limit=0)], "clear_rect_limit"),
+            ([HEADER_OPS, BEGIN, DRAW], "operation id must increase"),
+            ([HEADER_OPS, BEGIN, DRAW_OP, END_OPS], "pending operations"),
+            ([HEADER_OPS, BEGIN, CLEAR, DRAW_RESULT], "no matching operation"),
+            ([HEADER_OPS, BEGIN, CLEAR, dict(CLEAR_RESULT, frame=8)], "does not match active frame"),
+            ([HEADER_OPS, BEGIN, CLEAR, dict(CLEAR_RESULT, hr=True)], "operation hr"),
+            ([HEADER_OPS, BEGIN, CLEAR, CLEAR_RESULT, dict(DRAW_OP, op_id=1)], "operation id must increase"),
+            ([HEADER_OPS, BEGIN, CLEAR, CLEAR_RESULT, DRAW_OP, DRAW_RESULT, END], "concurrent_operations"),
+            ([HEADER, BEGIN, CLEAR], "clear requires operation result capability"),
+        ]
+        for events, message in cases:
+            with self.subTest(events=events):
+                self.assert_invalid(events, message)
+
+    def test_overlapping_operations_must_be_flagged(self):
+        events = [HEADER_OPS, BEGIN, CLEAR, DRAW_OP, DRAW_RESULT, CLEAR_RESULT]
+        self.assert_invalid(events + [END_OPS], "overlapping operations were not flagged")
+        self.write_events(*events, dict(END_OPS, concurrent_operations=True), CAPTURE_END)
+        self.assertTrue(trace_summary.summarize(self.trace)["frames"][0]["concurrent_operations"])
+
+    def test_clear_rectangles_are_never_fabricated(self):
+        cases = [
+            (dict(CLEAR, rects_status="captured", rect_count=2, rects=[]), "invalid captured"),
+            (dict(CLEAR, rects_status="captured", rect_count=1,
+                  rects=[{"x1": False, "y1": 0, "x2": 1, "y2": 2}]), "invalid clear rectangle"),
+            (dict(CLEAR, rects_status="null_pointer", rect_count=1, rects=[]), "must be null"),
+            (dict(CLEAR, rects_status="null_pointer", rect_count=0, rects=None), "status does not match count"),
+            (dict(CLEAR, rects_status="count_limit", rect_count=2, rects=None), "status does not match count"),
+            (dict(CLEAR, flags=True), "invalid clear flags"),
+            (dict(CLEAR, depth="1"), "invalid clear depth"),
+        ]
+        for event, message in cases:
+            with self.subTest(event=event):
+                self.assert_invalid([HEADER_OPS, BEGIN, event], message)
+        raw = json.dumps(CLEAR).replace('"depth": 1.0', '"depth": 1e999')
+        self.trace.write_text(json.dumps(HEADER_OPS) + "\n" + json.dumps(BEGIN) + "\n" + raw + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(trace_summary.TraceError, "invalid clear depth"):
+            trace_summary.summarize(self.trace)
 
 
 if __name__ == "__main__":

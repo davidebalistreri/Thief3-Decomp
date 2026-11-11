@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <d3d8.h>
+#include <cstdint>
 
 namespace t3render {
 
@@ -22,7 +23,12 @@ bool CaptureConfigured();
 void CaptureDevice(IDirect3DDevice8*, const D3DPRESENT_PARAMETERS*);
 // Called after final Release: the address is an identifier, not a live COM object.
 void CaptureDeviceReleased(IDirect3DDevice8*);
-void CaptureDraw(IDirect3DDevice8*, const DrawCall&);
+// A nonzero token identifies an attempted operation in the selected frame.
+// The matching result must be supplied after forwarding to the real device.
+std::uint64_t CaptureDraw(IDirect3DDevice8*, const DrawCall&);
+void CaptureDrawResult(IDirect3DDevice8*, std::uint64_t, HRESULT);
+std::uint64_t CaptureClear(IDirect3DDevice8*, DWORD, const D3DRECT*, DWORD, D3DCOLOR, float, DWORD);
+void CaptureClearResult(IDirect3DDevice8*, std::uint64_t, HRESULT);
 void CapturePresent(IDirect3DDevice8*, HRESULT);
 void CaptureReset(IDirect3DDevice8*, const D3DPRESENT_PARAMETERS*, HRESULT);
 

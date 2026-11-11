@@ -11,7 +11,7 @@ T3VtableLayout T3GetVtableLayout(void) {
         SLOT(IDirect3D8, QueryInterface), SLOT(IDirect3D8, Release), SLOT(IDirect3D8, CreateDevice),
         sizeof(struct IDirect3DDevice8Vtbl) / sizeof(void *),
         SLOT(IDirect3DDevice8, QueryInterface), SLOT(IDirect3DDevice8, Release),
-        SLOT(IDirect3DDevice8, Reset), SLOT(IDirect3DDevice8, Present),
+        SLOT(IDirect3DDevice8, Reset), SLOT(IDirect3DDevice8, Present), SLOT(IDirect3DDevice8, Clear),
         SLOT(IDirect3DDevice8, DrawPrimitive), SLOT(IDirect3DDevice8, DrawIndexedPrimitive),
         SLOT(IDirect3DDevice8, DrawPrimitiveUP), SLOT(IDirect3DDevice8, DrawIndexedPrimitiveUP)
     };

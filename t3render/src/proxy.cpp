@@ -40,6 +40,7 @@ using QueryDevice = Function<decltype(&IDirect3DDevice8::QueryInterface)>;
 using ReleaseDevice = Function<decltype(&IDirect3DDevice8::Release)>;
 using ResetDevice = Function<decltype(&IDirect3DDevice8::Reset)>;
 using PresentDevice = Function<decltype(&IDirect3DDevice8::Present)>;
+using ClearDevice = Function<decltype(&IDirect3DDevice8::Clear)>;
 using DrawPrimitive = Function<decltype(&IDirect3DDevice8::DrawPrimitive)>;
 using DrawIndexed = Function<decltype(&IDirect3DDevice8::DrawIndexedPrimitive)>;
 using DrawPrimitiveUp = Function<decltype(&IDirect3DDevice8::DrawPrimitiveUP)>;
@@ -53,6 +54,7 @@ HRESULT STDMETHODCALLTYPE DeviceQuery(IDirect3DDevice8*, REFIID, void**);
 ULONG STDMETHODCALLTYPE DeviceRelease(IDirect3DDevice8*);
 HRESULT STDMETHODCALLTYPE DeviceReset(IDirect3DDevice8*, D3DPRESENT_PARAMETERS*);
 HRESULT STDMETHODCALLTYPE DevicePresent(IDirect3DDevice8*, const RECT*, const RECT*, HWND, const RGNDATA*);
+HRESULT STDMETHODCALLTYPE DeviceClear(IDirect3DDevice8*, DWORD, const D3DRECT*, DWORD, D3DCOLOR, float, DWORD);
 HRESULT STDMETHODCALLTYPE DeviceDraw(IDirect3DDevice8*, D3DPRIMITIVETYPE, UINT, UINT);
 HRESULT STDMETHODCALLTYPE DeviceDrawIndexed(IDirect3DDevice8*, D3DPRIMITIVETYPE, UINT, UINT, UINT, UINT);
 HRESULT STDMETHODCALLTYPE DeviceDrawUp(IDirect3DDevice8*, D3DPRIMITIVETYPE, UINT, const void*, UINT);
@@ -66,6 +68,7 @@ static_assert(std::is_same_v<QueryDevice, decltype(&DeviceQuery)>);
 static_assert(std::is_same_v<ReleaseDevice, decltype(&DeviceRelease)>);
 static_assert(std::is_same_v<ResetDevice, decltype(&DeviceReset)>);
 static_assert(std::is_same_v<PresentDevice, decltype(&DevicePresent)>);
+static_assert(std::is_same_v<ClearDevice, decltype(&DeviceClear)>);
 static_assert(std::is_same_v<DrawPrimitive, decltype(&DeviceDraw)>);
 static_assert(std::is_same_v<DrawIndexed, decltype(&DeviceDrawIndexed)>);
 static_assert(std::is_same_v<DrawPrimitiveUp, decltype(&DeviceDrawUp)>);
@@ -168,6 +171,7 @@ bool Bind(void* object, bool device) noexcept {
             v[l.device_release] = reinterpret_cast<void*>(&DeviceRelease);
             v[l.device_reset] = reinterpret_cast<void*>(&DeviceReset);
             v[l.device_present] = reinterpret_cast<void*>(&DevicePresent);
+            v[l.device_clear] = reinterpret_cast<void*>(&DeviceClear);
             v[l.device_draw] = reinterpret_cast<void*>(&DeviceDraw);
             v[l.device_draw_indexed] = reinterpret_cast<void*>(&DeviceDrawIndexed);
             v[l.device_draw_up] = reinterpret_cast<void*>(&DeviceDrawUp);
@@ -306,6 +310,21 @@ HRESULT STDMETHODCALLTYPE DevicePresent(IDirect3DDevice8* device, const RECT* so
     return hr;
 }
 
+HRESULT STDMETHODCALLTYPE DeviceClear(IDirect3DDevice8* device, DWORD count, const D3DRECT* rectangles,
+                                      DWORD flags, D3DCOLOR color, float depth, DWORD stencil) {
+    ErrorState error;
+    auto binding = Find(device, true);
+    if (!binding) return D3DERR_INVALIDCALL;
+    std::uint64_t token = 0;
+    Observe([&] { token = t3render::CaptureClear(device, count, rectangles, flags, color, depth, stencil); });
+    error.Restore();
+    HRESULT hr = reinterpret_cast<ClearDevice>(binding->original[Layout().device_clear])(
+        device, count, rectangles, flags, color, depth, stencil);
+    error.Capture();
+    Observe([&] { t3render::CaptureClearResult(device, token, hr); });
+    return hr;
+}
+
 HRESULT STDMETHODCALLTYPE DeviceDraw(IDirect3DDevice8* device, D3DPRIMITIVETYPE primitive, UINT start, UINT count) {
     ErrorState error;
     auto binding = Find(device, true);
@@ -315,10 +334,12 @@ HRESULT STDMETHODCALLTYPE DeviceDraw(IDirect3DDevice8* device, D3DPRIMITIVETYPE 
     call.primitive_type = primitive;
     call.start_vertex = start;
     call.primitive_count = count;
-    Observe([&] { t3render::CaptureDraw(device, call); });
+    std::uint64_t token = 0;
+    Observe([&] { token = t3render::CaptureDraw(device, call); });
     error.Restore();
     HRESULT hr = reinterpret_cast<DrawPrimitive>(binding->original[Layout().device_draw])(device, primitive, start, count);
     error.Capture();
+    Observe([&] { t3render::CaptureDrawResult(device, token, hr); });
     return hr;
 }
 
@@ -334,11 +355,13 @@ HRESULT STDMETHODCALLTYPE DeviceDrawIndexed(IDirect3DDevice8* device, D3DPRIMITI
     call.num_vertices = vertices;
     call.start_index = start_index;
     call.primitive_count = count;
-    Observe([&] { t3render::CaptureDraw(device, call); });
+    std::uint64_t token = 0;
+    Observe([&] { token = t3render::CaptureDraw(device, call); });
     error.Restore();
     HRESULT hr = reinterpret_cast<DrawIndexed>(binding->original[Layout().device_draw_indexed])(
         device, primitive, min_index, vertices, start_index, count);
     error.Capture();
+    Observe([&] { t3render::CaptureDrawResult(device, token, hr); });
     return hr;
 }
 
@@ -353,11 +376,13 @@ HRESULT STDMETHODCALLTYPE DeviceDrawUp(IDirect3DDevice8* device, D3DPRIMITIVETYP
     call.primitive_count = count;
     call.vertex_stride = stride;
     call.vertex_data = vertices;
-    Observe([&] { t3render::CaptureDraw(device, call); });
+    std::uint64_t token = 0;
+    Observe([&] { token = t3render::CaptureDraw(device, call); });
     error.Restore();
     HRESULT hr = reinterpret_cast<DrawPrimitiveUp>(binding->original[Layout().device_draw_up])(
         device, primitive, count, vertices, stride);
     error.Capture();
+    Observe([&] { t3render::CaptureDrawResult(device, token, hr); });
     return hr;
 }
 
@@ -377,11 +402,13 @@ HRESULT STDMETHODCALLTYPE DeviceDrawIndexedUp(IDirect3DDevice8* device, D3DPRIMI
     call.vertex_stride = stride;
     call.vertex_data = vertex_data;
     call.index_data = indices;
-    Observe([&] { t3render::CaptureDraw(device, call); });
+    std::uint64_t token = 0;
+    Observe([&] { token = t3render::CaptureDraw(device, call); });
     error.Restore();
     HRESULT hr = reinterpret_cast<DrawIndexedUp>(binding->original[Layout().device_draw_indexed_up])(
         device, primitive, min_index, vertices, count, indices, format, vertex_data, stride);
     error.Capture();
+    Observe([&] { t3render::CaptureDrawResult(device, token, hr); });
     return hr;
 }
 

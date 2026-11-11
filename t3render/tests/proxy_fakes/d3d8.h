@@ -1,6 +1,8 @@
 #pragma once
 #include "windows.h"
 typedef int D3DDEVTYPE; typedef int D3DFORMAT; typedef int D3DPRIMITIVETYPE;
+typedef DWORD D3DCOLOR;
+typedef struct { int32_t x1, y1, x2, y2; } D3DRECT;
 #define D3DERR_INVALIDCALL ((HRESULT)-7)
 typedef struct { int marker; } D3DPRESENT_PARAMETERS;
 typedef struct IDirect3D8 IDirect3D8; typedef struct IDirect3DDevice8 IDirect3DDevice8;
@@ -19,6 +21,7 @@ struct IDirect3DDevice8Vtbl {
  HRESULT (*QueryInterface)(IDirect3DDevice8*,REFIID,void**); ULONG (*AddRef)(IDirect3DDevice8*); ULONG (*Release)(IDirect3DDevice8*);
  HRESULT (*Reset)(IDirect3DDevice8*,D3DPRESENT_PARAMETERS*);
  HRESULT (*Present)(IDirect3DDevice8*,const RECT*,const RECT*,HWND,const RGNDATA*);
+ HRESULT (*Clear)(IDirect3DDevice8*,DWORD,const D3DRECT*,DWORD,D3DCOLOR,float,DWORD);
  HRESULT (*DrawPrimitive)(IDirect3DDevice8*,D3DPRIMITIVETYPE,UINT,UINT);
  HRESULT (*DrawIndexedPrimitive)(IDirect3DDevice8*,D3DPRIMITIVETYPE,UINT,UINT,UINT,UINT);
  HRESULT (*DrawPrimitiveUP)(IDirect3DDevice8*,D3DPRIMITIVETYPE,UINT,const void*,UINT);
@@ -39,6 +42,7 @@ struct IDirect3DDevice8 {
  ULONG STDMETHODCALLTYPE Release();
  HRESULT STDMETHODCALLTYPE Reset(D3DPRESENT_PARAMETERS*);
  HRESULT STDMETHODCALLTYPE Present(const RECT*,const RECT*,HWND,const RGNDATA*);
+ HRESULT STDMETHODCALLTYPE Clear(DWORD,const D3DRECT*,DWORD,D3DCOLOR,float,DWORD);
  HRESULT STDMETHODCALLTYPE DrawPrimitive(D3DPRIMITIVETYPE,UINT,UINT);
  HRESULT STDMETHODCALLTYPE DrawIndexedPrimitive(D3DPRIMITIVETYPE,UINT,UINT,UINT,UINT);
  HRESULT STDMETHODCALLTYPE DrawPrimitiveUP(D3DPRIMITIVETYPE,UINT,const void*,UINT);

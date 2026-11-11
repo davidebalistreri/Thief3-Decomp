@@ -76,8 +76,10 @@ class CaptureHostTests(unittest.TestCase):
         self.assertEqual(summary["frames"][0]["present_hr"], -7)
         events = self.records()
         self.assertEqual([e["event"] for e in events],
-                         ["header", "frame_begin", "draw", "draw", "draw", "draw", "reset", "frame_end", "capture_end"])
+                         ["header", "frame_begin", "draw", "draw_result", "draw", "draw_result",
+                          "draw", "draw_result", "draw", "draw_result", "reset", "frame_end", "capture_end"])
         self.assertFalse(events[0]["replayable"])
+        self.assertEqual(events[0]["operation_results"], 1)
         self.assertEqual(events[1]["presentation"]["width"], 1280)
         draw = events[2]
         self.assertEqual(draw["viewport"]["height"], 720)
@@ -113,6 +115,74 @@ class CaptureHostTests(unittest.TestCase):
             self.assertEqual({int(key) for key in stage["states"]}, stage_ids)
             for key, value in stage["states"].items():
                 self.assertEqual(value, stage["stage"] * 1000 + int(key))
+
+    def test_clear_before_draw_and_operation_results_are_ordered(self):
+        self.run_capture("clear", frame="1")
+        events = self.records()
+        self.assertEqual(events[0]["operation_results"], 1)
+        self.assertEqual(events[0]["clear_rect_limit"], 256)
+        self.assertEqual([e["event"] for e in events[:6]],
+                         ["header", "frame_begin", "clear", "clear_result", "draw", "draw_result"])
+        self.assertEqual([e["op_id"] for e in events if e["event"] in ("clear", "draw")], list(range(1, 9)))
+        self.assertEqual(events[2]["rects_status"], "none")
+        self.assertEqual(events[2]["rects"], [])
+        self.assertEqual((events[2]["flags"], events[2]["color"], events[2]["depth"], events[2]["stencil"]),
+                         (7, 0x12345678, 0.75, 9))
+        self.assertEqual(events[2]["depth_bits"], 0x3f400000)
+        self.assertEqual(events[3]["op_id"], events[2]["op_id"])
+        self.assertEqual(events[5]["op_id"], events[4]["op_id"])
+        clears = [e for e in events if e["event"] == "clear"]
+        results = [e for e in events if e["event"] == "clear_result"]
+        self.assertEqual(clears[1]["rects"], [{"x1": -5, "y1": 2, "x2": 31, "y2": 42},
+                                              {"x1": 50, "y1": 60, "x2": 70, "y2": 80}])
+        self.assertEqual(results[1]["hr"], -1)
+        self.assertEqual([e["rects_status"] for e in clears[2:]],
+                         ["null_pointer", "inconsistent", "unreadable", "count_limit", "address_overflow"])
+        self.assertTrue(all(e["rects"] is None for e in clears[2:]))
+        self.assertFalse(events[-2]["concurrent_operations"])
+        self.assertEqual(trace_summary.summarize(self.path)["draw_count"], 1)
+
+    def test_clear_partial_copy_is_unknown(self):
+        self.run_capture("clear", frame="1", extra={"T3_TEST_PARTIAL_READ": "success"})
+        clears = [e for e in self.records() if e["event"] == "clear"]
+        self.assertEqual(clears[1]["rects_status"], "unreadable")
+        self.assertIsNone(clears[1]["rects"])
+
+    def test_clear_only_frame_is_valid(self):
+        self.run_capture("clear_only", frame="1")
+        self.assertEqual([e["event"] for e in self.records()],
+                         ["header", "frame_begin", "clear", "clear_result", "frame_end", "capture_end"])
+        summary = trace_summary.summarize(self.path)
+        self.assertEqual(summary["draw_count"], 0)
+        self.assertEqual(summary["events"]["clear"], 1)
+
+    def test_clear_nonfinite_depth_preserves_bits_without_invalid_json(self):
+        self.run_capture("clear_nan", frame="1")
+        clear = [e for e in self.records() if e["event"] == "clear"][1]
+        self.assertIsNone(clear["depth"])
+        self.assertEqual(clear["depth_bits"] & 0x7f800000, 0x7f800000)
+        self.assertNotEqual(clear["depth_bits"] & 0x007fffff, 0)
+        trace_summary.summarize(self.path)
+
+    def test_pending_clear_or_draw_leaves_incomplete_trace(self):
+        for scenario in ("clear_pending", "draw_pending"):
+            with self.subTest(scenario=scenario):
+                if self.path.exists(): self.path.unlink()
+                self.run_capture(scenario, frame="1")
+                events = self.records()
+                self.assertEqual(events[-1]["event"], "capture_incomplete")
+                self.assertEqual(events[-1]["reason"], "pending_operations")
+                self.assertFalse(any(e["event"] in ("frame_end", "capture_end") for e in events))
+                with self.assertRaisesRegex(trace_summary.TraceError, "no frame_end"):
+                    trace_summary.summarize(self.path)
+
+    def test_overlapping_operations_are_flagged(self):
+        self.run_capture("overlap", frame="1")
+        events = self.records()
+        self.assertEqual([e["event"] for e in events[2:-2]],
+                         ["clear", "clear_result", "clear", "draw", "clear_result", "draw_result"])
+        self.assertTrue(events[-2]["concurrent_operations"])
+        self.assertEqual(trace_summary.summarize(self.path)["draw_count"], 1)
 
     def test_f11_arms_the_next_frame(self):
         output = self.run_capture("key", key="F11")
@@ -232,7 +302,7 @@ class CaptureHostTests(unittest.TestCase):
 
     def test_release_during_frame_leaves_detectably_incomplete_trace(self):
         self.run_capture("release_open", frame="1")
-        self.assertEqual([event["event"] for event in self.records()], ["header", "frame_begin", "draw"])
+        self.assertEqual([event["event"] for event in self.records()], ["header", "frame_begin", "draw", "draw_result"])
         with self.assertRaisesRegex(trace_summary.TraceError, "frame 1 has no frame_end"):
             trace_summary.summarize(self.path)
 

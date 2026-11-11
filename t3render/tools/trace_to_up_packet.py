@@ -23,6 +23,7 @@ import trace_summary
 MAX_TRACE_BYTES = 4 * 1024 * 1024
 WIDTH = HEIGHT = 256
 FVF_XYZRHW_DIFFUSE = 0x44
+FVF_XYZ_DIFFUSE = 0x42
 TRIANGLE_LIST = 4
 TARGET_CLEAR = 1
 # D3D8 state IDs and values required by the single untextured fixture draw.
@@ -116,14 +117,15 @@ def require_states(draw):
     require(0 in seen and 1 in seen, "texture stages 0 and 1 are required")
 
 
-def vertex_data(draw):
+def vertex_data(draw, camera=False):
     up = draw.get("up_data")
     require(isinstance(up, dict) and up.get("index") is None and "index" in up,
             "non-indexed UP data is missing or inconsistent")
     vertex = up.get("vertex")
     require(isinstance(vertex, dict), "UP vertex data is missing")
+    stride = 16 if camera else 20
     expected = {"status": "captured", "first_vertex": 0, "vertex_count": 3,
-                "stride": 20, "byte_offset": 0, "byte_count": 60, "encoding": "hex"}
+                "stride": stride, "byte_offset": 0, "byte_count": 3 * stride, "encoding": "hex"}
     for key, value in expected.items():
         actual = vertex.get(key)
         if type(value) is int:
@@ -131,22 +133,68 @@ def vertex_data(draw):
         else:
             require(actual == value, f"unsupported UP vertex {key}")
     text = vertex.get("data")
-    require(isinstance(text, str) and len(text) == 120 and re.fullmatch(r"[0-9a-fA-F]{120}", text),
-            "UP vertex hex must contain exactly 60 complete bytes")
+    require(isinstance(text, str) and len(text) == 6 * stride and re.fullmatch(r"[0-9a-fA-F]+", text),
+            f"UP vertex hex must contain exactly {3 * stride} complete bytes")
     raw = bytes.fromhex(text)
     vertices = []
     for index in range(3):
-        x, y, z, rhw, color = struct.unpack_from("<4fI", raw, index * 20)
+        if camera:
+            x, y, z, color = struct.unpack_from("<3fI", raw, index * stride)
+            rhw = 1.0
+        else:
+            x, y, z, rhw, color = struct.unpack_from("<4fI", raw, index * stride)
         require(all(math.isfinite(value) for value in (x, y, z, rhw)) and rhw > 0,
                 f"vertex {index} contains invalid floats or rhw")
         # The initial DX12 comparison has only been designed for this bounded
         # screen-space case; do not imply general interpolation parity.
-        require(0 <= x <= WIDTH and 0 <= y <= HEIGHT and z == 0.0 and rhw == 1.0,
-                f"vertex {index} is outside the supported fixture space")
+        if camera:
+            require(max(abs(x), abs(y), abs(z)) <= 10000,
+                    f"vertex {index} is outside the supported fixture space")
+        else:
+            require(0 <= x <= WIDTH and 0 <= y <= HEIGHT and z == 0.0 and rhw == 1.0,
+                    f"vertex {index} is outside the supported fixture space")
         require(color >> 24 == 0xff, f"vertex {index} must have opaque alpha")
         vertices.append((x, y, z, rhw, color))
     require(len({vertex[4] for vertex in vertices}) == 1, "fixture requires uniform vertex color")
     return vertices
+
+
+def camera_matrices(draw):
+    transforms = draw.get("transforms")
+    require(isinstance(transforms, dict), "camera transforms are missing")
+    world = transforms.get("world")
+    require(isinstance(world, list) and world, "world transform is missing")
+    result = []
+    for name, source in (("world", world[0]), ("view", transforms.get("view")),
+                         ("projection", transforms.get("projection"))):
+        require(isinstance(source, list) and len(source) == 16, f"{name} transform must have 16 values")
+        matrix = []
+        for value in source:
+            require(number(value) is not None, f"{name} transform contains invalid values")
+            try:
+                value = float(value)
+            except (OverflowError, ValueError):
+                raise PacketError(f"{name} transform contains invalid values") from None
+            require(math.isfinite(value) and abs(value) <= 10000, f"{name} transform is out of range")
+            matrix.append(struct.unpack("<f", struct.pack("<f", value))[0])
+        result.append(matrix)
+    return result
+
+
+def validate_camera_triangle(vertices, matrices):
+    projected = []
+    for x, y, z, _, _ in vertices:
+        vector = [x, y, z, 1.0]
+        for matrix in matrices:
+            vector = [sum(vector[row] * matrix[row * 4 + col] for row in range(4)) for col in range(4)]
+        x, y, z, w = vector
+        require(all(math.isfinite(v) and abs(v) <= 1e12 for v in vector) and
+                w > 1e-5 and -w <= x <= w and -w <= y <= w and 0 <= z <= w,
+                "camera triangle must be finite and wholly inside the clip volume")
+        projected.append((x / w, y / w))
+    (x0, y0), (x1, y1), (x2, y2) = projected
+    require(abs((x1-x0)*(y2-y0)-(y1-y0)*(x2-x0)) > 1e-8,
+            "camera triangle is degenerate")
 
 
 def convert(path, *, synthetic_fixture=False):
@@ -156,6 +204,7 @@ def convert(path, *, synthetic_fixture=False):
     require([record.get("event") for record in records] == expected,
             "fixture requires exactly one ordered clear and one draw; observed extra events are unsupported")
     header, begin, clear, clear_result, draw, draw_result, end, _ = records
+    camera = integer(draw.get("vertex_shader")) == FVF_XYZ_DIFFUSE
     require(integer(header.get("operation_results")) == 1, "operation result capture capability is missing")
     frame = integer(begin.get("frame"))
     require(frame is not None, "invalid frame identifier")
@@ -188,26 +237,35 @@ def convert(path, *, synthetic_fixture=False):
     color = integer(clear.get("color"))
     require(color is not None and color >> 24 == 0xff, "clear ARGB color must be recorded and opaque")
 
+    stride = 16 if camera else 20
+    fvf = FVF_XYZ_DIFFUSE if camera else FVF_XYZRHW_DIFFUSE
     require(draw.get("call") == "DrawPrimitiveUP" and integer(draw.get("primitive_type")) == TRIANGLE_LIST and
-            integer(draw.get("primitive_count")) == 1 and integer(draw.get("vertex_stride")) == 20,
+            integer(draw.get("primitive_count")) == 1 and integer(draw.get("vertex_stride")) == stride,
             "fixture requires one three-vertex DrawPrimitiveUP triangle list")
-    require(integer(draw.get("vertex_shader")) == FVF_XYZRHW_DIFFUSE and integer(draw.get("pixel_shader")) == 0,
-            "fixture requires XYZRHW|DIFFUSE FVF and the fixed-function pixel shader")
+    require(integer(draw.get("vertex_shader")) == fvf and integer(draw.get("pixel_shader")) == 0,
+            "fixture requires the expected FVF and the fixed-function pixel shader")
     viewport = draw.get("viewport")
     require(isinstance(viewport, dict) and integer(viewport.get("x")) == 0 and integer(viewport.get("y")) == 0 and
             integer(viewport.get("width")) == WIDTH and integer(viewport.get("height")) == HEIGHT and
             number(viewport.get("min_z")) == 0 and number(viewport.get("max_z")) == 1,
             "fixture requires a full 256x256 viewport with depth range [0,1]")
     require_states(draw)
-    vertices = vertex_data(draw)
+    vertices = vertex_data(draw, camera=camera)
     require(vertices[0][4] != color, "triangle color must differ from the clear color")
-    x0, y0, _, _, _ = vertices[0]
-    x1, y1, _, _, _ = vertices[1]
-    x2, y2, _, _, _ = vertices[2]
-    require((x1 - x0) * (y2 - y0) != (y1 - y0) * (x2 - x0), "triangle is degenerate")
-    lines = ["T3R_UP_V1", f"{WIDTH} {HEIGHT}", str(color)]
-    for x, y, z, rhw, argb in vertices:
-        lines.append(f"{x:.9g} {y:.9g} {z:.9g} {rhw:.9g} {argb}")
+    lines = ["T3R_XYZ_V1" if camera else "T3R_UP_V1", f"{WIDTH} {HEIGHT}", str(color)]
+    if camera:
+        matrices = camera_matrices(draw)
+        validate_camera_triangle(vertices, matrices)
+        lines.extend(" ".join(f"{value:.9g}" for value in matrix) for matrix in matrices)
+        for x, y, z, _, argb in vertices:
+            lines.append(f"{x:.9g} {y:.9g} {z:.9g} {argb}")
+    else:
+        x0, y0, _, _, _ = vertices[0]
+        x1, y1, _, _, _ = vertices[1]
+        x2, y2, _, _, _ = vertices[2]
+        require((x1 - x0) * (y2 - y0) != (y1 - y0) * (x2 - x0), "triangle is degenerate")
+        for x, y, z, rhw, argb in vertices:
+            lines.append(f"{x:.9g} {y:.9g} {z:.9g} {rhw:.9g} {argb}")
     return "\n".join(lines) + "\n"
 
 

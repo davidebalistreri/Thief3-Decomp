@@ -16,6 +16,13 @@ int main() {
     const std::string bytes((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
     Frame frame{};
     if (!ParseFrameBytes(bytes.data(), bytes.size(), frame)) return 2;
+    if (frame.camera) {
+        std::cout << "camera " << frame.matrices[0][12] << ' ' << frame.matrices[1][0] << ' '
+                  << frame.matrices[2][11] << ' ' << frame.vertices[0].x << ' '
+                  << frame.vertices[0].y << ' ' << frame.vertices[0].z << ' '
+                  << frame.vertices[0].argb << '\n';
+        return 0;
+    }
     std::cout << frame.clear_argb << ' ' << frame.vertices[0].x << ' ' << frame.vertices[0].y << ' '
               << frame.vertices[0].z << ' ' << frame.vertices[0].rhw << ' ' << frame.vertices[0].argb << '\n';
     return 0;
@@ -24,6 +31,11 @@ int main() {
 HEADER = b"T3R_UP_V1\n256 256\n4278190080\n"
 VERTICES = b"12.5 -3.25 0 1 4294901760\n116 12 0 1 4294901760\n12 116 0 1 4294901760\n"
 REST = b"116 12 0 1 4294901760\n12 116 0 1 4294901760\n"
+CAMERA_HEADER = b"T3R_XYZ_V1\n256 256\n4278190080\n"
+WORLD = b"0 1 0 0 -1 0 0 0 0 0 1 0 0.1 -0.05 2 1\n"
+VIEW = b"0.9 0 0 0 0 1.1 0 0 0 0 1 0 -0.05 0.05 0.5 1\n"
+PROJECTION = b"1.8 0 0 0 0 1.8 0 0 0 0 1.06666667 1 0 0 -0.53333336 0\n"
+CAMERA_VERTICES = b"-0.7 0.8 0 4294901760\n0.8 0 0.2 4294901760\n-0.7 -0.8 0.1 4294901760\n"
 
 
 class D3D12ReplayParserTests(unittest.TestCase):
@@ -89,6 +101,25 @@ class D3D12ReplayParserTests(unittest.TestCase):
                      HEADER + b"0 0\x00 0 1 1\n" + REST):
             with self.subTest(data=data[:80]):
                 self.assert_rejected(data)
+
+    def test_camera_packet_preserves_captured_matrices_and_vertices(self):
+        data = CAMERA_HEADER + WORLD + VIEW + PROJECTION + CAMERA_VERTICES
+        result = self.parse(data)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        self.assertEqual(result.stdout, b"camera 0.1 0.9 1 -0.7 0.8 0 4294901760\n")
+
+    def test_camera_packet_rejects_unsupported_or_invalid_input(self):
+        for data in (
+            CAMERA_HEADER + b"0 1\n" + VIEW + PROJECTION + CAMERA_VERTICES,
+            CAMERA_HEADER + WORLD + VIEW + b"nan " + PROJECTION + CAMERA_VERTICES,
+            CAMERA_HEADER + WORLD + VIEW + PROJECTION + CAMERA_VERTICES + b"extra",
+            CAMERA_HEADER + WORLD + VIEW + PROJECTION + b"-0.7 0.8 0 4294901760\n" * 3,
+            CAMERA_HEADER + WORLD + VIEW + PROJECTION + CAMERA_VERTICES.replace(b"-0.7 0.8", b"100 100"),
+            CAMERA_HEADER + WORLD + VIEW + PROJECTION + CAMERA_VERTICES.replace(b"4294901760", b"4278255360", 1),
+            CAMERA_HEADER + WORLD + VIEW + PROJECTION + CAMERA_VERTICES.replace(b"4294901760", b"16711680"),
+            CAMERA_HEADER.replace(b"4278190080", b"0") + WORLD + VIEW + PROJECTION + CAMERA_VERTICES,
+        ):
+            with self.subTest(data=data): self.assert_rejected(data)
 
 
 if __name__ == "__main__":

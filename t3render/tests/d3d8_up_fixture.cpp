@@ -1,6 +1,6 @@
-// Synthetic single-draw D3D8 reference for the first offline replay.
-// No game assets are loaded. XYZRHW positions correspond to the NDC triangle
-// in d3d12_offscreen.cpp; D3D8/D3D12 raster rules may differ at half-pixels.
+// Synthetic single-draw D3D8 references for offline replay. No game assets
+// are loaded. The optional camera fixture uses XYZ vertices with distinct
+// world, view and perspective transforms. Raster rules may differ from D3D12.
 #include "d3d12_probe_pixels.hpp"
 
 #include <windows.h>
@@ -17,7 +17,8 @@
 namespace {
 constexpr UINT kWidth = 256;
 constexpr UINT kHeight = 256;
-constexpr DWORD kFvf = D3DFVF_XYZRHW | D3DFVF_DIFFUSE;
+constexpr DWORD kFvfScreen = D3DFVF_XYZRHW | D3DFVF_DIFFUSE;
+constexpr DWORD kFvfCamera = D3DFVF_XYZ | D3DFVF_DIFFUSE;
 
 // XYZRHW is four float32 values followed by D3DCOLOR AARRGGBB (little endian
 // bytes BB GG RR AA). The captured stride is 20 and there are three vertices.
@@ -26,6 +27,11 @@ struct Vertex {
     D3DCOLOR diffuse;
 };
 static_assert(sizeof(Vertex) == 20 && offsetof(Vertex, diffuse) == 16, "Unexpected D3D8 vertex layout");
+struct CameraVertex {
+    float x, y, z;
+    D3DCOLOR diffuse;
+};
+static_assert(sizeof(CameraVertex) == 16 && offsetof(CameraVertex, diffuse) == 12, "Unexpected XYZ vertex layout");
 
 template <typename T> struct ComPtr {
     T* value = nullptr;
@@ -123,7 +129,7 @@ bool ReadBackbuffer(IDirect3DDevice8* device, std::vector<std::uint8_t>& rgba, D
     return true;
 }
 
-bool Render(HWND window, const wchar_t* output) {
+bool Render(HWND window, const wchar_t* output, bool camera) {
     ComPtr<IDirect3D8> d3d;
     d3d.value = Direct3DCreate8(D3D_SDK_VERSION);
     if (!d3d.value) { std::fprintf(stderr, "Direct3DCreate8 failed\n"); return false; }
@@ -151,7 +157,32 @@ bool Render(HWND window, const wchar_t* output) {
         {128.0f, 25.6f, 0.0f, 1.0f, 0xffff0000},
         {230.4f, 217.6f, 0.0f, 1.0f, 0xffff0000},
     };
-    if (!Check(device->SetVertexShader(kFvf), "SetVertexShader(FVF)") ||
+    // Row-vector D3D8 matrices. Rotation, translation, view scale and
+    // perspective do not commute; using only identity matrices would not
+    // exercise matrix order or the homogeneous divide in the replay.
+    const CameraVertex camera_vertices[] = {
+        {-0.7f, 0.8f, 0.0f, 0xffff0000},
+        {0.8f, 0.0f, 0.2f, 0xffff0000},
+        {-0.7f, -0.8f, 0.1f, 0xffff0000},
+    };
+    D3DMATRIX world{};
+    world.m[0][1] = 1.0f; world.m[1][0] = -1.0f; world.m[2][2] = 1.0f;
+    world.m[3][0] = 0.1f; world.m[3][1] = -0.05f; world.m[3][2] = 2.0f; world.m[3][3] = 1.0f;
+    D3DMATRIX view{};
+    view.m[0][0] = 0.9f; view.m[1][1] = 1.1f; view.m[2][2] = 1.0f;
+    view.m[3][0] = -0.05f; view.m[3][1] = 0.05f; view.m[3][2] = 0.5f; view.m[3][3] = 1.0f;
+    D3DMATRIX projection{};
+    projection.m[0][0] = 1.8f; projection.m[1][1] = 1.8f;
+    projection.m[2][2] = 8.0f / 7.5f; projection.m[2][3] = 1.0f;
+    projection.m[3][2] = -4.0f / 7.5f;
+    if (camera && (!Check(device->SetTransform(D3DTS_WORLD, &world), "SetTransform(WORLD)") ||
+                   !Check(device->SetTransform(D3DTS_VIEW, &view), "SetTransform(VIEW)") ||
+                   !Check(device->SetTransform(D3DTS_PROJECTION, &projection), "SetTransform(PROJECTION)"))) return false;
+
+    const DWORD fvf = camera ? kFvfCamera : kFvfScreen;
+    const UINT stride = camera ? sizeof(CameraVertex) : sizeof(Vertex);
+    const void* vertex_data = camera ? static_cast<const void*>(camera_vertices) : static_cast<const void*>(vertices);
+    if (!Check(device->SetVertexShader(fvf), "SetVertexShader(FVF)") ||
         !Check(device->SetPixelShader(0), "SetPixelShader") ||
         !Check(device->SetRenderState(D3DRS_LIGHTING, FALSE), "SetRenderState(LIGHTING)") ||
         !Check(device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE), "SetRenderState(CULLMODE)") ||
@@ -173,7 +204,7 @@ bool Render(HWND window, const wchar_t* output) {
         !Check(device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xff000000, 1.0f, 0), "Clear") ||
         !Check(device->BeginScene(), "BeginScene")) return false;
 
-    const bool drawn = Check(device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, vertices, sizeof(Vertex)),
+    const bool drawn = Check(device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, vertex_data, stride),
                              "DrawPrimitiveUP");
     const bool ended = Check(device->EndScene(), "EndScene");
     if (!drawn || !ended) return false;
@@ -182,15 +213,19 @@ bool Render(HWND window, const wchar_t* output) {
     D3DFORMAT format = D3DFMT_UNKNOWN;
     if (!ReadBackbuffer(device.value, rgba, format)) return false;
     d3d12_probe::PixelStats stats;
-    if (!d3d12_probe::AnalyzeTriangle256(rgba.data(), rgba.size(), 0, kWidth * 4, stats)) {
+    const bool pixels_ok = camera
+        ? d3d12_probe::AnalyzePixels(rgba.data(), rgba.size(), 0, kWidth * 4, kWidth, kHeight, stats) &&
+          stats.center_red && stats.corners_black && stats.red_pixels > 1000 && stats.red_pixels < kWidth * kHeight
+        : d3d12_probe::AnalyzeTriangle256(rgba.data(), rgba.size(), 0, kWidth * 4, stats);
+    if (!pixels_ok) {
         std::fprintf(stderr, "Triangle readback did not match expected interior/background pixels\n");
         return false;
     }
     if (!Check(device->Present(nullptr, nullptr, nullptr, nullptr), "Present")) return false;
     if (output && !WritePpm(output, rgba)) return false;
-    std::printf("d3d8_up_fixture width=%u height=%u format=%lu draws=1 stride=%zu fvf=0x%08lx "
-                "red_pixels=%zu fnv1a=%016llx\n", kWidth, kHeight, static_cast<unsigned long>(format),
-                sizeof(Vertex), static_cast<unsigned long>(kFvf), stats.red_pixels,
+    std::printf("d3d8_up_fixture mode=%s width=%u height=%u format=%lu draws=1 stride=%u fvf=0x%08lx "
+                "red_pixels=%zu fnv1a=%016llx\n", camera ? "camera" : "screen", kWidth, kHeight,
+                static_cast<unsigned long>(format), stride, static_cast<unsigned long>(fvf), stats.red_pixels,
                 static_cast<unsigned long long>(stats.fnv1a));
     std::printf("result=PASS; edge pixels may differ from D3D12 due to raster/half-pixel rules\n");
     return true;
@@ -199,10 +234,14 @@ bool Render(HWND window, const wchar_t* output) {
 
 int wmain(int argc, wchar_t** argv) {
     const wchar_t* output = nullptr;
-    if (argc == 3 && !std::wcscmp(argv[1], L"--output")) output = argv[2];
-    else if (argc != 1) {
-        std::fwprintf(stderr, L"usage: d3d8_up_fixture [--output new-image.ppm]\n");
-        return 2;
+    bool camera = false;
+    for (int i = 1; i < argc; ++i) {
+        if (!std::wcscmp(argv[i], L"--camera") && !camera) camera = true;
+        else if (!std::wcscmp(argv[i], L"--output") && !output && i + 1 < argc && argv[i + 1][0]) output = argv[++i];
+        else {
+            std::fwprintf(stderr, L"usage: d3d8_up_fixture [--camera] [--output new-image.ppm]\n");
+            return 2;
+        }
     }
     const HINSTANCE instance = GetModuleHandleW(nullptr);
     const wchar_t* name = L"T3RenderD3D8UPFixture";
@@ -230,7 +269,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     ShowWindow(window, SW_SHOWNOACTIVATE);
     UpdateWindow(window);
-    const bool ok = Render(window, output);
+    const bool ok = Render(window, output, camera);
     DestroyWindow(window);
     UnregisterClassW(name, instance);
     return ok ? 0 : 1;

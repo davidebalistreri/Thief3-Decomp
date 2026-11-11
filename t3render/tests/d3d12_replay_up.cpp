@@ -1,6 +1,6 @@
-// Bounded one-triangle D3D12 replay of D3D8 XYZRHW|DIFFUSE input. Only flat,
-// opaque colors with z=0 and rhw=1 are accepted; this is a synthetic fixture,
-// not a frame reader, a full D3D8 emulator, or T3 replay.
+// Bounded one-triangle D3D12 replay of synthetic D3D8 XYZRHW|DIFFUSE or
+// XYZ|DIFFUSE with captured WORLD/VIEW/PROJECTION. Flat opaque color only;
+// this is not a general frame reader, D3D8 emulator, or T3 replay.
 #ifndef T3RENDER_REPLAY_PARSER_TEST
 #include <windows.h>
 #include <d3d12.h>
@@ -54,6 +54,8 @@ static_assert(sizeof(Vertex) == 20, "FVF XYZRHW|DIFFUSE must have a 20-byte stri
 struct Frame {
     std::uint32_t clear_argb = 0;
     Vertex vertices[3]{};
+    bool camera = false;
+    float matrices[3][16]{}; // D3D8 row-major WORLD, VIEW, PROJECTION
 };
 
 #ifndef T3RENDER_REPLAY_PARSER_TEST
@@ -89,19 +91,49 @@ std::istringstream Line(const std::string& line) {
     return stream;
 }
 
+bool CameraTriangleValid(const Frame& frame) {
+    double projected[3][2]{};
+    for (unsigned i = 0; i < 3; ++i) {
+        const Vertex& v = frame.vertices[i];
+        double p[4] = {v.x, v.y, v.z, 1.0};
+        for (unsigned m = 0; m < 3; ++m) {
+            double next[4]{};
+            for (unsigned col = 0; col < 4; ++col)
+                for (unsigned row = 0; row < 4; ++row)
+                    next[col] += p[row] * frame.matrices[m][row * 4 + col];
+            for (unsigned col = 0; col < 4; ++col) p[col] = next[col];
+        }
+        for (double value : p)
+            if (!std::isfinite(value) || std::fabs(value) > 1e12) return false;
+        const double w = p[3];
+        if (w <= 1e-5 || p[0] < -w || p[0] > w || p[1] < -w || p[1] > w ||
+            p[2] < 0 || p[2] > w) return false;
+        projected[i][0] = p[0] / w;
+        projected[i][1] = p[1] / w;
+    }
+    const double area = (projected[1][0] - projected[0][0]) * (projected[2][1] - projected[0][1]) -
+                        (projected[1][1] - projected[0][1]) * (projected[2][0] - projected[0][0]);
+    return std::fabs(area) > 1e-8;
+}
+
 bool ParseFrameBytes(const char* bytes, std::size_t size, Frame& frame) {
     if (!bytes || size > kMaxInputBytes || std::memchr(bytes, '\0', size)) {
         std::fprintf(stderr, "input exceeds limit or contains invalid bytes\n"); return false;
     }
     auto stream = Line(std::string(bytes, size));
-    std::string lines[6];
-    for (auto& line : lines) {
-        if (!std::getline(stream, line)) { std::fprintf(stderr, "input requires six lines\n"); return false; }
-        if (!line.empty() && line.back() == '\r') line.pop_back();
+    std::string lines[9];
+    if (!std::getline(stream, lines[0])) { std::fprintf(stderr, "missing header\n"); return false; }
+    if (!lines[0].empty() && lines[0].back() == '\r') lines[0].pop_back();
+    if (lines[0] != "T3R_UP_V1" && lines[0] != "T3R_XYZ_V1") {
+        std::fprintf(stderr, "invalid header\n"); return false;
     }
-    if (!AtEnd(stream) || lines[0] != "T3R_UP_V1") {
-        std::fprintf(stderr, "invalid header or trailing input\n"); return false;
+    frame.camera = lines[0] == "T3R_XYZ_V1";
+    const unsigned line_count = frame.camera ? 9 : 6;
+    for (unsigned i = 1; i < line_count; ++i) {
+        if (!std::getline(stream, lines[i])) { std::fprintf(stderr, "missing input line\n"); return false; }
+        if (!lines[i].empty() && lines[i].back() == '\r') lines[i].pop_back();
     }
+    if (!AtEnd(stream)) { std::fprintf(stderr, "trailing input\n"); return false; }
     std::string width, height;
     std::uint32_t parsed_width = 0, parsed_height = 0;
     auto viewport = Line(lines[1]);
@@ -114,26 +146,50 @@ bool ParseFrameBytes(const char* bytes, std::size_t size, Frame& frame) {
     if (!(clear_line >> clear) || !AtEnd(clear_line) || !DecimalU32(clear, frame.clear_argb)) {
         std::fprintf(stderr, "invalid decimal ARGB clear color\n"); return false;
     }
+    if (frame.camera) {
+        if ((frame.clear_argb >> 24) != 255) { std::fprintf(stderr, "clear color must be opaque\n"); return false; }
+        for (unsigned m = 0; m < 3; ++m) {
+            auto line = Line(lines[3 + m]);
+            for (float& value : frame.matrices[m]) {
+                if (!(line >> value) || !std::isfinite(value) || std::fabs(value) > 10000) {
+                    std::fprintf(stderr, "invalid matrix %u\n", m); return false;
+                }
+            }
+            if (!AtEnd(line)) { std::fprintf(stderr, "extra matrix values\n"); return false; }
+        }
+    }
     for (unsigned i = 0; i < 3; ++i) {
         Vertex vertex{};
         std::string color;
-        auto line = Line(lines[i + 3]);
-        if (!(line >> vertex.x >> vertex.y >> vertex.z >> vertex.rhw >> color) || !AtEnd(line) ||
+        auto line = Line(lines[i + (frame.camera ? 6 : 3)]);
+        if (!(line >> vertex.x >> vertex.y >> vertex.z) ||
+            (!frame.camera && !(line >> vertex.rhw)) || !(line >> color) || !AtEnd(line) ||
             !DecimalU32(color, vertex.argb) || !std::isfinite(vertex.x) || !std::isfinite(vertex.y) ||
-            !std::isfinite(vertex.z) || !std::isfinite(vertex.rhw) ||
-            std::fabs(vertex.x) > 1048576.0f || std::fabs(vertex.y) > 1048576.0f ||
-            vertex.z < 0.0f || vertex.z > 1.0f || vertex.rhw < 0.000001f || vertex.rhw > 1000000.0f) {
+            !std::isfinite(vertex.z)) {
             std::fprintf(stderr, "invalid or out-of-range vertex %u\n", i); return false;
+        }
+        if (frame.camera) {
+            vertex.rhw = 1.0f;
+            if (std::fabs(vertex.x) > 10000 || std::fabs(vertex.y) > 10000 || std::fabs(vertex.z) > 10000) {
+                std::fprintf(stderr, "camera vertex out of range\n"); return false;
+            }
+        } else if (!std::isfinite(vertex.rhw) || std::fabs(vertex.x) > 1048576.0f ||
+                   std::fabs(vertex.y) > 1048576.0f || vertex.z < 0.0f || vertex.z > 1.0f ||
+                   vertex.rhw < 0.000001f || vertex.rhw > 1000000.0f) {
+            std::fprintf(stderr, "screen vertex out of range\n"); return false;
         }
         frame.vertices[i] = vertex;
     }
     // The fragment stage uses one captured color rather than interpolating a
     // varying. Reject inputs whose D3D8 shading could differ from that model.
     for (const Vertex& vertex : frame.vertices) {
-        if (vertex.z != 0.0f || vertex.rhw != 1.0f ||
+        if ((!frame.camera && (vertex.z != 0.0f || vertex.rhw != 1.0f)) ||
             (vertex.argb >> 24) != 255 || vertex.argb != frame.vertices[0].argb) {
-            std::fprintf(stderr, "only flat opaque color, z=0 and rhw=1 are supported\n"); return false;
+            std::fprintf(stderr, "only flat opaque color and supported screen-space depth are accepted\n"); return false;
         }
+    }
+    if (frame.camera && (frame.vertices[0].argb == frame.clear_argb || !CameraTriangleValid(frame))) {
+        std::fprintf(stderr, "camera triangle is clear-colored, clipped or degenerate\n"); return false;
     }
     return true;
 }
@@ -270,11 +326,20 @@ int Replay(const Frame& frame, const wchar_t* output) {
         "float4 main(float4 position : POSITION) : SV_Position {"
         "float w=rcp(position.w); float2 p=position.xy+0.5;"
         "return float4((p.x/size.x*2.0-1.0)*w,(1.0-p.y/size.y*2.0)*w,position.z*w,w); }";
+    // D3D8 uses row-vector transforms. The adjustment moves projected points
+    // by half a pixel in screen space before DX12's perspective divide.
+    static const char camera_vertex_source[] =
+        "cbuffer Transforms : register(b0) {"
+        "row_major float4x4 world; row_major float4x4 view;"
+        "row_major float4x4 projection; float2 size; };"
+        "float4 main(float4 position : POSITION) : SV_Position {"
+        "float4 p=mul(mul(mul(float4(position.xyz,1),world),view),projection);"
+        "p.x+=p.w/size.x; p.y-=p.w/size.y; return p; }";
     static const char pixel_source[] =
         "cbuffer Diffuse : register(b1) { float4 color; };"
         "float4 main() : SV_Target { return color; }";
     ComPtr<ID3DBlob> vertex_shader, pixel_shader;
-    if (!Compile(compiler, vertex_source, "vs_5_0", vertex_shader) ||
+    if (!Compile(compiler, frame.camera ? camera_vertex_source : vertex_source, "vs_5_0", vertex_shader) ||
         !Compile(compiler, pixel_source, "ps_5_0", pixel_shader)) return 1;
 
     D3D12_COMMAND_QUEUE_DESC queue_desc{}; queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -344,7 +409,7 @@ int Replay(const Frame& frame, const wchar_t* output) {
 
     D3D12_ROOT_PARAMETER parameters[2]{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameters[0].Constants.ShaderRegister = 0; parameters[0].Constants.Num32BitValues = 2;
+    parameters[0].Constants.ShaderRegister = 0; parameters[0].Constants.Num32BitValues = frame.camera ? 50 : 2;
     parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     parameters[1].Constants.ShaderRegister = 1; parameters[1].Constants.Num32BitValues = 4;
@@ -389,7 +454,8 @@ int Replay(const Frame& frame, const wchar_t* output) {
                                          IID_PPV_ARGS(list.put())), "CreateCommandList")) return 1;
     list->SetGraphicsRootSignature(root.value);
     const float viewport_size[2] = {static_cast<float>(kWidth), static_cast<float>(kHeight)};
-    list->SetGraphicsRoot32BitConstants(0, 2, viewport_size, 0);
+    if (frame.camera) list->SetGraphicsRoot32BitConstants(0, 48, frame.matrices, 0);
+    list->SetGraphicsRoot32BitConstants(0, 2, viewport_size, frame.camera ? 48 : 0);
     const std::uint32_t argb = frame.vertices[0].argb;
     const float diffuse[4] = {static_cast<float>((argb >> 16) & 255) / 255.0f,
                               static_cast<float>((argb >> 8) & 255) / 255.0f,
@@ -457,8 +523,9 @@ int Replay(const Frame& frame, const wchar_t* output) {
         return 1;
     }
     if (!output_ok) return 1;
-    std::printf("replay=T3R_UP_V1 viewport=%ux%u pitch=%u changed_pixels=%zu fnv1a64=%016llx\n",
-                kWidth, kHeight, footprint.Footprint.RowPitch, changed_rgb, static_cast<unsigned long long>(hash));
+    std::printf("replay=%s viewport=%ux%u pitch=%u changed_pixels=%zu fnv1a64=%016llx\n",
+                frame.camera ? "T3R_XYZ_V1" : "T3R_UP_V1", kWidth, kHeight,
+                footprint.Footprint.RowPitch, changed_rgb, static_cast<unsigned long long>(hash));
     std::printf("pixel_centers=D3D8_integer_plus_0.5_to_DX12 (assumption); output=RGBA8\n");
     std::printf("result=PASS; no general D3D8 parity claimed\n");
     return 0;

@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_up_camera_capture_to_d3d12_replay",
+  "date": "2026-11-12",
+  "host": {"os": "macOS 27.2.1", "architecture": "arm64", "gpu": "Apple M5 Pro"},
+  "runtime": {
+    "environment": "Highball", "engine": "CrossOver 26.3 r30", "architecture": "x86",
+    "d3d12_chain": "Wine D3D12/vkd3d -> Vulkan -> MoltenVK -> Metal"
+  },
+  "fixture": {
+    "description": "One untextured flat opaque D3D8 XYZ|DIFFUSE DrawPrimitiveUP triangle, with captured nonidentity world, view and perspective projection matrices.",
+    "packet": "fixture.txt",
+    "packet_sha256": "fd064ca180b499a1794d9544db7bf980ac6247e530767d2796fa3a6a3b35c1c5",
+    "capture_sha256": "9bf43f342be76685e0da88637b7ed4afb4e72b49c694988d25581cfa32e46fa5",
+    "d3d8_fixture_source_sha256": "3a934df9b82bfbb145a38e0c58da9fbc4d29c38d7cc1db3d4e9b7a0840a0afde",
+    "d3d8_fixture_executable_sha256": "1c5168526cfb1b8f40546791c466e067a4914a0e26e08b991c00af778fdaa5ec",
+    "proxy_executable_sha256": "9f0da3cd47b58df26c9350eba744163862d5e948a3ba910ab3b5070b79520ddc",
+    "converter_source_sha256": "60a3837279f7a94a157675f182a587bdd6d2d5e067553fb494179c5942cbad13",
+    "replay_source_sha256": "0e04854298bbcd7a18da14ba919918a499c35fbcfc846cfdbc116e99bb4a3cd6",
+    "replay_executable_sha256": "69624e092ded55b743a77bfe7b80832be83980d7699bf13c83f4baf7e895a5e0"
+  },
+  "result": {
+    "width": 256, "height": 256, "red_pixels": 9409,
+    "ppm_sha256_all_three": "3bc2b44c9201d989467993755a9d21cd3888813f6746a3c0d625e7e2077c8fd6",
+    "comparison": "The D3D8 baseline, captured D3D8 run and D3D12 replay P6 PPM byte streams match.",
+    "rgba_fnv1a64_assuming_opaque_alpha": "c849dc0d45de6aa2",
+    "image": "triangle.png",
+    "image_sha256": "a8177cd8e17937a63d652757faf7f7a4c290ec3b34bbffde32e814ecc1a7ceb3",
+    "image_note": "Lossless RGB conversion of the matching reference PPM."
+  },
+  "matrix_sensitivity_check": {
+    "description": "For a separate replay, change captured VIEW row-major element [3][0] from approximately -0.05 to +0.15; compare to the unmodified replay.",
+    "changed_pixels": 4810,
+    "reported_rgba_fnv1a64": "2c5be957b3827596",
+    "evidence_note": "Observed during the Highball run; mutated packet and output were temporary and have been removed. This checks response to a changed matrix, not parity for the mutated scene."
+  },
+  "limitations": [
+    "Only an isolated synthetic single-triangle DrawPrimitiveUP fixture is tested, not a TDS frame.",
+    "The captured row-major world, view and projection matrices are applied on the GPU; the triangle is wholly within the clip volume.",
+    "No depth test, vertex or index buffers, textures, shaders from a game, lighting, materials or gameplay were replayed.",
+    "RGB equality for this fixture and runtime is not a general D3D8 parity guarantee; the PPM does not preserve alpha.",
+    "No native Windows D3D12 GPU, swapchain presentation or GPU timing was validated."
+  ]
+}

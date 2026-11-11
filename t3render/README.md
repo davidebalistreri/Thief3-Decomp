@@ -2,8 +2,8 @@
 
 T3Render is a separate renderer experiment. Its first step observes the
 original D3D8 device; it does not replace the renderer or change the game's
-stealth calculations. This is a diagnostic snapshot, **not a frame replay** or
-a DX12 backend.
+stealth calculations. A separate DX12 replay covers two synthetic single-draw
+fixtures; this is not a general TDS frame replay or production backend.
 
 ## Build
 
@@ -66,6 +66,11 @@ also passed through D3DMetal. Both produced identical synthetic pixels. See
 the [result manifest](benchmarks/d3d12/2026-11-12/result.json) and
 [image](benchmarks/d3d12/2026-11-12/triangle.png). Neither run is a native
 Windows test, a TDS frame, or a replay.
+
+A separate [synthetic D3D8-to-DX12 replay](tools/README_synthetic_replay.md)
+validates captured UP vertices in screen space and with nonidentity camera
+transforms. Its reference, captured and replay images match on the tested Wine
+runtime. Buffered draws, textures and actual TDS frames remain unsupported.
 
 To repeat the x86 test on the same Highball setup, pass the engine directory,
 the bottle directory, the built x86 executable and an unused absolute output

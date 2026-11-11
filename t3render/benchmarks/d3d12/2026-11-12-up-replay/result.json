@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_up_capture_to_d3d12_replay",
+  "date": "2026-11-12",
+  "host": {"os": "macOS 27.2.1", "architecture": "arm64", "gpu": "Apple M5 Pro"},
+  "runtime": {
+    "environment": "Highball", "engine": "CrossOver 26.3 r30",
+    "architecture": "x86", "moltenvk": "1.4.2",
+    "d3d12_chain": "Wine D3D12/vkd3d -> Vulkan -> MoltenVK -> Metal",
+    "d3d12_reported_adapter": "Radeon RX 6800/6800 XT / 6900 XT",
+    "adapter_identity_note": "The reported Radeon adapter is a compatibility identity, not the host GPU."
+  },
+  "fixture": {
+    "description": "One untextured flat opaque D3D8 XYZRHW|DIFFUSE DrawPrimitiveUP triangle on a black clear target.",
+    "packet": "fixture.txt",
+    "packet_sha256": "e1db18a81787457bd1197227484a5aa635551f222b88fef0c43d3ef0b9d946e5",
+    "capture_sha256": "1b2cf236d7cd1424e719bd78a558ff6858fb35f817de763e903f76c3ed1d8eb6",
+    "d3d8_fixture_source_sha256": "38859952f7a807b0225b3e47439dee67c9e6e486657fc9b2e383e68c2e2d9477",
+    "d3d8_fixture_executable_sha256": "9c942f8b91b96f0643c2bf7ae999e6c44bc57e9e6a975b556ec36aa41c7dab9d",
+    "proxy_executable_sha256": "9f0da3cd47b58df26c9350eba744163862d5e948a3ba910ab3b5070b79520ddc",
+    "converter_source_sha256": "730f570b78e5ba2bbedec8a78e7d37b9d2ec4e15e034181bca77ebce725f6429",
+    "replay_source_sha256": "f9f7e9b43dd717223f5a5cd4b597d67b205d49c7beb1405fc527f877b86f6a6d",
+    "replay_executable_sha256": "d14b72f76e2473d02a97b6e90a1d2c2fe4d5abd2478e2444aecc5bbeb8e417f3"
+  },
+  "result": {
+    "reference_d3d8_without_proxy": "PASS",
+    "capture_d3d8_with_proxy": "PASS",
+    "d3d12_replay": "PASS",
+    "width": 256, "height": 256, "red_pixels": 19648,
+    "rgba_fnv1a64": "10b6d7ca2fd8394d",
+    "ppm_sha256_all_three": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679",
+    "comparison": "All three P6 PPM byte streams match; the reported RGBA hash also matches in each run.",
+    "image": "triangle.png",
+    "image_sha256": "a60caf03c78a1a0741fed841e940c5b565934424db66cefe02e306e656f7dde5",
+    "image_note": "Lossless RGB conversion of the matching reference PPM."
+  },
+  "limitations": [
+    "Synthetic XYZRHW vertices already in screen space: no camera or model/view/projection transforms were replayed.",
+    "Only one flat opaque untextured triangle was tested; no depth test, index buffers, vertex buffers, shader programs, lighting or materials were replayed.",
+    "The validator requires explicit synthetic-fixture attestation and cannot rule out unobserved D3D8 operations in arbitrary captures.",
+    "Exact parity is a result for this fixture and runtime, not a guarantee across hardware or for other D3D8 rendering.",
+    "No TDS frame, gameplay or stealth behavior, native Windows GPU, swapchain presentation, or GPU timings were validated."
+  ]
+}

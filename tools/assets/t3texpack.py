@@ -11,16 +11,16 @@ Usage:
   t3texpack.py list [<map or .ibt>] [--json]
       texture names with their format, size, mip count and usage, and the
       bundles that hold each name.  With a map, only the names it holds.
-  t3texpack.py check --pack <dir> [--pack <dir> ...]
+  t3texpack.py check --pack <dir> [--pack <dir> ...] [--bundle <name> ...]
       every <dir>/textures/<name>.dds must name a texture somewhere and be a
       supported DDS; warns when its format or aspect ratio differs from the
       original's, or when it is larger.
-  t3texpack.py apply --pack <dir> [--pack <dir> ...] [--dry-run]
+  t3texpack.py apply --pack <dir> [--pack <dir> ...] [--bundle <name> ...] [--dry-run]
       replace the textures (later packs win).  Each affected bundle is backed
       up once to build/assets/backup/ and rebuilt from that original; bundles
       patched before and no longer affected are restored.  Without packs it is
       restore.
-  t3texpack.py restore [--dry-run]
+  t3texpack.py restore [--bundle <name> ...] [--dry-run]
       put every patched bundle back.
   t3texpack.py --selfcheck [<map or .ibt> ...]
       on the retail files: re-write each bundle unchanged, re-encode every
@@ -30,6 +30,8 @@ A pack <dir> is a mod folder with a textures/ folder, or the textures folder
 itself.  Exit status: 0 done (warnings allowed), 1 a problem was reported,
 2 a bad command line.  apply and restore are the only commands that write to
 the game folder; the record of what they did is build/assets/backup/t3texpack.json.
+--bundle limits check, apply and restore to named .ibt bundles. Apply still
+rebuilds those bundles from their original: include all packs wanted there.
 See docs/assets.md, section 3, for the format and the assumptions.
 """
 
@@ -295,6 +297,28 @@ def rel_key(game: Path, path: Path) -> Tuple[str, str]:
     """(record key, path as stored) for a bundle in the game folder."""
     rel = path.relative_to(game).as_posix()
     return rel.lower(), rel
+
+
+def bundle_scope(game: Path, state: State, names: Sequence[str]) -> Optional[Set[str]]:
+    """Resolve optional bundle names to record keys without accepting paths.
+
+    Include recorded bundles that are missing from the game folder so restore
+    can still put them back. Reject every unknown name before writing anything.
+    """
+    if not names:
+        return None
+    available = {p.name.lower(): rel_key(game, p)[0] for p in game_bundles(game)}
+    for key, rec in state.records().items():
+        available[Path(rec["path"]).name.lower()] = key
+    selected: Set[str] = set()
+    for name in names:
+        if not name or name in (".", "..") or "/" in name or "\\" in name:
+            raise TexPackError(f"invalid bundle name {name!r}: use a map name or .ibt filename")
+        filename = name.lower() if name.lower().endswith(".ibt") else name.lower() + ".ibt"
+        if filename not in available:
+            raise TexPackError(f"no such bundle in the game folder or its backup record: {name}")
+        selected.add(available[filename])
+    return selected
 
 
 # --- the record of patched bundles ------------------------------------------------------------------
@@ -601,20 +625,23 @@ class Plan:
     rules: Dict[str, PadRule] = field(default_factory=dict)
 
 
-def plan_packs(game: Path, dirs: Sequence[Path], state: State, report: Report, warnings: bool) -> Plan:
+def plan_packs(game: Path, dirs: Sequence[Path], state: State, report: Report, warnings: bool,
+               only: Optional[Set[str]] = None) -> Plan:
     """Load the packs and match them against the original bundles.  Reports
     errors (unknown names, bad files, layouts that cannot be rebuilt) and,
     with `warnings`, the differences from the originals."""
     winners, files = load_packs(dirs, report)
-    bundles = scan(game, state, report)
+    all_bundles = scan(game, state, report)
+    prior, _ = rule_counts(t for b in all_bundles for t in b.textures)
+    bundles = [b for b in all_bundles if only is None or b.key in only]
     idx = index_names(bundles)
     plan = Plan(winners, {b.key: b for b in bundles})
     rules: Dict[str, RuleFinding] = {}
-    prior, _ = rule_counts(t for b in bundles for t in b.textures)
     for pf in files:
         where = idx.get(pf.key)
         if not where:
-            report.error(f"{pf.label}: no texture named {pf.name!r} in any bundle (see `t3texpack.py list`)")
+            where_text = "the selected bundles" if only is not None else "any bundle"
+            report.error(f"{pf.label}: no texture named {pf.name!r} in {where_text} (see `t3texpack.py list`)")
             continue
         winner = winners[pf.key]
         if winner is not pf:
@@ -653,11 +680,13 @@ def plan_packs(game: Path, dirs: Sequence[Path], state: State, report: Report, w
     return plan
 
 
-def cmd_check(game: Path, dirs: Sequence[Path], report: Report, backup_dir: Path = BACKUP_DIR) -> int:
+def cmd_check(game: Path, dirs: Sequence[Path], report: Report, backup_dir: Path = BACKUP_DIR,
+              bundles: Sequence[str] = ()) -> int:
     if not dirs:
         raise TexPackError("give at least one --pack <dir>")
     state = State(game, backup_dir, report)
-    plan = plan_packs(game, dirs, state, report, warnings=True)
+    only = bundle_scope(game, state, bundles)
+    plan = plan_packs(game, dirs, state, report, warnings=True, only=only)
     n_res = sum(len(v) for v in plan.targets.values())
     status = "FAILED" if report.errors else "ok"
     report.info(f"check: {status}: {_count(len(plan.winners), 'texture')} from {_count(len(dirs), 'pack')}, "
@@ -811,12 +840,14 @@ def restore_bundle(state: State, key: str, report: Report, dry_run: bool) -> str
 
 
 def cmd_apply(game: Path, dirs: Sequence[Path], report: Report, backup_dir: Path = BACKUP_DIR,
-              dry_run: bool = False) -> int:
+              dry_run: bool = False, bundles: Sequence[str] = ()) -> int:
     state = State(game, backup_dir, report)
+    only = bundle_scope(game, state, bundles)
     if not dirs:
-        report.info("apply: no packs, so every patched bundle is restored")
-        return cmd_restore(game, report, backup_dir, dry_run, label="apply")
-    plan = plan_packs(game, dirs, state, report, warnings=False)
+        report.info("apply: no packs, so the selected patched bundles are restored" if only is not None
+                    else "apply: no packs, so every patched bundle is restored")
+        return cmd_restore(game, report, backup_dir, dry_run, label="apply", bundles=bundles)
+    plan = plan_packs(game, dirs, state, report, warnings=False, only=only)
     if report.errors:
         report.info(f"apply: FAILED: {_count(report.errors, 'error')}; nothing was written")
         return 1
@@ -830,7 +861,7 @@ def cmd_apply(game: Path, dirs: Sequence[Path], report: Report, backup_dir: Path
             report.error(str(ex))
         except (TexPackError, LayoutError) as ex:
             report.error(str(ex))
-    for key in sorted(k for k in state.records() if k not in plan.targets):
+    for key in sorted(k for k in state.records() if k not in plan.targets and (only is None or k in only)):
         try:
             counts[restore_bundle(state, key, report, dry_run)] += 1
         except Foreign as ex:
@@ -852,9 +883,10 @@ def cmd_apply(game: Path, dirs: Sequence[Path], report: Report, backup_dir: Path
 
 
 def cmd_restore(game: Path, report: Report, backup_dir: Path = BACKUP_DIR, dry_run: bool = False,
-                label: str = "restore") -> int:
+                label: str = "restore", bundles: Sequence[str] = ()) -> int:
     state = State(game, backup_dir, report)
-    keys = sorted(state.records())
+    only = bundle_scope(game, state, bundles)
+    keys = sorted(k for k in state.records() if only is None or k in only)
     if not keys:
         report.info(f"{label}: ok: nothing to restore")
         return 0
@@ -1104,10 +1136,13 @@ def main() -> None:
     s.add_argument("--json", action="store_true", help="print JSON")
     s = sub.add_parser("check", help="check texture packs against the game's textures")
     s.add_argument("--pack", action="append", default=[], type=Path, help="pack folder (repeat; later packs win)")
+    s.add_argument("--bundle", action="append", default=[], help="limit to this .ibt bundle (repeat)")
     s = sub.add_parser("apply", help="replace the textures in the game's bundles (later packs win)")
     s.add_argument("--pack", action="append", default=[], type=Path, help="pack folder (repeat; later packs win)")
+    s.add_argument("--bundle", action="append", default=[], help="limit to this .ibt bundle (repeat)")
     s.add_argument("-n", "--dry-run", action="store_true", help="check and rebuild in memory, write nothing")
     s = sub.add_parser("restore", help="put every patched bundle back")
+    s.add_argument("--bundle", action="append", default=[], help="limit to this .ibt bundle (repeat)")
     s.add_argument("-n", "--dry-run", action="store_true", help="show what would be restored")
     for p in sub.choices.values():
         p.add_argument("--game-dir", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
@@ -1119,11 +1154,11 @@ def main() -> None:
         elif args.cmd == "list":
             code = cmd_list(_game(args.game_dir, required=not args.bundle), args.bundle, args.json, report)
         elif args.cmd == "check":
-            code = cmd_check(_game(args.game_dir), args.pack, report)
+            code = cmd_check(_game(args.game_dir), args.pack, report, bundles=args.bundle)
         elif args.cmd == "apply":
-            code = cmd_apply(_game(args.game_dir), args.pack, report, dry_run=args.dry_run)
+            code = cmd_apply(_game(args.game_dir), args.pack, report, dry_run=args.dry_run, bundles=args.bundle)
         elif args.cmd == "restore":
-            code = cmd_restore(_game(args.game_dir), report, dry_run=args.dry_run)
+            code = cmd_restore(_game(args.game_dir), report, dry_run=args.dry_run, bundles=args.bundle)
         else:
             ap.error("choose a command: list, check, apply, restore (or --selfcheck)")
             return

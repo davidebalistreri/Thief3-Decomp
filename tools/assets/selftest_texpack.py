@@ -621,6 +621,41 @@ def test_packs() -> None:
     r = cli("restore")
     assert r.returncode == 0 and r.stdout.splitlines()[-1] == "restore: ok: 2 bundles restored", r.stdout
     assert all((maps / n).read_bytes() == d for n, d in originals.items())
+
+    # Scoped operations must not change or restore an active pack in a different bundle.
+    r = cli("apply", "--pack", str(p2))
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    kernel_path = maps / "Kernel_GFXALL.ibt"
+    manifest = root / "build" / "assets" / "backup" / MANIFEST
+    kernel_bytes = kernel_path.read_bytes()
+    kernel_key = "content/t3/maps/kernel_gfxall.ibt"
+    kernel_record = json.loads(manifest.read_text())["bundles"][kernel_key]
+    r = cli("check", "--pack", str(p1), "--bundle", "level1.ibt")
+    assert r.returncode == 0 and "2 resources in 1 bundle" in r.stdout, (r.stdout, r.stderr)
+    r = cli("apply", "--pack", str(p1), "--bundle", "level1.ibt")
+    assert r.returncode == 0 and top_mip(maps / "Level1.ibt", "wall_d") == wall1, (r.stdout, r.stderr)
+    assert kernel_path.read_bytes() == kernel_bytes
+    assert json.loads(manifest.read_text())["bundles"][kernel_key] == kernel_record
+    before = (manifest.read_bytes(), (maps / "Level1.ibt").read_bytes(), kernel_path.read_bytes())
+    for invalid in ("missing", "../Level1.ibt", "..\\Level1.ibt"):
+        r = cli("apply", "--pack", str(p2), "--bundle", "Level1", "--bundle", invalid)
+        assert r.returncode == 1 and "error:" in r.stderr, (r.stdout, r.stderr)
+        assert before == (manifest.read_bytes(), (maps / "Level1.ibt").read_bytes(), kernel_path.read_bytes())
+    r = cli("apply", "--bundle", "Level1")
+    assert r.returncode == 0 and (maps / "Level1.ibt").read_bytes() == originals["Level1.ibt"]
+    assert kernel_path.read_bytes() == kernel_bytes
+    assert json.loads(manifest.read_text())["bundles"][kernel_key] == kernel_record
+    r = cli("apply", "--pack", str(p2), "--bundle", "Level1")
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    level_bytes = (maps / "Level1.ibt").read_bytes()
+    r = cli("restore", "--bundle", "KERNEL_GFXALL")
+    assert r.returncode == 0 and kernel_path.read_bytes() == originals["Kernel_GFXALL.ibt"]
+    assert (maps / "Level1.ibt").read_bytes() == level_bytes
+    # A recorded bundle may have disappeared; scoped restore can recover it.
+    (maps / "Level1.ibt").unlink()
+    r = cli("restore", "--bundle", "level1")
+    assert r.returncode == 0 and (maps / "Level1.ibt").read_bytes() == originals["Level1.ibt"]
+
     r = cli("check")
     assert r.returncode == 1 and "at least one --pack" in r.stderr
     r = cli()

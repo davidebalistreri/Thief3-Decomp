@@ -425,9 +425,9 @@ the `textures/` folder of a mod package ([mods.md](mods.md)):
 
 ```
 t3texpack.py list [<map or .ibt>] [--json]         names, format, size, mips, usage, bundles
-t3texpack.py check --pack <dir> [--pack <dir> ...]
-t3texpack.py apply --pack <dir> [--pack <dir> ...] [--dry-run]
-t3texpack.py restore [--dry-run]
+t3texpack.py check --pack <dir> [--pack <dir> ...] [--bundle <name> ...]
+t3texpack.py apply --pack <dir> [--pack <dir> ...] [--bundle <name> ...] [--dry-run]
+t3texpack.py restore [--bundle <name> ...] [--dry-run]
 t3texpack.py --selfcheck [<map or .ibt> ...]
 ```
 
@@ -467,6 +467,15 @@ unknown names, unreadable DDS files, names given twice and textures whose
 layout cannot be rebuilt as errors. It warns when a texture's format or
 aspect ratio differs from the original's, or when it is larger. `list` and
 `check` read a patched bundle's original from its backup.
+
+For a level-specific experiment, repeat `--bundle <map name or .ibt filename>`
+on `check`, `apply`, or `restore`. Only those bundles are considered or
+restored; names are case-insensitive and must exist in the game or in the
+backup record. Unknown names stop the command before any write. Scoped apply
+still rebuilds each selected bundle from its original, so pass **all** packs
+that should remain active in it. It leaves patched bundles outside the scope
+and their backup records alone. Without `--bundle`, the existing global
+behaviour is unchanged.
 
 **Apply and restore** write into the game; everything else stays under
 `build/assets/`:

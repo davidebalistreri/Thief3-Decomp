@@ -120,6 +120,15 @@ programs so a frame can actually be replayed before defining the compatibility
 backend and testing DX12 parity. Keep the modern lighting pipeline independent
 of T3's stealth model.
 
+For buffered geometry, tracking must start when each resource is created, not
+when a frame trigger is pressed. A future D3D8 adapter should invalidate a
+writable lock's range immediately, invalidate the entire buffer on DISCARD,
+copy through fault-safe staging before Unlock, and mark bytes known only after
+a successful Unlock. Unknown aliases, GPU writes, ambiguous locks, resets and
+untracked resources must remain unknown. Resource generations, synchronization
+and a process-wide memory budget are still required; `BufferShadow` alone does
+not implement them.
+
 The existing Godot bedroom benchmark is useful visual reference; its
 “Original” images are a Godot export, not captures from Legacy D3D8. A
 permanent in-game benchmark still needs a repeatable save/camera, frame images,

@@ -83,6 +83,12 @@ An [offline Render IR prototype](tools/README_render_ir.md) translates these
 snapshots into API-independent camera, mesh, material, light and draw records.
 It preserves missing data and legacy state; it is not yet the runtime IR.
 
+`ir/buffer_shadow.hpp` provides a separate CPU-side model for partially known
+buffer contents. Partial writes and invalidation preserve unknown regions;
+discard invalidates the whole buffer. Its budget is per buffer and it is not
+thread-safe. It is not yet connected to D3D8 resource locks, so buffered
+geometry still cannot be recovered from a trace.
+
 ## Scope and next steps
 
 For each observed draw, the snapshot includes its parameters, available

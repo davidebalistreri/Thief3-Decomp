@@ -11,6 +11,17 @@ if(NOT T3RENDER_HAS_D3D8_H)
   message(FATAL_ERROR "The Direct3D 8 SDK header d3d8.h is required in the compiler include path.")
 endif()
 
+# Portable IR utilities; not connected to the experimental D3D8 proxy yet.
+add_library(t3render_ir STATIC ir/buffer_shadow.cpp)
+target_compile_features(t3render_ir PUBLIC cxx_std_17)
+target_include_directories(t3render_ir PUBLIC ir)
+if(MSVC)
+  target_compile_options(t3render_ir PRIVATE /W4 /utf-8)
+  set_property(TARGET t3render_ir PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+else()
+  target_compile_options(t3render_ir PRIVATE -Wall -Wextra)
+endif()
+
 if(MINGW)
   set(t3render_exports src/d3d8_mingw.def)
 else()

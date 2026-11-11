@@ -43,6 +43,7 @@ var enabled := true:
 var max_shadowed_lights := 4:
 	set(v):
 		max_shadowed_lights = clampi(v, 0, Effect.MAX_LIGHTS)
+		_dirty = true
 
 ## Whether the renderer can draw them (Forward+ on a GPU).
 var supported := false

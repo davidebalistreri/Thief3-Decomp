@@ -56,12 +56,12 @@ const LIT_LAYER := 1 << 19
 ## The lit shaders: opaque and alpha-tested.
 const LIT_SHADER := preload('res://t3_tools/shadows/t3_lit.gdshader')
 const LIT_MASKED_SHADER := preload('res://t3_tools/shadows/t3_lit_masked.gdshader')
+const PBR := preload('res://t3_tools/shadows/t3_lit_pbr_material.gd')
 
 ## BaseMaterial3D features t3_lit does not have: a material using one keeps
 ## its own look (and gets no volume shadows).
 const UNSUPPORTED_FEATURES := [BaseMaterial3D.FEATURE_RIM, BaseMaterial3D.FEATURE_CLEARCOAT,
-	BaseMaterial3D.FEATURE_ANISOTROPY, BaseMaterial3D.FEATURE_AMBIENT_OCCLUSION,
-	BaseMaterial3D.FEATURE_HEIGHT_MAPPING, BaseMaterial3D.FEATURE_SUBSURFACE_SCATTERING,
+	BaseMaterial3D.FEATURE_ANISOTROPY, BaseMaterial3D.FEATURE_SUBSURFACE_SCATTERING,
 	BaseMaterial3D.FEATURE_SUBSURFACE_TRANSMITTANCE, BaseMaterial3D.FEATURE_BACKLIGHT,
 	BaseMaterial3D.FEATURE_REFRACTION, BaseMaterial3D.FEATURE_DETAIL, BaseMaterial3D.FEATURE_BENT_NORMAL_MAPPING]
 
@@ -145,7 +145,7 @@ func restore_materials() -> void:
 
 ## A t3_lit material standing in for `mat`, or null when `mat` is not a
 ## BaseMaterial3D or uses something t3_lit does not have (unshaded, blended,
-## not back-face culled, rim, clearcoat, roughness or metallic textures,
+## not back-face culled, rim, clearcoat, unsupported PBR or metallic textures,
 ## triplanar mapping...).  Such a material stays as it is: it looks right but
 ## gets no volume shadows.
 func lit_material(mat: Material) -> ShaderMaterial:
@@ -156,13 +156,20 @@ func lit_material(mat: Material) -> ShaderMaterial:
 
 	var b := mat as BaseMaterial3D
 	_lit[mat] = null
+	# The PBR shader preserves roughness, AO and parallax. Unsupported PBR
+	# combinations remain unchanged, just as other unsupported materials do.
+	if b.roughness_texture != null or b.get_feature(BaseMaterial3D.FEATURE_AMBIENT_OCCLUSION) \
+			or b.get_feature(BaseMaterial3D.FEATURE_HEIGHT_MAPPING):
+		if b is StandardMaterial3D:
+			_lit[mat] = PBR.make(b, false)
+		return _lit[mat]
 	var masked := b.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
 	if b.shading_mode != BaseMaterial3D.SHADING_MODE_PER_PIXEL or b.cull_mode != BaseMaterial3D.CULL_BACK \
 			or not (masked or b.transparency == BaseMaterial3D.TRANSPARENCY_DISABLED) \
 			or b.diffuse_mode != BaseMaterial3D.DIFFUSE_BURLEY \
 			or b.specular_mode != BaseMaterial3D.SPECULAR_SCHLICK_GGX \
 			or b.billboard_mode != BaseMaterial3D.BILLBOARD_DISABLED \
-			or b.roughness_texture != null or b.metallic_texture != null \
+			or b.metallic_texture != null \
 			or b.uv1_triplanar or b.uv2_triplanar or b.grow or b.proximity_fade_enabled \
 			or b.distance_fade_mode != BaseMaterial3D.DISTANCE_FADE_DISABLED or b.next_pass != null:
 		return null

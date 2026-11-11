@@ -33,7 +33,15 @@ In a separate sensitivity check, increasing the VIEW X translation by 0.2 in a
 temporary packet changed 4,810 pixels. That mutated packet and its output were
 discarded; the check is recorded separately from the retained parity evidence.
 
-Neither mode exercises buffered or indexed draws, depth, textures, game shader
+A separate `--buffered` fixture draws the same screen-space triangle with
+`DrawIndexedPrimitive`, partially written vertex and index buffers, and
+nonzero base vertex, minimum vertex and start index. Its D3D8 reference and
+proxy images matched on the tested runtime; see the
+[buffered fixture result](../benchmarks/d3d8/2026-11-12-buffered/result.json).
+This is a capture test only: buffer bytes and buffered DX12 replay are not yet
+implemented. Do not pass this mode to the UP replay runner.
+
+Neither replay mode exercises buffered or indexed draws, depth, textures, game shader
 programs, lighting, PBR, or TDS gameplay. The pixel-center adjustment is
 tested only against these fixtures and this runtime. The
 trace contains observations, not all possible D3D8 operations; the converter

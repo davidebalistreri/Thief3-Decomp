@@ -1,6 +1,7 @@
 // Synthetic single-draw D3D8 references for offline replay. No game assets
-// are loaded. The optional camera fixture uses XYZ vertices with distinct
-// world, view and perspective transforms. Raster rules may differ from D3D12.
+// are loaded. The camera fixture uses XYZ vertices with distinct matrices;
+// the buffered fixture uses an indexed draw with nonzero offsets. Raster
+// rules may differ from D3D12.
 #include "d3d12_probe_pixels.hpp"
 
 #include <windows.h>
@@ -19,6 +20,7 @@ constexpr UINT kWidth = 256;
 constexpr UINT kHeight = 256;
 constexpr DWORD kFvfScreen = D3DFVF_XYZRHW | D3DFVF_DIFFUSE;
 constexpr DWORD kFvfCamera = D3DFVF_XYZ | D3DFVF_DIFFUSE;
+enum class Fixture { Screen, Camera, Buffered };
 
 // XYZRHW is four float32 values followed by D3DCOLOR AARRGGBB (little endian
 // bytes BB GG RR AA). The captured stride is 20 and there are three vertices.
@@ -129,7 +131,9 @@ bool ReadBackbuffer(IDirect3DDevice8* device, std::vector<std::uint8_t>& rgba, D
     return true;
 }
 
-bool Render(HWND window, const wchar_t* output, bool camera) {
+bool Render(HWND window, const wchar_t* output, Fixture fixture) {
+    const bool camera = fixture == Fixture::Camera;
+    const bool buffered = fixture == Fixture::Buffered;
     ComPtr<IDirect3D8> d3d;
     d3d.value = Direct3DCreate8(D3D_SDK_VERSION);
     if (!d3d.value) { std::fprintf(stderr, "Direct3DCreate8 failed\n"); return false; }
@@ -182,6 +186,31 @@ bool Render(HWND window, const wchar_t* output, bool camera) {
     const DWORD fvf = camera ? kFvfCamera : kFvfScreen;
     const UINT stride = camera ? sizeof(CameraVertex) : sizeof(Vertex);
     const void* vertex_data = camera ? static_cast<const void*>(camera_vertices) : static_cast<const void*>(vertices);
+    // These buffers are created and partially written before the captured
+    // frame. Indices 1..3 with base vertex 1 address VB vertices 2..4; the
+    // first two index slots and the first vertex remain unwritten.
+    ComPtr<IDirect3DVertexBuffer8> vertex_buffer;
+    ComPtr<IDirect3DIndexBuffer8> index_buffer;
+    if (buffered) {
+        const Vertex buffered_vertices[] = {{}, vertices[0], vertices[0], vertices[1], vertices[2]};
+        const std::uint16_t indices[] = {1, 2, 3};
+        if (!Check(device->CreateVertexBuffer(sizeof(buffered_vertices), 0, kFvfScreen, D3DPOOL_MANAGED,
+                                               vertex_buffer.put()), "CreateVertexBuffer") ||
+            !Check(device->CreateIndexBuffer(5 * sizeof(std::uint16_t), 0, D3DFMT_INDEX16, D3DPOOL_MANAGED,
+                                              index_buffer.put()), "CreateIndexBuffer")) return false;
+        BYTE* mapped = nullptr;
+        if (!Check(vertex_buffer->Lock(sizeof(Vertex), 4 * sizeof(Vertex), &mapped, 0), "VertexBuffer::Lock")) return false;
+        if (!mapped) { vertex_buffer->Unlock(); std::fprintf(stderr, "VertexBuffer::Lock returned null\n"); return false; }
+        std::memcpy(mapped, buffered_vertices + 1, 4 * sizeof(Vertex));
+        if (!Check(vertex_buffer->Unlock(), "VertexBuffer::Unlock")) return false;
+        mapped = nullptr;
+        if (!Check(index_buffer->Lock(2 * sizeof(std::uint16_t), sizeof(indices), &mapped, 0), "IndexBuffer::Lock")) return false;
+        if (!mapped) { index_buffer->Unlock(); std::fprintf(stderr, "IndexBuffer::Lock returned null\n"); return false; }
+        std::memcpy(mapped, indices, sizeof(indices));
+        if (!Check(index_buffer->Unlock(), "IndexBuffer::Unlock") ||
+            !Check(device->SetStreamSource(0, vertex_buffer.value, sizeof(Vertex)), "SetStreamSource") ||
+            !Check(device->SetIndices(index_buffer.value, 1), "SetIndices")) return false;
+    }
     if (!Check(device->SetVertexShader(fvf), "SetVertexShader(FVF)") ||
         !Check(device->SetPixelShader(0), "SetPixelShader") ||
         !Check(device->SetRenderState(D3DRS_LIGHTING, FALSE), "SetRenderState(LIGHTING)") ||
@@ -204,8 +233,9 @@ bool Render(HWND window, const wchar_t* output, bool camera) {
         !Check(device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xff000000, 1.0f, 0), "Clear") ||
         !Check(device->BeginScene(), "BeginScene")) return false;
 
-    const bool drawn = Check(device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, vertex_data, stride),
-                             "DrawPrimitiveUP");
+    const bool drawn = buffered
+        ? Check(device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 1, 3, 2, 1), "DrawIndexedPrimitive")
+        : Check(device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, vertex_data, stride), "DrawPrimitiveUP");
     const bool ended = Check(device->EndScene(), "EndScene");
     if (!drawn || !ended) return false;
 
@@ -224,7 +254,7 @@ bool Render(HWND window, const wchar_t* output, bool camera) {
     if (!Check(device->Present(nullptr, nullptr, nullptr, nullptr), "Present")) return false;
     if (output && !WritePpm(output, rgba)) return false;
     std::printf("d3d8_up_fixture mode=%s width=%u height=%u format=%lu draws=1 stride=%u fvf=0x%08lx "
-                "red_pixels=%zu fnv1a=%016llx\n", camera ? "camera" : "screen", kWidth, kHeight,
+                "red_pixels=%zu fnv1a=%016llx\n", camera ? "camera" : (buffered ? "buffered" : "screen"), kWidth, kHeight,
                 static_cast<unsigned long>(format), stride, static_cast<unsigned long>(fvf), stats.red_pixels,
                 static_cast<unsigned long long>(stats.fnv1a));
     std::printf("result=PASS; edge pixels may differ from D3D12 due to raster/half-pixel rules\n");
@@ -234,12 +264,13 @@ bool Render(HWND window, const wchar_t* output, bool camera) {
 
 int wmain(int argc, wchar_t** argv) {
     const wchar_t* output = nullptr;
-    bool camera = false;
+    Fixture fixture = Fixture::Screen;
     for (int i = 1; i < argc; ++i) {
-        if (!std::wcscmp(argv[i], L"--camera") && !camera) camera = true;
+        if (!std::wcscmp(argv[i], L"--camera") && fixture == Fixture::Screen) fixture = Fixture::Camera;
+        else if (!std::wcscmp(argv[i], L"--buffered") && fixture == Fixture::Screen) fixture = Fixture::Buffered;
         else if (!std::wcscmp(argv[i], L"--output") && !output && i + 1 < argc && argv[i + 1][0]) output = argv[++i];
         else {
-            std::fwprintf(stderr, L"usage: d3d8_up_fixture [--camera] [--output new-image.ppm]\n");
+            std::fwprintf(stderr, L"usage: d3d8_up_fixture [--camera | --buffered] [--output new-image.ppm]\n");
             return 2;
         }
     }
@@ -269,7 +300,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     ShowWindow(window, SW_SHOWNOACTIVATE);
     UpdateWindow(window);
-    const bool ok = Render(window, output, camera);
+    const bool ok = Render(window, output, fixture);
     DestroyWindow(window);
     UnregisterClassW(name, instance);
     return ok ? 0 : 1;

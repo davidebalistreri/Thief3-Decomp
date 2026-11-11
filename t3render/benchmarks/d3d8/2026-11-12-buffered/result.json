@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_indexed_buffer_fixture",
+  "date": "2026-11-12",
+  "host": {
+    "os": "macOS 27.2.1",
+    "architecture": "arm64",
+    "gpu": "Apple M5 Pro"
+  },
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86"
+  },
+  "fixture": {
+    "mode": "--buffered",
+    "source_sha256": "c2da2e0c0a3513603284f492a38877253b99b31801527e600cd0a04f4c773344",
+    "executable_sha256": "560c5c557b4de22d3608757d50840c0292a8d75dc5fab35f1b6190af8642c2d7",
+    "proxy_sha256": "9f0da3cd47b58df26c9350eba744163862d5e948a3ba910ab3b5070b79520ddc",
+    "vertex_buffer_bytes": 100,
+    "vertex_lock_offset": 20,
+    "vertex_lock_size": 80,
+    "index_format": "D3DFMT_INDEX16",
+    "index_buffer_bytes": 10,
+    "index_lock_offset": 4,
+    "index_lock_size": 6,
+    "base_vertex_index": 1,
+    "min_vertex_index": 1,
+    "num_vertices": 3,
+    "start_index": 2,
+    "primitive_count": 1
+  },
+  "result": {
+    "reference_d3d8": "PASS",
+    "capture_with_proxy": "PASS",
+    "trace_draw": "DrawIndexedPrimitive",
+    "width": 256,
+    "height": 256,
+    "red_pixels": 19648,
+    "rgba_fnv1a64": "10b6d7ca2fd8394d",
+    "ppm_sha256_both": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679",
+    "comparison": "Both P6 PPM images were byte-identical; temporary trace and PPM files were removed after verification."
+  },
+  "limitations": [
+    "Synthetic D3D8 draw; this is not a TDS frame or native Windows test.",
+    "The proxy records buffer bindings and draw parameters, but does not capture vertex or index buffer contents.",
+    "No buffered DX12 replay, material, lighting, game or stealth behavior was tested."
+  ]
+}

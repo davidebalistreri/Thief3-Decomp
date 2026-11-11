@@ -32,6 +32,16 @@ standalone D3D8 program in the `smoke/` subdirectory. It draws four synthetic
 triangles, checks one pixel of each and prints a backbuffer hash. Compare that
 hash with and without the proxy only on the same adapter, format and runtime.
 
+Add `-DT3RENDER_BUILD_D3D12_PROBE=ON` to build `t3render_d3d12_probe.exe`, a
+separate offscreen D3D12 device test. It creates a queue, pipeline and render
+target, draws a synthetic triangle, waits on a fence and validates readback.
+`--warp` explicitly selects the software adapter; `--output <new-image.ppm>`
+optionally saves the result. It requires the Windows D3D12 and DXGI runtimes
+and `d3dcompiler_47.dll`, and uses SM 5.0 shaders. Capability queries are
+capped by the available SDK headers; DXR is not tested. The x86 executable has
+been cross-compiled, but its D3D12 GPU execution has not yet been verified.
+This probe is not the D3D8 compatibility backend.
+
 The proxy forwards to the system D3D8 implementation and, when capture is
 enabled, observes the original COM objects. It is specific to T3Main's
 `Direct3DCreate8` import and does not implement every possible D3D8 export or

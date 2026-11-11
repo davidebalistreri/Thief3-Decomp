@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -101,9 +102,103 @@ class TraceToIrTests(unittest.TestCase):
         self.assertEqual(result["meshes"][0]["geometry_source"], "immediate")
         self.assertIsNone(result["meshes"][0]["vertex_streams_observed"])
         self.assertIsNone(result["meshes"][0]["index_buffer_observed"])
+        self.assertEqual(result["meshes"][0]["immediate_data_observed"]["vertex"]["status"], "unknown")
+        self.assertEqual(result["meshes"][0]["immediate_data_observed"]["index"]["status"], "unknown")
         self.assertEqual(command["parameters"]["immediate_vertex_stride_bytes"], 20)
         self.assertEqual(command["parameters"]["immediate_index_format"], "uint32")
         self.assertEqual(command["compatibility"]["d3d8"]["draw"]["indices"]["buffer"], "0x456")
+
+    def test_up_bytes_are_exposed_as_opaque_observations(self):
+        draw = {"event": "draw", "frame": 0, "call": "DrawIndexedPrimitiveUP", "primitive_type": 4,
+                "primitive_count": 1, "min_vertex_index": 2, "num_vertices": 3, "vertex_stride": 4,
+                "index_format": 101, "up_data": {
+                    "vertex": {"status": "captured", "first_vertex": 2, "vertex_count": 3, "stride": 4,
+                               "byte_offset": 8, "byte_count": 12, "encoding": "hex",
+                               "data": "01020304aabbccdd01234567"},
+                    "index": {"status": "captured", "index_count": 3, "index_format": 101,
+                              "byte_count": 6, "encoding": "hex", "data": "020003000400"}}}
+        self.write([HEADER, {"event": "frame_begin", "frame": 0}, draw,
+                    {"event": "frame_end", "frame": 0, "present_hr": 0}, END])
+        result = trace_to_ir.convert(self.path)
+        mesh = result["meshes"][0]
+        data = mesh["immediate_data_observed"]
+        self.assertEqual(data["vertex"], {"status": "captured", "first_vertex": 2, "vertex_count": 3,
+                                          "stride_bytes": 4, "byte_offset": 8, "byte_count": 12,
+                                          "encoding": "hex", "data": "01020304aabbccdd01234567"})
+        self.assertEqual(data["index"], {"status": "captured", "index_count": 3, "index_format": "uint16",
+                                         "byte_count": 6, "encoding": "hex", "data": "020003000400"})
+        self.assertFalse(mesh["geometry_available"])
+        self.assertFalse(result["replayable"])
+        self.assertEqual(result["frames"][0]["commands"][0]["compatibility"]["d3d8"]["draw"]["up_data"],
+                         draw["up_data"])
+
+    def test_up_empty_and_unindexed_are_distinct_from_unknown(self):
+        draw = {"event": "draw", "frame": 0, "call": "DrawPrimitiveUP", "primitive_type": 4,
+                "primitive_count": 0, "vertex_stride": 20, "up_data": {
+                    "vertex": {"status": "empty", "first_vertex": 0, "vertex_count": 0, "stride": 20,
+                               "byte_offset": 0, "byte_count": 0, "encoding": "hex", "data": ""},
+                    "index": None}}
+        self.write([HEADER, {"event": "frame_begin", "frame": 0}, draw,
+                    {"event": "frame_end", "frame": 0, "present_hr": 0}, END])
+        data = trace_to_ir.convert(self.path)["meshes"][0]["immediate_data_observed"]
+        self.assertEqual(data["vertex"]["status"], "empty")
+        self.assertEqual(data["vertex"]["data"], "")
+        self.assertIsNone(data["index"])
+
+    def test_up_index32_and_unindexed_nonempty(self):
+        first = {"event": "draw", "frame": 0, "call": "DrawPrimitiveUP", "primitive_type": 2,
+                 "primitive_count": 1, "vertex_stride": 1, "up_data": {
+                     "vertex": {"status": "captured", "first_vertex": 0, "vertex_count": 2, "stride": 1,
+                                "byte_offset": 0, "byte_count": 2, "encoding": "hex", "data": "aBcd"},
+                     "index": None}}
+        second = {"event": "draw", "frame": 0, "call": "DrawIndexedPrimitiveUP", "primitive_type": 1,
+                  "primitive_count": 1, "min_vertex_index": 3, "num_vertices": 1, "vertex_stride": 1,
+                  "index_format": 102, "up_data": {
+                      "vertex": {"status": "captured", "first_vertex": 3, "vertex_count": 1, "stride": 1,
+                                 "byte_offset": 3, "byte_count": 1, "encoding": "hex", "data": "ff"},
+                      "index": {"status": "captured", "index_count": 1, "index_format": 102,
+                                "byte_count": 4, "encoding": "hex", "data": "03000000"}}}
+        self.write([HEADER, {"event": "frame_begin", "frame": 0}, first, second,
+                    {"event": "frame_end", "frame": 0, "present_hr": 0}, END])
+        meshes = trace_to_ir.convert(self.path)["meshes"]
+        self.assertEqual(meshes[0]["immediate_data_observed"]["vertex"]["data"], "aBcd")
+        self.assertIsNone(meshes[0]["immediate_data_observed"]["index"])
+        self.assertEqual(meshes[1]["immediate_data_observed"]["index"]["index_format"], "uint32")
+        self.assertEqual(meshes[1]["immediate_data_observed"]["index"]["data"], "03000000")
+
+    def test_up_invalid_bytes_or_metadata_remain_unknown(self):
+        valid = {"event": "draw", "frame": 0, "call": "DrawIndexedPrimitiveUP", "primitive_type": 4,
+                 "primitive_count": 1, "min_vertex_index": 0, "num_vertices": 3, "vertex_stride": 1,
+                 "index_format": 101, "up_data": {
+                     "vertex": {"status": "captured", "first_vertex": 0, "vertex_count": 3, "stride": 1,
+                                "byte_offset": 0, "byte_count": 3, "encoding": "hex", "data": "aabbcc"},
+                     "index": {"status": "captured", "index_count": 3, "index_format": 101,
+                               "byte_count": 6, "encoding": "hex", "data": "000001000200"}}}
+        variants = [
+            ("vertex", "data", "aabbc"), ("vertex", "data", "aabbgg"),
+            ("vertex", "byte_count", 2), ("vertex", "byte_count", True),
+            ("vertex", "byte_offset", 1), ("vertex", "vertex_count", 2),
+            ("vertex", "stride", 0), ("vertex", "first_vertex", -1),
+            ("vertex", "encoding", "base64"), ("vertex", "status", "empty"),
+            ("vertex", "status", "unreadable"),
+            ("index", "data", "00000100020g"), ("index", "byte_count", 5),
+            ("index", "index_count", 2), ("index", "index_format", 999),
+            ("index", "status", "overflow"), ("index", "encoding", "base64"),
+        ]
+        for component, key, value in variants:
+            with self.subTest(component=component, key=key, value=value):
+                draw = copy.deepcopy(valid)
+                draw["up_data"][component][key] = value
+                self.write([HEADER, {"event": "frame_begin", "frame": 0}, draw,
+                            {"event": "frame_end", "frame": 0, "present_hr": 0}, END])
+                result = trace_to_ir.convert(self.path)
+                data = result["meshes"][0]["immediate_data_observed"]
+                self.assertEqual(data[component]["status"], "unknown")
+                self.assertIsNone(data[component]["data"])
+                other = "index" if component == "vertex" else "vertex"
+                self.assertEqual(data[other]["status"], "captured")
+                self.assertEqual(result["frames"][0]["commands"][0]["compatibility"]["d3d8"]
+                                 ["draw"]["up_data"][component][key], value)
 
     def test_multiple_frames_keep_snapshot_ids_distinct(self):
         draw = {"event": "draw", "frame": 3, "call": "DrawPrimitive", "primitive_count": 1}

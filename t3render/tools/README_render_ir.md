@@ -2,8 +2,9 @@
 
 `trace_to_ir.py` converts a **complete diagnostic v1 JSONL trace** into a
 versioned, API-independent JSON representation for inspection. This is an
-offline prototype, not a runtime renderer interface or a replay: geometry,
-resource contents, shader programs and draw results are not captured.
+offline prototype, not a runtime renderer interface or a replay: decoded
+geometry, buffered resource contents, shader programs and draw results are
+not captured. Some newer diagnostic traces can contain opaque UP bytes.
 Neither visual parity nor gameplay behavior can be established from this IR.
 
 ```sh
@@ -33,9 +34,18 @@ data is removed after validation. No third-party modules are needed.
   successful texture getter.
   Resource tokens are opaque process addresses scoped to the source capture;
   they may be reused and must not be treated as stable asset names or IDs.
-- Immediate-mode (UP) draws use caller-supplied data that the trace does not
-  include. Their mesh has no inferred buffer bindings even if the diagnostic
-  snapshot contains previously bound buffers. For buffered indexed draws, the
+- Immediate-mode (UP) draws use caller-supplied data. When the optional
+  `up_data` record is present, `immediate_data_observed` exposes each validated
+  vertex/index byte snapshot as opaque hex with its recorded offset, stride,
+  counts and format. `captured` and `empty` require coherent hexadecimal data,
+  byte lengths and counts; otherwise the component is `unknown` and its raw
+  source remains in the draw's compatibility extension. Old traces with no UP
+  data remain valid and produce unknown components. An index value of `null`
+  is used only for non-indexed draws. These are snapshots before the call;
+  concurrent writes could change the bytes seen by the driver. They do not
+  make the capture replayable or assert a decoded mesh. The mesh has no
+  inferred buffer bindings even if the diagnostic snapshot contains previously
+  bound buffers. For buffered indexed draws, the
   index format comes only from the captured index buffer description; base
   vertex, minimum vertex, vertex count and start index remain separate.
 - Material values are captured legacy parameters and texture slots, not PBR

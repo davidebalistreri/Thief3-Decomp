@@ -11,6 +11,7 @@ import io
 import json
 import math
 from pathlib import Path
+import re
 import sys
 import tempfile
 
@@ -164,13 +165,104 @@ def material(draw, identifier):
             "texture_slots_observed": texture_slots(draw.get("stages")), "pbr_parameters": None}
 
 
+def nonnegative(value):
+    value = integer(value)
+    return value if value is not None and value >= 0 else None
+
+
+def captured_hex(raw):
+    """Only return data when the producer status and actual byte length agree."""
+    status = raw.get("status")
+    size = nonnegative(raw.get("byte_count"))
+    value = raw.get("data")
+    if (status not in ("captured", "empty") or size is None or raw.get("encoding") != "hex"
+            or not isinstance(value, str) or len(value) != 2 * size
+            or re.fullmatch(r"[0-9a-fA-F]*", value) is None
+            or (status == "empty" and size != 0) or (status == "captured" and size == 0)):
+        return None
+    return status, size, value
+
+
+def primitive_elements(draw):
+    count = nonnegative(draw.get("primitive_count"))
+    kind = integer(draw.get("primitive_type"))
+    if count is None or kind not in TOPOLOGIES:
+        return None
+    if count == 0:
+        return 0
+    return {1: count, 2: count * 2, 3: count + 1, 4: count * 3, 5: count + 2, 6: count + 2}[kind]
+
+
+def immediate_vertex(raw, draw, indexed):
+    unknown = {"status": "unknown", "first_vertex": None, "vertex_count": None, "stride_bytes": None,
+               "byte_offset": None, "byte_count": None, "encoding": None, "data": None}
+    if not isinstance(raw, dict):
+        return unknown
+    data = captured_hex(raw)
+    first = nonnegative(raw.get("first_vertex"))
+    count = nonnegative(raw.get("vertex_count"))
+    stride = nonnegative(raw.get("stride"))
+    offset = nonnegative(raw.get("byte_offset"))
+    if (data is None or first is None or count is None or stride is None or offset is None
+            or first > 0xffffffff or stride > 0xffffffff or (count > 0 and stride == 0)
+            or offset != first * stride or data[1] != count * stride):
+        return unknown
+    if "vertex_stride" in draw and nonnegative(draw["vertex_stride"]) != stride:
+        return unknown
+    if indexed:
+        if first + count > 0x100000000:
+            return unknown
+        if "min_vertex_index" in draw and nonnegative(draw["min_vertex_index"]) != first:
+            return unknown
+        primitives = nonnegative(draw.get("primitive_count"))
+        declared = nonnegative(draw.get("num_vertices"))
+        if primitives == 0 and count != 0:
+            return unknown
+        if primitives is not None and primitives > 0 and declared is not None and count != declared:
+            return unknown
+    else:
+        if first != 0:
+            return unknown
+        expected = primitive_elements(draw)
+        if expected is not None and count != expected:
+            return unknown
+    return {"status": data[0], "first_vertex": first, "vertex_count": count, "stride_bytes": stride,
+            "byte_offset": offset, "byte_count": data[1], "encoding": "hex", "data": data[2]}
+
+
+def immediate_index(raw, draw):
+    unknown = {"status": "unknown", "index_count": None, "index_format": None,
+               "byte_count": None, "encoding": None, "data": None}
+    if not isinstance(raw, dict):
+        return unknown
+    data = captured_hex(raw)
+    count = nonnegative(raw.get("index_count"))
+    fmt = integer(raw.get("index_format"))
+    width = {101: 2, 102: 4}.get(fmt)
+    if data is None or count is None or width is None or data[1] != count * width:
+        return unknown
+    if "index_format" in draw and integer(draw["index_format"]) != fmt:
+        return unknown
+    expected = primitive_elements(draw)
+    if expected is not None and count != expected:
+        return unknown
+    return {"status": data[0], "index_count": count, "index_format": INDEX_FORMATS[fmt],
+            "byte_count": data[1], "encoding": "hex", "data": data[2]}
+
+
 def mesh(draw, identifier, source, indexed):
     # UP data is supplied directly to the call; bound streams/indices are NOT
-    # that data. The trace does not contain bytes for either path.
+    # that data. Captured bytes are opaque snapshots, not decoded geometry.
     streams = vertex_streams(draw.get("streams")) if source == "buffered" else None
     indices = index_buffer(draw.get("indices")) if source == "buffered" and indexed is True else None
+    immediate_data = None
+    if source == "immediate":
+        raw = object_or_empty(draw.get("up_data"))
+        immediate_data = {"vertex": immediate_vertex(raw.get("vertex"), draw, indexed),
+                          "index": immediate_index(raw.get("index"), draw) if indexed else None}
     return {"id": identifier, "geometry_available": False, "geometry_source": source,
-            "vertex_streams_observed": streams, "index_buffer_observed": indices}
+            "vertex_streams_observed": streams, "index_buffer_observed": indices,
+            "immediate_data_observed": immediate_data}
 
 
 def observed_lights(draw, ir, draw_index):

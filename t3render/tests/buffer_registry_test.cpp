@@ -3,7 +3,9 @@
 #include <array>
 #include <cassert>
 #include <cstdint>
+#include <cstring>
 #include <limits>
+#include <stdexcept>
 
 using namespace t3render::ir;
 
@@ -11,6 +13,21 @@ namespace {
 using R = RegistryResult;
 using A = BufferAvailability;
 using L = BufferLock;
+
+struct ReaderContext {
+    const std::uint8_t* bytes;
+    int calls = 0;
+    bool partial = false;
+    bool throws = false;
+};
+
+bool SnapshotReader(void* context, void* destination, std::size_t length) {
+    auto& reader = *static_cast<ReaderContext*>(context);
+    ++reader.calls;
+    if (reader.throws) throw std::runtime_error("reader failed");
+    std::memcpy(destination, reader.bytes, reader.partial ? length / 2 : length);
+    return !reader.partial;
+}
 
 BufferToken Register(BufferRegistry& registry, std::uintptr_t identity, std::size_t size, A expected = A::Tracked) {
     BufferToken token{};
@@ -153,6 +170,9 @@ void GlobalBudgetAndOverflow() {
     std::array<std::uint8_t, 8> out{};
     assert(registry.BeginLock(first, 0, 8, L::Write) == R::Ok);
     assert(registry.StageUnlock(first, source.data(), 8) == R::BudgetExceeded);
+    ReaderContext reader{source.data()};
+    assert(registry.StageUnlockFromReader(first, SnapshotReader, &reader) == R::BudgetExceeded);
+    assert(reader.calls == 0);  // The global budget is checked before copying.
     assert(registry.EndUnlock(first, true) == R::DataNotStaged);
     assert(registry.Read(first, 0, out.data(), 8) == R::UnknownData);
     assert(registry.Release(second) == R::Ok && registry.used_bytes() == 9);
@@ -169,6 +189,39 @@ void GlobalBudgetAndOverflow() {
     assert(registry.Release(unavailable) == R::Ok);
     assert(registry.Release(huge) == R::Ok && registry.used_bytes() == 0);
 }
+
+void FaultSafeReader() {
+    BufferRegistry registry(32, 1);
+    const auto token = Register(registry, 9, 8);
+    std::array<std::uint8_t, 8> source{1, 2, 3, 4, 5, 6, 7, 8};
+    std::array<std::uint8_t, 8> out{};
+    ReaderContext reader{source.data()};
+    assert(registry.BeginLock(token, 0, 8, L::Write) == R::Ok);
+    assert(registry.StageUnlockFromReader(token, SnapshotReader, &reader) == R::Ok);
+    assert(reader.calls == 1 && registry.used_bytes() == 17);
+    // A failed replacement snapshot must drop the previous successful copy.
+    reader.partial = true;
+    assert(registry.StageUnlockFromReader(token, SnapshotReader, &reader) == R::ReadFailed);
+    assert(reader.calls == 2 && registry.used_bytes() == 9);
+    assert(registry.EndUnlock(token, true) == R::DataNotStaged);
+    assert(registry.Read(token, 0, out.data(), 8) == R::UnknownData);
+    assert(registry.BeginLock(token, 0, 8, L::Write) == R::Ok);
+    reader.throws = true;
+    assert(registry.StageUnlockFromReader(token, SnapshotReader, &reader) == R::ReadFailed);
+    assert(registry.EndUnlock(token, true) == R::DataNotStaged);
+    assert(registry.used_bytes() == 9);
+    assert(registry.BeginLock(token, 0, 8, L::Write) == R::Ok);
+    assert(registry.StageUnlockFromReader(token, nullptr, nullptr) == R::NullPointer);
+    assert(registry.EndUnlock(token, true) == R::DataNotStaged);
+    assert(registry.BeginLock(token, 0, 8, L::Write) == R::Ok);
+    reader.partial = false;
+    reader.throws = false;
+    assert(registry.StageUnlockFromReader(token, SnapshotReader, &reader) == R::Ok);
+    source.fill(99);
+    assert(registry.EndUnlock(token, true) == R::Ok);
+    assert(registry.Read(token, 0, out.data(), 8) == R::Ok);
+    assert((out == std::array<std::uint8_t, 8>{1, 2, 3, 4, 5, 6, 7, 8}));
+}
 }  // namespace
 
 int main() {
@@ -176,4 +229,5 @@ int main() {
     PartialWritesAndStaging();
     DiscardReadOnlyAndFailures();
     GlobalBudgetAndOverflow();
+    FaultSafeReader();
 }

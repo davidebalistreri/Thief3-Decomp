@@ -123,9 +123,10 @@ It preserves missing data and legacy state; it is not yet the runtime IR.
 `ir/buffer_shadow.hpp` and `ir/buffer_registry.hpp` provide a separate
 CPU-side model for partially known buffer contents and resource generations.
 The registry bounds resources and the shared shadow/staging byte budget. It
-invalidates writable ranges at lock and commits staged bytes only after a
-successful unlock; ambiguous resource identity or lock state is abandoned.
-The caller must synchronize all operations and provide a fault-safe copy.
+invalidates writable ranges before a lock attempt and commits staged bytes only
+after a successful unlock; ambiguous resource identity or lock state is
+abandoned. The caller must synchronize all operations and supply a fault-safe
+reader; partial reads never become known data.
 Neither model is connected to D3D8 resource locks, so buffered geometry still
 cannot be recovered from a trace.
 

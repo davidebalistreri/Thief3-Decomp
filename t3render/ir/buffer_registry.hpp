@@ -23,8 +23,12 @@ enum class RegistryResult {
     Ok, InvalidIdentity, AlreadyTracked, CapacityExceeded, GenerationExhausted,
     AllocationFailed, UnknownResource, StaleGeneration, InvalidRange, InvalidLock,
     OverlappingLocks, NoActiveLock, InvalidOperation, NullPointer, BudgetExceeded,
-    Unavailable, UnknownData, Busy, DataNotStaged
+    Unavailable, UnknownData, Busy, DataNotStaged, ReadFailed
 };
+
+// Return true only if every requested byte was copied into destination. The
+// callback must not retain the destination or re-enter this registry.
+using BufferSnapshotReader = bool (*)(void* context, void* destination, std::size_t length);
 
 // D3D-independent evidence tracker. All methods must be externally serialized.
 // Register a resource at creation, before any writes; retire it only on its
@@ -49,17 +53,21 @@ public:
     RegistryResult Release(BufferToken token) noexcept;
     RegistryResult Availability(BufferToken token, BufferAvailability& availability) const noexcept;
 
-    // The adapter supplies a normalized nonempty byte range. On a successful
-    // writable lock call this immediately invalidates that range; Discard
-    // invalidates the whole resource. ReadOnly does not invalidate. An overlap
-    // or an invalid successful lock abandons tracking conservatively. Call only
-    // for a lock the runtime accepted, and serialize capture with game calls.
+    // Supply a normalized nonempty byte range BEFORE invoking the real Lock.
+    // A writable attempt immediately invalidates that range; Discard
+    // invalidates the whole resource. ReadOnly does not invalidate. On a
+    // failed real Lock call EndUnlock(token, false), which abandons tracking.
+    // An overlap or invalid range also abandons tracking conservatively.
     RegistryResult BeginLock(BufferToken token, std::size_t offset, std::size_t length,
                              BufferLock kind) noexcept;
     // Before calling the real Unlock, supply an exact copy from trusted,
     // fault-safe staging. This class does not dereference a D3D lock pointer.
     // Failed or missing staging leaves the range unknown.
     RegistryResult StageUnlock(BufferToken token, const void* data, std::size_t length) noexcept;
+    // As above, but stage directly through a fault-safe reader into registry-
+    // owned memory. Its allocation counts toward the global budget; failed or
+    // partial reads are discarded. This does not make a racing source stable.
+    RegistryResult StageUnlockFromReader(BufferToken token, BufferSnapshotReader reader, void* context) noexcept;
     // Commit staged bytes only when the real Unlock succeeded. Failed Unlock
     // abandons the object because its lock state is then unknown.
     RegistryResult EndUnlock(BufferToken token, bool succeeded) noexcept;

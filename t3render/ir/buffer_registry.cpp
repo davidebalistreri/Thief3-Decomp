@@ -7,6 +7,13 @@
 
 namespace t3render::ir {
 
+namespace {
+bool CopyKnownBytes(void* source, void* destination, std::size_t length) {
+    std::memcpy(destination, source, length);
+    return true;
+}
+}  // namespace
+
 BufferRegistry::BufferRegistry(std::size_t byte_budget, std::size_t max_resources) noexcept
     : byte_budget_(byte_budget), max_resources_(max_resources) {}
 
@@ -134,19 +141,36 @@ RegistryResult BufferRegistry::StageUnlock(BufferToken token, const void* data, 
     ClearStaging(*entry);
     if (length != entry->length) return RegistryResult::InvalidRange;
     if (!data) return RegistryResult::NullPointer;
+    return StageUnlockFromReader(token, CopyKnownBytes, const_cast<void*>(data));
+}
+
+RegistryResult BufferRegistry::StageUnlockFromReader(BufferToken token, BufferSnapshotReader reader,
+                                                     void* context) noexcept {
+    Entry* entry = nullptr;
+    const auto result = Find(token, entry);
+    if (result != RegistryResult::Ok) return result;
+    if (!entry->locked) return RegistryResult::NoActiveLock;
+    if (entry->kind == BufferLock::ReadOnly) return RegistryResult::InvalidOperation;
+    ClearStaging(*entry);
+    if (!reader) return RegistryResult::NullPointer;
     if (!entry->shadow) return RegistryResult::Unavailable;
-    if (length > byte_budget_ - used_bytes_) return RegistryResult::BudgetExceeded;
+    if (entry->length > byte_budget_ - used_bytes_) return RegistryResult::BudgetExceeded;
+    std::unique_ptr<std::uint8_t[]> copy;
     try {
-        auto copy = std::unique_ptr<std::uint8_t[]>(new (std::nothrow) std::uint8_t[length]);
-        if (!copy) return RegistryResult::AllocationFailed;
-        std::memcpy(copy.get(), data, length);
-        entry->staging = std::move(copy);
-        entry->staging_size = length;
-        used_bytes_ += length;
-        return RegistryResult::Ok;
+        copy.reset(new (std::nothrow) std::uint8_t[entry->length]);
     } catch (...) {
         return RegistryResult::AllocationFailed;
     }
+    if (!copy) return RegistryResult::AllocationFailed;
+    try {
+        if (!reader(context, copy.get(), entry->length)) return RegistryResult::ReadFailed;
+    } catch (...) {
+        return RegistryResult::ReadFailed;
+    }
+    entry->staging = std::move(copy);
+    entry->staging_size = entry->length;
+    used_bytes_ += entry->length;
+    return RegistryResult::Ok;
 }
 
 RegistryResult BufferRegistry::EndUnlock(BufferToken token, bool succeeded) noexcept {

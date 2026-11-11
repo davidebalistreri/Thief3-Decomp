@@ -1,0 +1,153 @@
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+
+SCRIPT = Path(__file__).resolve().parents[1] / "tools" / "trace_summary.py"
+spec = importlib.util.spec_from_file_location("trace_summary", SCRIPT)
+trace_summary = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(trace_summary)
+
+HEADER = {"event": "header", "format": "t3render-d3d8-diagnostic", "version": 1}
+BEGIN = {"event": "frame_begin", "frame": 7}
+DRAW = {"event": "draw", "frame": 7, "call": "DrawIndexedPrimitive"}
+END = {"event": "frame_end", "frame": 7, "present_hr": 0}
+CAPTURE_END = {"event": "capture_end", "frames": 1}
+
+
+class TraceSummaryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.trace = Path(self.temp.name) / "trace.jsonl"
+
+    def write_events(self, *events):
+        self.trace.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+
+    def assert_invalid(self, events, message):
+        self.write_events(*events)
+        with self.assertRaisesRegex(trace_summary.TraceError, message):
+            trace_summary.summarize(self.trace)
+
+    def test_summary_counts_per_call_and_frame_without_interpreting_other_events(self):
+        self.write_events(
+            HEADER,
+            {"event": "device_info", "frame": "opaque"},
+            BEGIN,
+            DRAW,
+            DRAW,
+            {"event": "draw", "frame": 7, "call": "DrawPrimitive", "details": {"count": 3}},
+            END,
+            {"event": "frame_begin", "frame": 8},
+            {"event": "frame_end", "frame": 8, "present_hr": -1},
+            {"event": "capture_end", "frames": 2},
+        )
+        result = trace_summary.summarize(self.trace)
+        self.assertEqual(result["frame_count"], 2)
+        self.assertEqual(result["draw_count"], 3)
+        self.assertEqual(result["calls"], {"DrawIndexedPrimitive": 2, "DrawPrimitive": 1})
+        self.assertEqual(result["events"]["device_info"], 1)
+        self.assertEqual(result["frames"][0]["calls"], result["calls"])
+        self.assertEqual(result["frames"][1]["present_hr"], -1)
+        self.assertEqual(result["frames"][1]["draws"], 0)
+
+    def test_json_cli_and_invalid_cli(self):
+        self.write_events(HEADER, BEGIN, DRAW, END, CAPTURE_END)
+        result = subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), str(self.trace), "--json"],
+            text=True, capture_output=True, check=True,
+        )
+        self.assertEqual(json.loads(result.stdout)["draw_count"], 1)
+        self.write_events(HEADER, BEGIN, DRAW)
+        failed = subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), str(self.trace)], text=True, capture_output=True,
+        )
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn("unexpected EOF", failed.stderr)
+        self.assertNotIn("Traceback", failed.stderr)
+
+    def test_header_and_required_types(self):
+        cases = [
+            ([BEGIN, DRAW, END], "first event must be header"),
+            ([dict(HEADER, format="wrong")], "unsupported trace format"),
+            ([dict(HEADER, version=True)], "unsupported trace version"),
+            ([dict(HEADER, version=1.0)], "unsupported trace version"),
+            ([HEADER, HEADER], "duplicate header"),
+            ([HEADER, {"event": "frame_begin", "frame": True}], "frame must be an integer"),
+            ([HEADER, BEGIN, dict(DRAW, call=3)], "draw call must be a non-empty string"),
+            ([HEADER, BEGIN, dict(DRAW, call="")], "draw call must be a non-empty string"),
+            ([HEADER, BEGIN, DRAW, dict(END, present_hr=True)], "present_hr must be an integer"),
+            ([HEADER, BEGIN, DRAW, {"event": "frame_end", "frame": 7}], "present_hr must be an integer"),
+            ([HEADER, {"event": None}], "event must be a non-empty string"),
+            ([HEADER, []], "expected a JSON object"),
+        ]
+        for events, message in cases:
+            with self.subTest(events=events):
+                self.assert_invalid(events, message)
+
+    def test_frame_order_and_ids(self):
+        cases = [
+            ([HEADER, DRAW], "draw outside a frame"),
+            ([HEADER, END], "frame_end outside a frame"),
+            ([HEADER, BEGIN, BEGIN], "frame_begin before previous frame_end"),
+            ([HEADER, BEGIN, dict(DRAW, frame=8)], "does not match active frame"),
+            ([HEADER, BEGIN, DRAW, dict(END, frame=8)], "does not match active frame"),
+            ([HEADER, BEGIN, dict(DRAW, frame=False)], "frame must be an integer"),
+            ([HEADER, BEGIN, DRAW, dict(END, frame=None)], "frame must be an integer"),
+        ]
+        for events, message in cases:
+            with self.subTest(events=events):
+                self.assert_invalid(events, message)
+
+    def test_truncation_and_missing_draws(self):
+        self.trace.write_text("", encoding="utf-8")
+        with self.assertRaisesRegex(trace_summary.TraceError, "missing header"):
+            trace_summary.summarize(self.trace)
+        self.assert_invalid([HEADER], "missing capture_end")
+        self.assert_invalid([HEADER, {"event": "capture_end", "frames": 0}], "no complete frames")
+        self.assert_invalid([HEADER, BEGIN, END, CAPTURE_END], "no draw events")
+        self.assert_invalid([HEADER, BEGIN, DRAW], "unexpected EOF")
+        self.assert_invalid([HEADER, BEGIN, DRAW, END], "missing capture_end")
+        self.trace.write_text(json.dumps(HEADER) + "\n{\"event\":", encoding="utf-8")
+        with self.assertRaisesRegex(trace_summary.TraceError, "line 2: invalid JSON"):
+            trace_summary.summarize(self.trace)
+
+    def test_rejects_nonstandard_json_and_invalid_utf8(self):
+        for payload in [
+            '{"event":"header","event":"header"}',
+            '{"event":"header","format":"t3render-d3d8-diagnostic","version":NaN}',
+        ]:
+            with self.subTest(payload=payload):
+                self.trace.write_text(payload, encoding="utf-8")
+                with self.assertRaisesRegex(trace_summary.TraceError, "invalid JSON"):
+                    trace_summary.summarize(self.trace)
+        self.trace.write_bytes(b"\xff")
+        with self.assertRaisesRegex(trace_summary.TraceError, "cannot read trace"):
+            trace_summary.summarize(self.trace)
+
+    def test_final_newline_is_optional(self):
+        self.write_events(HEADER, BEGIN, DRAW, END, CAPTURE_END)
+        self.trace.write_bytes(self.trace.read_bytes().rstrip(b"\n"))
+        self.assertEqual(trace_summary.summarize(self.trace)["draw_count"], 1)
+
+    def test_capture_end_is_final_and_counts_complete_frames(self):
+        cases = [
+            ([HEADER, BEGIN, DRAW, CAPTURE_END], "capture_end inside a frame"),
+            ([HEADER, BEGIN, DRAW, END, {"event": "capture_end"}], "capture_end frames must be an integer"),
+            ([HEADER, BEGIN, DRAW, END, dict(CAPTURE_END, frames=True)], "capture_end frames must be an integer"),
+            ([HEADER, BEGIN, DRAW, END, dict(CAPTURE_END, frames=2)], "does not match 1 complete frames"),
+            ([HEADER, BEGIN, DRAW, END, CAPTURE_END, CAPTURE_END], "event after capture_end"),
+            ([HEADER, BEGIN, DRAW, END, CAPTURE_END, BEGIN], "event after capture_end"),
+            ([HEADER, BEGIN, DRAW, END, CAPTURE_END, {"event": "state"}], "event after capture_end"),
+        ]
+        for events, message in cases:
+            with self.subTest(events=events):
+                self.assert_invalid(events, message)
+
+
+if __name__ == "__main__":
+    unittest.main()

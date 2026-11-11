@@ -1,0 +1,51 @@
+cmake_minimum_required(VERSION 3.25)
+project(T3Render LANGUAGES C CXX)
+
+if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 4 OR NOT (MSVC OR MINGW))
+  message(FATAL_ERROR "T3Render requires an MSVC or MinGW Win32/x86 compiler (the game is 32-bit).")
+endif()
+
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles("#include <windows.h>\n#include <d3d8.h>\nint main() { return 0; }" T3RENDER_HAS_D3D8_H)
+if(NOT T3RENDER_HAS_D3D8_H)
+  message(FATAL_ERROR "The Direct3D 8 SDK header d3d8.h is required in the compiler include path.")
+endif()
+
+if(MINGW)
+  set(t3render_exports src/d3d8_mingw.def)
+else()
+  set(t3render_exports src/d3d8.def)
+endif()
+add_library(t3render SHARED
+  src/proxy.cpp
+  src/vtable_layout.c
+  src/capture.cpp
+  ${t3render_exports})
+target_compile_features(t3render PRIVATE cxx_std_17)
+target_compile_definitions(t3render PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(t3render PRIVATE dxguid)
+if(MSVC)
+  target_compile_options(t3render PRIVATE /W4 /utf-8)
+  set_property(TARGET t3render PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+else()
+  target_compile_options(t3render PRIVATE -Wall -Wextra)
+  target_link_options(t3render PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+set_target_properties(t3render PROPERTIES OUTPUT_NAME d3d8 PREFIX "")
+
+option(T3RENDER_BUILD_SMOKE_TEST "Build the standalone synthetic D3D8 test" OFF)
+if(T3RENDER_BUILD_SMOKE_TEST)
+  add_executable(t3render_smoke tests/d3d8_smoke.cpp)
+  target_compile_features(t3render_smoke PRIVATE cxx_std_17)
+  target_compile_definitions(t3render_smoke PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_link_libraries(t3render_smoke PRIVATE d3d8 user32)
+  if(MSVC)
+    target_compile_options(t3render_smoke PRIVATE /W4 /utf-8)
+    set_property(TARGET t3render_smoke PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  else()
+    target_compile_options(t3render_smoke PRIVATE -Wall -Wextra)
+    target_link_options(t3render_smoke PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
+  # Keep the baseline executable away from the proxy DLL by default.
+  set_target_properties(t3render_smoke PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/smoke")
+endif()

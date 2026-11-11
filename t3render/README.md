@@ -69,6 +69,10 @@ The validator checks the JSONL framing and summarizes draw calls. A valid
 trace is not evidence that every D3D8 operation was captured, that a frame
 can be replayed, or that its pixels match the original.
 
+An [offline Render IR prototype](tools/README_render_ir.md) translates these
+snapshots into API-independent camera, mesh, material, light and draw records.
+It preserves missing data and legacy state; it is not yet the runtime IR.
+
 ## Scope and next steps
 
 For each observed draw, the snapshot includes its parameters, available

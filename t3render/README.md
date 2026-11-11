@@ -31,6 +31,8 @@ Add `-DT3RENDER_BUILD_SMOKE_TEST=ON` at configuration time to build a
 standalone D3D8 program in the `smoke/` subdirectory. It draws four synthetic
 triangles, checks one pixel of each and prints a backbuffer hash. Compare that
 hash with and without the proxy only on the same adapter, format and runtime.
+`-DT3RENDER_BUILD_D3D8_UP_FIXTURE=ON` instead adds a single-draw synthetic
+fixture in `d3d8_up_fixture/`, with optional PPM readback for replay testing.
 
 Add `-DT3RENDER_BUILD_D3D12_PROBE=ON` to build `t3render_d3d12_probe.exe`, a
 separate offscreen D3D12 device test. It creates a queue, pipeline and render

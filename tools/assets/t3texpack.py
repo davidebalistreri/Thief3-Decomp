@@ -549,7 +549,9 @@ def cmd_list(game: Optional[Path], only: Optional[str], as_json: bool, report: R
             if game is None:
                 raise TexPackError("game folder not found: pass --game-dir or set T3_GAME_DIR, or give a .ibt file")
             p = resolve_map(game, only, ".ibt")
-        mine = [b for b in bundles if b.path.resolve() == p.resolve()]
+        # resolve() can retain the caller's spelling on a case-insensitive
+        # filesystem; compare the actual files, not their path strings.
+        mine = [b for b in bundles if b.path.samefile(p)]
         if mine:
             names_in = {t.name.lower() for t in mine[0].textures}
         else:

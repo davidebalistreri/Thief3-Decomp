@@ -127,6 +127,14 @@ Do not replace an existing wrapper without first understanding that chain.
 The per-object vtable interception is experimental: a distinct COM alias can
 bypass it and, if released last, leave an entry allocated until process exit.
 
+`src/com_identity_registry.hpp` is an independent identity-table prototype for
+a future COM facade. Its weak entries, generation checks and strong temporary
+pins are host-tested; it is not connected to the proxy. A pin is not a COM
+reference. The future facade must coordinate native lifetime and an atomic,
+non-resurrecting COM `TryAddRef` with final release before retiring an entry.
+The table alone does not close resource/device alias paths or make buffer
+capture safe for TDS.
+
 ## Capture and inspect
 
 Set `T3RENDER_CAPTURE_PATH` to a new absolute Windows path and select exactly

@@ -5,6 +5,7 @@
 #include "d3d12_probe_pixels.hpp"
 #include "d3d8_buffer_readback.hpp"
 #include "d3d8_buffer_snapshot.hpp"
+#include "d3d8_buffer_wrappers.hpp"
 
 #include <windows.h>
 #include <d3d8.h>
@@ -162,7 +163,7 @@ bool ReadBackbuffer(IDirect3DDevice8* device, std::vector<std::uint8_t>& rgba, D
 }
 
 bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buffer_readback,
-            const wchar_t* buffer_snapshot_path) {
+            const wchar_t* buffer_snapshot_path, bool wrapped_buffers) {
     const bool camera = fixture == Fixture::Camera;
     const bool buffered = fixture == Fixture::Buffered;
     ComPtr<IDirect3D8> d3d;
@@ -222,15 +223,30 @@ bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buf
     // first two index slots and the first vertex remain unwritten.
     ComPtr<IDirect3DVertexBuffer8> vertex_buffer;
     ComPtr<IDirect3DIndexBuffer8> index_buffer;
+    t3render::harness::VertexBufferWrapper* vertex_wrapper = nullptr;
+    t3render::harness::IndexBufferWrapper* index_wrapper = nullptr;
     std::array<std::uint8_t, d3d8_fixture::kVertexRangeBytes> vertex_snapshot{};
     std::array<std::uint8_t, d3d8_fixture::kIndexRangeBytes> index_snapshot{};
     if (buffered) {
         const Vertex buffered_vertices[] = {{}, vertices[0], vertices[0], vertices[1], vertices[2]};
         const std::uint16_t indices[] = {1, 2, 3};
-        if (!Check(device->CreateVertexBuffer(sizeof(buffered_vertices), 0, kFvfScreen, D3DPOOL_MANAGED,
-                                               vertex_buffer.put()), "CreateVertexBuffer") ||
-            !Check(device->CreateIndexBuffer(5 * sizeof(std::uint16_t), 0, D3DFMT_INDEX16, D3DPOOL_MANAGED,
+        const DWORD usage = wrapped_buffers ? D3DUSAGE_WRITEONLY : 0;
+        if (!Check(device->CreateVertexBuffer(sizeof(buffered_vertices), usage, kFvfScreen, D3DPOOL_MANAGED,
+                                               vertex_buffer.put()), "CreateVertexBuffer")) return false;
+        if (wrapped_buffers) {
+            vertex_wrapper = t3render::harness::VertexBufferWrapper::Adopt(
+                vertex_buffer.value, sizeof(buffered_vertices), ReadMappedBuffer, nullptr);
+            if (!vertex_wrapper) { std::fprintf(stderr, "Cannot create vertex wrapper\n"); return false; }
+            vertex_buffer.value = vertex_wrapper;
+        }
+        if (!Check(device->CreateIndexBuffer(5 * sizeof(std::uint16_t), usage, D3DFMT_INDEX16, D3DPOOL_MANAGED,
                                               index_buffer.put()), "CreateIndexBuffer")) return false;
+        if (wrapped_buffers) {
+            index_wrapper = t3render::harness::IndexBufferWrapper::Adopt(
+                index_buffer.value, 5 * sizeof(std::uint16_t), ReadMappedBuffer, nullptr);
+            if (!index_wrapper) { std::fprintf(stderr, "Cannot create index wrapper\n"); return false; }
+            index_buffer.value = index_wrapper;
+        }
         BYTE* mapped = nullptr;
         if (!Check(vertex_buffer->Lock(sizeof(Vertex), 4 * sizeof(Vertex), &mapped, 0), "VertexBuffer::Lock")) return false;
         if (!mapped) { vertex_buffer->Unlock(); std::fprintf(stderr, "VertexBuffer::Lock returned null\n"); return false; }
@@ -241,6 +257,19 @@ bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buf
         if (!mapped) { index_buffer->Unlock(); std::fprintf(stderr, "IndexBuffer::Lock returned null\n"); return false; }
         std::memcpy(mapped, indices, sizeof(indices));
         if (!Check(index_buffer->Unlock(), "IndexBuffer::Unlock")) return false;
+        if (wrapped_buffers) {
+            if (vertex_wrapper->ReadObserved(sizeof(Vertex), vertex_snapshot.data(), vertex_snapshot.size()) !=
+                    t3render::ir::RegistryResult::Ok ||
+                index_wrapper->ReadObserved(2 * sizeof(std::uint16_t), index_snapshot.data(), index_snapshot.size()) !=
+                    t3render::ir::RegistryResult::Ok ||
+                std::memcmp(vertex_snapshot.data(), buffered_vertices + 1, vertex_snapshot.size()) != 0 ||
+                std::memcmp(index_snapshot.data(), indices, index_snapshot.size()) != 0) {
+                std::fprintf(stderr, "Wrapper did not observe both application writes\n");
+                return false;
+            }
+            std::printf("wrapped_buffer_writes vertex_bytes=%zu index_bytes=%zu result=PASS\n",
+                        vertex_snapshot.size(), index_snapshot.size());
+        }
         if (verify_buffer_readback) {
             const bool vertex_ok = d3d8_fixture::VerifyBufferRange(vertex_buffer.value, sizeof(Vertex),
                 4 * sizeof(Vertex), buffered_vertices + 1, D3DLOCK_READONLY, "VertexBuffer", ReadMappedBuffer, nullptr,
@@ -252,8 +281,25 @@ bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buf
             std::printf("buffer_readback vertex_offset=%zu vertex_bytes=%zu index_offset=%zu index_bytes=%zu result=PASS\n",
                         sizeof(Vertex), 4 * sizeof(Vertex), 2 * sizeof(std::uint16_t), sizeof(indices));
         }
-        if (!Check(device->SetStreamSource(0, vertex_buffer.value, sizeof(Vertex)), "SetStreamSource") ||
-            !Check(device->SetIndices(index_buffer.value, kBufferedBaseVertex), "SetIndices")) return false;
+        IDirect3DVertexBuffer8* real_vertex = wrapped_buffers ? vertex_wrapper->Real() : vertex_buffer.value;
+        IDirect3DIndexBuffer8* real_index = wrapped_buffers ? index_wrapper->Real() : index_buffer.value;
+        if (!Check(device->SetStreamSource(0, real_vertex, sizeof(Vertex)), "SetStreamSource") ||
+            !Check(device->SetIndices(real_index, kBufferedBaseVertex), "SetIndices")) return false;
+        if (wrapped_buffers) {
+            ComPtr<IDirect3DVertexBuffer8> observed_vertex;
+            ComPtr<IDirect3DIndexBuffer8> observed_index;
+            UINT observed_stride = 0, observed_base = 0;
+            bool vertex_matched = false, index_matched = false;
+            if (!Check(t3render::harness::GetWrappedStream(device.value, 0, vertex_wrapper, observed_vertex.put(),
+                                                            &observed_stride, vertex_matched), "GetWrappedStream") ||
+                !Check(t3render::harness::GetWrappedIndices(device.value, index_wrapper, observed_index.put(),
+                                                             &observed_base, index_matched), "GetWrappedIndices") ||
+                !vertex_matched || !index_matched || observed_vertex.value != vertex_wrapper ||
+                observed_index.value != index_wrapper || observed_stride != sizeof(Vertex) ||
+                observed_base != kBufferedBaseVertex) {
+                std::fprintf(stderr, "Wrapper getter identity mismatch\n"); return false;
+            }
+        }
     }
     if (!Check(device->SetVertexShader(fvf), "SetVertexShader(FVF)") ||
         !Check(device->SetPixelShader(0), "SetPixelShader") ||
@@ -296,6 +342,28 @@ bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buf
         std::fprintf(stderr, "Triangle readback did not match expected interior/background pixels\n");
         return false;
     }
+    if (wrapped_buffers) {
+        // The real device retains its bindings after the final application
+        // wrapper references are released. A getter without a live wrapper
+        // returns the real reference explicitly as untracked, not a new identity.
+        auto* real_vertex = vertex_wrapper->Real();
+        auto* real_index = index_wrapper->Real();
+        vertex_buffer.value->Release(); vertex_buffer.value = nullptr; vertex_wrapper = nullptr;
+        index_buffer.value->Release(); index_buffer.value = nullptr; index_wrapper = nullptr;
+        ComPtr<IDirect3DVertexBuffer8> retained_vertex;
+        ComPtr<IDirect3DIndexBuffer8> retained_index;
+        UINT observed_stride = 0, observed_base = 0;
+        bool vertex_matched = true, index_matched = true;
+        if (!Check(t3render::harness::GetWrappedStream(device.value, 0, nullptr, retained_vertex.put(),
+                                                       &observed_stride, vertex_matched), "GetStreamAfterRelease") ||
+            !Check(t3render::harness::GetWrappedIndices(device.value, nullptr, retained_index.put(),
+                                                        &observed_base, index_matched), "GetIndicesAfterRelease") ||
+            vertex_matched || index_matched || retained_vertex.value != real_vertex || retained_index.value != real_index ||
+            observed_stride != sizeof(Vertex) || observed_base != kBufferedBaseVertex) {
+            std::fprintf(stderr, "Device binding did not retain the real buffers\n"); return false;
+        }
+        std::printf("wrapped_buffer_lifetime result=PASS\n");
+    }
     if (!Check(device->Present(nullptr, nullptr, nullptr, nullptr), "Present")) return false;
     if (output && !WritePpm(output, rgba)) return false;
     if (buffer_snapshot_path) {
@@ -318,15 +386,17 @@ int wmain(int argc, wchar_t** argv) {
     const wchar_t* buffer_snapshot_path = nullptr;
     Fixture fixture = Fixture::Screen;
     bool verify_buffer_readback = false;
+    bool wrapped_buffers = false;
     for (int i = 1; i < argc; ++i) {
         if (!std::wcscmp(argv[i], L"--camera") && fixture == Fixture::Screen) fixture = Fixture::Camera;
         else if (!std::wcscmp(argv[i], L"--buffered") && fixture == Fixture::Screen) fixture = Fixture::Buffered;
         else if (!std::wcscmp(argv[i], L"--verify-buffer-readback") && !verify_buffer_readback) verify_buffer_readback = true;
+        else if (!std::wcscmp(argv[i], L"--wrapped-buffers") && !wrapped_buffers) wrapped_buffers = true;
         else if (!std::wcscmp(argv[i], L"--buffer-snapshot") && !buffer_snapshot_path && i + 1 < argc &&
                  argv[i + 1][0] && std::wcsncmp(argv[i + 1], L"--", 2) != 0) buffer_snapshot_path = argv[++i];
         else if (!std::wcscmp(argv[i], L"--output") && !output && i + 1 < argc && argv[i + 1][0]) output = argv[++i];
         else {
-            std::fwprintf(stderr, L"usage: d3d8_up_fixture [--camera | --buffered [--verify-buffer-readback [--buffer-snapshot new-file]]] [--output new-image.ppm]\n");
+            std::fwprintf(stderr, L"usage: d3d8_up_fixture [--camera | --buffered [--wrapped-buffers | --verify-buffer-readback] [--buffer-snapshot new-file]] [--output new-image.ppm]\n");
             return 2;
         }
     }
@@ -334,8 +404,12 @@ int wmain(int argc, wchar_t** argv) {
         std::fprintf(stderr, "--verify-buffer-readback requires --buffered\n");
         return 2;
     }
-    if (buffer_snapshot_path && !verify_buffer_readback) {
-        std::fprintf(stderr, "--buffer-snapshot requires --buffered --verify-buffer-readback\n");
+    if (buffer_snapshot_path && !verify_buffer_readback && !wrapped_buffers) {
+        std::fprintf(stderr, "--buffer-snapshot requires --buffered and a readback or wrapper mode\n");
+        return 2;
+    }
+    if (wrapped_buffers && (fixture != Fixture::Buffered || verify_buffer_readback)) {
+        std::fprintf(stderr, "--wrapped-buffers requires --buffered and uses WRITEONLY buffers; READONLY verification is unavailable\n");
         return 2;
     }
     const HINSTANCE instance = GetModuleHandleW(nullptr);
@@ -364,7 +438,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     ShowWindow(window, SW_SHOWNOACTIVATE);
     UpdateWindow(window);
-    const bool ok = Render(window, output, fixture, verify_buffer_readback, buffer_snapshot_path);
+    const bool ok = Render(window, output, fixture, verify_buffer_readback, buffer_snapshot_path, wrapped_buffers);
     DestroyWindow(window);
     UnregisterClassW(name, instance);
     return ok ? 0 : 1;

@@ -42,6 +42,34 @@ or other buffer types. Add `--buffer-snapshot new-file` to serialize the two
 verified ranges in the fixture-specific `T3R_BUFFER_V1` ASCII format. Existing
 files are never replaced; these bytes are fixture-owned readback, not proxy trace.
 
+The separate `--buffered --wrapped-buffers` fixture creates MANAGED,
+WRITEONLY vertex and index buffers, wraps their COM interfaces without changing
+the runtime objects, and observes the application's own Lock/Unlock writes.
+The fixture explicitly unwraps resources before passing them to the real
+device. An optional `--buffer-snapshot new-file` serializes the observed
+application writes without READONLY locks on the buffers. The fixture also checks
+getter identity while wrappers are alive and that the device retains its raw
+bindings after the last wrapper reference is released.
+
+This harness is only for controlled, serial fixture calls; it is not connected
+to the proxy or TDS. Its `GetDevice` exposes the native device, unknown IIDs can
+expose raw resource aliases, and only the individual wrapper shadow is
+invalidated on such escape. Adopting the same real object twice creates
+different wrapper identities; the fixture adopts each resource exactly once.
+The getter fallback after final wrapper release returns the raw resource as
+untracked. State blocks, global alias invalidation, complete COM identity and
+device interception remain unimplemented. Each wrapper has its own 512 KiB
+shadow/staging budget and a 256 KiB per-lock snapshot limit. CPU writes racing
+the snapshot may differ from what the driver consumes; no complete frame or
+gameplay parity is implied.
+
+This direction matters because T3SDK reconstructs WRITEONLY buffer creation
+in [`VBPoolStaticPermanent_4.cpp`](../src/Game/VBPoolStaticPermanent_4.cpp#L33)
+and [`Unsorted_10942D20.cpp`](../src/Game/Unsorted_10942D20.cpp#L136), while
+[`cD3DDynamicVertexBuffer.cpp`](../src/Game/cD3DDynamicVertexBuffer.cpp) uses
+DISCARD/NOOVERWRITE lock flags. The isolated fixture does not establish coverage
+for those game paths.
+
 Add `-DT3RENDER_BUILD_D3D12_PROBE=ON` to build `t3render_d3d12_probe.exe`, a
 separate offscreen D3D12 device test. It creates a queue, pipeline and render
 target, draws a synthetic triangle, waits on a fence and validates readback.

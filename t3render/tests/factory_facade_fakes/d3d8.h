@@ -1,0 +1,30 @@
+#pragma once
+
+#include <windows.h>
+
+inline constexpr GUID IID_IDirect3D8{2, 0, 0, {}};
+enum D3DDEVTYPE : std::uint32_t { DEVICE = 1 };
+enum D3DFORMAT : std::uint32_t { FORMAT1 = 1, FORMAT2 = 2, FORMAT3 = 3 };
+enum D3DRESOURCETYPE : std::uint32_t { RESOURCE = 1 };
+enum D3DMULTISAMPLE_TYPE : std::uint32_t { MULTISAMPLE = 2 };
+struct D3DADAPTER_IDENTIFIER8 { UINT value; };
+struct D3DDISPLAYMODE { UINT value; };
+struct D3DCAPS8 { UINT value; };
+struct D3DPRESENT_PARAMETERS { UINT value; };
+struct IDirect3DDevice8;
+
+struct IDirect3D8 : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE RegisterSoftwareDevice(void*) = 0;
+    virtual UINT STDMETHODCALLTYPE GetAdapterCount() = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetAdapterIdentifier(UINT, DWORD, D3DADAPTER_IDENTIFIER8*) = 0;
+    virtual UINT STDMETHODCALLTYPE GetAdapterModeCount(UINT) = 0;
+    virtual HRESULT STDMETHODCALLTYPE EnumAdapterModes(UINT, UINT, D3DDISPLAYMODE*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetAdapterDisplayMode(UINT, D3DDISPLAYMODE*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE CheckDeviceType(UINT, D3DDEVTYPE, D3DFORMAT, D3DFORMAT, BOOL) = 0;
+    virtual HRESULT STDMETHODCALLTYPE CheckDeviceFormat(UINT, D3DDEVTYPE, D3DFORMAT, DWORD, D3DRESOURCETYPE, D3DFORMAT) = 0;
+    virtual HRESULT STDMETHODCALLTYPE CheckDeviceMultiSampleType(UINT, D3DDEVTYPE, D3DFORMAT, BOOL, D3DMULTISAMPLE_TYPE) = 0;
+    virtual HRESULT STDMETHODCALLTYPE CheckDepthStencilMatch(UINT, D3DDEVTYPE, D3DFORMAT, D3DFORMAT, D3DFORMAT) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetDeviceCaps(UINT, D3DDEVTYPE, D3DCAPS8*) = 0;
+    virtual HMONITOR STDMETHODCALLTYPE GetAdapterMonitor(UINT) = 0;
+    virtual HRESULT STDMETHODCALLTYPE CreateDevice(UINT, D3DDEVTYPE, HWND, DWORD, D3DPRESENT_PARAMETERS*, IDirect3DDevice8**) = 0;
+};

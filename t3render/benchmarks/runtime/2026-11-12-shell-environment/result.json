@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "test": "synthetic_shellexecute_environment",
+  "date": "2026-11-12",
+  "status": "PASS",
+  "host": {
+    "os": "macOS 27.2.1",
+    "architecture": "arm64",
+    "gpu": "Apple M5 Pro"
+  },
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86"
+  },
+  "source_sha256": {
+    "t3render/tests/shell_environment_fixture.cpp": "29637b9d86d16ee1f50c0403ce5cf97cd1005ebe1caaa6686006dbe026120769",
+    "t3render/tools/run_shell_environment_probe.py": "b610bc0228095dc18174babd1ec3db6bfe31a5d0f25dd1d8a9ab20cefd7523ae"
+  },
+  "fixture_sha256": "cd4f6b4d5bdbe62e86c8ffeeb106185a69a8d636aad3aff65c135543ce3b4304",
+  "result": {
+    "process_count": 3,
+    "shell_execute_ex_a_calls": 2,
+    "snapshots_match": true,
+    "snapshot_sha256": "791b3e46228eefabe30a6f741c1e9d2971fadf41df58c1f86c2e4412033fd84d",
+    "variables": [
+      "T3RENDER_SHELL_MARKER",
+      "T3RENDER_CAPTURE_PATH",
+      "T3RENDER_CAPTURE_KEY",
+      "T3RENDER_CAPTURE_BUFFERS"
+    ],
+    "absent_variable": "T3RENDER_CAPTURE_FRAME",
+    "capture_file_created": false
+  },
+  "limitations": [
+    "Two ShellExecuteExA calls between synthetic x86 programs on this runtime only.",
+    "Steam, Ion Launcher, TDS, and a level transition are not tested.",
+    "The fixture never loads the capture proxy; no game frame is captured."
+  ]
+}

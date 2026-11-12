@@ -83,3 +83,22 @@ The IR can help design and test a future runtime representation, but the
 capture still lacks complete resource contents, persistent asset identity,
 pipeline state and execution data required for a compatibility renderer. The
 schema does not imply those missing pieces exist.
+
+## Observed geometry candidates
+
+`python3 -B t3render/tools/trace_geometry_candidates.py capture.jsonl -o /tmp/geometry-ir.json`
+enriches the validated IR with a `geometry_candidate` for each draw. It accepts
+stable buffered or immediate observations with a successful draw and Present,
+no recorded reset or concurrent operations, and a bounded fixed-function FVF
+layout. It describes XYZ or XYZRHW positions, normals, point size, colors and
+up to eight texture coordinate sets. Blended vertices and unsupported FVF bits
+remain unavailable. Indexed draws are rebased by the declared minimum vertex
+onto the captured vertex window, including nonzero base vertices. It validates
+the index range, stride and finite float attributes; missing or inconsistent
+observations remain unavailable with a reason.
+
+The numeric vertex-shader value may also be a programmable shader handle, so
+the layout is explicitly a candidate. The output retains the original state,
+draw order, source hash and `replayable: false`; UP data can change after the
+snapshot, unobserved device operations and GPU writes remain possible, and no
+texture contents or shader code are inferred. It is not a frame replay.

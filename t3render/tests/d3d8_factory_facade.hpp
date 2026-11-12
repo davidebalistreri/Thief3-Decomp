@@ -7,7 +7,6 @@
 #include <d3d8.h>
 
 #include <atomic>
-#include <limits>
 #include <new>
 
 namespace t3render::fixture {
@@ -37,7 +36,7 @@ public:
         ULONG value = refs_.load(std::memory_order_relaxed);
         for (;;) {
             // Saturation intentionally leaks instead of wrapping to zero.
-            if (!value || value == std::numeric_limits<ULONG>::max()) return value;
+            if (!value || value == ~ULONG{0}) return value;
             if (refs_.compare_exchange_weak(value, value + 1, std::memory_order_acquire,
                                             std::memory_order_relaxed)) return value + 1;
         }
@@ -45,7 +44,7 @@ public:
     ULONG STDMETHODCALLTYPE Release() override {
         ULONG value = refs_.load(std::memory_order_relaxed);
         for (;;) {
-            if (!value || value == std::numeric_limits<ULONG>::max()) return value;
+            if (!value || value == ~ULONG{0}) return value;
             if (refs_.compare_exchange_weak(value, value - 1, std::memory_order_acq_rel,
                                             std::memory_order_relaxed)) break;
         }

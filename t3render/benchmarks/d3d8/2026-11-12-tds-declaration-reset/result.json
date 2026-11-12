@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "test": "tds_bedroom_declaration_unavailability",
+  "date": "2026-11-12",
+  "status": "PARTIAL",
+  "environment": {
+    "os": "macOS 27.2.1 (26B131)",
+    "gpu": "Apple M5 Pro",
+    "runtime": "Highball CrossOver 26.3 r30 / Wine x86"
+  },
+  "scenario": {
+    "map": "SouthQuarter1_int1.gmp",
+    "save_slot": "Garrett’s Building",
+    "camera": "User oriented toward the bed; no same-frame screenshot or exact camera transform.",
+    "captured_presentation": {
+      "width": 1168,
+      "height": 755,
+      "format": 21,
+      "count": 1,
+      "multisample": 0,
+      "swap_effect": 1,
+      "windowed": false,
+      "auto_depth_stencil": true,
+      "depth_stencil_format": 75,
+      "flags": 0,
+      "refresh_hz": 0,
+      "present_interval": 1
+    },
+    "requested_frames": 1,
+    "declaration_observation": true,
+    "buffer_observation": false
+  },
+  "proxy": {
+    "sha256": "18a8c1bb7ef78ccec1e297e7c496d45fba9624d196dc70f9fbd9ce488b2247bc",
+    "source_commit": "0e9c4f5",
+    "temporary_install_removed": true
+  },
+  "result": {
+    "frame": 2240,
+    "draw_count": 437,
+    "calls": {
+      "DrawIndexedPrimitive": 428,
+      "DrawPrimitiveUP": 9
+    },
+    "clear_count": 11,
+    "present_hresult": 0,
+    "concurrent_operations": false,
+    "declaration_status": {
+      "unavailable": 415,
+      "unknown": 22
+    },
+    "unavailable_reasons": [
+      {
+        "reason": "reset_attempt",
+        "scan_status": "complete",
+        "draws": 415
+      }
+    ],
+    "stable_results": 437,
+    "stable_candidates": 0,
+    "trace_sha256": "1e4b0650d8de3fe1b3e0235264573f0f7838c0e9ee9631910c991d9bf1cbe9af",
+    "partial_ir_sha256": "63100117b325f571662ad3c2b04b135bd140b1a37a9d9225dca8e3449a2332ed",
+    "wine_log_sha256": "daac9c481eb0948851f4ec6d916b8f1058fa208e52f0337f47538245236e1891"
+  },
+  "limitations": [
+    "Reset was attempted before the captured frame; its HRESULT and shader survival were not recorded.",
+    "Complete scan describes token framing only, not the values consumed by the GPU.",
+    "The stable flag covers observed overlap, not declaration availability or untracked device aliases.",
+    "Buffer contents, texture bytes, shader programs and constants were not captured.",
+    "No matched screenshot, replay, native Windows test, or proof of gameplay/stealth parity."
+  ]
+}

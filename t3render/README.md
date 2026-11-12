@@ -204,6 +204,9 @@ unsafe observations contain no declaration words. On Highball, a real TDS
 bedroom capture produced 285 unavailable and 16 unknown observations, with no
 usable candidate; this version did not record why the data was unavailable.
 See the [result](benchmarks/d3d8/2026-11-12-tds-bedroom-declarations/result.json).
+In a follow-up [capture](benchmarks/d3d8/2026-11-12-tds-declaration-reset/result.json),
+415 unavailable observations had a complete token scan and were invalidated by
+an earlier Reset attempt. Its HRESULT and shader survival were not recorded.
 This does not validate unobserved aliases or gameplay. The observer does not
 capture shader bytecode or constants and cannot make the frame replayable.
 

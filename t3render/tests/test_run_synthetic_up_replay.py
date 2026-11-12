@@ -23,8 +23,7 @@ print(json.dumps({{"kind": kind, "cwd": os.getcwd(), "args": args,
  "prefix": os.environ.get("WINEPREFIX"), "server": os.environ.get("WINESERVER"),
  "overrides": os.environ.get("WINEDLLOVERRIDES"), "dllpath": os.environ.get("WINEDLLPATH_PREPEND"),
  "inherited": [os.environ.get(x) for x in ("WINEDLLPATH", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH")],
- "capture_key": os.environ.get("T3RENDER_CAPTURE_KEY"), "frame": os.environ.get("T3RENDER_CAPTURE_FRAME"),
- "buffer_tracking": os.environ.get("T3RENDER_CAPTURE_BUFFERS")}}), flush=True)
+ "capture_key": os.environ.get("T3RENDER_CAPTURE_KEY"), "frame": os.environ.get("T3RENDER_CAPTURE_FRAME")}}), flush=True)
 if os.environ.get("FAKE_TIMEOUT") == kind:
     time.sleep(30)
 if os.environ.get("FAKE_FAIL") == kind:
@@ -104,15 +103,14 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
         self.output = self.root / "output with spaces"
 
     def run_runner(self, *, output=None, extra_env=None, timeout="5", engine=None, bottle=None, build=None,
-                   camera=False, buffered=False, buffer_tracking=False):
+                   camera=False, buffered=False):
         env = os.environ.copy()
         env.update({"FAKE_TRACE": str(self.trace), "FAKE_TRACE_CAMERA": str(self.camera_trace),
                     "FAKE_TRACE_BUFFERED": str(self.buffered_trace),
                     "WINEDLLPATH": "poison/dxmt",
                     "WINEDLLPATH_PREPEND": "poison/dxmt", "DYLD_LIBRARY_PATH": "poison",
                     "DYLD_FRAMEWORK_PATH": "poison", "T3RENDER_CAPTURE_KEY": "F11",
-                    "T3RENDER_CAPTURE_FRAME": "12", "T3RENDER_CAPTURE_PATH": "poison",
-                    "T3RENDER_CAPTURE_BUFFERS": "poison"})
+                    "T3RENDER_CAPTURE_FRAME": "12", "T3RENDER_CAPTURE_PATH": "poison"})
         env.update(extra_env or {})
         args = [sys.executable, "-B", str(RUNNER), "--engine", str(engine or self.engine),
                                "--bottle", str(bottle or self.bottle), "--build-dir", str(build or self.build),
@@ -121,8 +119,6 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
             args.append("--camera")
         if buffered:
             args.append("--buffered")
-        if buffer_tracking:
-            args.append("--buffer-tracking")
         return subprocess.run(args, env=env, text=True, capture_output=True, timeout=20)
 
     def manifest(self):
@@ -153,7 +149,6 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
             self.assertEqual(log["inherited"], [None, None, None])
             self.assertNotIn("dxmt", log["dllpath"].lower())
             self.assertIsNone(log["capture_key"])
-            self.assertIsNone(log["buffer_tracking"])
             self.assertEqual(log["frame"], "0" if name == "capture" else None)
             self.assertTrue(log["overrides"].startswith("d3d8=n,b;" if name == "capture" else "d3d8=b;"))
             self.assertTrue(log["args"][-1].startswith("Z:\\"))
@@ -185,7 +180,6 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
         self.assertEqual(manifest["status"], "PASS")
         self.assertEqual(manifest["fixture_mode"], "buffered")
         self.assertEqual(manifest["dx12_replay"], "not_run")
-        self.assertEqual(manifest["buffer_tracking"], "disabled")
         self.assertEqual(manifest["stages"], ["baseline", "capture", "trace_validation", "compare"])
         self.assertEqual(manifest["sha256"]["baseline_ppm"], manifest["sha256"]["captured_ppm"])
         self.assertNotIn("replay_exe", manifest["sha256"])
@@ -194,25 +188,13 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
         self.assertTrue(any("buffer bytes and DX12 replay" in line for line in manifest["limitations"]))
         for name in ("baseline", "capture"):
             self.assertIn("--buffered", self.log(name)["args"])
-            self.assertIsNone(self.log(name)["buffer_tracking"])
         for name in ("replay.log", "replay.ppm", "convert.log", "packet.txt"):
             self.assertFalse((self.output / name).exists())
 
-    def test_buffered_tracking_is_opt_in_and_capture_only(self):
-        result = self.run_runner(buffered=True, buffer_tracking=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.manifest()["buffer_tracking"], "requested")
-        self.assertIsNone(self.log("baseline")["buffer_tracking"])
-        self.assertEqual(self.log("capture")["buffer_tracking"], "1")
-        self.assertEqual(self.manifest()["dx12_replay"], "not_run")
-
     def test_mode_options_are_exclusive(self):
-        for kwargs in ({"camera": True, "buffered": True}, {"buffer_tracking": True},
-                       {"camera": True, "buffer_tracking": True}):
-            with self.subTest(kwargs=kwargs):
-                result = self.run_runner(**kwargs)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertFalse(self.output.exists())
+        result = self.run_runner(camera=True, buffered=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.output.exists())
 
     def test_buffered_trace_malformed_or_wrong_bindings_fail(self):
         def remove_stream(draw): draw.pop("streams")

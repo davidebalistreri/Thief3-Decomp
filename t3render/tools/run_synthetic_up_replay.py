@@ -181,9 +181,9 @@ def validate_buffered_trace(path):
         raise RunError(f"invalid buffered fixture trace: {exc}") from exc
 
 
-def execute(engine, bottle, build, output, timeout, camera=False, buffered=False, buffer_tracking=False):
-    if camera and buffered or buffer_tracking and not buffered:
-        raise RunError("camera and buffered are exclusive; buffer tracking requires buffered mode")
+def execute(engine, bottle, build, output, timeout, camera=False, buffered=False):
+    if camera and buffered:
+        raise RunError("camera and buffered are exclusive")
     engine, bottle, build, output = map(valid_path, (engine, bottle, build, output))
     wine = engine / "engine/bin/wine"
     wineserver = engine / "engine/bin/wineserver"
@@ -224,7 +224,6 @@ def execute(engine, bottle, build, output, timeout, camera=False, buffered=False
     result = {"schema": 1, "test": "synthetic_d3d8_indexed_buffer_capture" if buffered else "synthetic_d3d8_up_dx12_replay",
               "status": "FAIL", "dx12_replay": "not_run" if buffered else "performed_on_success",
               "fixture_mode": "buffered" if buffered else ("camera" if camera else "screen_space"),
-              "buffer_tracking": "requested" if buffer_tracking else "disabled",
               "engine": str(engine), "bottle": str(bottle), "build_dir": str(build),
               "limitations": [mode_limit, *LIMITATIONS], "stages": [], "sha256": {}}
     stage = "setup"
@@ -267,8 +266,6 @@ def execute(engine, bottle, build, output, timeout, camera=False, buffered=False
         capture_env = env.copy()
         capture_env.update({"WINEDLLOVERRIDES": "d3d8=n,b;nvapi64,nvngx=n,b;winemenubuilder.exe=d",
                             "T3RENDER_CAPTURE_FRAME": "0", "T3RENDER_CAPTURE_PATH": windows_path(trace)})
-        if buffer_tracking:
-            capture_env["T3RENDER_CAPTURE_BUFFERS"] = "1"
         stage = "capture"
         run_stage(stage, [wine, captured_exe, *fixture_args, "--output", windows_path(captured_ppm)], captured,
                   capture_env, output / "capture.log", timeout)
@@ -326,14 +323,10 @@ def main(argv=None):
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--camera", action="store_true", help="replay the synthetic XYZ camera fixture")
     modes.add_argument("--buffered", action="store_true", help="compare indexed D3D8 draws; no DX12 replay")
-    parser.add_argument("--buffer-tracking", action="store_true",
-                        help="request experimental buffer tracking in the capture process (requires --buffered)")
     args = parser.parse_args(argv)
-    if args.buffer_tracking and not args.buffered:
-        parser.error("--buffer-tracking requires --buffered")
     try:
         result = execute(args.engine, args.bottle, args.build_dir, args.output_dir, args.timeout,
-                         args.camera, args.buffered, args.buffer_tracking)
+                         args.camera, args.buffered)
     except RunError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

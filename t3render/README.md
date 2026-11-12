@@ -167,14 +167,20 @@ backend and testing DX12 parity. Keep the modern lighting pipeline independent
 of T3's stealth model.
 
 For buffered geometry, tracking must start when each resource is created, not
-when a frame trigger is pressed. A future D3D8 adapter should invalidate a
-writable lock's range immediately, invalidate the entire buffer on DISCARD,
-copy through fault-safe staging before Unlock, and mark bytes known only after
-a successful Unlock. Unknown aliases, GPU writes, ambiguous locks, resets and
-untracked resources must remain unknown. Resource generations, synchronization
-and a process-wide memory budget are still required in the adapter. The isolated
-`BufferRegistry` models generations and a shared budget, but does not itself
-instrument COM objects or enforce process-wide synchronization.
+when a frame trigger is pressed. An experimental per-object VB/IB vtable swap
+was rejected: on the synthetic buffered fixture Highball/Wine asserted that the
+vertex buffer still had its original runtime vtable. The hooks were removed;
+see the [failure record](benchmarks/d3d8/2026-11-12-buffer-tracking-failure/result.json).
+
+One next approach is complete COM resource wrappers with explicit unwrapping at
+every device API boundary that accepts a resource, while preserving identity,
+reference counts and aliasing. It needs separate design and runtime validation;
+the current proxy does not implement it. A selective READONLY lock on a managed,
+non-write-only synthetic buffer could test readback without replacing a vtable,
+but it adds driver calls, can synchronize or fail, and cannot establish passive
+capture or support for arbitrary TDS buffers. Unknown aliases, GPU writes,
+ambiguous locks and resets must remain unknown. `BufferRegistry` models the
+necessary generation and budget rules but is not connected to COM objects.
 
 The existing Godot bedroom benchmark is useful visual reference; its
 “Original” images are a Godot export, not captures from Legacy D3D8. A

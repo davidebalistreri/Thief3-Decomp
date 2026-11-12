@@ -96,11 +96,9 @@ For the indexed buffer capture test, use a new output directory and pass
 observed draw parameters; no replay executable is required in this mode.
 `--camera` and `--buffered` are mutually exclusive.
 
-With `--buffered`, adding `--buffer-tracking` sets
-`T3RENDER_CAPTURE_BUFFERS=1` only for the proxy capture process. The manifest
-records this as a tracking request; the test checks image parity and observed
-bindings, not the correctness of buffer bytes, which are not serialized in the
-trace. Neither option establishes that an older proxy implements tracking.
+An experimental buffer-vtable replacement failed a Wine assertion and was
+discarded. The [failure manifest](../benchmarks/d3d8/2026-11-12-buffer-tracking-failure/result.json)
+records the isolated test and its limits; it did not modify or launch TDS.
 
 ## Replay the saved packet on Windows
 

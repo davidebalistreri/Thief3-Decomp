@@ -33,6 +33,11 @@ triangles, checks one pixel of each and prints a backbuffer hash. Compare that
 hash with and without the proxy only on the same adapter, format and runtime.
 `-DT3RENDER_BUILD_D3D8_UP_FIXTURE=ON` instead adds a single-draw synthetic
 fixture in `d3d8_up_fixture/`, with optional PPM readback for replay testing.
+The fixture's explicit `--buffered --verify-buffer-readback` mode also locks
+its managed, non-write-only VB/IB with `D3DLOCK_READONLY` and compares only the
+written ranges using bounded `ReadProcessMemory` snapshots. It adds driver calls
+that may synchronize or stall; it is not passive capture and does not test TDS
+or other buffer types.
 
 Add `-DT3RENDER_BUILD_D3D12_PROBE=ON` to build `t3render_d3d12_probe.exe`, a
 separate offscreen D3D12 device test. It creates a queue, pipeline and render
@@ -175,10 +180,9 @@ see the [failure record](benchmarks/d3d8/2026-11-12-buffer-tracking-failure/resu
 One next approach is complete COM resource wrappers with explicit unwrapping at
 every device API boundary that accepts a resource, while preserving identity,
 reference counts and aliasing. It needs separate design and runtime validation;
-the current proxy does not implement it. A selective READONLY lock on a managed,
-non-write-only synthetic buffer could test readback without replacing a vtable,
-but it adds driver calls, can synchronize or fail, and cannot establish passive
-capture or support for arbitrary TDS buffers. Unknown aliases, GPU writes,
+the current proxy does not implement it. The fixture's selective READONLY
+readback does not replace a vtable, but cannot establish passive capture or
+support for arbitrary TDS buffers. Unknown aliases, GPU writes,
 ambiguous locks and resets must remain unknown. `BufferRegistry` models the
 necessary generation and budget rules but is not connected to COM objects.
 

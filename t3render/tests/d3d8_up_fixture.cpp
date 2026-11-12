@@ -3,6 +3,7 @@
 // the buffered fixture uses an indexed draw with nonzero offsets. Raster
 // rules may differ from D3D12.
 #include "d3d12_probe_pixels.hpp"
+#include "d3d8_buffer_readback.hpp"
 
 #include <windows.h>
 #include <d3d8.h>
@@ -55,6 +56,11 @@ bool Check(HRESULT hr, const char* operation) {
     std::fprintf(stderr, "%s failed: HRESULT=0x%08lx\n", operation,
                  static_cast<unsigned long>(static_cast<std::uint32_t>(hr)));
     return false;
+}
+
+bool ReadMappedBuffer(void*, const void* source, void* destination, std::size_t length) {
+    SIZE_T copied = 0;
+    return ReadProcessMemory(GetCurrentProcess(), source, destination, length, &copied) && copied == length;
 }
 
 bool WriteAll(HANDLE file, const void* data, DWORD size) {
@@ -131,7 +137,7 @@ bool ReadBackbuffer(IDirect3DDevice8* device, std::vector<std::uint8_t>& rgba, D
     return true;
 }
 
-bool Render(HWND window, const wchar_t* output, Fixture fixture) {
+bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buffer_readback) {
     const bool camera = fixture == Fixture::Camera;
     const bool buffered = fixture == Fixture::Buffered;
     ComPtr<IDirect3D8> d3d;
@@ -207,8 +213,17 @@ bool Render(HWND window, const wchar_t* output, Fixture fixture) {
         if (!Check(index_buffer->Lock(2 * sizeof(std::uint16_t), sizeof(indices), &mapped, 0), "IndexBuffer::Lock")) return false;
         if (!mapped) { index_buffer->Unlock(); std::fprintf(stderr, "IndexBuffer::Lock returned null\n"); return false; }
         std::memcpy(mapped, indices, sizeof(indices));
-        if (!Check(index_buffer->Unlock(), "IndexBuffer::Unlock") ||
-            !Check(device->SetStreamSource(0, vertex_buffer.value, sizeof(Vertex)), "SetStreamSource") ||
+        if (!Check(index_buffer->Unlock(), "IndexBuffer::Unlock")) return false;
+        if (verify_buffer_readback) {
+            const bool vertex_ok = d3d8_fixture::VerifyBufferRange(vertex_buffer.value, sizeof(Vertex),
+                4 * sizeof(Vertex), buffered_vertices + 1, D3DLOCK_READONLY, "VertexBuffer", ReadMappedBuffer, nullptr);
+            const bool index_ok = d3d8_fixture::VerifyBufferRange(index_buffer.value, 2 * sizeof(std::uint16_t),
+                sizeof(indices), indices, D3DLOCK_READONLY, "IndexBuffer", ReadMappedBuffer, nullptr);
+            if (!vertex_ok || !index_ok) return false;
+            std::printf("buffer_readback vertex_offset=%zu vertex_bytes=%zu index_offset=%zu index_bytes=%zu result=PASS\n",
+                        sizeof(Vertex), 4 * sizeof(Vertex), 2 * sizeof(std::uint16_t), sizeof(indices));
+        }
+        if (!Check(device->SetStreamSource(0, vertex_buffer.value, sizeof(Vertex)), "SetStreamSource") ||
             !Check(device->SetIndices(index_buffer.value, 1), "SetIndices")) return false;
     }
     if (!Check(device->SetVertexShader(fvf), "SetVertexShader(FVF)") ||
@@ -265,14 +280,20 @@ bool Render(HWND window, const wchar_t* output, Fixture fixture) {
 int wmain(int argc, wchar_t** argv) {
     const wchar_t* output = nullptr;
     Fixture fixture = Fixture::Screen;
+    bool verify_buffer_readback = false;
     for (int i = 1; i < argc; ++i) {
         if (!std::wcscmp(argv[i], L"--camera") && fixture == Fixture::Screen) fixture = Fixture::Camera;
         else if (!std::wcscmp(argv[i], L"--buffered") && fixture == Fixture::Screen) fixture = Fixture::Buffered;
+        else if (!std::wcscmp(argv[i], L"--verify-buffer-readback") && !verify_buffer_readback) verify_buffer_readback = true;
         else if (!std::wcscmp(argv[i], L"--output") && !output && i + 1 < argc && argv[i + 1][0]) output = argv[++i];
         else {
-            std::fwprintf(stderr, L"usage: d3d8_up_fixture [--camera | --buffered] [--output new-image.ppm]\n");
+            std::fwprintf(stderr, L"usage: d3d8_up_fixture [--camera | --buffered [--verify-buffer-readback]] [--output new-image.ppm]\n");
             return 2;
         }
+    }
+    if (verify_buffer_readback && fixture != Fixture::Buffered) {
+        std::fprintf(stderr, "--verify-buffer-readback requires --buffered\n");
+        return 2;
     }
     const HINSTANCE instance = GetModuleHandleW(nullptr);
     const wchar_t* name = L"T3RenderD3D8UPFixture";
@@ -300,7 +321,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     ShowWindow(window, SW_SHOWNOACTIVATE);
     UpdateWindow(window);
-    const bool ok = Render(window, output, fixture);
+    const bool ok = Render(window, output, fixture, verify_buffer_readback);
     DestroyWindow(window);
     UnregisterClassW(name, instance);
     return ok ? 0 : 1;

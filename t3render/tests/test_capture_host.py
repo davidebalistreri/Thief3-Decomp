@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -95,6 +96,87 @@ class CaptureHostTests(unittest.TestCase):
         self.assertEqual(draw["pixel_shader"], 555)
         self.assertTrue(events[-2]["had_reset"])
         self.assertEqual(events[-2]["draws"], 4)
+
+    def test_frame_window_defaults_to_one_and_preserves_legacy_events(self):
+        self.run_capture("window", frame="1")
+        records = self.records()
+        self.assertEqual([e["event"] for e in records], ["header", "frame_begin", "clear", "draw",
+                         "clear_result", "draw_result", "frame_end", "capture_end"])
+        self.assertEqual(records[-1]["frames"], 1)
+        self.assertEqual(records[0]["requested_frames"], 1)
+        self.assertTrue(records[-2]["concurrent_operations"])
+        self.assertEqual(records[-2]["present_hr"], -1)
+        self.assertEqual(trace_summary.summarize(self.path)["frame_count"], 1)
+
+    def test_frame_windows_preserve_order_and_reset_frame_local_state(self):
+        for count in (2, 3):
+            with self.subTest(count=count):
+                self.run_capture("window", frame="1", extra={"T3RENDER_CAPTURE_FRAMES": str(count)})
+                events = self.records()
+                summary = trace_summary.summarize(self.path)
+                self.assertEqual([f["frame"] for f in summary["frames"]], list(range(1, count + 1)))
+                self.assertEqual(summary["draw_count"], count)
+                self.assertEqual(events[-1], {"event": "capture_end", "frames": count})
+                self.assertEqual(events[0]["requested_frames"], count)
+                ends = [e for e in events if e["event"] == "frame_end"]
+                self.assertEqual([e["draws"] for e in ends], [1] * count)
+                self.assertEqual([e["concurrent_operations"] for e in ends], [True] + [False] * (count - 1))
+                self.assertEqual([e["had_reset"] for e in ends], [False, True] + [False] * (count - 2))
+                operations = [e["op_id"] for e in events if e["event"] in ("clear", "draw")]
+                self.assertEqual(operations, list(range(1, count * 2 + 1)))
+                if count == 3:
+                    begins = [e for e in events if e["event"] == "frame_begin"]
+                    self.assertEqual([e["presentation"]["width"] for e in begins], [1280, 1280, 1600])
+                result = subprocess.run([sys.executable, "-B", str(ROOT / "tools" / "trace_to_ir.py"), str(self.path)],
+                                        text=True, capture_output=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                ir = json.loads(result.stdout)
+                self.assertEqual([f["frame"] for f in ir["frames"]], list(range(1, count + 1)))
+                self.assertEqual([len(f["commands"]) for f in ir["frames"]], [1] * count)
+                self.path.unlink()
+
+    def test_f11_window_captures_consecutive_frames_without_retrigger(self):
+        self.run_capture("window_key", key="F11", extra={"T3RENDER_CAPTURE_FRAMES": "2"})
+        summary = trace_summary.summarize(self.path)
+        self.assertEqual([f["frame"] for f in summary["frames"]], [2, 3])
+        self.assertEqual(self.records()[-1]["frames"], 2)
+        self.assertEqual(self.records()[0]["requested_frames"], 2)
+
+    def test_frame_window_resets_up_and_buffer_budgets(self):
+        self.run_capture("window_budget", frame="1", extra={"T3RENDER_CAPTURE_FRAMES": "2"})
+        draws = [event for event in self.records() if event["event"] == "draw"]
+        first = [draw for draw in draws if draw["frame"] == 1]
+        second = [draw for draw in draws if draw["frame"] == 2]
+        self.assertEqual(len(first), 66)
+        self.assertEqual(len(second), 2)
+        for field in ("up_data", "buffer_data"):
+            current = [draw[field]["vertex"]["status"] for draw in first if field in draw]
+            self.assertEqual(current, ["captured"] * 32 + ["frame_limit"])
+            self.assertEqual(next(draw[field]["vertex"]["status"] for draw in second if field in draw), "captured")
+        self.assertEqual(trace_summary.summarize(self.path)["frame_count"], 2)
+
+    def test_window_release_and_pending_operations_remain_incomplete(self):
+        for scenario, expected in (("window_release", "missing capture_end"),
+                                   ("window_pending", "frame 2 has no frame_end")):
+            with self.subTest(scenario=scenario):
+                self.run_capture(scenario, frame="1", extra={"T3RENDER_CAPTURE_FRAMES": "2"})
+                events = self.records()
+                self.assertEqual(events[0]["requested_frames"], 2)
+                self.assertEqual(len([e for e in events if e["event"] == "frame_end"]), 1)
+                self.assertFalse(any(e["event"] == "capture_end" for e in events))
+                with self.assertRaisesRegex(trace_summary.TraceError, expected):
+                    trace_summary.summarize(self.path)
+                self.path.unlink()
+
+    def test_invalid_frame_window_fails_closed(self):
+        for value in ("", "0", "4", "-1", "+1", "01", "1 ", "abc", "99"):
+            with self.subTest(value=value):
+                output = self.run_capture(frame="1", extra={"T3RENDER_CAPTURE_FRAMES": value})
+                self.assertIn("configured=0 getters=0", output)
+                self.assertFalse(self.path.exists())
+        output = self.run_capture(frame="18446744073709551614", extra={"T3RENDER_CAPTURE_FRAMES": "2"})
+        self.assertIn("configured=0 getters=0", output)
+        self.assertFalse(self.path.exists())
 
     def test_only_sdk_defined_observable_state_ids_are_queried(self):
         # The fake deliberately accepts *every* numeric ID, like a permissive

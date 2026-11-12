@@ -45,6 +45,7 @@ def summarize(path):
     capture_ended = False
     operation_results = False
     clear_rect_limit = None
+    requested_frames = None
     lines = 0
 
     try:
@@ -69,6 +70,10 @@ def summarize(path):
                         raise TraceError(f"line {lines}: unsupported trace format")
                     if not _is_int(item.get("version")) or item["version"] != 1:
                         raise TraceError(f"line {lines}: unsupported trace version")
+                    if "requested_frames" in item:
+                        requested_frames = item["requested_frames"]
+                        if not _is_int(requested_frames) or not 1 <= requested_frames <= 3:
+                            raise TraceError(f"line {lines}: requested_frames must be an integer from 1 through 3")
                     if "operation_results" in item:
                         if not _is_int(item["operation_results"]) or item["operation_results"] != 1:
                             raise TraceError(f"line {lines}: unsupported operation result capability")
@@ -89,6 +94,8 @@ def summarize(path):
                         raise TraceError(
                             f"line {lines}: capture_end frames {frame_count} does not match {len(frames)} complete frames"
                         )
+                    if requested_frames is not None and frame_count != requested_frames:
+                        raise TraceError(f"line {lines}: capture_end frames does not match requested_frames")
                     capture_ended = True
                 elif event == "frame_begin":
                     frame = item.get("frame")
@@ -96,6 +103,11 @@ def summarize(path):
                         raise TraceError(f"line {lines}: frame must be an integer")
                     if current is not None:
                         raise TraceError(f"line {lines}: frame_begin before previous frame_end")
+                    if requested_frames is not None:
+                        if frame < 0 or frame >= (1 << 64) - 1:
+                            raise TraceError(f"line {lines}: frame outside requested window range")
+                        if frames and frame != frames[-1]["frame"] + 1:
+                            raise TraceError(f"line {lines}: requested capture frames are not consecutive")
                     current = {"frame": frame, "draws": 0, "calls": Counter(), "pending": {},
                                "last_op": 0, "overlap": False}
                 elif event in ("draw", "draw_result", "clear", "clear_result", "frame_end"):

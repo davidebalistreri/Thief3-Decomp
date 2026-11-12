@@ -155,6 +155,28 @@ class TraceSummaryTests(unittest.TestCase):
             with self.subTest(events=events):
                 self.assert_invalid(events, message)
 
+    def test_requested_window_must_be_complete_and_consecutive(self):
+        self.write_events(dict(HEADER, requested_frames=2), BEGIN, DRAW, END,
+                          {"event": "frame_begin", "frame": 8},
+                          {"event": "frame_end", "frame": 8, "present_hr": 0},
+                          dict(CAPTURE_END, frames=2))
+        self.assertEqual(trace_summary.summarize(self.trace)["frame_count"], 2)
+        for invalid in (None, True, False, 0, -1, 4, 1.0, "2"):
+            with self.subTest(invalid=invalid):
+                self.assert_invalid([dict(HEADER, requested_frames=invalid)], "requested_frames")
+        self.assert_invalid([dict(HEADER, requested_frames=2), BEGIN, DRAW, END, CAPTURE_END],
+                            "does not match requested_frames")
+        for next_frame in (7, 9, -1, (1 << 64) - 1):
+            with self.subTest(frame=next_frame):
+                self.assert_invalid([dict(HEADER, requested_frames=2), BEGIN, DRAW, END,
+                                     {"event": "frame_begin", "frame": next_frame}],
+                                    "not consecutive|outside requested window range")
+
+    def test_legacy_trace_remains_valid_without_requested_window(self):
+        self.write_events(HEADER, BEGIN, DRAW, END, dict(BEGIN), dict(DRAW), dict(END),
+                          dict(CAPTURE_END, frames=2))
+        self.assertEqual(trace_summary.summarize(self.trace)["frame_count"], 2)
+
     def test_operation_results_are_required_when_advertised(self):
         self.write_events(HEADER_OPS, BEGIN, CLEAR, CLEAR_RESULT, DRAW_OP, DRAW_RESULT, END_OPS, CAPTURE_END)
         result = trace_summary.summarize(self.trace)

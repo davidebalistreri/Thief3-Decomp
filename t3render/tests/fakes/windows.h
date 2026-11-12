@@ -39,11 +39,15 @@ constexpr DWORD PAGE_EXECUTE_READ = 0x20;
 constexpr DWORD PAGE_EXECUTE_READWRITE = 0x40;
 constexpr DWORD PAGE_EXECUTE_WRITECOPY = 0x80;
 constexpr DWORD PAGE_GUARD = 0x100;
+constexpr DWORD ERROR_SUCCESS = 0;
+constexpr DWORD ERROR_ENVVAR_NOT_FOUND = 203;
 
 #define SUCCEEDED(hr) ((hr) >= 0)
 #define FAILED(hr) ((hr) < 0)
 
 DWORD GetEnvironmentVariableW(const wchar_t*, wchar_t*, DWORD);
+DWORD GetLastError();
+void SetLastError(DWORD);
 HANDLE CreateFileW(const wchar_t*, DWORD, DWORD, void*, DWORD, DWORD, void*);
 BOOL WriteFile(HANDLE, const void*, DWORD, DWORD*, void*);
 BOOL CloseHandle(HANDLE);

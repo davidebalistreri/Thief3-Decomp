@@ -151,6 +151,19 @@ one trigger before launching the game:
 - `T3RENDER_CAPTURE_FRAME=N`: capture frame `N`, counting from zero at device
   creation. A game restart or replacement device starts the count again.
 
+Optionally set `T3RENDER_CAPTURE_FRAMES=1`, `2` or `3` to capture that many
+consecutive Present-delimited frames in the same JSONL file. The default is
+one; any other value disables capture. Each frame records observed draw order,
+results and byte budgets. A failed Present is recorded as a frame boundary
+with its HRESULT, not silently treated as a successful display. If the device
+is released or an operation remains pending before the window ends, the trace
+is incomplete and has no `capture_end`. This option does not select or verify
+the map: trigger it only after reaching the intended room. Boundaries follow
+intercepted Present completions; concurrent Present calls can still be
+observed in a different order from driver submission. The trace's
+`concurrent_operations` flag covers overlapping draw/clear attempts, not
+Present or Reset calls.
+
 An existing output file is never overwritten. Environment variables must
 reach the actual `T3Main.exe` process, including across a level restart.
 Without a valid path and trigger no frame is captured. Capturing a frame can

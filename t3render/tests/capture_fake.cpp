@@ -191,10 +191,15 @@ void SimulatedDraw(IDirect3DDevice8* device, const t3render::DrawCall& draw) {
 }
 }  // namespace
 
+thread_local DWORD fake_last_error = ERROR_SUCCESS;
+DWORD GetLastError() { return fake_last_error; }
+void SetLastError(DWORD value) { fake_last_error = value; }
+
 DWORD GetEnvironmentVariableW(const wchar_t* name, wchar_t* buffer, DWORD size) {
     const std::string narrow_name = Narrow(name);
     const char* value = std::getenv(narrow_name.c_str());
-    if (!value || !*value) return 0;
+    if (!value) { SetLastError(ERROR_ENVVAR_NOT_FOUND); return 0; }
+    if (!*value) { SetLastError(ERROR_SUCCESS); return 0; }
     const DWORD length = static_cast<DWORD>(std::strlen(value));
     if (!buffer || size <= length) return length + 1;
     for (DWORD i = 0; i < length; ++i) buffer[i] = static_cast<unsigned char>(value[i]);
@@ -299,7 +304,75 @@ int main(int argc, char** argv) {
     fake_index[32] = 3; fake_index[36] = 4; fake_index[40] = 5;
 
     bool second_used = false;
-    if (scenario == "buffered" || scenario == "buffer_budget" || scenario == "buffer_budget_fail" ||
+    if (scenario == "window" || scenario == "window_key" || scenario == "window_pending" ||
+        scenario == "window_release" || scenario == "window_budget") {
+        if (scenario == "window_key") {
+            t3render::CapturePresent(&device, S_OK); // frame 0, F11 not pressed
+            key_down = true;
+            t3render::CapturePresent(&device, S_OK); // arm frame 2
+        } else {
+            t3render::CapturePresent(&device, S_OK); // advance to frame 1
+        }
+        if (scenario == "window_budget") {
+            device.stream_stride = 4;
+            device.vertex.size = 256 * 1024;
+            auto immediate = up;
+            immediate.primitive_type = D3DPT_POINTLIST; immediate.primitive_count = 65536;
+            immediate.vertex_stride = 4; immediate.vertex_data = reinterpret_cast<void*>(kVertexAddress);
+            auto buffered = draw;
+            buffered.primitive_type = D3DPT_POINTLIST; buffered.primitive_count = 65536;
+            ObserverState state{&device};
+            t3render::BufferObserver observer{&state, true, ReadObservedVertex, ReadObservedIndex};
+            buffered.buffer_observer = &observer;
+            auto emit_buffered = [&]() {
+                const auto token = t3render::CaptureDraw(&device, buffered);
+                if (!token) return false;
+                t3render::CaptureBufferedDrawResult(&device, token, S_OK, true);
+                return true;
+            };
+            for (unsigned i = 0; i < 33; ++i) {
+                SimulatedDraw(&device, immediate);
+                if (!emit_buffered()) return 8;
+            }
+            t3render::CapturePresent(&device, S_OK);
+            SimulatedDraw(&device, immediate);
+            if (!emit_buffered()) return 8;
+            t3render::CapturePresent(&device, S_OK);
+        } else {
+            for (unsigned i = 0; i < 3; ++i) {
+                const auto clear = t3render::CaptureClear(&device, 0, nullptr, 1, 0xff000000, 1.0f, 0);
+                if (i == 0) {
+                    // Paired operations deliberately overlap in the first frame.
+                    const auto token = t3render::CaptureDraw(&device, draw);
+                    t3render::CaptureClearResult(&device, clear, S_OK);
+                    t3render::CaptureDrawResult(&device, token, S_OK);
+                } else {
+                    t3render::CaptureClearResult(&device, clear, S_OK);
+                    if (scenario == "window_pending" && i == 1) {
+                        const auto pending = t3render::CaptureDraw(&device, indexed);
+                        t3render::CapturePresent(&device, S_OK);
+                        t3render::CaptureDrawResult(&device, pending, S_OK);
+                        break;
+                    }
+                    SimulatedDraw(&device, indexed);
+                }
+                if (i == 1) {
+                    D3DPRESENT_PARAMETERS update = presentation;
+                    update.BackBufferWidth = 1600;
+                    t3render::CaptureReset(&device, &update, S_OK);
+                }
+                t3render::CapturePresent(&device, i == 0 ? E_FAIL : S_OK);
+                if (scenario == "window_release" && i == 0) {
+                    t3render::CaptureDeviceReleased(&device);
+                    t3render::CaptureDevice(&unrelated, &presentation);
+                    SimulatedDraw(&unrelated, draw);
+                    t3render::CapturePresent(&unrelated, S_OK);
+                    second_used = true;
+                    break;
+                }
+            }
+        }
+    } else if (scenario == "buffered" || scenario == "buffer_budget" || scenario == "buffer_budget_fail" ||
         scenario == "buffer_budget_mixed") {
         t3render::CapturePresent(&device, S_OK);  // target frame 1
         ObserverState state{&device};

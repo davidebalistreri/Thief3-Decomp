@@ -51,6 +51,8 @@ struct CaptureState {
     bool had_reset = false;
     uint64_t frame = 0;
     uint64_t target = 0;
+    unsigned frames_requested = 1;
+    unsigned frames_written = 0;
     uint64_t draws = 0;
     uint64_t up_bytes = 0;  // successfully emitted raw bytes, not hex characters
     uint64_t buffer_bytes = 0;
@@ -141,6 +143,18 @@ void Initialize(CaptureState& s) {
     const std::wstring frame = Environment(L"T3RENDER_CAPTURE_FRAME");
     const std::wstring key = Environment(L"T3RENDER_CAPTURE_KEY");
     s.buffer_requested = Environment(L"T3RENDER_CAPTURE_BUFFERS") == L"1";
+    // Missing means the legacy single frame; an explicitly empty, truncated,
+    // or malformed value must not silently start a capture.
+    wchar_t frames[2]{};
+    SetLastError(ERROR_SUCCESS);
+    const DWORD frames_length = GetEnvironmentVariableW(L"T3RENDER_CAPTURE_FRAMES", frames, 2);
+    if (!frames_length) {
+        if (GetLastError() != ERROR_ENVVAR_NOT_FOUND) return;
+    } else if (frames_length != 1 || frames[0] < L'1' || frames[0] > L'3') {
+        return;
+    } else {
+        s.frames_requested = static_cast<unsigned>(frames[0] - L'0');
+    }
     if (path.empty() || (!frame.empty() && !key.empty()) || (frame.empty() && key.empty())) return;
     if (!key.empty()) {
         if (key != L"F11") return;
@@ -151,7 +165,8 @@ void Initialize(CaptureState& s) {
         errno = 0;
         wchar_t* end = nullptr;
         const unsigned long long parsed = std::wcstoull(frame.c_str(), &end, 10);
-        if (errno == ERANGE || !end || *end || parsed == std::numeric_limits<uint64_t>::max()) return;
+        if (errno == ERANGE || !end || *end ||
+            parsed > std::numeric_limits<uint64_t>::max() - s.frames_requested) return;
         s.target = static_cast<uint64_t>(parsed);
         s.triggered = true;
     }
@@ -170,6 +185,7 @@ bool Open(CaptureState& s) {
     auto out = Json();
     out << "{\"event\":\"header\",\"format\":\"t3render-d3d8-diagnostic\",\"version\":1,"
         << "\"trigger\":\"" << (s.key_trigger ? "F11" : "frame") << "\","
+        << "\"requested_frames\":" << s.frames_requested << ','
         << "\"operation_results\":1,\"clear_rect_limit\":" << kClearRectLimit << ','
         << "\"replayable\":false,\"up_capture\":{\"encoding\":\"hex\",\"component_limit_bytes\":"
         << kUpComponentLimit << ",\"frame_limit_bytes\":" << kUpFrameLimit << "},"
@@ -182,6 +198,7 @@ bool Open(CaptureState& s) {
         << "\"indexed UP vertex window uses MinVertexIndex times stride; nonzero behavior is not runtime verified\","
         << "\"draw and clear events describe attempts; results are paired by op_id\","
         << "\"concurrent device calls may have a different driver submission order\","
+        << "\"concurrent_operations only covers draw/clear overlap, not Present or Reset\","
         << "\"shader programs, declarations and constants are not captured\","
         << "\"light indices 0 through 31 only\","
         << "\"world transform indices 0 through 3 only\","
@@ -893,7 +910,8 @@ void CheckKey(CaptureState& s) {
     BYTE keys[256]{};
     if (!GetKeyboardState(keys)) return;
     const bool down = (keys[VK_F11] & 0x80) != 0;
-    if (!s.triggered && down && !s.key_down && s.frame != std::numeric_limits<uint64_t>::max()) {
+    if (!s.triggered && down && !s.key_down &&
+        s.frame < std::numeric_limits<uint64_t>::max() - s.frames_requested) {
         s.target = s.frame + 1;
         s.triggered = true;
     }
@@ -938,7 +956,7 @@ void CaptureDeviceReleased(IDirect3DDevice8* device) {
         // The underlying COM object has already been destroyed: only compare
         // its address, never dereference or release it here.
         if (!s.enabled || s.complete || !device || device != s.device) return;
-        if (s.begun) {
+        if (s.begun || s.frames_written) {
             // A partial frame is evidence, not a completed capture. Close it
             // without fabricating Present, frame_end or capture_end records.
             Stop(s);
@@ -1051,10 +1069,25 @@ void CapturePresent(IDirect3DDevice8* device, HRESULT result) {
                 << ",\"had_reset\":" << (s.had_reset ? "true" : "false")
                 << ",\"concurrent_operations\":" << (s.concurrent_operations ? "true" : "false")
                 << ",\"replayable\":false}\n";
-            if (Write(s, out.str()) && Write(s, "{\"event\":\"capture_end\",\"frames\":1}\n")) {
-                s.complete = true;
+            if (!Write(s, out.str())) return;
+            ++s.frames_written;
+            if (s.frames_written == s.frames_requested) {
+                auto end = Json();
+                end << "{\"event\":\"capture_end\",\"frames\":" << s.frames_written << "}\n";
+                if (Write(s, end.str())) s.complete = true;
+                Stop(s);  // Closing commits the final record to the OS.
+                return;
             }
-            Stop(s);  // Closing commits the final record to the OS.
+            // Preserve globally unique operation IDs, but reset frame-local
+            // budgets and hazards only once all paired operations completed.
+            s.begun = false;
+            s.draws = 0;
+            s.up_bytes = 0;
+            s.buffer_bytes = 0;
+            s.had_reset = false;
+            s.concurrent_operations = false;
+            ++s.frame;
+            s.target = s.frame;
             return;
         }
         if (s.key_trigger) CheckKey(s);

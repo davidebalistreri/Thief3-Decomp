@@ -1,0 +1,108 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_shader_reset",
+  "date": "2026-11-12",
+  "status": "PASS",
+  "host": {
+    "os": "macOS 27.2.1",
+    "architecture": "arm64"
+  },
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86"
+  },
+  "proxy_source_commit": "0e9c4f56860cc06087b962558219c0da5e67373d",
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "c23a8f360de5d550f2f689a61db9b3731a450d4ea6d44f01461e13418c5436ba",
+    "t3render/src/proxy.cpp": "4d5382e450d688030a5d7a4267399f5cef1517fcdfbe2412325205f4fdf84105",
+    "t3render/src/buffer_proxy.cpp": "07713f49baa4edf25063d238b5e98f7d7e83f88164c3b70c583f0888c9548f14",
+    "t3render/src/buffer_proxy.hpp": "b4077c53dd35a8a4d1cf68a9e526a70be2da4fe23fa4868a1d920aa25b37f151",
+    "t3render/src/vtable_layout.c": "f7893ae8b98f1d6c46eea2447678d6da7e97c1752a05c650875219c5659e6358",
+    "t3render/src/vtable_layout.h": "338d41bfb312fba5742555e8e09ab19da30fe039538ef22ebbce30b2157654de",
+    "t3render/src/capture.cpp": "d62550eeba4a0544d09867fe74905d37bffed214fadf229a92a060f580139f36",
+    "t3render/src/capture.hpp": "b5590e2862d47cb01b594e8a117d5a48a8121d42b769a81c8a45b518e0b6d36f",
+    "t3render/src/d3d8_mingw.def": "fc91ff1781931d7f0f8bd5ab400872d980ff1d4a92b4fc59b38951434ec989e9",
+    "t3render/ir/buffer_shadow.cpp": "9cfed54a6fcf4718e80fd1d8301a8afa5f84852ac70b428938b06d1e64cddafe",
+    "t3render/ir/buffer_shadow.hpp": "55b7aaf05cbd2f1d8047572abacf66e88d7485c9e243a78ce37c1213565a017d",
+    "t3render/ir/buffer_registry.cpp": "9e24931212d54e0ee58b7be7313a85510e9fc867f3a3b20297eff3e1f6138b84",
+    "t3render/ir/buffer_registry.hpp": "c7ff088b36ff035945f56482aeb45d3e1359e11710437798fa83fba179e85260",
+    "t3render/ir/vertex_declaration.cpp": "b2aaae1f322bd12f42e78f45dd449271ae700d402af86325862fd431c25054b6",
+    "t3render/ir/vertex_declaration.hpp": "001e8c4bcdc37c860b8c86db3f81094a9a23923e78896fe838ae764bfe4dc2a5",
+    "t3render/ir/vertex_declaration_registry.cpp": "91c167f222c9173c29894ae2cf3a174d42f6523c58406753a414f7e15a51ca64",
+    "t3render/ir/vertex_declaration_registry.hpp": "afb64183c2c26b7f081e26810e4b9fbdee4f95a6496f0f5d0efee4ce44890e4b",
+    "t3render/tests/d3d8_shader_reset_fixture.cpp": "7a0e47435111e101c17969133be0f0b6b2ff410493045d8a96222d0f7b7550e8",
+    "t3render/tests/d3d8_declaration_fixture.cpp": "8f9159f0ab16b4a6456ad16f9334df718e2894b85779a0e5fa871acff6fac067",
+    "t3render/tools/run_d3d8_shader_reset_fixture.py": "8a5b9771cbb66d0a3e49ae7dfd39c7f992bdb503567f243823e9764f20fefbbd",
+    "t3render/tools/run_synthetic_up_replay.py": "114c356a1febf4efa3106789039aeef3aa52dd3f6c37de6cf4180965618ed334",
+    "t3render/tools/run_d3d8_stateblock_experiment.py": "e8cd0fcb98744d8789d963fbb270a595b346d21b8bc9ffeffa7b24d20184c0f7",
+    "t3render/tools/trace_summary.py": "3c1e1942e378363de0d0ab8894b3565231ce440d69a89bdb5a6e34571a8717ec"
+  },
+  "proxy_sha256": "18a8c1bb7ef78ccec1e297e7c496d45fba9624d196dc70f9fbd9ce488b2247bc",
+  "fixture_sha256": "95b3ac9415f4c5bb3123e985d090d76a27da4b7428ec5f21c06a1735a95aedea",
+  "scenarios": {
+    "valid-only": {
+      "status": "PASS",
+      "reset_hr": [
+        "0x00000000",
+        "0x00000000"
+      ],
+      "binding_after_reset": "0; original handle successfully rebound",
+      "declaration_bytes": 16,
+      "function_bytes": 32
+    },
+    "recovery": {
+      "status": "PASS",
+      "reset_hr": [
+        "0x8876086c",
+        "0x00000000",
+        "0x00000000"
+      ],
+      "binding_after_recovery": "0; original handle successfully rebound",
+      "declaration_bytes": 16,
+      "function_bytes": 32,
+      "failed_reset_alone": "not_observed"
+    }
+  },
+  "comparison": {
+    "modes": [
+      "builtin",
+      "proxy_declarations_off",
+      "proxy_declarations_on"
+    ],
+    "rgb_ppm_sha256": "5c13a1848569e78c8d35c4aeab416aa738892bc9a9e4cba59ac9f72db43b11c2",
+    "pixel_parity": "all modes and all phases identical",
+    "double_reads_and_size_requeries": "all successful, identical, tails intact",
+    "image": "triangle.png",
+    "image_sha256": "58ca5eddb80803c67e0c353ec95a7d3cee7a907f22b6ed36efff3a58435be64d",
+    "logs_and_traces_sha256": {
+      "valid-only/baseline.log": "8bf9295d6986e7733ffc7244e7c6eae88a92d51d7ed329385e4748133bebfcc7",
+      "valid-only/proxy_off.log": "cb7643ed1c83d5054e3258bfadc64c8306fa539d445790c931cfe1e43a23ad6a",
+      "valid-only/proxy_on.log": "5c0037a8ad73b83770d67ccc808086ef2fe36710ab6a875bea3be1157efd9390",
+      "valid-only/proxy_off.jsonl": "317bf82d25f3b7f8759c496684b543aaa8299eed5dfcdf43632ad7aeec2fcc78",
+      "valid-only/proxy_on.jsonl": "48fa360e0f0b3cabd9d0faafcbc9ed434c8a6964fad734044a964a942be78004",
+      "recovery/baseline.log": "5f7e5926acc504f39f1387fee7e131de2fce6fa236bee993c046fb5497419e24",
+      "recovery/proxy_off.log": "c9cc10b8ec5daa29ac589c20c194dbdddfbc8f735d40c17c41c63a775cbf6ce4",
+      "recovery/proxy_on.log": "caadb40c92ac8c8042165de4a6fb49bac2e311ffc8d6958958690c2de2f8ca46",
+      "recovery/proxy_off.jsonl": "98244206cd0879ff5ff1e8acfeaa628d59acf358a927e08da638046c42cb5bb9",
+      "recovery/proxy_on.jsonl": "88c64b785360c221c1335c16182cd4d34a259defac198ba830c3b16e30dbc98e"
+    }
+  },
+  "initial_probe": {
+    "status": "PARTIAL",
+    "fixture_sha256": "42370936018cb2c4909aa8da3ec359173f4d24aae44e9f3478ef90cb9e80304a",
+    "source_sha256": "6636f30959606c946ae5c512d71c8ea9467501dad1b42d683f06bb5599b41f05",
+    "runner_sha256": "3a185e4ac487d03df0d84254e2626101f8d167af780759dc9a9bdd125503397d",
+    "reason": "Getters returned success but left the supplied output capacity unchanged; token length not established."
+  },
+  "local_details": "build/t3render-diagnostics/2026-11-12-shader-reset",
+  "limitations": [
+    "Synthetic fixture only; no TDS process or game data.",
+    "No device queries or drawing between failed Reset and successful recovery Reset.",
+    "After recovery, observations cannot isolate effects of the failed Reset alone.",
+    "RGB only; no COM alias coverage, native Windows or gameplay validation.",
+    "Synthetic fixture getters are not used by the TDS proxy.",
+    "Double-read/canary checks do not prove atomicity or general runtime safety."
+  ],
+  "evidence_head": "51f831723081584e9c83c865168816328e424d2f"
+}

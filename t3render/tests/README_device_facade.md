@@ -32,3 +32,26 @@ Run the fake contract and i686 SDK signature checks from `t3sdk`:
 ```
 python3 -B -m unittest discover -s t3render/tests -p test_d3d8_device_facade.py -v
 ```
+
+The [Highball comparison](../benchmarks/d3d8/2026-11-12-device-facade/result.json)
+ran native and facade devices in separate x86 processes. The 81 recorded
+HRESULT/state observations and four-triangle RGB PPMs matched; alpha was not
+compared. Surface, texture,
+vertex-buffer and index-buffer `GetDevice` calls all exposed the native device;
+this confirms the boundary remains open, not that TDS is safe to test.
+
+With an existing i686 MinGW build configured as in the main README, repeat it
+using an existing Highball engine and bottle and a new output directory:
+
+```sh
+cmake -S t3render -B build/t3render-mingw -DT3RENDER_BUILD_D3D8_DEVICE_FACADE_FIXTURE=ON
+cmake --build build/t3render-mingw --target t3render_d3d8_device_facade_fixture
+python3 -B t3render/tools/run_d3d8_device_facade.py \
+  --engine '/absolute/path/to/Highball/engine' \
+  --bottle '/absolute/path/to/Highball/bottle' \
+  --fixture '/absolute/path/to/t3sdk/build/t3render-mingw/d3d8_device_facade_fixture/t3render_d3d8_device_facade_fixture.exe' \
+  --output-dir '/absolute/path/to/new/output-directory'
+```
+
+The runner compares selected results and image bytes, creates its output in a
+new directory and never launches TDS. Wine may update its bottle state.

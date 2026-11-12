@@ -1,0 +1,369 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_device_facade",
+  "date": "2026-11-12",
+  "status": "PASS",
+  "host": {
+    "os": "macOS 27.2.1",
+    "architecture": "arm64",
+    "gpu": "Apple M5 Pro"
+  },
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86"
+  },
+  "source_sha256": {
+    "t3render/tests/d3d8_device_facade.hpp": "043015a01b2b7b60376e5cd91532aa3bb9e2031e6cad8d32ddee88a45c446845",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "fb395bd99e0ba4a729e4efe23a16e7630e05a8706391a43e112417e9d0a7d1a8",
+    "t3render/tools/run_d3d8_device_facade.py": "7077b9e6d8df54280d144b55bc52cc867c8fdd41303da0263319752c0edca428"
+  },
+  "fixture_sha256": "ba926d0fdaeb24666e8008a794e92e261ff50202248b68a3aaf5c85495e73e81",
+  "result": {
+    "parity_record_count": 81,
+    "observations": [
+      {
+        "name": "GetAdapterDisplayMode",
+        "value": "0x00000000"
+      },
+      {
+        "name": "CreateDevice",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetDirect3D",
+        "value": "0x00000000"
+      },
+      {
+        "name": "FactoryQIUnknown",
+        "value": "0x00000000"
+      },
+      {
+        "name": "FactoryQIRoundtrip",
+        "value": "0x00000000"
+      },
+      {
+        "name": "DeviceQIUnknown",
+        "value": "0x00000000"
+      },
+      {
+        "name": "DeviceQIRoundtrip",
+        "value": "0x00000000"
+      },
+      {
+        "name": "CreateVertexBuffer",
+        "value": "0x00000000"
+      },
+      {
+        "name": "CreateIndexBuffer",
+        "value": "0x00000000"
+      },
+      {
+        "name": "CreateTexture",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetBackBuffer",
+        "value": "0x00000000"
+      },
+      {
+        "name": "VertexLock",
+        "value": "0x00000000"
+      },
+      {
+        "name": "VertexUnlock",
+        "value": "0x00000000"
+      },
+      {
+        "name": "IndexLock",
+        "value": "0x00000000"
+      },
+      {
+        "name": "IndexUnlock",
+        "value": "0x00000000"
+      },
+      {
+        "name": "SetTransformWorld",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetTransformWorld",
+        "value": "0x00000000"
+      },
+      {
+        "name": "World",
+        "value": "3f800000000000000000000000000000000000003f800000000000000000000000000000000000003f800000000000003f80000000000000000000003f800000"
+      },
+      {
+        "name": "SetTransformView",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetTransformView",
+        "value": "0x00000000"
+      },
+      {
+        "name": "View",
+        "value": "3f800000000000000000000000000000000000003f800000000000000000000000000000000000003f800000000000004000000000000000000000003f800000"
+      },
+      {
+        "name": "SetTransformProjection",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetTransformProjection",
+        "value": "0x00000000"
+      },
+      {
+        "name": "Projection",
+        "value": "3f800000000000000000000000000000000000003f800000000000000000000000000000000000003f800000000000004040000000000000000000003f800000"
+      },
+      {
+        "name": "SetViewport",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetViewport",
+        "value": "0x00000000"
+      },
+      {
+        "name": "Viewport",
+        "value": "0,0,256,256,0.0,1.0"
+      },
+      {
+        "name": "SetRenderLighting",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetRenderLighting",
+        "value": "0x00000000"
+      },
+      {
+        "name": "RenderLighting",
+        "value": "0"
+      },
+      {
+        "name": "SetRenderCull",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetRenderCull",
+        "value": "0x00000000"
+      },
+      {
+        "name": "RenderCull",
+        "value": "1"
+      },
+      {
+        "name": "SetRenderZEnable",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetRenderZEnable",
+        "value": "0x00000000"
+      },
+      {
+        "name": "RenderZEnable",
+        "value": "0"
+      },
+      {
+        "name": "SetRenderAlphaBlend",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetRenderAlphaBlend",
+        "value": "0x00000000"
+      },
+      {
+        "name": "RenderAlphaBlend",
+        "value": "0"
+      },
+      {
+        "name": "SetRenderDither",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetRenderDither",
+        "value": "0x00000000"
+      },
+      {
+        "name": "RenderDither",
+        "value": "0"
+      },
+      {
+        "name": "SetRenderFog",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetRenderFog",
+        "value": "0x00000000"
+      },
+      {
+        "name": "RenderFog",
+        "value": "0"
+      },
+      {
+        "name": "SetStageColorOp",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetStageColorOp",
+        "value": "0x00000000"
+      },
+      {
+        "name": "StageColorOp",
+        "value": "2"
+      },
+      {
+        "name": "SetStageColorArg1",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetStageColorArg1",
+        "value": "0x00000000"
+      },
+      {
+        "name": "StageColorArg1",
+        "value": "0"
+      },
+      {
+        "name": "SetStageAlphaOp",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetStageAlphaOp",
+        "value": "0x00000000"
+      },
+      {
+        "name": "StageAlphaOp",
+        "value": "2"
+      },
+      {
+        "name": "SetStageAlphaArg1",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetStageAlphaArg1",
+        "value": "0x00000000"
+      },
+      {
+        "name": "StageAlphaArg1",
+        "value": "0"
+      },
+      {
+        "name": "SetVertexShader",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetVertexShader",
+        "value": "0x00000000"
+      },
+      {
+        "name": "SetPixelShader",
+        "value": "0x00000000"
+      },
+      {
+        "name": "FVF",
+        "value": "68"
+      },
+      {
+        "name": "SetTexture",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetTexture",
+        "value": "0x00000000"
+      },
+      {
+        "name": "ClearTexture",
+        "value": "0x00000000"
+      },
+      {
+        "name": "SetStreamSource",
+        "value": "0x00000000"
+      },
+      {
+        "name": "SetIndices",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetStreamSource",
+        "value": "0x00000000"
+      },
+      {
+        "name": "GetIndices",
+        "value": "0x00000000"
+      },
+      {
+        "name": "Bindings stride",
+        "value": "20 base=0"
+      },
+      {
+        "name": "Clear",
+        "value": "0x00000000"
+      },
+      {
+        "name": "BeginScene",
+        "value": "0x00000000"
+      },
+      {
+        "name": "DrawPrimitive",
+        "value": "0x00000000"
+      },
+      {
+        "name": "DrawIndexedPrimitive",
+        "value": "0x00000000"
+      },
+      {
+        "name": "DrawPrimitiveUP",
+        "value": "0x00000000"
+      },
+      {
+        "name": "DrawIndexedPrimitiveUP",
+        "value": "0x00000000"
+      },
+      {
+        "name": "EndScene",
+        "value": "0x00000000"
+      },
+      {
+        "name": "BackBufferDesc",
+        "value": "0x00000000"
+      },
+      {
+        "name": "BackBufferLock",
+        "value": "0x00000000"
+      },
+      {
+        "name": "BackBufferUnlock",
+        "value": "0x00000000"
+      },
+      {
+        "name": "BackBufferFormat",
+        "value": "22"
+      },
+      {
+        "name": "Present",
+        "value": "0x00000000"
+      }
+    ],
+    "baseline_log_sha256": "905347daf7444b9e92ef21eebc9ddee99ba47745b41a01d813bbdab2dcbed230",
+    "facade_log_sha256": "0e7a780de0c8fe69d0e717586623b4ec467f9080618771211ff8b2aea6a5432c",
+    "ppm_sha256_both": "6c1c61fd0434bf500fd9b7e0a206b92461fc12e46efc117b3d5cc93749713bb4",
+    "image": "triangles.png",
+    "image_sha256": "9e343949ce3af29f8924892318ba85ad9dabebf71aa4b061b14e4ab1f91ed8b0",
+    "native_device_escape": [
+      "surface",
+      "texture",
+      "vertex_buffer",
+      "index_buffer"
+    ]
+  },
+  "limitations": [
+    "Fixture only: not integrated with the proxy or TDS.",
+    "Resources are native and GetDevice exposes the native device, bypassing the facade.",
+    "Wrapped buffers are not passed through the escaped device.",
+    "Four synthetic triangles and selected fixed-function states only; no gameplay parity.",
+    "PPM comparison covers RGB only; alpha is not preserved."
+  ]
+}

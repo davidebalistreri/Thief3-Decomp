@@ -135,6 +135,11 @@ non-resurrecting COM `TryAddRef` with final release before retiring an entry.
 The table alone does not close resource/device alias paths or make buffer
 capture safe for TDS.
 
+Separate [fixture-only factory and device facades](tests/README_device_facade.md)
+have also been compared with native D3D8 on Highball. They forward native
+resources, so their `GetDevice` still escapes the facade; they are not
+integrated into this proxy and must not be used with wrapped buffers in TDS.
+
 ## Capture and inspect
 
 Set `T3RENDER_CAPTURE_PATH` to a new absolute Windows path and select exactly

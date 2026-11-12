@@ -28,6 +28,7 @@ class ProxyTest(unittest.TestCase):
             subprocess.run([cxx, "-std=c++17", "-Wall", "-Wextra", "-pthread", "-DT3RENDER_PROXY_TEST", *include,
                             str(root / "src" / "proxy.cpp"), str(root / "src" / "buffer_proxy.cpp"),
                             str(root / "ir" / "buffer_shadow.cpp"), str(root / "ir" / "buffer_registry.cpp"),
+                            str(root / "ir" / "vertex_declaration.cpp"), str(root / "ir" / "vertex_declaration_registry.cpp"),
                             str(root / "tests" / "proxy_mock.cpp"), str(obj), "-o", str(cls.binary)],
                            check=True, timeout=60)
         except Exception:
@@ -42,6 +43,19 @@ class ProxyTest(unittest.TestCase):
         command = [str(self.binary)] + ([mode] if mode else [])
         result = subprocess.run(command, text=True, capture_output=True, timeout=timeout)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_declaration_observer_is_bounded_and_opt_in(self):
+        for mode in ("decl-opt-out", "decl-in", "decl-create-fail", "decl-null-output", "decl-bad-output",
+                     "decl-incomplete", "decl-collision", "decl-reuse", "decl-reset", "decl-stateblock",
+                     "decl-alias", "decl-alias-capacity", "decl-draw-set", "decl-draw-create", "decl-draw-delete", "decl-get-fail",
+                     "decl-draw-fail", "decl-inactive", "decl-combined", "decl-get-set", "decl-get-draw", "decl-get-recursive", "decl-get-release",
+                     "decl-writer-set", "decl-writer-create", "decl-writer-delete", "decl-writer-state", "decl-writer-alias",
+                     "decl-writer-draw", "decl-writer-reset", "decl-writer-present", "decl-writer-clear", "decl-writer-release",
+                     "decl-cross-draw", "decl-cross-reset", "decl-cross-present", "decl-cross-clear",
+                     "decl-cross-combined-draw", "decl-create-callback", "decl-entry-config", "decl-entry-clear",
+                     "decl-entry-clear-result", "decl-entry-present", "decl-entry-reset", "decl-entry-draw-result",
+                     "decl-entry-wants-draw"):
+            with self.subTest(mode=mode): self.run_mode(mode, timeout=10)
 
     def test_forwarding_and_lifecycle(self):
         self.run_mode()

@@ -79,6 +79,10 @@ struct IDirect3DDevice8Vtbl {
  HRESULT (*CaptureStateBlock)(IDirect3DDevice8*,DWORD);
  HRESULT (*DeleteStateBlock)(IDirect3DDevice8*,DWORD);
  HRESULT (*CreateStateBlock)(IDirect3DDevice8*,D3DSTATEBLOCKTYPE,DWORD*);
+ HRESULT (*CreateVertexShader)(IDirect3DDevice8*,const DWORD*,const DWORD*,DWORD*,DWORD);
+ HRESULT (*SetVertexShader)(IDirect3DDevice8*,DWORD);
+ HRESULT (*GetVertexShader)(IDirect3DDevice8*,DWORD*);
+ HRESULT (*DeleteVertexShader)(IDirect3DDevice8*,DWORD);
 };
 struct IDirect3D8 {
  struct IDirect3D8Vtbl* lpVtbl; int refs;
@@ -113,5 +117,9 @@ struct IDirect3DDevice8 {
  HRESULT STDMETHODCALLTYPE CaptureStateBlock(DWORD);
  HRESULT STDMETHODCALLTYPE DeleteStateBlock(DWORD);
  HRESULT STDMETHODCALLTYPE CreateStateBlock(D3DSTATEBLOCKTYPE,DWORD*);
+ HRESULT STDMETHODCALLTYPE CreateVertexShader(const DWORD*,const DWORD*,DWORD*,DWORD);
+ HRESULT STDMETHODCALLTYPE SetVertexShader(DWORD);
+ HRESULT STDMETHODCALLTYPE GetVertexShader(DWORD*);
+ HRESULT STDMETHODCALLTYPE DeleteVertexShader(DWORD);
 #endif
 };

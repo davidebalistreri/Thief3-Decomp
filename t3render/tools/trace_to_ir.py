@@ -256,6 +256,66 @@ def uint32(value):
     return value if value is not None and value <= 0xffffffff else None
 
 
+def framed_declaration(words):
+    """Check the producer's bounded token framing, not D3D8 shader semantics."""
+    if not isinstance(words, list) or not 1 <= len(words) <= 1024:
+        return False
+    if any(uint32(word) is None for word in words):
+        return False
+    position = 0
+    while position < len(words):
+        token = words[position]
+        position += 1
+        if token == 0xffffffff:
+            return position == len(words)
+        kind = token >> 29
+        if kind == 0:
+            if token != 0:
+                return False
+            payload = 0
+        elif kind in (1, 2, 3):
+            payload = 0
+        elif kind == 4:  # CONSTMEM payload can itself contain END words.
+            payload = ((token >> 25) & 0x0f) * 4
+        elif kind == 5:  # EXT payload words are opaque.
+            payload = (token >> 24) & 0x1f
+        else:
+            return False
+        if payload > len(words) - position:
+            return False
+        position += payload
+    return False
+
+
+def observed_declaration(draw, result, header):
+    """Publish only a paired, stable and structurally valid candidate."""
+    stable = result.get("shader_stable") if isinstance(result.get("shader_stable"), bool) else None
+    hr = integer(result.get("hr"))
+    observed = {"status": "unknown", "shader_value": None, "generation": None, "words": None,
+                "shader_stable": stable, "draw_hresult": hr}
+    capability = object_or_empty(header.get("declaration_capture"))
+    raw = object_or_empty(draw.get("vertex_declaration"))
+    shader = uint32(draw.get("vertex_shader"))
+    if (capability.get("requested") is not True or stable is not True or
+            hresult_succeeded(hr) is not True or shader is None):
+        return observed
+    if not {"status", "generation", "words"}.issubset(raw):
+        return observed
+    status = raw.get("status")
+    generation = integer(raw.get("generation"))
+    if ((raw.get("generation") is not None and generation is None) or
+            (generation is not None and not 1 <= generation <= 0xffffffffffffffff)):
+        return observed
+    words = raw.get("words")
+    if status == "candidate":
+        if generation is None or not framed_declaration(words):
+            return observed
+        observed.update(status=status, shader_value=shader, generation=generation, words=words[:])
+    elif status in ("unknown", "unavailable", "unsafe") and words is None:
+        observed.update(status=status, shader_value=shader, generation=generation)
+    return observed
+
+
 def buffer_binding(record):
     """Validate a getter's resource identity and declared byte size."""
     if not isinstance(record, dict) or hresult_succeeded(record.get("hr")) is not True:
@@ -466,6 +526,7 @@ def convert(path):
     }
     current = None
     buffered_pending = {}
+    shader_pending = {}
     buffered_results = []
     frame_buffer_bytes = 0
     draw_index = 0
@@ -477,6 +538,7 @@ def convert(path):
             ir["compatibility"]["d3d8"]["capture_end"] = event
         elif kind == "frame_begin":
             buffered_pending = {}
+            shader_pending = {}
             buffered_results = []
             frame_buffer_bytes = 0
             current = {"frame": event["frame"], "commands": [],
@@ -503,7 +565,7 @@ def convert(path):
                 buffered_pending[event["op_id"]] = (mesh_record, event, indexed)
             ir["materials"].append(material(event, material_id))
             transforms = object_or_empty(event.get("transforms"))
-            current["commands"].append({
+            command = {
                 "id": f"draw:{draw_index}", "source_line": line_number,
                 "camera": camera_id, "mesh": mesh_id, "material": material_id,
                 "lights": observed_lights(event, ir, draw_index),
@@ -512,9 +574,16 @@ def convert(path):
                 "transforms_observed": {"world": matrix_list(transforms.get("world")),
                                         "texture": matrix_list(transforms.get("texture"))},
                 "compatibility": {"d3d8": {"draw": event}},
-            })
+            }
+            current["commands"].append(command)
+            if "op_id" in event:
+                shader_pending[event["op_id"]] = (command, event)
             draw_index += 1
         else:
+            if kind == "draw_result" and event.get("op_id") in shader_pending:
+                command, draw = shader_pending.pop(event["op_id"])
+                if "vertex_declaration" in draw or "shader_stable" in event:
+                    command["vertex_declaration_observed"] = observed_declaration(draw, event, records[0])
             if kind == "draw_result" and event.get("op_id") in buffered_pending:
                 mesh_record, draw, indexed = buffered_pending.pop(event["op_id"])
                 buffered_results.append((mesh_record, draw, event, indexed))

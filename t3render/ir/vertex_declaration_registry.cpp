@@ -216,6 +216,13 @@ void VertexDeclarationRegistry::CloseDevice(std::uint64_t id) noexcept {
         }
     } catch (...) {}
 }
+void VertexDeclarationRegistry::MarkUnsafe(std::uint64_t id) noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Device* device = FindLocked(id);
+        if (device) PoisonLocked(*device);
+    } catch (...) {}
+}
 void VertexDeclarationRegistry::Invalidate(std::uint64_t id) noexcept {
     try {
         {

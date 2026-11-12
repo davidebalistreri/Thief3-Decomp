@@ -48,6 +48,7 @@ struct CaptureState {
     bool key_down = false;
     bool triggered = false;
     bool buffer_requested = false;
+    bool declaration_requested = false;
     bool begun = false;
     bool had_reset = false;
     uint64_t frame = 0;
@@ -146,6 +147,7 @@ void Initialize(CaptureState& s) {
     const std::wstring key = Environment(L"T3RENDER_CAPTURE_KEY");
     const std::wstring trigger_path = Environment(L"T3RENDER_CAPTURE_TRIGGER_PATH");
     s.buffer_requested = Environment(L"T3RENDER_CAPTURE_BUFFERS") == L"1";
+    s.declaration_requested = Environment(L"T3RENDER_CAPTURE_DECLARATIONS") == L"1";
     // Missing means the legacy single frame; an explicitly empty, truncated,
     // or malformed value must not silently start a capture.
     wchar_t frames[2]{};
@@ -203,7 +205,8 @@ bool Open(CaptureState& s) {
         << kUpComponentLimit << ",\"frame_limit_bytes\":" << kUpFrameLimit << "},"
         << "\"buffer_capture\":{\"requested\":" << (s.buffer_requested ? "true" : "false")
         << ",\"encoding\":\"hex\",\"component_limit_bytes\":" << kBufferComponentLimit
-        << ",\"frame_limit_bytes\":" << kBufferFrameLimit << "},\"limitations\":["
+        << ",\"frame_limit_bytes\":" << kBufferFrameLimit << "},\"declaration_capture\":{\"requested\":"
+        << (s.declaration_requested ? "true" : "false") << "},\"limitations\":["
         << "\"texture bytes and T3 asset names are not captured\","
         << "\"optional buffer shadows are bounded observations, not proof of driver input\","
         << "\"UP data is bounded, may be unavailable, and may change between snapshot and draw\","
@@ -211,7 +214,7 @@ bool Open(CaptureState& s) {
         << "\"draw and clear events describe attempts; results are paired by op_id\","
         << "\"concurrent device calls may have a different driver submission order\","
         << "\"concurrent_operations only covers draw/clear overlap, not Present or Reset\","
-        << "\"shader programs, declarations and constants are not captured\","
+        << "\"shader programs and constants are not captured; declarations are optional candidates\","
         << "\"light indices 0 through 31 only\","
         << "\"world transform indices 0 through 3 only\","
         << "\"texture stages at most 8 and vertex streams at most 16\","
@@ -823,9 +826,38 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
         out << '}';
     }
     DWORD vs = 0, ps = 0;
-    const HRESULT vs_hr = device->GetVertexShader(&vs), ps_hr = device->GetPixelShader(&ps);
+    HRESULT vs_hr = E_FAIL;
+    if (draw.shader_snapshot) {
+        vs = draw.shader_snapshot->value;
+        vs_hr = draw.shader_snapshot->getter_result;
+    } else {
+        vs_hr = device->GetVertexShader(&vs);
+    }
+    const HRESULT ps_hr = device->GetPixelShader(&ps);
     out << "],\"vertex_shader\":";
     if (SUCCEEDED(vs_hr)) out << vs; else out << "null";
+    if (draw.shader_snapshot) {
+        const auto& declaration = draw.shader_snapshot->declaration;
+        const char* status = "unknown";
+        switch (declaration.status) {
+        case ir::ShaderObservationStatus::Candidate: status = "candidate"; break;
+        case ir::ShaderObservationStatus::Unavailable: status = "unavailable"; break;
+        case ir::ShaderObservationStatus::Unsafe: status = "unsafe"; break;
+        case ir::ShaderObservationStatus::Unknown: break;
+        }
+        out << ",\"vertex_declaration\":{\"status\":\"" << status << "\",\"generation\":";
+        if (declaration.generation) out << declaration.generation; else out << "null";
+        out << ",\"words\":";
+        if (declaration.status == ir::ShaderObservationStatus::Candidate) {
+            out << '[';
+            for (size_t i = 0; i < declaration.words.size(); ++i) {
+                if (i) out << ',';
+                out << declaration.words[i];
+            }
+            out << ']';
+        } else out << "null";
+        out << '}';
+    }
     out << ",\"pixel_shader\":";
     if (SUCCEEDED(ps_hr)) out << ps; else out << "null";
     out << ',';
@@ -892,7 +924,7 @@ uint64_t BeginOperation(CaptureState& s, OperationKind kind) {
 void Fail() noexcept;
 
 void FinishOperation(IDirect3DDevice8* device, uint64_t token, HRESULT result, OperationKind kind,
-                     int buffer_stable = -1) {
+                     int buffer_stable = -1, int shader_stable = -1) {
     if (!token) return;
     try {
         auto& s = State();
@@ -910,6 +942,8 @@ void FinishOperation(IDirect3DDevice8* device, uint64_t token, HRESULT result, O
             << ",\"hr\":" << static_cast<int32_t>(result);
         if (kind == OperationKind::Draw && buffer_stable >= 0)
             out << ",\"buffer_stable\":" << (buffer_stable ? "true" : "false");
+        if (kind == OperationKind::Draw && shader_stable >= 0)
+            out << ",\"shader_stable\":" << (shader_stable ? "true" : "false");
         out << "}\n";
         if (Write(s, out.str())) s.pending_operations.erase(pending);
     } catch (...) { Fail(); }
@@ -1025,6 +1059,22 @@ void CaptureDeviceReleased(IDirect3DDevice8* device) {
     } catch (...) { Fail(); }
 }
 
+void CaptureAbandonDevice(IDirect3DDevice8* device) {
+    try {
+        auto& s = State();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (s.enabled && !s.complete && (!device || device == s.device)) Stop(s);
+    } catch (...) { Fail(); }
+}
+
+bool CaptureWantsDraw(IDirect3DDevice8* device) {
+    try {
+        auto& s = State();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        return s.enabled && !s.complete && device && device == s.device && s.triggered && s.frame == s.target;
+    } catch (...) { Fail(); return false; }
+}
+
 uint64_t CaptureDraw(IDirect3DDevice8* device, const DrawCall& draw) {
     try {
         auto& s = State();
@@ -1079,6 +1129,10 @@ uint64_t CaptureClear(IDirect3DDevice8* device, DWORD count, const D3DRECT* sour
         out << ",\"depth_bits\":" << depth_bits << ",\"stencil\":" << stencil << "}\n";
         return Write(s, out.str()) ? token : 0;
     } catch (...) { Fail(); return 0; }
+}
+
+void CaptureShaderDrawResult(IDirect3DDevice8* device, uint64_t token, HRESULT result, int buffer_stable, bool shader_stable) {
+    FinishOperation(device, token, result, OperationKind::Draw, buffer_stable, shader_stable && SUCCEEDED(result) ? 1 : 0);
 }
 
 void CaptureClearResult(IDirect3DDevice8* device, uint64_t token, HRESULT result) {

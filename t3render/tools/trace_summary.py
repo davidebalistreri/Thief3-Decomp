@@ -122,10 +122,15 @@ def summarize(path):
                         )
                     if event in ("draw", "clear"):
                         has_buffer_data = event == "draw" and "buffer_data" in item
+                        has_declaration = event == "draw" and "vertex_declaration" in item
                         if has_buffer_data and not isinstance(item["buffer_data"], dict):
                             raise TraceError(f"line {lines}: buffer_data must be an object")
                         if has_buffer_data and not operation_results:
                             raise TraceError(f"line {lines}: buffer_data requires operation result capability")
+                        if has_declaration and not isinstance(item["vertex_declaration"], dict):
+                            raise TraceError(f"line {lines}: vertex_declaration must be an object")
+                        if has_declaration and not operation_results:
+                            raise TraceError(f"line {lines}: vertex_declaration requires operation result capability")
                         if event == "clear":
                             if not operation_results:
                                 raise TraceError(f"line {lines}: clear requires operation result capability")
@@ -186,6 +191,8 @@ def summarize(path):
                             raise TraceError(f"line {lines}: result has no matching operation")
                         if not _is_int(item.get("hr")) or not -(1 << 31) <= item["hr"] < (1 << 32):
                             raise TraceError(f"line {lines}: operation hr must be an integer")
+                        if "shader_stable" in item and (event != "draw_result" or not isinstance(item["shader_stable"], bool)):
+                            raise TraceError(f"line {lines}: shader_stable requires a boolean draw result")
                         if pending[1]:
                             if not isinstance(item.get("buffer_stable"), bool):
                                 raise TraceError(f"line {lines}: buffered draw result requires boolean buffer_stable")

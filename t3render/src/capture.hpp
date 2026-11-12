@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "../ir/vertex_declaration_registry.hpp"
+
 namespace t3render {
 
 enum class DrawKind { Primitive, IndexedPrimitive, PrimitiveUP, IndexedPrimitiveUP };
@@ -20,6 +22,14 @@ struct BufferObserver {
     bool (*read_index)(void*, IDirect3DDevice8*, IDirect3DIndexBuffer8*, std::size_t, void*, std::size_t) = nullptr;
 };
 
+// Candidate sampled outside the capture mutex. Its numeric match is not proof
+// of shader identity or of bytes consumed by the driver.
+struct ShaderSnapshot {
+    HRESULT getter_result = E_FAIL;
+    DWORD value = 0;
+    ir::ShaderObservation declaration;
+};
+
 // Parameters passed by the caller. UP pointers remain owned by the caller and
 // are observed synchronously before forwarding; they are never retained.
 struct DrawCall {
@@ -30,12 +40,18 @@ struct DrawCall {
     const void* vertex_data = nullptr;
     const void* index_data = nullptr;
     const BufferObserver* buffer_observer = nullptr;
+    const ShaderSnapshot* shader_snapshot = nullptr;
 };
 
 bool CaptureConfigured();
+// Advisory only: a concurrent Present may change the active window.
+bool CaptureWantsDraw(IDirect3DDevice8*);
 void CaptureDevice(IDirect3DDevice8*, const D3DPRESENT_PARAMETERS*);
 // Called after final Release: the address is an identifier, not a live COM object.
 void CaptureDeviceReleased(IDirect3DDevice8*);
+// Stop a partial trace after an unrecorded nested device operation; a null
+// device abandons the current capture without needing its identity.
+void CaptureAbandonDevice(IDirect3DDevice8*);
 // A nonzero token identifies an attempted operation in the selected frame.
 // The matching result must be supplied after forwarding to the real device.
 std::uint64_t CaptureDraw(IDirect3DDevice8*, const DrawCall&);
@@ -43,6 +59,8 @@ void CaptureDrawResult(IDirect3DDevice8*, std::uint64_t, HRESULT);
 // The snapshot was taken before the driver draw; stable is true only when the
 // whole observed draw window completed without an intercepted hazard.
 void CaptureBufferedDrawResult(IDirect3DDevice8*, std::uint64_t, HRESULT, bool stable);
+// buffer_stable is -1 when no buffer observation was made.
+void CaptureShaderDrawResult(IDirect3DDevice8*, std::uint64_t, HRESULT, int buffer_stable, bool shader_stable);
 std::uint64_t CaptureClear(IDirect3DDevice8*, DWORD, const D3DRECT*, DWORD, D3DCOLOR, float, DWORD);
 void CaptureClearResult(IDirect3DDevice8*, std::uint64_t, HRESULT);
 void CapturePresent(IDirect3DDevice8*, HRESULT);

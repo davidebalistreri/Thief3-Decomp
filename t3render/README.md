@@ -178,6 +178,33 @@ Without a valid path and trigger no frame is captured. Capturing a frame can
 be expensive: it queries D3D8 state on every draw and writes a potentially
 large file. The trace is local game-derived data and is not to be committed.
 
+### Experimental vertex-declaration observation
+
+`T3RENDER_CAPTURE_DECLARATIONS=1` independently enables candidate declaration
+observation from device creation, before a frame trigger. It does not enable
+VB/IB wrapping. If the buffer observer is also enabled for a device, the
+proxy suppresses declaration observation on that device because buffer
+`GetDevice` can leak an untracked alias. The header reports the request, not
+successful activation. The proxy copies at most 1024 DWORDs from each application
+`CreateVertexShader` declaration using checked memory reads, and tracks
+creation, deletion, binding, reset and draw windows. For an active draw the
+usual `GetVertexShader` query is performed before the capture writer's mutex.
+No `GetVertexShaderDeclaration` call is made by the observer.
+
+A `vertex_declaration` with status `candidate` contains an observed numeric
+handle match, generation and DWORDs. Match it by `op_id` to `draw_result` and
+require a successful HRESULT and `shader_stable: true` before using it as a
+candidate. Even then, the numeric value could be an FVF, the input memory can
+change before the driver consumes it, and an unobserved native alias can bypass
+the hooks. Detected device aliases, state blocks and overlapping shader
+operations invalidate evidence conservatively. A nested draw, clear, reset or
+present during a writer getter abandons the partial trace; payload retirement
+is deferred until the writer lock has been released. Unknown, incomplete or
+unsafe observations contain no declaration words. The optional observer is host-tested
+and cross-compiled, but has **not** been run in TDS. It does not capture shader
+bytecode or constants, and cannot reconstruct programmable camera transforms or
+make the frame replayable.
+
 ### Experimental buffered capture — isolated fixture only
 
 Set `T3RENDER_CAPTURE_BUFFERS=1` in addition to the capture configuration to
@@ -247,7 +274,7 @@ are flagged because their actual submission order may differ from the log.
 
 The header records the exact limits. IDs are transient process addresses, not
 stable T3 asset names. Capture does not include texture bytes, complete
-buffered-resource histories, shader code/declarations/constants, all light or
+buffered-resource histories, shader code/constants, reliable complete declarations, all light or
 world indices, render-target operations or complete resource lifetime. Snapshot order under concurrent
 device calls is not guaranteed to
 be the final GPU submission order. The first device is observed until its

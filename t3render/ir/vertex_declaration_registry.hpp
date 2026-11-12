@@ -10,7 +10,7 @@
 
 namespace t3render::ir {
 
-// Portable experimental registry, not connected to the proxy. A device token
+// Portable experimental registry used by the optional proxy observer. A device token
 // is unique to this registry lifetime and must represent one observed COM
 // device lifetime; it is not a native pointer or persistent asset identity.
 // Entries are candidates from application memory, not proof of driver input,
@@ -48,6 +48,9 @@ public:
     void CloseDevice(std::uint64_t device) noexcept;
     // Unsafe escape or unobserved mutation permanently invalidates this device.
     void Invalidate(std::uint64_t device) noexcept;
+    // Marks unsafe without draining/deallocating retired payloads. The caller
+    // must subsequently call Invalidate or CloseDevice outside its own locks.
+    void MarkUnsafe(std::uint64_t device) noexcept;
 
     // All begin/end windows bracket the corresponding native operation, but
     // never hold this registry's lock across it. Any overlap poisons the

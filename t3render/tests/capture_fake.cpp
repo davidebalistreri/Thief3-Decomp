@@ -74,6 +74,7 @@ struct Device : IDirect3DDevice8 {
     IndexBuffer index;
     unsigned getters = 0;
     DWORD render_state = 42;
+    unsigned vertex_shader_getters = 0;
     DWORD vertex_shader = 444;
     DWORD pixel_shader = 555;
     UINT stream_stride = 32, index_base = 3;
@@ -125,7 +126,7 @@ struct Device : IDirect3DDevice8 {
         if (stage == 0) { ++texture.refs; *out = &texture; }
         return S_OK;
     }
-    HRESULT GetVertexShader(DWORD* out) override { ++getters; *out = vertex_shader; return S_OK; }
+    HRESULT GetVertexShader(DWORD* out) override { ++getters; ++vertex_shader_getters; *out = vertex_shader; return S_OK; }
     HRESULT GetPixelShader(DWORD* out) override { ++getters; *out = pixel_shader; return S_OK; }
     HRESULT GetStreamSource(UINT stream, IDirect3DVertexBuffer8** out, UINT* stride) override {
         ++getters; *out = nullptr; *stride = 0;
@@ -316,7 +317,39 @@ int main(int argc, char** argv) {
     fake_index[32] = 3; fake_index[36] = 4; fake_index[40] = 5;
 
     bool second_used = false;
-    if (scenario == "window" || scenario == "window_key" || scenario == "window_file" || scenario == "window_pending" ||
+    if (scenario == "shader_abandon" || scenario == "shader_abandon_all") {
+        t3render::CapturePresent(&device, S_OK);
+        const auto token = t3render::CaptureDraw(&device, draw);
+        if (!token) return 8;
+        t3render::CaptureAbandonDevice(scenario == "shader_abandon_all" ? nullptr : &device);
+        t3render::CaptureDrawResult(&device, token, S_OK);
+        t3render::CapturePresent(&device, S_OK);
+    } else if (scenario == "shader") {
+        if (t3render::CaptureWantsDraw(&device)) return 8;
+        t3render::CapturePresent(&device, S_OK);
+        if (!t3render::CaptureWantsDraw(&device) || t3render::CaptureWantsDraw(&unrelated)) return 8;
+        t3render::ShaderSnapshot snapshot;
+        snapshot.getter_result = S_OK;
+        snapshot.value = 0xf0000001u;
+        snapshot.declaration.status = t3render::ir::ShaderObservationStatus::Candidate;
+        snapshot.declaration.generation = 7;
+        snapshot.declaration.words = {0x20000000u, 0xffffffffu};
+        auto candidate = draw;
+        candidate.shader_snapshot = &snapshot;
+        for (unsigned i=0; i<4; ++i) {
+            if (i == 3) {
+                snapshot.getter_result = E_FAIL;
+                snapshot.declaration = {};
+            }
+            const auto token = t3render::CaptureDraw(&device, candidate);
+            if (!token) return 8;
+            t3render::CaptureShaderDrawResult(&device, token, i==1 ? E_FAIL : S_OK,
+                                              i==2 ? 0 : -1, i!=2);
+        }
+        if (device.vertex_shader_getters != 0) return 8;
+        t3render::CapturePresent(&device, S_OK);
+        if (t3render::CaptureWantsDraw(&device)) return 8;
+    } else if (scenario == "window" || scenario == "window_key" || scenario == "window_file" || scenario == "window_pending" ||
         scenario == "window_release" || scenario == "window_budget") {
         if (scenario == "window_key") {
             t3render::CapturePresent(&device, S_OK); // frame 0, F11 not pressed

@@ -241,6 +241,28 @@ class TraceSummaryTests(unittest.TestCase):
         self.write_events(HEADER_OPS, BEGIN, DRAW_OP, DRAW_RESULT, END_OPS, CAPTURE_END)
         self.assertEqual(trace_summary.summarize(self.trace)["draw_count"], 1)
 
+    def test_declaration_and_shader_stability_are_paired_without_requiring_optional_fields(self):
+        draw = dict(DRAW_OP, vertex_declaration={"status": "candidate"})
+        for result in (DRAW_RESULT, dict(DRAW_RESULT, shader_stable=True), dict(DRAW_RESULT, shader_stable=False)):
+            self.write_events(HEADER_OPS, BEGIN, draw, result, END_OPS, CAPTURE_END)
+            self.assertEqual(trace_summary.summarize(self.trace)["draw_count"], 1)
+        # A getter interrupted before publishing the snapshot can still emit
+        # shader_stable, but there is no declaration to expose.
+        self.write_events(HEADER_OPS, BEGIN, DRAW_OP, dict(DRAW_RESULT, shader_stable=True), END_OPS, CAPTURE_END)
+        self.assertEqual(trace_summary.summarize(self.trace)["draw_count"], 1)
+        for invalid in (None, 0, 1, "true"):
+            with self.subTest(invalid=invalid):
+                self.assert_invalid([HEADER_OPS, BEGIN, draw, dict(DRAW_RESULT, shader_stable=invalid)],
+                                    "shader_stable requires a boolean draw result")
+        self.assert_invalid([HEADER_OPS, BEGIN, CLEAR, dict(CLEAR_RESULT, shader_stable=True)],
+                            "shader_stable requires a boolean draw result")
+        self.assert_invalid([HEADER_OPS, BEGIN, dict(DRAW_OP, vertex_declaration=None)],
+                            "vertex_declaration must be an object")
+        self.assert_invalid([HEADER, BEGIN, dict(DRAW, vertex_declaration={})],
+                            "vertex_declaration requires operation result capability")
+        self.assert_invalid([HEADER_OPS, BEGIN, draw, dict(DRAW_RESULT, op_id=3, shader_stable=True)],
+                            "no matching operation")
+
     def test_clear_rectangles_are_never_fabricated(self):
         cases = [
             (dict(CLEAR, rects_status="captured", rect_count=2, rects=[]), "invalid captured"),

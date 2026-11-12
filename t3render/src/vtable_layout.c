@@ -20,7 +20,9 @@ T3VtableLayout T3GetVtableLayout(void) {
         SLOT(IDirect3DDevice8, ProcessVertices),
         SLOT(IDirect3DDevice8, BeginStateBlock), SLOT(IDirect3DDevice8, EndStateBlock),
         SLOT(IDirect3DDevice8, ApplyStateBlock), SLOT(IDirect3DDevice8, CaptureStateBlock),
-        SLOT(IDirect3DDevice8, DeleteStateBlock), SLOT(IDirect3DDevice8, CreateStateBlock)
+        SLOT(IDirect3DDevice8, DeleteStateBlock), SLOT(IDirect3DDevice8, CreateStateBlock),
+        SLOT(IDirect3DDevice8, CreateVertexShader), SLOT(IDirect3DDevice8, SetVertexShader),
+        SLOT(IDirect3DDevice8, GetVertexShader), SLOT(IDirect3DDevice8, DeleteVertexShader)
     };
     return result;
 }

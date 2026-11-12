@@ -111,6 +111,24 @@ void ReentrantInvalidationDiscardsCopiedObservation() {
     assert(!registry.End(draw) && !registry.BeginDraw(active_device));
 }
 
+void MarkUnsafeDefersDeallocation() {
+    VertexDeclarationRegistry registry({2, 4, 8, 32});
+    active_registry = &registry;
+    active_device = registry.OpenDevice();
+    Register(registry, active_device, 99);
+    const auto draw = registry.BeginDraw(active_device);
+    assert(draw);
+    opened_device = 0;
+    deallocation_hook = OpenAnotherDevice;
+    registry.MarkUnsafe(active_device);
+    assert(deallocation_hook.load() == OpenAnotherDevice && !opened_device);
+    assert(!registry.End(draw) && !registry.BeginDraw(active_device));
+    assert(deallocation_hook.load() == OpenAnotherDevice && !opened_device);
+    registry.Invalidate(active_device);
+    assert(!deallocation_hook.load() && opened_device && opened_device != active_device);
+    registry.CloseDevice(opened_device);
+}
+
 void DeallocationCanReenterWithoutDeadlock() {
     VertexDeclarationRegistry registry({2, 4, 8, 32});
     active_registry = &registry;
@@ -345,6 +363,7 @@ void CrossRegistryRecursiveFreeIsBounded() {
 int main() {
     AllocationCanReenterWithoutDeadlock();
     ReentrantInvalidationDiscardsCopiedObservation();
+    MarkUnsafeDefersDeallocation();
     DeallocationCanReenterWithoutDeadlock();
     ReentrantCloseDuringResetKeepsOldTicketInvalid();
     AllocationFailurePoisonsOnlyTheDevice();

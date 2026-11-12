@@ -97,6 +97,32 @@ class CaptureHostTests(unittest.TestCase):
         self.assertTrue(events[-2]["had_reset"])
         self.assertEqual(events[-2]["draws"], 4)
 
+    def test_reentrant_device_operation_abandons_partial_frame(self):
+        for scenario in ("shader_abandon", "shader_abandon_all"):
+            with self.subTest(scenario=scenario):
+                self.run_capture(scenario, frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1"})
+                self.assertEqual([item["event"] for item in self.records()], ["header", "frame_begin", "draw"])
+                self.path.unlink()
+
+    def test_shader_candidate_is_paired_with_result_and_reuses_sampled_getter(self):
+        self.run_capture("shader", frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1"})
+        records = self.records()
+        self.assertTrue(records[0]["declaration_capture"]["requested"])
+        draws = [item for item in records if item["event"] == "draw"]
+        results = {item["op_id"]: item for item in records if item["event"] == "draw_result"}
+        self.assertEqual(len(draws), 4)
+        for draw in draws[:3]:
+            self.assertEqual(draw["vertex_shader"], 0xf0000001)
+            self.assertEqual(draw["vertex_declaration"], {
+                "status": "candidate", "generation": 7, "words": [0x20000000, 0xffffffff]})
+        self.assertTrue(results[draws[0]["op_id"]]["shader_stable"])
+        self.assertFalse(results[draws[1]["op_id"]]["shader_stable"])
+        self.assertFalse(results[draws[2]["op_id"]]["shader_stable"])
+        self.assertFalse(results[draws[2]["op_id"]]["buffer_stable"])
+        self.assertIsNone(draws[3]["vertex_shader"])
+        self.assertEqual(draws[3]["vertex_declaration"], {
+            "status": "unknown", "generation": None, "words": None})
+
     def test_frame_window_defaults_to_one_and_preserves_legacy_events(self):
         self.run_capture("window", frame="1")
         records = self.records()

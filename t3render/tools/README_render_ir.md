@@ -67,6 +67,26 @@ data is removed after validation. No third-party modules are needed.
   draws do not gain this field, and raw source data remains in the compatibility
   extension. These are pre-draw observations from application write locks:
   concurrent CPU writes can still differ from what the GPU consumes.
+- An observed declaration is attached to its draw command as
+  `vertex_declaration_observed` only after matching the `draw_result` in the
+  same frame by operation ID. It retains the draw HRESULT and the independently
+  observed `shader_stable` flag. A `candidate` exposes its numeric shader value,
+  generation and DWORDs only if the header requests declaration capture, the
+  draw succeeds, `shader_stable` is true, and the value and generation are
+  valid unsigned integers. The words are bounded to 1024 and must form a
+  complete declaration: CONST/EXT payloads are skipped before looking for the
+  final END token. This checks framing, not declaration or shader semantics.
+  Missing, unstable, failed or malformed observations produce `unknown` and
+  no words; a stable observation may also report `unknown`, `unavailable` or
+  `unsafe`. A result can contain `shader_stable` without a declaration, and
+  old traces retain their previous shape. Raw source fields remain in the
+  compatibility extension and are not validated observations.
+
+  Even a stable declaration is a candidate: a shader handle can resemble an
+  FVF, native aliases may bypass interception and concurrent writes can affect
+  what the driver consumes. `shader_stable` does not establish alias coverage,
+  shader identity, GPU input or replayability. Generations are scoped to the
+  observed device lifetime and are not persistent asset identifiers.
 - Material values are captured legacy parameters and texture slots, not PBR
   values or texture roles. Lights are reported only when observed: the list is
   explicitly incomplete even when empty, since capture samples a limited range

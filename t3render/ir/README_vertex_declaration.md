@@ -1,7 +1,7 @@
 # D3D8 declaration observation prototype
 
-These portable helpers are not connected to the proxy or the game.
-`ScanDeclaration` frames an application-supplied D3D8 declaration into DWORDs,
+These portable helpers are used by the proxy's optional declaration observer;
+the integration has not been validated against TDS. `ScanDeclaration` frames an application-supplied D3D8 declaration into DWORDs,
 including its terminator. It advances past the payloads of CONST and EXT tokens
 before looking for END; payload words can themselves equal `0xffffffff`. It
 does not validate the semantics of the declaration or decode shader programs.
@@ -42,14 +42,15 @@ and container metadata are caller/process memory outside that DWORD budget;
 it is not a cap on total process memory. Publish the registry only after its
 constructor finishes and destroy it only after all calls have ended. Tests
 exercise reentrant allocation/deallocation and concurrent close, but this
-prototype has not been integrated into or validated against TDS.
+integration has only been tested with host mocks, not against TDS.
 
 An observation from `Observe` is usable only if the corresponding draw's
 `End` succeeds. Even then, matching a numeric value to a recorded creation is
 only a candidate: an FVF can resemble a handle, a native alias may bypass
 interception, state blocks may change bindings, and the snapshot may race the
-driver. The future integration must invalidate observations for untracked
-aliases and state changes. These helpers do not establish TDS replayability.
+driver. The proxy invalidates observations on detected alias escapes and state-block
+calls, but cannot detect every native alias. These helpers do not establish TDS
+replayability.
 
 ```sh
 python3 -B -m unittest t3render/tests/test_vertex_declaration.py -v

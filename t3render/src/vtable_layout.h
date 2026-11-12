@@ -11,6 +11,7 @@ typedef struct T3VtableLayout {
     size_t device_set_stream, device_get_stream, device_set_indices, device_get_indices, device_process_vertices;
     size_t device_begin_state_block, device_end_state_block, device_apply_state_block;
     size_t device_capture_state_block, device_delete_state_block, device_create_state_block;
+    size_t device_create_vertex_shader, device_set_vertex_shader, device_get_vertex_shader, device_delete_vertex_shader;
 } T3VtableLayout;
 
 #ifdef __cplusplus

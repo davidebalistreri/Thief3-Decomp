@@ -15,8 +15,10 @@ constexpr std::size_t kMaxReadbackBytes = 256;
 // passive observation. Always balance a successful Lock, even on mismatch.
 template <class Buffer>
 bool VerifyBufferRange(Buffer* buffer, unsigned offset, unsigned length, const void* expected,
-                       unsigned read_only_flag, const char* name, SnapshotReader reader, void* context) {
-    if (!buffer || !expected || !length || length > kMaxReadbackBytes || !reader) {
+                       unsigned read_only_flag, const char* name, SnapshotReader reader, void* context,
+                       unsigned char* verified = nullptr, std::size_t verified_capacity = 0) {
+    if (!buffer || !expected || !length || length > kMaxReadbackBytes || !reader ||
+        (verified ? verified_capacity < length : verified_capacity != 0)) {
         std::fprintf(stderr, "%s: invalid readback arguments\n", name);
         return false;
     }
@@ -43,6 +45,7 @@ bool VerifyBufferRange(Buffer* buffer, unsigned offset, unsigned length, const v
     if (!mapped) std::fprintf(stderr, "%s: READONLY Lock returned null\n", name);
     else if (!copied) std::fprintf(stderr, "%s: READONLY snapshot failed or was partial\n", name);
     else if (!matches) std::fprintf(stderr, "%s: READONLY bytes differ from fixture data\n", name);
+    if (matches && verified) std::memcpy(verified, snapshot.data(), length);
     return matches;
 }
 

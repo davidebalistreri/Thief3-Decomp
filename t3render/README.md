@@ -37,7 +37,9 @@ The fixture's explicit `--buffered --verify-buffer-readback` mode also locks
 its managed, non-write-only VB/IB with `D3DLOCK_READONLY` and compares only the
 written ranges using bounded `ReadProcessMemory` snapshots. It adds driver calls
 that may synchronize or stall; it is not passive capture and does not test TDS
-or other buffer types.
+or other buffer types. Add `--buffer-snapshot new-file` to serialize the two
+verified ranges in the fixture-specific `T3R_BUFFER_V1` ASCII format. Existing
+files are never replaced; these bytes are fixture-owned readback, not proxy trace.
 
 Add `-DT3RENDER_BUILD_D3D12_PROBE=ON` to build `t3render_d3d12_probe.exe`, a
 separate offscreen D3D12 device test. It creates a queue, pipeline and render

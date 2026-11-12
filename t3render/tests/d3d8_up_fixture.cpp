@@ -4,6 +4,7 @@
 // rules may differ from D3D12.
 #include "d3d12_probe_pixels.hpp"
 #include "d3d8_buffer_readback.hpp"
+#include "d3d8_buffer_snapshot.hpp"
 
 #include <windows.h>
 #include <d3d8.h>
@@ -30,6 +31,14 @@ struct Vertex {
     D3DCOLOR diffuse;
 };
 static_assert(sizeof(Vertex) == 20 && offsetof(Vertex, diffuse) == 16, "Unexpected D3D8 vertex layout");
+static_assert(sizeof(Vertex) * 4 == d3d8_fixture::kVertexRangeBytes &&
+              sizeof(std::uint16_t) * 3 == d3d8_fixture::kIndexRangeBytes, "Unexpected snapshot range size");
+constexpr UINT kBufferedBaseVertex = 1;
+constexpr UINT kBufferedMinimumIndex = 1;
+constexpr UINT kBufferedVertexCount = 3;
+constexpr UINT kBufferedStartIndex = 2;
+static_assert(kBufferedBaseVertex == 1 && kBufferedMinimumIndex == 1 &&
+              kBufferedVertexCount == 3 && kBufferedStartIndex == 2, "Update the V1 snapshot contract");
 struct CameraVertex {
     float x, y, z;
     D3DCOLOR diffuse;
@@ -103,6 +112,21 @@ bool WritePpm(const wchar_t* path, const std::vector<std::uint8_t>& rgba) {
     return true;
 }
 
+bool WriteBufferPacket(const wchar_t* path, const d3d8_fixture::BufferPacket& packet) {
+    Handle file{CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW,
+                            FILE_ATTRIBUTE_NORMAL, nullptr)};
+    if (file.value == INVALID_HANDLE_VALUE) {
+        std::fwprintf(stderr, L"Cannot create %ls (error %lu; existing files are not replaced)\n",
+                      path, GetLastError());
+        return false;
+    }
+    if (!WriteAll(file.value, packet.data(), static_cast<DWORD>(packet.size()))) {
+        std::fwprintf(stderr, L"Incomplete output remains at %ls\n", path);
+        return false;
+    }
+    return true;
+}
+
 bool ReadBackbuffer(IDirect3DDevice8* device, std::vector<std::uint8_t>& rgba, D3DFORMAT& format) {
     ComPtr<IDirect3DSurface8> surface;
     if (!Check(device->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, surface.put()), "GetBackBuffer")) return false;
@@ -137,7 +161,8 @@ bool ReadBackbuffer(IDirect3DDevice8* device, std::vector<std::uint8_t>& rgba, D
     return true;
 }
 
-bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buffer_readback) {
+bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buffer_readback,
+            const wchar_t* buffer_snapshot_path) {
     const bool camera = fixture == Fixture::Camera;
     const bool buffered = fixture == Fixture::Buffered;
     ComPtr<IDirect3D8> d3d;
@@ -197,6 +222,8 @@ bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buf
     // first two index slots and the first vertex remain unwritten.
     ComPtr<IDirect3DVertexBuffer8> vertex_buffer;
     ComPtr<IDirect3DIndexBuffer8> index_buffer;
+    std::array<std::uint8_t, d3d8_fixture::kVertexRangeBytes> vertex_snapshot{};
+    std::array<std::uint8_t, d3d8_fixture::kIndexRangeBytes> index_snapshot{};
     if (buffered) {
         const Vertex buffered_vertices[] = {{}, vertices[0], vertices[0], vertices[1], vertices[2]};
         const std::uint16_t indices[] = {1, 2, 3};
@@ -216,15 +243,17 @@ bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buf
         if (!Check(index_buffer->Unlock(), "IndexBuffer::Unlock")) return false;
         if (verify_buffer_readback) {
             const bool vertex_ok = d3d8_fixture::VerifyBufferRange(vertex_buffer.value, sizeof(Vertex),
-                4 * sizeof(Vertex), buffered_vertices + 1, D3DLOCK_READONLY, "VertexBuffer", ReadMappedBuffer, nullptr);
+                4 * sizeof(Vertex), buffered_vertices + 1, D3DLOCK_READONLY, "VertexBuffer", ReadMappedBuffer, nullptr,
+                vertex_snapshot.data(), vertex_snapshot.size());
             const bool index_ok = d3d8_fixture::VerifyBufferRange(index_buffer.value, 2 * sizeof(std::uint16_t),
-                sizeof(indices), indices, D3DLOCK_READONLY, "IndexBuffer", ReadMappedBuffer, nullptr);
+                sizeof(indices), indices, D3DLOCK_READONLY, "IndexBuffer", ReadMappedBuffer, nullptr,
+                index_snapshot.data(), index_snapshot.size());
             if (!vertex_ok || !index_ok) return false;
             std::printf("buffer_readback vertex_offset=%zu vertex_bytes=%zu index_offset=%zu index_bytes=%zu result=PASS\n",
                         sizeof(Vertex), 4 * sizeof(Vertex), 2 * sizeof(std::uint16_t), sizeof(indices));
         }
         if (!Check(device->SetStreamSource(0, vertex_buffer.value, sizeof(Vertex)), "SetStreamSource") ||
-            !Check(device->SetIndices(index_buffer.value, 1), "SetIndices")) return false;
+            !Check(device->SetIndices(index_buffer.value, kBufferedBaseVertex), "SetIndices")) return false;
     }
     if (!Check(device->SetVertexShader(fvf), "SetVertexShader(FVF)") ||
         !Check(device->SetPixelShader(0), "SetPixelShader") ||
@@ -249,7 +278,8 @@ bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buf
         !Check(device->BeginScene(), "BeginScene")) return false;
 
     const bool drawn = buffered
-        ? Check(device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 1, 3, 2, 1), "DrawIndexedPrimitive")
+        ? Check(device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, kBufferedMinimumIndex, kBufferedVertexCount,
+                                             kBufferedStartIndex, 1), "DrawIndexedPrimitive")
         : Check(device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, vertex_data, stride), "DrawPrimitiveUP");
     const bool ended = Check(device->EndScene(), "EndScene");
     if (!drawn || !ended) return false;
@@ -268,6 +298,12 @@ bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buf
     }
     if (!Check(device->Present(nullptr, nullptr, nullptr, nullptr), "Present")) return false;
     if (output && !WritePpm(output, rgba)) return false;
+    if (buffer_snapshot_path) {
+        d3d8_fixture::BufferPacket packet{};
+        if (!d3d8_fixture::EncodeBufferPacket(vertex_snapshot.data(), vertex_snapshot.size(),
+                                               index_snapshot.data(), index_snapshot.size(), packet) ||
+            !WriteBufferPacket(buffer_snapshot_path, packet)) return false;
+    }
     std::printf("d3d8_up_fixture mode=%s width=%u height=%u format=%lu draws=1 stride=%u fvf=0x%08lx "
                 "red_pixels=%zu fnv1a=%016llx\n", camera ? "camera" : (buffered ? "buffered" : "screen"), kWidth, kHeight,
                 static_cast<unsigned long>(format), stride, static_cast<unsigned long>(fvf), stats.red_pixels,
@@ -279,20 +315,27 @@ bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buf
 
 int wmain(int argc, wchar_t** argv) {
     const wchar_t* output = nullptr;
+    const wchar_t* buffer_snapshot_path = nullptr;
     Fixture fixture = Fixture::Screen;
     bool verify_buffer_readback = false;
     for (int i = 1; i < argc; ++i) {
         if (!std::wcscmp(argv[i], L"--camera") && fixture == Fixture::Screen) fixture = Fixture::Camera;
         else if (!std::wcscmp(argv[i], L"--buffered") && fixture == Fixture::Screen) fixture = Fixture::Buffered;
         else if (!std::wcscmp(argv[i], L"--verify-buffer-readback") && !verify_buffer_readback) verify_buffer_readback = true;
+        else if (!std::wcscmp(argv[i], L"--buffer-snapshot") && !buffer_snapshot_path && i + 1 < argc &&
+                 argv[i + 1][0] && std::wcsncmp(argv[i + 1], L"--", 2) != 0) buffer_snapshot_path = argv[++i];
         else if (!std::wcscmp(argv[i], L"--output") && !output && i + 1 < argc && argv[i + 1][0]) output = argv[++i];
         else {
-            std::fwprintf(stderr, L"usage: d3d8_up_fixture [--camera | --buffered [--verify-buffer-readback]] [--output new-image.ppm]\n");
+            std::fwprintf(stderr, L"usage: d3d8_up_fixture [--camera | --buffered [--verify-buffer-readback [--buffer-snapshot new-file]]] [--output new-image.ppm]\n");
             return 2;
         }
     }
     if (verify_buffer_readback && fixture != Fixture::Buffered) {
         std::fprintf(stderr, "--verify-buffer-readback requires --buffered\n");
+        return 2;
+    }
+    if (buffer_snapshot_path && !verify_buffer_readback) {
+        std::fprintf(stderr, "--buffer-snapshot requires --buffered --verify-buffer-readback\n");
         return 2;
     }
     const HINSTANCE instance = GetModuleHandleW(nullptr);
@@ -321,7 +364,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     ShowWindow(window, SW_SHOWNOACTIVATE);
     UpdateWindow(window);
-    const bool ok = Render(window, output, fixture, verify_buffer_readback);
+    const bool ok = Render(window, output, fixture, verify_buffer_readback, buffer_snapshot_path);
     DestroyWindow(window);
     UnregisterClassW(name, instance);
     return ok ? 0 : 1;

@@ -24,6 +24,20 @@ class VertexDeclarationTests(unittest.TestCase):
             result = subprocess.run([str(binary)], text=True, capture_output=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_allocator_can_reenter_without_mutex_deadlock(self):
+        compiler = shutil.which("clang++") or shutil.which("g++")
+        if not compiler:
+            self.skipTest("host C++ compiler required")
+        with tempfile.TemporaryDirectory(prefix="t3render-declaration-reentrant-") as directory:
+            binary = Path(directory) / "reentrant-test"
+            command = [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pthread",
+                       *(str(path) for path in SOURCES), str(ROOT / "tests" / "vertex_declaration_reentrant_test.cpp"),
+                       "-o", str(binary)]
+            compiled = subprocess.run(command, text=True, capture_output=True, timeout=60)
+            self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+            result = subprocess.run([str(binary)], text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_i686_cross_compile(self):
         compiler = shutil.which("i686-w64-mingw32-g++")
         if not compiler:

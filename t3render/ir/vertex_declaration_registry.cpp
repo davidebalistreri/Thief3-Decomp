@@ -1,5 +1,6 @@
 #include "vertex_declaration_registry.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <utility>
 
@@ -8,72 +9,257 @@ namespace {
 std::uint64_t Advance(std::uint64_t value) noexcept {
     return value == (std::numeric_limits<std::uint64_t>::max)() ? 0 : value + 1;
 }
+// Bound the metadata preallocated before any registry lock is taken.
+constexpr std::size_t kMaxDevices = 64;
+constexpr std::size_t kMaxHandlesPerDevice = 4096;
+constexpr std::size_t kMaxSlots = 65536;
+struct DrainScope {
+    const VertexDeclarationRegistry* registry;
+    DrainScope* previous;
+};
+thread_local DrainScope* active_drain = nullptr;
+struct ScopedDrain {
+    DrainScope scope;
+    explicit ScopedDrain(const VertexDeclarationRegistry* registry) noexcept : scope{registry, active_drain} {
+        active_drain = &scope;
+    }
+    ~ScopedDrain() { active_drain = scope.previous; }
+};
 } // namespace
 
-void VertexDeclarationRegistry::Poison(Device& device) noexcept {
+VertexDeclarationRegistry::VertexDeclarationRegistry(ShaderRegistryLimits limits) noexcept : limits_(limits) {
+    if (!limits_.devices || !limits_.handles_per_device || limits_.devices > kMaxDevices ||
+        limits_.handles_per_device > kMaxHandlesPerDevice ||
+        limits_.devices > kMaxSlots / limits_.handles_per_device) return;
+    try {
+        std::vector<Device> devices(limits_.devices);
+        for (auto& device : devices) device.handles.resize(limits_.handles_per_device);
+        devices_ = std::move(devices);
+        for (auto& device : devices_) for (auto& entry : device.handles) entry.owner = &device;
+    } catch (...) {
+        // No device can be opened if initial bounded metadata allocation fails.
+    }
+}
+
+VertexDeclarationRegistry::Device* VertexDeclarationRegistry::FindLocked(std::uint64_t id, bool include_closing) noexcept {
+    for (auto& device : devices_)
+        if (device.id == id && (device.active || (include_closing && device.closing))) return &device;
+    return nullptr;
+}
+VertexDeclarationRegistry::Entry* VertexDeclarationRegistry::FindHandleLocked(Device& device, std::uint32_t handle) noexcept {
+    for (auto& entry : device.handles)
+        if (entry.occupied && entry.handle == handle) return &entry;
+    return nullptr;
+}
+VertexDeclarationRegistry::Entry* VertexDeclarationRegistry::FreeHandleLocked(Device& device) noexcept {
+    for (auto& entry : device.handles)
+        if (!entry.occupied && !entry.payload && !entry.queued) return &entry;
+    return nullptr;
+}
+void VertexDeclarationRegistry::EnqueueLocked(Entry& entry) noexcept {
+    if (!entry.payload || entry.queued) return;
+    entry.queued = true;
+    entry.retired_next = nullptr;
+    if (retired_tail_) retired_tail_->retired_next = &entry;
+    else retired_head_ = &entry;
+    retired_tail_ = &entry;
+    ++retired_count_;
+    ++retire_epoch_;
+}
+void VertexDeclarationRegistry::PoisonLocked(Device& device) noexcept {
     device.unsafe = true;
     device.pending = {};
     device.pending_handle = 0;
-    device.handles.clear();
-    device.words = 0;
+    for (auto& entry : device.handles) {
+        entry.available = false;
+        EnqueueLocked(entry);
+    }
+}
+
+void VertexDeclarationRegistry::FinishClosingLocked(Device& device) noexcept {
+    if (!device.closing || device.preparing || device.retiring || device.words) return;
+    for (const auto& entry : device.handles) if (entry.payload || entry.queued) return;
+    for (auto& entry : device.handles) {
+        entry.occupied = false;
+        entry.available = false;
+        entry.handle = 0;
+        entry.generation = 0;
+    }
+    device.id = 0;
+    device.closing = false;
+}
+
+void VertexDeclarationRegistry::FinishPreparation(std::uint64_t id, std::size_t words) noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Device* device = FindLocked(id, true);
+        if (!device || !device->preparing || device->words < words) return;
+        device->words -= words;
+        --device->preparing;
+        FinishClosingLocked(*device);
+    } catch (...) {}
+}
+
+// Move one unreachable payload at a time out of the table and drop its last
+// reference only after unlocking. Reentrant drains of this registry defer to
+// the outer sweep, preventing recursive allocator callbacks from exhausting
+// the stack. The sweep also completes any reentrant CloseDevice calls.
+void VertexDeclarationRegistry::Drain() noexcept {
+    for (DrainScope* scope = active_drain; scope; scope = scope->previous)
+        if (scope->registry == this) return;
+    ScopedDrain active(this);
+    // Keep a maliciously reentrant allocator or continuously changing set of
+    // pins from trapping one call forever. Remaining work stays queued; later
+    // unpins or registry operations retry it without relaxing memory quotas.
+    std::size_t allowance = devices_.size() * limits_.handles_per_device * 2 + 1;
+    for (;;) {
+        std::size_t remaining = 0;
+        std::uint64_t epoch = 0;
+        try {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                remaining = retired_count_;
+                epoch = retire_epoch_;
+            }
+            while (remaining > 0 && allowance > 0) {
+                --remaining;
+                --allowance;
+                std::shared_ptr<const Payload> retired;
+                Device* owner = nullptr;
+                std::size_t words = 0;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    Entry* entry = retired_head_;
+                    if (!entry) break;
+                    if (entry->payload.use_count() > 1) {
+                        // An Observe pin still owns the payload. Keep its
+                        // quota charged and retry once that pin is released.
+                        if (entry != retired_tail_) {
+                            retired_head_ = entry->retired_next;
+                            entry->retired_next = nullptr;
+                            retired_tail_->retired_next = entry;
+                            retired_tail_ = entry;
+                        }
+                    } else {
+                        retired_head_ = entry->retired_next;
+                        if (!retired_head_) retired_tail_ = nullptr;
+                        entry->retired_next = nullptr;
+                        entry->queued = false;
+                        --retired_count_;
+                        owner = entry->owner;
+                        words = entry->payload->size;
+                        ++owner->retiring;
+                        retired = std::move(entry->payload);
+                    }
+                }
+                if (retired) {
+                    retired.reset(); // last payload reference, outside mutex_
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    owner->words -= words;
+                    --owner->retiring;
+                    FinishClosingLocked(*owner);
+                }
+            }
+            bool changed = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                changed = retire_epoch_ != epoch;
+                for (auto& device : devices_) FinishClosingLocked(device);
+            }
+            // Reentrant calls can enqueue work while a payload is destroyed.
+            // A stable queue containing only pins must not spin indefinitely.
+            if (!changed || !allowance) return;
+        } catch (...) { return; }
+    }
 }
 
 std::uint64_t VertexDeclarationRegistry::OpenDevice() noexcept {
     try {
+        Drain(); // retry deferred retirements before deciding all slots are busy
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!next_device_ || devices_.size() >= limits_.devices) return 0;
-        const auto id = next_device_;
-        devices_.emplace(id, Device{});
-        next_device_ = Advance(id);
-        return id;
-    } catch (...) { return 0; }
+        if (!next_device_) return 0;
+        for (auto& device : devices_) {
+            if (device.active || device.closing) continue;
+            const auto id = next_device_;
+            next_device_ = Advance(id);
+            device.id = id;
+            device.active = true;
+            device.unsafe = false;
+            device.next_operation = 1;
+            device.next_generation = 1;
+            device.pending = {};
+            device.pending_handle = 0;
+            device.words = 0;
+            device.preparing = 0;
+            device.retiring = 0;
+            return id;
+        }
+    } catch (...) {}
+    return 0;
 }
-void VertexDeclarationRegistry::CloseDevice(std::uint64_t device) noexcept {
-    try { std::lock_guard<std::mutex> lock(mutex_); devices_.erase(device); } catch (...) {}
-}
-void VertexDeclarationRegistry::Invalidate(std::uint64_t device) noexcept {
+void VertexDeclarationRegistry::CloseDevice(std::uint64_t id) noexcept {
     try {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const auto it = devices_.find(device);
-        if (it != devices_.end()) Poison(it->second);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            Device* device = FindLocked(id);
+            if (!device) return;
+            device->active = false;
+            device->closing = true;
+            PoisonLocked(*device);
+        }
+        Drain();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            Device* device = FindLocked(id, true);
+            if (!device || !device->closing) return;
+            FinishClosingLocked(*device);
+        }
+    } catch (...) {}
+}
+void VertexDeclarationRegistry::Invalidate(std::uint64_t id) noexcept {
+    try {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            Device* device = FindLocked(id);
+            if (!device) return;
+            PoisonLocked(*device);
+        }
+        Drain();
     } catch (...) {}
 }
 bool VertexDeclarationRegistry::Matches(const Device& device, ShaderTicket ticket) const noexcept {
-    return !device.unsafe && ticket && device.pending.device == ticket.device &&
+    return device.active && !device.unsafe && ticket && device.pending.device == ticket.device &&
            device.pending.sequence == ticket.sequence && device.pending.kind == ticket.kind;
 }
 
 ShaderTicket VertexDeclarationRegistry::Begin(std::uint64_t id, ShaderOperation kind, std::uint32_t handle) noexcept {
+    ShaderTicket result;
+    bool drain = false;
     try {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const auto it = devices_.find(id);
-        if (it == devices_.end() || it->second.unsafe) return {};
-        auto& device = it->second;
-        if (device.pending || !device.next_operation || kind == ShaderOperation::None) {
-            Poison(device); return {};
-        }
-        const auto sequence = device.next_operation;
-        device.next_operation = Advance(sequence);
-        device.pending = {id, sequence, kind};
-        if (kind == ShaderOperation::Delete) {
-            device.pending_handle = handle;
-            const auto entry = device.handles.find(handle);
-            if (entry != device.handles.end()) {
-                device.words -= entry->second.words.capacity();
-                std::vector<std::uint32_t>().swap(entry->second.words);
-                entry->second.available = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            Device* device = FindLocked(id);
+            if (!device || device->unsafe) return {};
+            if (device->pending || !device->next_operation || kind == ShaderOperation::None) {
+                PoisonLocked(*device);
+                drain = true;
+            } else {
+                const auto sequence = device->next_operation;
+                device->next_operation = Advance(sequence);
+                device->pending = {id, sequence, kind};
+                if (kind == ShaderOperation::Delete) {
+                    device->pending_handle = handle;
+                    Entry* entry = FindHandleLocked(*device, handle);
+                    if (entry) { entry->available = false; EnqueueLocked(*entry); drain = true; }
+                } else if (kind == ShaderOperation::Reset) {
+                    for (auto& entry : device->handles) { entry.available = false; EnqueueLocked(entry); }
+                    drain = true;
+                }
+                result = device->pending;
             }
-        } else if (kind == ShaderOperation::Reset) {
-            // Shader survival across Reset has not been verified. Retain
-            // tombstones so a returned numeric handle cannot silently replace
-            // a formerly observed shader on this device.
-            for (auto& item : device.handles) {
-                std::vector<std::uint32_t>().swap(item.second.words);
-                item.second.available = false;
-            }
-            device.words = 0;
         }
-        return device.pending;
+        if (drain) Drain();
+        return result;
     } catch (...) { Invalidate(id); return {}; }
 }
 ShaderTicket VertexDeclarationRegistry::BeginCreate(std::uint64_t id) noexcept { return Begin(id, ShaderOperation::Create, 0); }
@@ -84,103 +270,196 @@ ShaderTicket VertexDeclarationRegistry::BeginDraw(std::uint64_t id) noexcept { r
 
 bool VertexDeclarationRegistry::EndCreate(ShaderTicket ticket, bool native_success, bool handle_known,
                                           std::uint32_t handle, DeclarationSnapshot snapshot) noexcept {
+    const bool complete = snapshot.status == DeclarationStatus::Complete && !snapshot.words.empty() &&
+                          snapshot.words.back() == 0xffffffffu;
+    const std::size_t count = complete ? snapshot.words.size() : 0;
+    bool drain = false;
+    bool finished = false, completed = false;
     try {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const auto it = devices_.find(ticket.device);
-        if (it == devices_.end()) return false;
-        auto& device = it->second;
-        if (ticket.kind != ShaderOperation::Create || !Matches(device, ticket)) {
-            if (!device.unsafe) Poison(device);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            Device* device = FindLocked(ticket.device);
+            if (!device) return false;
+            // A ticket can be finalized only once. While its payload is being
+            // prepared outside the mutex, a second EndCreate must poison the
+            // device rather than publish a competing candidate.
+            if (ticket.kind != ShaderOperation::Create || !Matches(*device, ticket) || device->preparing) {
+                if (!device->unsafe) { PoisonLocked(*device); drain = true; }
+                finished = true;
+            } else if (!native_success) {
+                device->pending = {};
+                return true;
+            } else if (!handle_known || !device->next_generation) {
+                PoisonLocked(*device); drain = true; finished = true;
+            } else if (Entry* old = FindHandleLocked(*device, handle)) {
+                // A repeated successful handle is ambiguous, including after
+                // Reset or a failed Delete. Keep a tombstone, never replace.
+                old->available = false;
+                EnqueueLocked(*old);
+                old->generation = device->next_generation;
+                device->next_generation = Advance(device->next_generation);
+                device->pending = {};
+                drain = true; finished = true; completed = true;
+            } else if (!FreeHandleLocked(*device) ||
+                       (complete && (count > limits_.words_per_declaration ||
+                                     count > limits_.words_per_device ||
+                                     device->words > limits_.words_per_device - count))) {
+                PoisonLocked(*device); drain = true; finished = true;
+            } else if (!complete) {
+                Entry* entry = FreeHandleLocked(*device);
+                entry->occupied = true;
+                entry->available = false;
+                entry->handle = handle;
+                entry->generation = device->next_generation;
+                device->next_generation = Advance(device->next_generation);
+                device->pending = {};
+                return true;
+            } else {
+                // Reserve quota and pin this device lifetime before allocating
+                // outside the lock. Close cannot reuse the slot in between.
+                device->words += count;
+                ++device->preparing;
+                drain = false;
+            }
+        }
+        if (finished) {
+            if (drain) Drain();
+            return completed;
+        }
+
+        std::shared_ptr<Payload> payload;
+        try {
+            payload = std::make_shared<Payload>();
+            payload->size = count;
+            payload->words.reset(new std::uint32_t[count]);
+            std::copy(snapshot.words.begin(), snapshot.words.end(), payload->words.get());
+        } catch (...) {
+            payload.reset(); // complete deallocation before releasing reservation
+            FinishPreparation(ticket.device, count);
+            Invalidate(ticket.device);
             return false;
         }
-        if (!native_success) { device.pending = {}; return true; }
-        if (!handle_known || !device.next_generation) { Poison(device); return false; }
-        const auto old = device.handles.find(handle);
-        if (old != device.handles.end()) {
-            // A successful Create returning a still-observed numeric handle
-            // is ambiguous. Do not assume the older object was replaced.
-            device.words -= old->second.words.capacity();
-            std::vector<std::uint32_t>().swap(old->second.words);
-            old->second.available = false;
-            old->second.generation = device.next_generation;
-            device.next_generation = Advance(device.next_generation);
-            device.pending = {};
-            return true;
-        }
-        const bool complete = snapshot.status == DeclarationStatus::Complete && !snapshot.words.empty() &&
-                              snapshot.words.back() == 0xffffffffu;
-        const std::size_t size = complete ? snapshot.words.size() : 0;
-        if (device.handles.size() >= limits_.handles_per_device || size > limits_.words_per_declaration ||
-            size > limits_.words_per_device || device.words > limits_.words_per_device - size) {
-            Poison(device); return false;
-        }
-        try {
-            Entry entry;
-            entry.generation = device.next_generation;
-            entry.available = complete;
-            // Copy into owned bounded storage: a caller-provided vector may
-            // have much more capacity than the declaration's word count.
-            if (complete) entry.words.assign(snapshot.words.begin(), snapshot.words.end());
-            const std::size_t capacity = entry.words.capacity();
-            if (capacity > limits_.words_per_device || device.words > limits_.words_per_device - capacity) {
-                Poison(device); return false;
+        bool inserted = false;
+        bool poisoned = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            Device* device = FindLocked(ticket.device, true);
+            if (!device) return false; // violated lifetime contract; no storage exposed
+            if (!Matches(*device, ticket) || FindHandleLocked(*device, handle) || !FreeHandleLocked(*device) ||
+                !device->preparing || device->words < count) {
+                if (device->active && !device->unsafe) { PoisonLocked(*device); poisoned = true; }
+            } else {
+                Entry* entry = FreeHandleLocked(*device);
+                entry->occupied = true;
+                entry->available = true;
+                entry->handle = handle;
+                entry->generation = device->next_generation;
+                entry->payload = std::move(payload); // free slot has no owned payload
+                --device->preparing; // reservation now belongs to the entry
+                device->next_generation = Advance(device->next_generation);
+                device->pending = {};
+                inserted = true;
             }
-            device.handles.emplace(handle, std::move(entry));
-            device.words += capacity;
-            device.next_generation = Advance(device.next_generation);
-            device.pending = {};
-            return true;
-        } catch (...) { Poison(device); return false; }
+        }
+        if (!inserted) {
+            payload.reset(); // release outside lock while quota is still charged
+            FinishPreparation(ticket.device, count);
+        }
+        if (poisoned) Drain();
+        return inserted;
     } catch (...) { Invalidate(ticket.device); return false; }
 }
 
 bool VertexDeclarationRegistry::EndDelete(ShaderTicket ticket, bool native_success) noexcept {
+    bool result = false, drain = false;
     try {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const auto it = devices_.find(ticket.device);
-        if (it == devices_.end()) return false;
-        auto& device = it->second;
-        if (ticket.kind != ShaderOperation::Delete || !Matches(device, ticket)) {
-            if (!device.unsafe) Poison(device);
-            return false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            Device* device = FindLocked(ticket.device);
+            if (!device) return false;
+            if (ticket.kind != ShaderOperation::Delete || !Matches(*device, ticket)) {
+                if (!device->unsafe) { PoisonLocked(*device); drain = true; }
+            } else {
+                Entry* entry = FindHandleLocked(*device, device->pending_handle);
+                if (native_success && entry) {
+                    entry->occupied = false;
+                    entry->available = false;
+                    entry->generation = 0;
+                    EnqueueLocked(*entry);
+                    drain = true;
+                }
+                device->pending = {};
+                device->pending_handle = 0;
+                result = true;
+            }
         }
-        if (native_success) device.handles.erase(device.pending_handle);
-        device.pending = {};
-        device.pending_handle = 0;
-        return true;
-    } catch (...) { Invalidate(ticket.device); return false; }
+        if (drain) Drain();
+    } catch (...) { Invalidate(ticket.device); }
+    return result;
 }
 
 bool VertexDeclarationRegistry::End(ShaderTicket ticket) noexcept {
+    bool result = false, drain = false;
     try {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const auto it = devices_.find(ticket.device);
-        if (it == devices_.end()) return false;
-        auto& device = it->second;
-        if (ticket.kind == ShaderOperation::Create || ticket.kind == ShaderOperation::Delete || !Matches(device, ticket)) {
-            if (!device.unsafe) Poison(device);
-            return false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            Device* device = FindLocked(ticket.device);
+            if (!device) return false;
+            if (ticket.kind == ShaderOperation::Create || ticket.kind == ShaderOperation::Delete || !Matches(*device, ticket)) {
+                if (!device->unsafe) { PoisonLocked(*device); drain = true; }
+            } else { device->pending = {}; result = true; }
         }
-        device.pending = {};
-        return true;
-    } catch (...) { Invalidate(ticket.device); return false; }
+        if (drain) Drain();
+    } catch (...) { Invalidate(ticket.device); }
+    return result;
 }
 
 ShaderObservation VertexDeclarationRegistry::Observe(ShaderTicket ticket, std::uint32_t value) noexcept {
     ShaderObservation result;
+    std::shared_ptr<const Payload> pin;
     try {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const auto it = devices_.find(ticket.device);
-        if (it == devices_.end() || ticket.kind != ShaderOperation::Draw || !Matches(it->second, ticket)) {
-            result.status = ShaderObservationStatus::Unsafe; return result;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            Device* device = FindLocked(ticket.device);
+            if (!device || ticket.kind != ShaderOperation::Draw || !Matches(*device, ticket)) {
+                result.status = ShaderObservationStatus::Unsafe; return result;
+            }
+            Entry* entry = FindHandleLocked(*device, value);
+            if (!entry) return result;
+            result.generation = entry->generation;
+            if (!entry->available || !entry->payload) { result.status = ShaderObservationStatus::Unavailable; return result; }
+            pin = entry->payload; // strong pin, no allocation
         }
-        const auto entry = it->second.handles.find(value);
-        if (entry == it->second.handles.end()) return result; // FVF or unobserved handle
-        result.generation = entry->second.generation;
-        if (!entry->second.available) { result.status = ShaderObservationStatus::Unavailable; return result; }
-        result.words = entry->second.words;
-        result.status = ShaderObservationStatus::Candidate;
-    } catch (...) { result = {}; result.status = ShaderObservationStatus::Unavailable; }
+        // Copy and allocator callbacks happen outside mutex_. The source pin
+        // keeps the quota charged and the device slot alive until released.
+        result.words.assign(pin->words.get(), pin->words.get() + pin->size);
+        bool still_valid = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            Device* device = FindLocked(ticket.device);
+            Entry* entry = device ? FindHandleLocked(*device, value) : nullptr;
+            still_valid = device && Matches(*device, ticket) && entry && entry->available &&
+                          entry->generation == result.generation && entry->payload == pin;
+        }
+        if (!still_valid) {
+            std::vector<std::uint32_t>().swap(result.words);
+            result.status = ShaderObservationStatus::Unsafe;
+        }
+        else result.status = ShaderObservationStatus::Candidate;
+    } catch (...) {
+        std::vector<std::uint32_t>().swap(result.words);
+        result.status = ShaderObservationStatus::Unavailable;
+    }
+    if (pin) {
+        pin.reset();
+        bool drain = false;
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            drain = retired_count_ != 0;
+            if (drain) ++retire_epoch_; // wake a reentrant outer drain
+        } catch (...) {}
+        if (drain) Drain();
+    }
     return result;
 }
 

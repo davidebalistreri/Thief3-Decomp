@@ -26,10 +26,23 @@ unavailable rather than silently replacing the earlier one. A successful Create
 with an unreadable output handle poisons the device. Failed declaration scans
 are stored as unavailable rather than exposing guessed bytes.
 
-The registry currently allocates, copies and releases standard container
-storage while holding its mutex. A global allocator that reenters this registry
-could deadlock. Resolve and test allocator reentrancy before integrating these
-helpers into the game process.
+Device and handle metadata are preallocated before the registry is published
+(at most 64 devices, 4096 handles per device and 65536 slots total). If those
+limits or metadata allocation fail, no device can be opened. Handle lookup is
+bounded and linear. Payload allocation and copying, and release of retired
+payloads, occur outside the mutex. A reentrant allocator can still invalidate a
+device or make an observation fail; it cannot make the registry trust stale
+data. Retirement uses a preallocated queue and a bounded, non-recursive drain.
+
+The per-device DWORD budget stays charged while payload allocation is in
+progress, while an observation pins a retired payload and until its final
+deallocation returns. A closing device slot cannot be reused during those
+periods. The input snapshot, returned observation vector, allocator metadata
+and container metadata are caller/process memory outside that DWORD budget;
+it is not a cap on total process memory. Publish the registry only after its
+constructor finishes and destroy it only after all calls have ended. Tests
+exercise reentrant allocation/deallocation and concurrent close, but this
+prototype has not been integrated into or validated against TDS.
 
 An observation from `Observe` is usable only if the corresponding draw's
 `End` succeeds. Even then, matching a numeric value to a recorded creation is

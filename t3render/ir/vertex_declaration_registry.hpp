@@ -4,8 +4,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
-#include <unordered_map>
 #include <vector>
 
 namespace t3render::ir {
@@ -15,6 +15,9 @@ namespace t3render::ir {
 // device lifetime; it is not a native pointer or persistent asset identity.
 // Entries are candidates from application memory, not proof of driver input,
 // programmable-shader identity, or a distinction between FVF and handle.
+// Construction preallocates metadata outside the mutex: at most 64 devices,
+// 4096 handles per device and 65536 total slots. If that fails, OpenDevice
+// returns 0. Publish only after construction and destroy after all callers end.
 enum class ShaderOperation { None, Create, Delete, Set, Reset, Draw };
 struct ShaderTicket {
     std::uint64_t device = 0;
@@ -37,7 +40,7 @@ struct ShaderRegistryLimits {
 
 class VertexDeclarationRegistry final {
 public:
-    explicit VertexDeclarationRegistry(ShaderRegistryLimits limits = {}) noexcept : limits_(limits) {}
+    explicit VertexDeclarationRegistry(ShaderRegistryLimits limits = {}) noexcept;
     VertexDeclarationRegistry(const VertexDeclarationRegistry&) = delete;
     VertexDeclarationRegistry& operator=(const VertexDeclarationRegistry&) = delete;
 
@@ -69,27 +72,53 @@ public:
 
     // Only during a live Draw ticket. The caller must also require End(draw)
     // to succeed after the native draw, otherwise discard this observation.
-    // A numeric match is not proof of shader vs FVF or exact driver input.
+    // A numeric match is not proof of shader vs FVF or exact driver input. Its
+    // returned vector is caller-owned and outside the resident payload budget.
     ShaderObservation Observe(ShaderTicket draw, std::uint32_t shader_value) noexcept;
 
 private:
-    struct Entry { std::uint64_t generation = 0; bool available = false; std::vector<std::uint32_t> words; };
+    struct Device;
+    struct Payload {
+        std::unique_ptr<std::uint32_t[]> words;
+        std::size_t size = 0;
+    };
+    struct Entry {
+        bool occupied = false, available = false, queued = false;
+        std::uint32_t handle = 0;
+        std::uint64_t generation = 0;
+        Device* owner = nullptr;
+        Entry* retired_next = nullptr;
+        std::shared_ptr<const Payload> payload;
+    };
+    void EnqueueLocked(Entry& entry) noexcept;
     struct Device {
-        bool unsafe = false;
+        bool active = false, closing = false, unsafe = false;
+        std::uint64_t id = 0;
         std::uint64_t next_operation = 1, next_generation = 1;
         ShaderTicket pending{};
         std::uint32_t pending_handle = 0;
         std::size_t words = 0;
-        std::unordered_map<std::uint32_t, Entry> handles;
+        std::size_t preparing = 0, retiring = 0;
+        std::vector<Entry> handles;
     };
-    void Poison(Device& device) noexcept;
+    void PoisonLocked(Device& device) noexcept;
+    Device* FindLocked(std::uint64_t id, bool include_closing = false) noexcept;
+    Entry* FindHandleLocked(Device& device, std::uint32_t handle) noexcept;
+    Entry* FreeHandleLocked(Device& device) noexcept;
+    void FinishClosingLocked(Device& device) noexcept;
+    void FinishPreparation(std::uint64_t device, std::size_t words) noexcept;
+    void Drain() noexcept;
     ShaderTicket Begin(std::uint64_t device, ShaderOperation kind, std::uint32_t handle) noexcept;
     bool Matches(const Device& device, ShaderTicket ticket) const noexcept;
 
     const ShaderRegistryLimits limits_;
     std::mutex mutex_;
     std::uint64_t next_device_ = 1;
-    std::unordered_map<std::uint64_t, Device> devices_;
+    std::vector<Device> devices_;
+    Entry* retired_head_ = nullptr;
+    Entry* retired_tail_ = nullptr;
+    std::size_t retired_count_ = 0;
+    std::uint64_t retire_epoch_ = 0;
 };
 
 } // namespace t3render::ir

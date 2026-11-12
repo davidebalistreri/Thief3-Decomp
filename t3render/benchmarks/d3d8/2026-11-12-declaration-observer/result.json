@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_vertex_declaration",
+  "date": "2026-11-12",
+  "status": "PASS",
+  "host": {
+    "os": "macOS 27.2.1",
+    "architecture": "arm64"
+  },
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86"
+  },
+  "mode": "vs_1_1",
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "c23a8f360de5d550f2f689a61db9b3731a450d4ea6d44f01461e13418c5436ba",
+    "t3render/src/proxy.cpp": "4d5382e450d688030a5d7a4267399f5cef1517fcdfbe2412325205f4fdf84105",
+    "t3render/src/buffer_proxy.cpp": "07713f49baa4edf25063d238b5e98f7d7e83f88164c3b70c583f0888c9548f14",
+    "t3render/src/buffer_proxy.hpp": "b4077c53dd35a8a4d1cf68a9e526a70be2da4fe23fa4868a1d920aa25b37f151",
+    "t3render/src/vtable_layout.c": "f7893ae8b98f1d6c46eea2447678d6da7e97c1752a05c650875219c5659e6358",
+    "t3render/src/vtable_layout.h": "338d41bfb312fba5742555e8e09ab19da30fe039538ef22ebbce30b2157654de",
+    "t3render/src/capture.cpp": "0138d6b420501cdfbfec84c989e860e794e165e168c2dc50b8a241525e5c87d3",
+    "t3render/src/capture.hpp": "b5590e2862d47cb01b594e8a117d5a48a8121d42b769a81c8a45b518e0b6d36f",
+    "t3render/src/d3d8_mingw.def": "fc91ff1781931d7f0f8bd5ab400872d980ff1d4a92b4fc59b38951434ec989e9",
+    "t3render/ir/buffer_shadow.cpp": "9cfed54a6fcf4718e80fd1d8301a8afa5f84852ac70b428938b06d1e64cddafe",
+    "t3render/ir/buffer_shadow.hpp": "55b7aaf05cbd2f1d8047572abacf66e88d7485c9e243a78ce37c1213565a017d",
+    "t3render/ir/buffer_registry.cpp": "9e24931212d54e0ee58b7be7313a85510e9fc867f3a3b20297eff3e1f6138b84",
+    "t3render/ir/buffer_registry.hpp": "c7ff088b36ff035945f56482aeb45d3e1359e11710437798fa83fba179e85260",
+    "t3render/ir/vertex_declaration.cpp": "b2aaae1f322bd12f42e78f45dd449271ae700d402af86325862fd431c25054b6",
+    "t3render/ir/vertex_declaration.hpp": "001e8c4bcdc37c860b8c86db3f81094a9a23923e78896fe838ae764bfe4dc2a5",
+    "t3render/ir/vertex_declaration_registry.cpp": "537f9aaca2b3a274a035da3e58870ec4a3069a00f2aa9dc4dc02798752b7f4d8",
+    "t3render/ir/vertex_declaration_registry.hpp": "aa210cbe02dda20a1c7419c027de3f4e98771612088f1e7325fc7b9851bb4db3",
+    "t3render/tests/d3d8_declaration_fixture.cpp": "8f9159f0ab16b4a6456ad16f9334df718e2894b85779a0e5fa871acff6fac067",
+    "t3render/tools/run_d3d8_declaration_fixture.py": "ec55eee2e893e8d8aee23d0b2d3f2f1b5dfdaa769499f2fe5e186969a50252bb",
+    "t3render/tools/run_synthetic_up_replay.py": "114c356a1febf4efa3106789039aeef3aa52dd3f6c37de6cf4180965618ed334",
+    "t3render/tools/trace_summary.py": "3c1e1942e378363de0d0ab8894b3565231ce440d69a89bdb5a6e34571a8717ec",
+    "t3render/tools/trace_to_up_packet.py": "69e107a87b88514a649f3963c2dc8a1c5e7fbc600a43a45a97fdbba986d59bcf"
+  },
+  "fixture_sha256": "810c393655d6b3202bf1224ac321dee0a7fc16ab44cd32943fa288d6b0ef6c91",
+  "proxy_sha256": "be7a3882694208d381ba26fdd3cd941ed76e28f8d139b0eca04edd470c22e4aa",
+  "result": {
+    "hresult_comparison": "33 ordered successful HRESULT observations match in all three runs",
+    "draws": 2,
+    "generation": [
+      1,
+      2
+    ],
+    "shader_stable": [
+      true,
+      true
+    ],
+    "rgb_ppm_sha256": "c093048051cee6e2938757ca98e58f472d692f1c4050cdd0adf049dfa1f2159c",
+    "image": "triangles.png",
+    "image_sha256": "62b1293f869139726092180f1ba2a4674132252b0e66b07d3a6e40bf49b58d1d",
+    "logs_and_traces_sha256": {
+      "baseline.log": "86efb01b7682e51418e32e48f1535a95bf65eef2c366c9e95718bb3c9833bf5e",
+      "proxy_off.log": "b62674614022334a4aa0be6f32f58e558b3af43c59c30f4d12caa662830bba70",
+      "proxy_on.log": "7ade866d6d9cd72b8b7ebc007e6c359d149fe151e59c284387607df79890244e",
+      "proxy_off.jsonl": "e014fcef2357e591b7bbac19f531adbc8d2cc9b2c0741ced783a7bc1e1cf0e0d",
+      "proxy_on.jsonl": "ed972dcff2baf37a742c9bb1ea0b72ef4014f9fcb3ffd9a753b9a9fe3dd56058"
+    },
+    "local_details": "build/t3render-diagnostics/2026-11-12-declaration-observer"
+  },
+  "limitations": [
+    "Synthetic x86 D3D8 fixture; no TDS process, assets or game frame.",
+    "Two UP draws, one declaration layout, no buffer wrappers or state blocks.",
+    "RGB only; no alpha, native Windows, COM alias or concurrent mutation validation.",
+    "A stable observation is a candidate, not proof of GPU input or replayability."
+  ]
+}

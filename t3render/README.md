@@ -144,6 +144,33 @@ Without a valid path and trigger no frame is captured. Capturing a frame can
 be expensive: it queries D3D8 state on every draw and writes a potentially
 large file. The trace is local game-derived data and is not to be committed.
 
+### Experimental buffered capture — isolated fixture only
+
+Set `T3RENDER_CAPTURE_BUFFERS=1` in addition to the capture configuration to
+observe application VB/IB writes from resource creation until capture ends.
+The proxy passes native resources to D3D8 and does not replace resource vtables
+or perform extra buffer locks. It tracks writes in bounded CPU shadows and
+records selected stream 0 and index ranges in `buffer_data` for buffered draws.
+The header reports whether the option was requested; requested does not imply
+successful tracking. A draw's `buffer_stable` is true only if its intercepted
+window stayed free of recognized hazards. Missing, unstable, partial or failed
+observations are not replay evidence, and concurrent CPU writes through a
+mapped pointer may still differ from what the driver consumes.
+
+The shared shadow/staging budget is 32 MiB for at most 4096 resources, and a
+single lock snapshot is limited to 256 KiB. The trace has separate 256 KiB per
+component and 8 MiB per frame output limits. Unknown aliases, failed locks,
+GPU `ProcessVertices` writes, reset, state blocks and recognized overlaps can
+invalidate tracking. When capture stops, shadows are discarded but issued
+wrappers remain active for forwarding until released.
+
+**Do not enable this option in TDS yet.** An uninstrumented device alias can
+escape through other resources and bypass the proxy's unwrap hooks. If the
+application passes a buffer wrapper to that alias, Wine may assert or abort;
+marking bytes unknown cannot prevent that crash. Device and resource alias
+coverage, state-block ownership, COM identity and coexistence with T3SDK hooks
+need further validation. The current Wine test is an isolated synthetic fixture.
+
 ```sh
 python3 t3render/tools/trace_summary.py /path/to/capture.jsonl
 python3 t3render/tools/trace_summary.py /path/to/capture.jsonl --json
@@ -164,9 +191,8 @@ The registry bounds resources and the shared shadow/staging byte budget. It
 invalidates writable ranges before a lock attempt and commits staged bytes only
 after a successful unlock; ambiguous resource identity or lock state is
 abandoned. The caller must synchronize all operations and supply a fault-safe
-reader; partial reads never become known data.
-Neither model is connected to D3D8 resource locks, so buffered geometry still
-cannot be recovered from a trace.
+reader; partial reads never become known data. The experimental opt-in uses
+these models for observed resource writes, subject to the limitations above.
 
 ## Scope and next steps
 
@@ -186,9 +212,9 @@ if Present occurs while such an operation is pending; overlapping operations
 are flagged because their actual submission order may differ from the log.
 
 The header records the exact limits. IDs are transient process addresses, not
-stable T3 asset names. Capture does not include texture or buffered-resource
-bytes, shader code/declarations/constants, all light or world indices,
-render-target operations or resource lifetime. Snapshot order under concurrent
+stable T3 asset names. Capture does not include texture bytes, complete
+buffered-resource histories, shader code/declarations/constants, all light or
+world indices, render-target operations or complete resource lifetime. Snapshot order under concurrent
 device calls is not guaranteed to
 be the final GPU submission order. The first device is observed until its
 final intercepted release; a subsequently created device can then be observed,
@@ -210,14 +236,11 @@ was rejected: on the synthetic buffered fixture Highball/Wine asserted that the
 vertex buffer still had its original runtime vtable. The hooks were removed;
 see the [failure record](benchmarks/d3d8/2026-11-12-buffer-tracking-failure/result.json).
 
-One next approach is complete COM resource wrappers with explicit unwrapping at
-every device API boundary that accepts a resource, while preserving identity,
-reference counts and aliasing. It needs separate design and runtime validation;
-the current proxy does not implement it. The fixture's selective READONLY
-readback does not replace a vtable, but cannot establish passive capture or
-support for arbitrary TDS buffers. Unknown aliases, GPU writes,
-ambiguous locks and resets must remain unknown. `BufferRegistry` models the
-necessary generation and budget rules but is not connected to COM objects.
+The experimental opt-in now uses COM wrappers and unwraps observed device
+boundaries, but it does not cover every alias, state block or resource escape.
+Those gaps must be resolved before testing it in TDS. The fixture's selective
+READONLY readback does not establish support for arbitrary game buffers;
+unknown aliases, GPU writes, ambiguous locks and resets remain unknown.
 
 The existing Godot bedroom benchmark is useful visual reference; its
 “Original” images are a Godot export, not captures from Legacy D3D8. A

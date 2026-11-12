@@ -2,11 +2,23 @@
 
 #include <windows.h>
 #include <d3d8.h>
+#include <cstddef>
 #include <cstdint>
 
 namespace t3render {
 
 enum class DrawKind { Primitive, IndexedPrimitive, PrimitiveUP, IndexedPrimitiveUP };
+
+// Optional bounded observations from the resource shadow. The callbacks copy
+// exactly the requested range into the destination and return false if any
+// byte or the owning resource is unknown. The provider is valid only during
+// CaptureDraw; it must not call the D3D runtime or capture writer.
+struct BufferObserver {
+    void* context = nullptr;
+    bool valid = false;
+    bool (*read_vertex)(void*, IDirect3DDevice8*, IDirect3DVertexBuffer8*, std::size_t, void*, std::size_t) = nullptr;
+    bool (*read_index)(void*, IDirect3DDevice8*, IDirect3DIndexBuffer8*, std::size_t, void*, std::size_t) = nullptr;
+};
 
 // Parameters passed by the caller. UP pointers remain owned by the caller and
 // are observed synchronously before forwarding; they are never retained.
@@ -17,6 +29,7 @@ struct DrawCall {
     D3DFORMAT index_format;
     const void* vertex_data = nullptr;
     const void* index_data = nullptr;
+    const BufferObserver* buffer_observer = nullptr;
 };
 
 bool CaptureConfigured();
@@ -27,6 +40,9 @@ void CaptureDeviceReleased(IDirect3DDevice8*);
 // The matching result must be supplied after forwarding to the real device.
 std::uint64_t CaptureDraw(IDirect3DDevice8*, const DrawCall&);
 void CaptureDrawResult(IDirect3DDevice8*, std::uint64_t, HRESULT);
+// The snapshot was taken before the driver draw; stable is true only when the
+// whole observed draw window completed without an intercepted hazard.
+void CaptureBufferedDrawResult(IDirect3DDevice8*, std::uint64_t, HRESULT, bool stable);
 std::uint64_t CaptureClear(IDirect3DDevice8*, DWORD, const D3DRECT*, DWORD, D3DCOLOR, float, DWORD);
 void CaptureClearResult(IDirect3DDevice8*, std::uint64_t, HRESULT);
 void CapturePresent(IDirect3DDevice8*, HRESULT);

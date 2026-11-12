@@ -45,17 +45,24 @@ struct Texture : IDirect3DTexture8 {
 };
 struct VertexBuffer : IDirect3DVertexBuffer8 {
     ULONG refs = 1;
+    DWORD size = 4096;
+    bool desc_failure = false;
     ULONG Release() override { return --refs; }
     HRESULT GetDesc(D3DVERTEXBUFFER_DESC* out) override {
-        *out = {D3DFMT_UNKNOWN, D3DRTYPE_TEXTURE, 7, 2, 4096, 123};
+        if (desc_failure) return E_FAIL;
+        *out = {D3DFMT_UNKNOWN, D3DRTYPE_VERTEXBUFFER, 7, 2, size, 123};
         return S_OK;
     }
 };
 struct IndexBuffer : IDirect3DIndexBuffer8 {
     ULONG refs = 1;
+    DWORD size = 1024;
+    D3DFORMAT format = D3DFMT_INDEX16;
+    bool desc_failure = false;
     ULONG Release() override { return --refs; }
     HRESULT GetDesc(D3DINDEXBUFFER_DESC* out) override {
-        *out = {D3DFMT_INDEX16, D3DRTYPE_TEXTURE, 8, 2, 1024};
+        if (desc_failure) return E_FAIL;
+        *out = {format, D3DRTYPE_INDEXBUFFER, 8, 2, size};
         return S_OK;
     }
 };
@@ -68,6 +75,9 @@ struct Device : IDirect3DDevice8 {
     DWORD render_state = 42;
     DWORD vertex_shader = 444;
     DWORD pixel_shader = 555;
+    UINT stream_stride = 32, index_base = 3;
+    bool vertex_get_failure = false, index_get_failure = false;
+    bool vertex_unbound = false, index_unbound = false;
     float material_power = 16;
     D3DVIEWPORT8 viewport = {1, 2, 1280, 720, 0, 1};
 
@@ -118,11 +128,15 @@ struct Device : IDirect3DDevice8 {
     HRESULT GetPixelShader(DWORD* out) override { ++getters; *out = pixel_shader; return S_OK; }
     HRESULT GetStreamSource(UINT stream, IDirect3DVertexBuffer8** out, UINT* stride) override {
         ++getters; *out = nullptr; *stride = 0;
-        if (stream == 0) { ++vertex.refs; *out = &vertex; *stride = 32; }
+        if (vertex_get_failure) return E_FAIL;
+        if (stream == 0 && !vertex_unbound) { ++vertex.refs; *out = &vertex; *stride = stream_stride; }
         return S_OK;
     }
     HRESULT GetIndices(IDirect3DIndexBuffer8** out, UINT* base) override {
-        ++getters; ++index.refs; *out = &index; *base = 3; return S_OK;
+        ++getters; *out = nullptr; *base = 0;
+        if (index_get_failure) return E_FAIL;
+        if (!index_unbound) { ++index.refs; *out = &index; *base = index_base; }
+        return S_OK;
     }
     bool Unchanged() const {
         return texture.refs == 1 && vertex.refs == 1 && index.refs == 1 && render_state == 42 &&
@@ -130,6 +144,37 @@ struct Device : IDirect3DDevice8 {
             viewport.X == 1 && viewport.Y == 2 && viewport.Width == 1280 && viewport.Height == 720;
     }
 };
+
+struct ObserverState {
+    Device* expected = nullptr;
+    bool vertex_known = true, index_known = true;
+    unsigned vertex_reads = 0, index_reads = 0;
+};
+
+bool ReadObservedVertex(void* context, IDirect3DDevice8* device, IDirect3DVertexBuffer8* buffer,
+                        std::size_t offset, void* destination, std::size_t length) {
+    auto& state = *static_cast<ObserverState*>(context);
+    ++state.vertex_reads;
+    if (device != state.expected || buffer != &state.expected->vertex || !destination) return false;
+    auto* bytes = static_cast<BYTE*>(destination);
+    if (!state.vertex_known) { if (length) bytes[0] = 0xef; return false; }
+    for (std::size_t i = 0; i < length; ++i) bytes[i] = static_cast<BYTE>((offset + i) & 0xff);
+    return true;
+}
+
+bool ReadObservedIndex(void* context, IDirect3DDevice8* device, IDirect3DIndexBuffer8* buffer,
+                       std::size_t offset, void* destination, std::size_t length) {
+    auto& state = *static_cast<ObserverState*>(context);
+    ++state.index_reads;
+    if (device != state.expected || buffer != &state.expected->index || !destination) return false;
+    auto* bytes = static_cast<BYTE*>(destination);
+    if (!state.index_known) { if (length) bytes[0] = 0xef; return false; }
+    for (std::size_t i = 0; i < length; ++i) {
+        const auto address = offset + i;
+        bytes[i] = address % 2 ? 0 : static_cast<BYTE>(1 + address / 2);
+    }
+    return true;
+}
 
 t3render::DrawCall MakeDraw(t3render::DrawKind kind) {
     t3render::DrawCall draw{};
@@ -254,7 +299,79 @@ int main(int argc, char** argv) {
     fake_index[32] = 3; fake_index[36] = 4; fake_index[40] = 5;
 
     bool second_used = false;
-    if (scenario == "clear" || scenario == "clear_only" || scenario == "clear_nan" || scenario == "clear_pending" ||
+    if (scenario == "buffered" || scenario == "buffer_budget" || scenario == "buffer_budget_fail" ||
+        scenario == "buffer_budget_mixed") {
+        t3render::CapturePresent(&device, S_OK);  // target frame 1
+        ObserverState state{&device};
+        t3render::BufferObserver observer{&state, true, ReadObservedVertex, ReadObservedIndex};
+        auto emit = [&](t3render::DrawCall call, bool stable = true, HRESULT result = S_OK) {
+            call.buffer_observer = &observer;
+            const auto token = t3render::CaptureDraw(&device, call);
+            if (!token) return false;
+            t3render::CaptureBufferedDrawResult(&device, token, result, stable);
+            return true;
+        };
+        if (scenario == "buffer_budget" || scenario == "buffer_budget_fail" || scenario == "buffer_budget_mixed") {
+            device.stream_stride = 4;
+            device.vertex.size = 256 * 1024;
+            auto call = draw;
+            call.primitive_type = D3DPT_POINTLIST; call.primitive_count = 65536;
+            state.vertex_known = scenario != "buffer_budget_fail";
+            const unsigned attempts = scenario == "buffer_budget" ? 33 : scenario == "buffer_budget_mixed" ? 31 : 40;
+            for (unsigned i = 0; i < attempts; ++i) if (!emit(call)) return 8;
+            if (scenario == "buffer_budget_fail") { state.vertex_known = true; if (!emit(call)) return 8; }
+            if (scenario == "buffer_budget_mixed") {
+                device.index_base = 0;
+                call = indexed; call.primitive_count = 1; call.num_vertices = 65534;
+                if (!emit(call)) return 8; // 262136 vertex bytes + 6 index bytes
+                call.num_vertices = 0;
+                if (!emit(call)) return 8; // only 2 bytes remain, not enough for indices
+            }
+        } else {
+            auto primitive = draw;
+            primitive.start_vertex = 2; primitive.primitive_count = 1;
+            auto indexed_call = indexed;
+            indexed_call.min_vertex_index = 2; indexed_call.num_vertices = 3;
+            indexed_call.start_index = 1; indexed_call.primitive_count = 1;
+            if (!emit(primitive) || !emit(indexed_call, false)) return 8;
+            state.vertex_known = false; if (!emit(indexed_call)) return 8;
+            state.vertex_known = true; state.index_known = false; if (!emit(indexed_call)) return 8;
+            state.index_known = true; observer.valid = false; if (!emit(indexed_call, false)) return 8;
+            observer.valid = true; if (!emit(indexed_call, true, E_FAIL)) return 8;
+            observer.read_vertex = nullptr; if (!emit(indexed_call)) return 8;
+            observer.read_vertex = ReadObservedVertex;
+            SimulatedDraw(&device, primitive); // legacy: no observer or stability field
+            auto immediate = up;
+            immediate.vertex_data = reinterpret_cast<void*>(kVertexAddress); immediate.vertex_stride = 4;
+            immediate.primitive_count = 1; immediate.buffer_observer = &observer;
+            const auto up_token = t3render::CaptureDraw(&device, immediate);
+            if (!up_token) return 8;
+            t3render::CaptureDrawResult(&device, up_token, S_OK);
+            primitive.primitive_count = 0; if (!emit(primitive)) return 8;
+            device.index_base = std::numeric_limits<UINT>::max();
+            indexed_call.min_vertex_index = 1; if (!emit(indexed_call)) return 8;
+            device.index_base = 3; indexed_call.min_vertex_index = 2;
+            device.vertex_get_failure = true; device.index_get_failure = true; if (!emit(indexed_call)) return 8;
+            device.vertex_get_failure = false; device.index_get_failure = false;
+            device.vertex_unbound = true; device.index_unbound = true; if (!emit(indexed_call)) return 8;
+            device.vertex_unbound = false; device.index_unbound = false;
+            device.vertex.desc_failure = true; device.index.desc_failure = true; if (!emit(indexed_call)) return 8;
+            device.vertex.desc_failure = false; device.index.desc_failure = false;
+            device.stream_stride = 0; if (!emit(indexed_call)) return 8; device.stream_stride = 32;
+            device.vertex.size = 64; device.index.size = 2; if (!emit(indexed_call)) return 8;
+            device.vertex.size = 4096; device.index.size = 1024;
+            device.index.format = D3DFMT_UNKNOWN; if (!emit(indexed_call)) return 8;
+            device.index.format = D3DFMT_INDEX16;
+            indexed_call.primitive_type = D3DPT_FAKE; if (!emit(indexed_call)) return 8;
+            primitive = draw; primitive.primitive_type = D3DPT_FAKE; if (!emit(primitive)) return 8;
+            primitive = draw; primitive.primitive_type = D3DPT_POINTLIST; primitive.primitive_count = 65537;
+            device.stream_stride = 4; device.vertex.size = 512 * 1024; if (!emit(primitive)) return 8;
+            device.stream_stride = 32; device.vertex.size = 4096;
+            indexed_call.primitive_type = D3DPT_TRIANGLELIST; device.index.format = D3DFMT_INDEX32;
+            if (!emit(indexed_call)) return 8; device.index.format = D3DFMT_INDEX16;
+        }
+        t3render::CapturePresent(&device, S_OK);
+    } else if (scenario == "clear" || scenario == "clear_only" || scenario == "clear_nan" || scenario == "clear_pending" ||
         scenario == "draw_pending" || scenario == "overlap") {
         t3render::CapturePresent(&device, S_OK);  // target frame 1
         const auto empty = t3render::CaptureClear(&device, 0, nullptr, 7, 0x12345678, 0.75f, 9);

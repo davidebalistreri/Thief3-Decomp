@@ -163,7 +163,7 @@ bool ReadBackbuffer(IDirect3DDevice8* device, std::vector<std::uint8_t>& rgba, D
 }
 
 bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buffer_readback,
-            const wchar_t* buffer_snapshot_path, bool wrapped_buffers) {
+            const wchar_t* buffer_snapshot_path, bool wrapped_buffers, bool writeonly_buffers) {
     const bool camera = fixture == Fixture::Camera;
     const bool buffered = fixture == Fixture::Buffered;
     ComPtr<IDirect3D8> d3d;
@@ -230,7 +230,7 @@ bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buf
     if (buffered) {
         const Vertex buffered_vertices[] = {{}, vertices[0], vertices[0], vertices[1], vertices[2]};
         const std::uint16_t indices[] = {1, 2, 3};
-        const DWORD usage = wrapped_buffers ? D3DUSAGE_WRITEONLY : 0;
+        const DWORD usage = (wrapped_buffers || writeonly_buffers) ? D3DUSAGE_WRITEONLY : 0;
         if (!Check(device->CreateVertexBuffer(sizeof(buffered_vertices), usage, kFvfScreen, D3DPOOL_MANAGED,
                                                vertex_buffer.put()), "CreateVertexBuffer")) return false;
         if (wrapped_buffers) {
@@ -387,16 +387,18 @@ int wmain(int argc, wchar_t** argv) {
     Fixture fixture = Fixture::Screen;
     bool verify_buffer_readback = false;
     bool wrapped_buffers = false;
+    bool writeonly_buffers = false;
     for (int i = 1; i < argc; ++i) {
         if (!std::wcscmp(argv[i], L"--camera") && fixture == Fixture::Screen) fixture = Fixture::Camera;
         else if (!std::wcscmp(argv[i], L"--buffered") && fixture == Fixture::Screen) fixture = Fixture::Buffered;
         else if (!std::wcscmp(argv[i], L"--verify-buffer-readback") && !verify_buffer_readback) verify_buffer_readback = true;
         else if (!std::wcscmp(argv[i], L"--wrapped-buffers") && !wrapped_buffers) wrapped_buffers = true;
+        else if (!std::wcscmp(argv[i], L"--writeonly-buffers") && !writeonly_buffers) writeonly_buffers = true;
         else if (!std::wcscmp(argv[i], L"--buffer-snapshot") && !buffer_snapshot_path && i + 1 < argc &&
                  argv[i + 1][0] && std::wcsncmp(argv[i + 1], L"--", 2) != 0) buffer_snapshot_path = argv[++i];
         else if (!std::wcscmp(argv[i], L"--output") && !output && i + 1 < argc && argv[i + 1][0]) output = argv[++i];
         else {
-            std::fwprintf(stderr, L"usage: d3d8_up_fixture [--camera | --buffered [--wrapped-buffers | --verify-buffer-readback] [--buffer-snapshot new-file]] [--output new-image.ppm]\n");
+            std::fwprintf(stderr, L"usage: d3d8_up_fixture [--camera | --buffered [--writeonly-buffers | --wrapped-buffers | --verify-buffer-readback] [--buffer-snapshot new-file]] [--output new-image.ppm]\n");
             return 2;
         }
     }
@@ -410,6 +412,10 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (wrapped_buffers && (fixture != Fixture::Buffered || verify_buffer_readback)) {
         std::fprintf(stderr, "--wrapped-buffers requires --buffered and uses WRITEONLY buffers; READONLY verification is unavailable\n");
+        return 2;
+    }
+    if (writeonly_buffers && (fixture != Fixture::Buffered || verify_buffer_readback || wrapped_buffers)) {
+        std::fprintf(stderr, "--writeonly-buffers requires --buffered and excludes readback and fixture wrappers\n");
         return 2;
     }
     const HINSTANCE instance = GetModuleHandleW(nullptr);
@@ -438,7 +444,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     ShowWindow(window, SW_SHOWNOACTIVATE);
     UpdateWindow(window);
-    const bool ok = Render(window, output, fixture, verify_buffer_readback, buffer_snapshot_path, wrapped_buffers);
+    const bool ok = Render(window, output, fixture, verify_buffer_readback, buffer_snapshot_path, wrapped_buffers, writeonly_buffers);
     DestroyWindow(window);
     UnregisterClassW(name, instance);
     return ok ? 0 : 1;

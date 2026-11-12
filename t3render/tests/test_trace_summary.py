@@ -182,6 +182,43 @@ class TraceSummaryTests(unittest.TestCase):
         self.write_events(*events, dict(END_OPS, concurrent_operations=True), CAPTURE_END)
         self.assertTrue(trace_summary.summarize(self.trace)["frames"][0]["concurrent_operations"])
 
+    def test_buffered_draw_result_is_paired_by_frame_and_operation_id(self):
+        buffered = dict(DRAW_OP, buffer_data={"source": "application_lock_shadow"})
+        for stable in (True, False):
+            self.write_events(HEADER_OPS, BEGIN, buffered, dict(DRAW_RESULT, buffer_stable=stable), END_OPS, CAPTURE_END)
+            self.assertEqual(trace_summary.summarize(self.trace)["draw_count"], 1)
+
+        # Overlapping draw results can arrive in a different order: the flag
+        # must follow its own op_id, not the last draw or event order.
+        other = dict(DRAW_OP, op_id=3, call="DrawPrimitive")
+        self.write_events(HEADER_OPS, BEGIN, buffered, other, dict(DRAW_RESULT, op_id=3),
+                          dict(DRAW_RESULT, buffer_stable=False), dict(END_OPS, concurrent_operations=True), CAPTURE_END)
+        self.assertEqual(trace_summary.summarize(self.trace)["draw_count"], 2)
+        self.assert_invalid([HEADER_OPS, BEGIN, buffered, other, dict(DRAW_RESULT, op_id=3, buffer_stable=True)],
+                            "no matching buffer_data")
+        self.assert_invalid([HEADER_OPS, BEGIN, buffered, other, dict(DRAW_RESULT, op_id=3), DRAW_RESULT],
+                            "requires boolean buffer_stable")
+
+        cases = [
+            ([HEADER_OPS, BEGIN, buffered, DRAW_RESULT], "requires boolean buffer_stable"),
+            ([HEADER_OPS, BEGIN, buffered, dict(DRAW_RESULT, buffer_stable=0)], "requires boolean buffer_stable"),
+            ([HEADER_OPS, BEGIN, buffered, dict(DRAW_RESULT, buffer_stable=None)], "requires boolean buffer_stable"),
+            ([HEADER_OPS, BEGIN, buffered, dict(DRAW_RESULT, buffer_stable="false")], "requires boolean buffer_stable"),
+            ([HEADER_OPS, BEGIN, DRAW_OP, dict(DRAW_RESULT, buffer_stable=True)], "no matching buffer_data"),
+            ([HEADER_OPS, BEGIN, CLEAR, dict(CLEAR_RESULT, buffer_stable=True)], "no matching buffer_data"),
+            ([HEADER_OPS, BEGIN, dict(DRAW_OP, buffer_data=None)], "buffer_data must be an object"),
+            ([HEADER, BEGIN, dict(DRAW, buffer_data={})], "requires operation result capability"),
+            ([HEADER_OPS, BEGIN, buffered, dict(DRAW_RESULT, frame=8, buffer_stable=True)], "does not match active frame"),
+            ([HEADER_OPS, BEGIN, buffered, dict(DRAW_RESULT, op_id=3, buffer_stable=True)], "no matching operation"),
+            ([HEADER_OPS, BEGIN, buffered, END_OPS], "pending operations"),
+        ]
+        for events, message in cases:
+            with self.subTest(events=events): self.assert_invalid(events, message)
+
+        # Original traces without buffered observations remain valid.
+        self.write_events(HEADER_OPS, BEGIN, DRAW_OP, DRAW_RESULT, END_OPS, CAPTURE_END)
+        self.assertEqual(trace_summary.summarize(self.trace)["draw_count"], 1)
+
     def test_clear_rectangles_are_never_fabricated(self):
         cases = [
             (dict(CLEAR, rects_status="captured", rect_count=2, rects=[]), "invalid captured"),

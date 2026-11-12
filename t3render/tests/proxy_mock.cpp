@@ -1,20 +1,37 @@
 #include "capture.hpp"
+#include "../ir/buffer_registry.hpp"
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <cstring>
+#include <cwchar>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
 
 extern "C" IDirect3D8* Proxy_Direct3DCreate8(UINT);
-extern "C" const IID IID_IDirect3D8{1}, IID_IDirect3DDevice8{2};
+extern "C" const IID IID_IUnknown{0}, IID_IDirect3D8{1}, IID_IDirect3DDevice8{2};
+extern "C" const IID IID_IDirect3DResource8{3}, IID_IDirect3DVertexBuffer8{4}, IID_IDirect3DIndexBuffer8{5};
+#ifdef T3RENDER_PROXY_TEST
+t3render::ir::RegistryResult T3ProxyTestReadVertex(IDirect3DDevice8*, IDirect3DVertexBuffer8*, std::size_t, void*, std::size_t);
+t3render::ir::RegistryResult T3ProxyTestReadIndex(IDirect3DDevice8*, IDirect3DIndexBuffer8*, std::size_t, void*, std::size_t);
+#endif
 static std::vector<std::string> events;
 static bool enabled = false, writable = true, reject_swap = false, recursive = false;
+static bool buffers_requested = false;
+static bool invalid_buffer_option = false;
 static bool create_fails = false, throw_capture = false;
+static bool stop_on_present = false, stop_on_capture_error = false;
+static bool observed_buffer_observer = false, observed_buffer_observer_valid = false;
+static bool observed_buffer_result = false, observed_buffer_stable = false;
 static std::atomic<bool> stress{false};
 static std::atomic<int> captured_draws{0}, forwarded_draws{0};
+static std::atomic<bool> block_draw{false}, draw_entered{false}, allow_draw{false};
+static std::atomic<bool> block_set_stream{false}, set_stream_entered{false}, allow_set_stream{false};
 static std::atomic<std::uint64_t> next_token{1};
 static int failures = 0;
 static IDirect3DDevice8 devices[2];
@@ -33,13 +50,105 @@ static DWORD clear_input_error = 0;
 static const D3DRECT* clear_rectangles = nullptr;
 static DWORD clear_count = 0, clear_flags = 0, clear_color = 0, clear_stencil = 0;
 static float clear_depth = 0;
+static std::mutex fake_capture_mutex;
+static bool reentrant_capture = false;
+static bool drop_binding_during_get = false;
+static bool return_device_alias = false;
+static bool device_query_alias = false;
+static bool up_clears_stream = false;
+static IDirect3DVertexBuffer8* bound_vertex = nullptr;
+static IDirect3DIndexBuffer8* bound_index = nullptr;
+static UINT bound_stride = 0, bound_base = 0;
+static HRESULT create_vertex_result = 0, create_index_result = 0;
+static HRESULT set_stream_result = 0, get_stream_result = 0, set_indices_result = 0, get_indices_result = 0;
+static DWORD vertex_create_error = 0, index_create_error = 0, stream_set_error = 0, stream_get_error = 0;
+static DWORD indices_set_error = 0, indices_get_error = 0;
 
-extern "C" size_t VirtualQuery(void* p,MEMORY_BASIC_INFORMATION* out,size_t) { if(!writable) return 0; out->BaseAddress=p; out->RegionSize=sizeof(void*); out->State=MEM_COMMIT; out->Protect=PAGE_READWRITE; return sizeof(*out); }
+template<class Interface, class Desc, int Type>
+struct NativeBuffer final : Interface {
+ IDirect3DDevice8* owner;
+ ULONG refs=1;
+ bool destroyed=false, locked=false;
+ UINT size, stride_or_fvf;
+ DWORD usage;
+ D3DFORMAT format;
+ D3DPOOL pool;
+ std::array<BYTE, 128> bytes{};
+ HRESULT lock_result=S_OK, unlock_result=S_OK;
+ unsigned locks=0, unlocks=0;
+ DWORD lock_input_error=0, unlock_input_error=0;
+ NativeBuffer(IDirect3DDevice8* d,UINT length,DWORD u,UINT f,D3DPOOL p)
+     : owner(d),size(length),stride_or_fvf(f),usage(u),format(f),pool(p) {
+  owner->lpVtbl->AddRef(owner);
+ }
+ HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid,void** out) override {
+  if(!out) return E_POINTER;
+  const bool own = Type==D3DRTYPE_VERTEXBUFFER ? IsEqualIID(iid,IID_IDirect3DVertexBuffer8)
+                                               : IsEqualIID(iid,IID_IDirect3DIndexBuffer8);
+  // IID 99 models a raw, otherwise uninstrumented COM alias.
+  if(!own && !IsEqualIID(iid,IID_IUnknown) && !IsEqualIID(iid,IID_IDirect3DResource8) && iid.id!=99) {
+   *out=nullptr; return E_NOINTERFACE;
+  }
+  *out=static_cast<Interface*>(this); AddRef(); return S_OK;
+ }
+ ULONG STDMETHODCALLTYPE AddRef() override { assert(!destroyed && refs); return ++refs; }
+ ULONG STDMETHODCALLTYPE Release() override {
+  assert(!destroyed && refs); const ULONG left=--refs;
+  if(!left) { destroyed=true; owner->lpVtbl->Release(owner); }
+  return left;
+ }
+ HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice8** out) override {
+  if(!out) return E_POINTER;
+  *out=return_device_alias ? &devices[1] : owner;
+  (*out)->lpVtbl->AddRef(*out); return S_OK;
+ }
+ HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID,const void*,DWORD,DWORD) override { return S_OK; }
+ HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID,void*,DWORD*) override { return S_OK; }
+ HRESULT STDMETHODCALLTYPE FreePrivateData(REFGUID) override { return S_OK; }
+ DWORD STDMETHODCALLTYPE SetPriority(DWORD) override { return 0; }
+ DWORD STDMETHODCALLTYPE GetPriority() override { return 0; }
+ void STDMETHODCALLTYPE PreLoad() override {}
+ D3DRESOURCETYPE STDMETHODCALLTYPE GetType() override { return Type; }
+ HRESULT STDMETHODCALLTYPE Lock(UINT offset,UINT length,BYTE** out,DWORD) override {
+  lock_input_error=GetLastError(); SetLastError(931); ++locks;
+  if(FAILED(lock_result)) return lock_result;
+  if(!out || offset>size || length>size-offset || size>bytes.size()) return D3DERR_INVALIDCALL;
+  *out=bytes.data()+offset; locked=true; return S_OK;
+ }
+ HRESULT STDMETHODCALLTYPE Unlock() override {
+  unlock_input_error=GetLastError(); SetLastError(932); ++unlocks;
+  if(FAILED(unlock_result)) return unlock_result;
+  if(!locked) return D3DERR_INVALIDCALL;
+  locked=false; return S_OK;
+ }
+ HRESULT STDMETHODCALLTYPE GetDesc(Desc* out) override {
+  if(!out) return E_POINTER; *out={}; out->Type=Type; out->Usage=usage; out->Pool=pool; out->Size=size;
+  if constexpr (Type==D3DRTYPE_VERTEXBUFFER) out->FVF=stride_or_fvf;
+  else out->Format=format;
+  return S_OK;
+ }
+};
+using NativeVertex = NativeBuffer<IDirect3DVertexBuffer8,D3DVERTEXBUFFER_DESC,D3DRTYPE_VERTEXBUFFER>;
+using NativeIndex = NativeBuffer<IDirect3DIndexBuffer8,D3DINDEXBUFFER_DESC,D3DRTYPE_INDEXBUFFER>;
+static std::unique_ptr<NativeVertex> native_vertex;
+static std::unique_ptr<NativeIndex> native_index;
+
+extern "C" size_t VirtualQuery(void* p,MEMORY_BASIC_INFORMATION* out,size_t) { if(!writable) return 0; out->BaseAddress=p; out->RegionSize=4096; out->State=MEM_COMMIT; out->Protect=PAGE_READWRITE; return sizeof(*out); }
 extern "C" void* InterlockedCompareExchangePointer(void* volatile* p,void* x,void* compare) { void* prior=*p; if(reject_swap && x) {reject_swap=false; return reinterpret_cast<void*>(1);} if(prior==compare) *p=x; return prior; }
 extern "C" void OutputDebugStringA(const char*) { ++failures; }
 extern "C" DWORD GetLastError() { return last_error; }
 extern "C" void SetLastError(DWORD value) { last_error = value; }
 extern "C" UINT GetSystemDirectoryW(wchar_t* out,UINT) { const wchar_t path[]=L"sys"; std::memcpy(out,path,sizeof path); return 3; }
+extern "C" DWORD GetEnvironmentVariableW(const wchar_t* name, wchar_t* value, DWORD size) {
+ if (std::wcscmp(name,L"T3RENDER_CAPTURE_BUFFERS") || !buffers_requested) return 0;
+ if (size < 2) return 2;
+ value[0]=invalid_buffer_option ? L'0' : L'1'; value[1]=0; return 1;
+}
+extern "C" HANDLE GetCurrentProcess() { return reinterpret_cast<HANDLE>(1); }
+extern "C" BOOL ReadProcessMemory(HANDLE,const void* source,void* destination,SIZE_T length,SIZE_T* copied) {
+ if (!source || !destination) { if(copied) *copied=0; return 0; }
+ std::memcpy(destination,source,length); if(copied) *copied=length; return 1;
+}
 extern "C" HMODULE LoadLibraryW(const wchar_t*) { return reinterpret_cast<void*>(1); }
 extern "C" int FreeLibrary(HMODULE) { return 1; }
 extern "C" int GetModuleHandleExW(DWORD,LPCWSTR,HMODULE* out) { *out=reinterpret_cast<void*>(2); return 1; }
@@ -48,15 +157,37 @@ extern "C" void* GetProcAddress(HMODULE,const char*) { return reinterpret_cast<v
 namespace t3render {
 bool CaptureConfigured() { SetLastError(991); return enabled; }
 void CaptureDevice(IDirect3DDevice8*,const D3DPRESENT_PARAMETERS* p) { observed_params=const_cast<D3DPRESENT_PARAMETERS*>(p); events.push_back("capture-device"); }
-void CaptureDeviceReleased(IDirect3DDevice8* d) { assert(d==last_freed); events.push_back("capture-release"); }
-std::uint64_t CaptureDraw(IDirect3DDevice8*,const DrawCall& d) {
+void CaptureDeviceReleased(IDirect3DDevice8* d) {
+ std::unique_lock<std::mutex> lock(fake_capture_mutex, std::defer_lock);
+ if (reentrant_capture) lock.lock();
+ assert(d==last_freed); events.push_back("capture-release");
+}
+std::uint64_t CaptureDraw(IDirect3DDevice8* device,const DrawCall& d) {
  SetLastError(991);
  if (stress) { ++captured_draws; return next_token++; }
- if (throw_capture) throw std::runtime_error("capture failed");
+ if (throw_capture) {
+  if(stop_on_capture_error) enabled=false;
+  throw std::runtime_error("capture failed");
+ }
+ if (reentrant_capture) {
+  std::lock_guard<std::mutex> lock(fake_capture_mutex);
+  IDirect3DVertexBuffer8* vertex=nullptr; IDirect3DIndexBuffer8* index=nullptr;
+  UINT stride=0, base=0;
+  assert(device->lpVtbl->GetStreamSource(device,0,&vertex,&stride)==S_OK);
+  assert(device->lpVtbl->GetIndices(device,&index,&base)==S_OK);
+  if(vertex) vertex->Release();
+  if(index) index->Release();
+ }
+ observed_buffer_observer=d.buffer_observer!=nullptr;
+ observed_buffer_observer_valid=d.buffer_observer && d.buffer_observer->valid;
  observed_call=d; events.push_back("capture-draw");
  return next_token++;
 }
 void CaptureDrawResult(IDirect3DDevice8*,std::uint64_t token,HRESULT) { SetLastError(991); if (!token || stress) return; events.push_back("capture-draw-result"); }
+void CaptureBufferedDrawResult(IDirect3DDevice8*,std::uint64_t token,HRESULT,bool stable) {
+ SetLastError(991); if(!token || stress) return;
+ observed_buffer_result=true; observed_buffer_stable=stable; events.push_back("capture-draw-result");
+}
 std::uint64_t CaptureClear(IDirect3DDevice8*,DWORD count,const D3DRECT* rectangles,DWORD flags,D3DCOLOR color,float depth,DWORD stencil) {
  SetLastError(991); clear_count=count; clear_rectangles=rectangles; clear_flags=flags; clear_color=color;
  clear_depth=depth; clear_stencil=stencil; events.push_back("capture-clear"); return next_token++;
@@ -65,7 +196,10 @@ void CaptureClearResult(IDirect3DDevice8*,std::uint64_t token,HRESULT hr) {
  SetLastError(991); assert(token && hr==-71); events.push_back("capture-clear-result");
 }
 void CaptureReset(IDirect3DDevice8*,const D3DPRESENT_PARAMETERS* p,HRESULT hr) { SetLastError(991); assert(hr==12); observed_params=const_cast<D3DPRESENT_PARAMETERS*>(p); events.push_back("capture-reset"); }
-void CapturePresent(IDirect3DDevice8*,HRESULT hr) { SetLastError(991); assert(hr==13); events.push_back("capture-present"); }
+void CapturePresent(IDirect3DDevice8*,HRESULT hr) {
+ SetLastError(991); assert(hr==13); events.push_back("capture-present");
+ if(stop_on_present) enabled=false;
+}
 }
 static HRESULT query_factory(IDirect3D8* f,REFIID,void** out) { *out=f; ++f->refs; return 0; }
 static ULONG add_factory(IDirect3D8* f) { return ++f->refs; }
@@ -75,7 +209,10 @@ static HRESULT make_device(IDirect3D8*,UINT,D3DDEVTYPE,HWND,DWORD,D3DPRESENT_PAR
  if (create_fails) return -123;
  *out=&devices[next_device]; return 0;
 }
-static HRESULT query_device(IDirect3DDevice8* d,REFIID,void** out) { *out=d; ++d->refs; return 0; }
+static HRESULT query_device(IDirect3DDevice8* d,REFIID,void** out) {
+ IDirect3DDevice8* result=device_query_alias ? &devices[1] : d;
+ *out=result; ++result->refs; return 0;
+}
 static ULONG add_device(IDirect3DDevice8* d) { return ++d->refs; }
 static ULONG release_device(IDirect3DDevice8* d) { ULONG refs=--d->refs; if (!refs) last_freed=d; return refs; }
 static HRESULT reset(IDirect3DDevice8*,D3DPRESENT_PARAMETERS*) { reset_input_error=GetLastError(); SetLastError(912); events.push_back("reset"); return 12; }
@@ -86,14 +223,343 @@ static HRESULT clear(IDirect3DDevice8*,DWORD count,const D3DRECT* rectangles,DWO
 }
 static HRESULT draw(IDirect3DDevice8*,int,UINT,UINT) {
  if (stress) { ++forwarded_draws; return 14; }
+ if(block_draw) { draw_entered=true; while(!allow_draw) std::this_thread::yield(); }
  events.push_back("draw"); return 14;
 }
 static HRESULT draw_indexed(IDirect3DDevice8*,int,UINT,UINT,UINT,UINT) { events.push_back("draw-indexed"); return 15; }
-static HRESULT draw_up(IDirect3DDevice8*,int,UINT,const void* v,UINT) { draw_up_input_error=GetLastError(); SetLastError(909); observed_vertices=v; events.push_back("draw-up"); return 16; }
+static HRESULT draw_up(IDirect3DDevice8*,int,UINT,const void* v,UINT) {
+ draw_up_input_error=GetLastError(); SetLastError(909); observed_vertices=v; events.push_back("draw-up");
+ if(up_clears_stream && bound_vertex) { bound_vertex->Release(); bound_vertex=nullptr; bound_stride=0; }
+ return 16;
+}
 static HRESULT draw_indexed_up(IDirect3DDevice8*,int,UINT,UINT,UINT,const void* i,int,const void* v,UINT) { observed_indices=i; observed_vertices=v; events.push_back("draw-indexed-up"); return 17; }
+static HRESULT create_vertex(IDirect3DDevice8* d,UINT size,DWORD usage,DWORD fvf,D3DPOOL pool,IDirect3DVertexBuffer8** out) {
+ vertex_create_error=GetLastError(); SetLastError(941);
+ if(FAILED(create_vertex_result)) return create_vertex_result;
+ assert(out && size<=128 && !native_vertex); native_vertex=std::make_unique<NativeVertex>(d,size,usage,fvf,pool);
+ *out=native_vertex.get(); return S_OK;
+}
+static HRESULT create_index(IDirect3DDevice8* d,UINT size,DWORD usage,D3DFORMAT format,D3DPOOL pool,IDirect3DIndexBuffer8** out) {
+ index_create_error=GetLastError(); SetLastError(942);
+ if(FAILED(create_index_result)) return create_index_result;
+ assert(out && size<=128 && !native_index); native_index=std::make_unique<NativeIndex>(d,size,usage,format,pool);
+ *out=native_index.get(); return S_OK;
+}
+static HRESULT set_stream(IDirect3DDevice8*,UINT stream,IDirect3DVertexBuffer8* buffer,UINT stride) {
+ stream_set_error=GetLastError(); SetLastError(943); assert(stream==0);
+ if(block_set_stream) { set_stream_entered=true; while(!allow_set_stream) std::this_thread::yield(); }
+ if(FAILED(set_stream_result)) return set_stream_result;
+ assert(!buffer || buffer==native_vertex.get());
+ if(buffer) buffer->AddRef(); if(bound_vertex) bound_vertex->Release(); bound_vertex=buffer; bound_stride=stride; return S_OK;
+}
+static HRESULT get_stream(IDirect3DDevice8*,UINT stream,IDirect3DVertexBuffer8** out,UINT* stride) {
+ stream_get_error=GetLastError(); SetLastError(944); assert(stream==0);
+ if(FAILED(get_stream_result)) return get_stream_result;
+ if(!out || !stride) return E_POINTER;
+ *out=bound_vertex; *stride=bound_stride; if(*out) (*out)->AddRef();
+ if(drop_binding_during_get && bound_vertex) { bound_vertex->Release(); bound_vertex=nullptr; }
+ return S_OK;
+}
+static HRESULT set_indices(IDirect3DDevice8*,IDirect3DIndexBuffer8* buffer,UINT base) {
+ indices_set_error=GetLastError(); SetLastError(945);
+ if(FAILED(set_indices_result)) return set_indices_result;
+ assert(!buffer || buffer==native_index.get());
+ if(buffer) buffer->AddRef(); if(bound_index) bound_index->Release(); bound_index=buffer; bound_base=base; return S_OK;
+}
+static HRESULT get_indices(IDirect3DDevice8*,IDirect3DIndexBuffer8** out,UINT* base) {
+ indices_get_error=GetLastError(); SetLastError(946);
+ if(FAILED(get_indices_result)) return get_indices_result;
+ if(!out || !base) return E_POINTER;
+ *out=bound_index; *base=bound_base; if(*out) (*out)->AddRef(); return S_OK;
+}
+static HRESULT process_vertices(IDirect3DDevice8*,UINT,UINT,UINT,IDirect3DVertexBuffer8* target,DWORD) {
+ assert(!target || target==native_vertex.get()); return S_OK;
+}
+static HRESULT begin_state_block(IDirect3DDevice8*) { return 21; }
+static HRESULT end_state_block(IDirect3DDevice8*,DWORD* token) { if(token) *token=7; return 22; }
+static HRESULT apply_state_block(IDirect3DDevice8*,DWORD) { return 23; }
+static HRESULT capture_state_block(IDirect3DDevice8*,DWORD) { return 24; }
+static HRESULT delete_state_block(IDirect3DDevice8*,DWORD) { return 25; }
+static HRESULT create_state_block(IDirect3DDevice8*,D3DSTATEBLOCKTYPE,DWORD* token) { if(token) *token=8; return 26; }
 static IDirect3D8Vtbl factory_vt{query_factory,add_factory,release_factory,make_device};
-static IDirect3DDevice8Vtbl device_vt{query_device,add_device,release_device,reset,present,clear,draw,draw_indexed,draw_up,draw_indexed_up};
-int main() {
+static IDirect3DDevice8Vtbl device_vt{query_device,add_device,release_device,reset,present,clear,draw,draw_indexed,draw_up,draw_indexed_up,
+ create_vertex,create_index,set_stream,get_stream,set_indices,get_indices,process_vertices,
+ begin_state_block,end_state_block,apply_state_block,capture_state_block,delete_state_block,create_state_block};
+
+static int BufferBoundaryTest(const std::string& mode) {
+ const bool active = mode!="no-capture";
+ const bool wrapped = mode!="opt-out" && mode!="invalid-opt-in" && active;
+ enabled=active; buffers_requested=(mode!="opt-out");
+ invalid_buffer_option=mode=="invalid-opt-in";
+ factory={&factory_vt,1}; devices[0]={&device_vt,1}; devices[1]={&device_vt,1};
+ IDirect3D8* f=Proxy_Direct3DCreate8(220);
+ assert(f==&factory && ((f->lpVtbl!=&factory_vt)==active));
+ D3DPRESENT_PARAMETERS params{23}; IDirect3DDevice8* d=nullptr;
+ assert(f->lpVtbl->CreateDevice(f,0,0,nullptr,0,&params,&d)==S_OK && d==&devices[0]);
+
+ IDirect3DVertexBuffer8* vertex=nullptr;
+ IDirect3DIndexBuffer8* index=nullptr;
+ create_vertex_result=-71; SetLastError(11);
+ assert(d->lpVtbl->CreateVertexBuffer(d,100,D3DUSAGE_WRITEONLY,0x44,D3DPOOL_MANAGED,&vertex)==-71 && !vertex);
+ assert(vertex_create_error==11 && GetLastError()==941); create_vertex_result=0;
+ create_index_result=-72; SetLastError(12);
+ assert(d->lpVtbl->CreateIndexBuffer(d,10,D3DUSAGE_WRITEONLY,D3DFMT_INDEX16,D3DPOOL_MANAGED,&index)==-72 && !index);
+ assert(index_create_error==12 && GetLastError()==942); create_index_result=0;
+ SetLastError(13);
+ assert(d->lpVtbl->CreateVertexBuffer(d,100,D3DUSAGE_WRITEONLY,0x44,D3DPOOL_MANAGED,&vertex)==S_OK && vertex);
+ assert(vertex_create_error==13 && GetLastError()==941);
+ SetLastError(14);
+ assert(d->lpVtbl->CreateIndexBuffer(d,10,D3DUSAGE_WRITEONLY,D3DFMT_INDEX16,D3DPOOL_MANAGED,&index)==S_OK && index);
+ assert(index_create_error==14 && GetLastError()==942);
+ assert((vertex!=native_vertex.get())==wrapped && (index!=native_index.get())==wrapped);
+
+ BYTE* data=nullptr; SetLastError(15);
+ assert(vertex->Lock(20,80,&data,0)==S_OK && data==native_vertex->bytes.data()+20);
+ assert(native_vertex->lock_input_error==15 && GetLastError()==931);
+ for(unsigned i=0;i<80;++i) data[i]=static_cast<BYTE>(i);
+ SetLastError(16); assert(vertex->Unlock()==S_OK);
+ assert(native_vertex->unlock_input_error==16 && GetLastError()==932);
+ SetLastError(17); assert(index->Lock(4,6,&data,0)==S_OK && data==native_index->bytes.data()+4);
+ for(unsigned i=0;i<6;++i) data[i]=static_cast<BYTE>(i+3);
+ SetLastError(18); assert(index->Unlock()==S_OK);
+ assert(native_index->unlock_input_error==18 && GetLastError()==932);
+
+#ifdef T3RENDER_PROXY_TEST
+ if(wrapped) {
+  std::array<BYTE,80> observed_vertex{};
+  std::array<BYTE,6> observed_index{};
+  assert(T3ProxyTestReadVertex(d,native_vertex.get(),20,observed_vertex.data(),observed_vertex.size())==t3render::ir::RegistryResult::Ok);
+  assert(T3ProxyTestReadIndex(d,native_index.get(),4,observed_index.data(),observed_index.size())==t3render::ir::RegistryResult::Ok);
+  for(unsigned i=0;i<80;++i) assert(observed_vertex[i]==i);
+  for(unsigned i=0;i<6;++i) assert(observed_index[i]==i+3);
+  BYTE untouched=0xee;
+  assert(T3ProxyTestReadVertex(d,native_vertex.get(),0,&untouched,1)==t3render::ir::RegistryResult::UnknownData && untouched==0xee);
+  if(mode=="device-query-alias") {
+   // A distinct QI alias may receive calls outside the original device
+   // observer. Both the owner and alias must remain untrusted thereafter.
+   device_query_alias=true; void* queried=nullptr;
+   assert(d->lpVtbl->QueryInterface(d,IID_IDirect3DDevice8,&queried)==S_OK && queried==&devices[1]);
+   auto* alias=static_cast<IDirect3DDevice8*>(queried);
+   assert(T3ProxyTestReadVertex(d,native_vertex.get(),20,observed_vertex.data(),observed_vertex.size())!=t3render::ir::RegistryResult::Ok);
+   assert(T3ProxyTestReadIndex(d,native_index.get(),4,observed_index.data(),observed_index.size())!=t3render::ir::RegistryResult::Ok);
+   vertex->Release(); index->Release(); assert(native_vertex->destroyed && native_index->destroyed);
+   native_vertex.reset(); native_index.reset();
+   IDirect3DVertexBuffer8* later=nullptr;
+   assert(alias->lpVtbl->CreateVertexBuffer(alias,100,D3DUSAGE_WRITEONLY,0x44,D3DPOOL_MANAGED,&later)==S_OK && later);
+   BYTE* later_data=nullptr; assert(later->Lock(20,80,&later_data,0)==S_OK && later_data);
+   std::memset(later_data,1,80); assert(later->Unlock()==S_OK);
+   assert(T3ProxyTestReadVertex(alias,native_vertex.get(),20,observed_vertex.data(),observed_vertex.size())!=t3render::ir::RegistryResult::Ok);
+   later->Release(); assert(native_vertex->destroyed);
+   assert(alias->lpVtbl->Release(alias)==1); assert(d->lpVtbl->Release(d)==0); assert(f->lpVtbl->Release(f)==0);
+   std::cout<<"buffer boundary "<<mode<<": passed\n"; return 0;
+  }
+  if(mode=="alias" || mode=="stateblock" || mode=="reset" || mode=="device-alias" ||
+     mode=="raw-vertex" || mode=="raw-index") {
+   if(mode=="alias") {
+    void* raw_alias=nullptr;
+    const IID unknown{99};
+    assert(vertex->QueryInterface(unknown,&raw_alias)==S_OK && raw_alias==native_vertex.get());
+    static_cast<IDirect3DVertexBuffer8*>(raw_alias)->Release();
+   } else if(mode=="device-alias") {
+    IDirect3DDevice8* raw_device=nullptr;
+    return_device_alias=true;
+    assert(vertex->GetDevice(&raw_device)==S_OK && raw_device==&devices[1]);
+    raw_device->lpVtbl->Release(raw_device);
+   } else if(mode=="stateblock") {
+    DWORD token=0;
+    assert(d->lpVtbl->BeginStateBlock(d)==21);
+    assert(d->lpVtbl->EndStateBlock(d,&token)==22 && token==7);
+    assert(d->lpVtbl->CreateStateBlock(d,0,&token)==26 && token==8);
+    assert(d->lpVtbl->CaptureStateBlock(d,token)==24);
+    assert(d->lpVtbl->ApplyStateBlock(d,token)==23);
+    assert(d->lpVtbl->DeleteStateBlock(d,token)==25);
+   } else if(mode=="raw-vertex") {
+    assert(d->lpVtbl->SetStreamSource(d,0,native_vertex.get(),20)==S_OK);
+    assert(d->lpVtbl->SetStreamSource(d,0,nullptr,0)==S_OK);
+   } else if(mode=="raw-index") {
+    assert(d->lpVtbl->SetIndices(d,native_index.get(),1)==S_OK);
+    assert(d->lpVtbl->SetIndices(d,nullptr,0)==S_OK);
+   } else {
+    assert(d->lpVtbl->Reset(d,&params)==12);
+   }
+   // An escaped alias or state mutation invalidates the entire device, never
+   // just the resource through which it was observed.
+   assert(T3ProxyTestReadVertex(d,native_vertex.get(),20,observed_vertex.data(),observed_vertex.size())!=t3render::ir::RegistryResult::Ok);
+   assert(T3ProxyTestReadIndex(d,native_index.get(),4,observed_index.data(),observed_index.size())!=t3render::ir::RegistryResult::Ok);
+   vertex->Release(); index->Release();
+   assert(native_vertex->destroyed && native_index->destroyed);
+   assert(d->lpVtbl->Release(d)==0); assert(f->lpVtbl->Release(f)==0);
+   std::cout<<"buffer boundary "<<mode<<": passed\n";
+   return 0;
+  }
+ }
+#endif
+
+ set_stream_result=-73; SetLastError(19);
+ assert(d->lpVtbl->SetStreamSource(d,0,vertex,20)==-73 && !bound_vertex);
+ assert(stream_set_error==19 && GetLastError()==943); set_stream_result=0;
+ set_indices_result=-74; SetLastError(20);
+ assert(d->lpVtbl->SetIndices(d,index,1)==-74 && !bound_index);
+ assert(indices_set_error==20 && GetLastError()==945); set_indices_result=0;
+ assert(d->lpVtbl->SetStreamSource(d,0,vertex,20)==S_OK && bound_vertex==native_vertex.get());
+ assert(d->lpVtbl->SetIndices(d,index,1)==S_OK && bound_index==native_index.get());
+
+ IDirect3DVertexBuffer8* got_vertex=nullptr; IDirect3DIndexBuffer8* got_index=nullptr;
+ UINT stride=0,base=0; get_stream_result=-75; SetLastError(21);
+ assert(d->lpVtbl->GetStreamSource(d,0,&got_vertex,&stride)==-75 && !got_vertex);
+ assert(stream_get_error==21 && GetLastError()==944); get_stream_result=0;
+ get_indices_result=-76; SetLastError(22);
+ assert(d->lpVtbl->GetIndices(d,&got_index,&base)==-76 && !got_index);
+ assert(indices_get_error==22 && GetLastError()==946); get_indices_result=0;
+ SetLastError(23); assert(d->lpVtbl->GetStreamSource(d,0,&got_vertex,&stride)==S_OK);
+ assert(got_vertex==vertex && stride==20 && stream_get_error==23 && GetLastError()==944);
+ SetLastError(24); assert(d->lpVtbl->GetIndices(d,&got_index,&base)==S_OK);
+ assert(got_index==index && base==1 && indices_get_error==24 && GetLastError()==946);
+ got_vertex->Release(); got_index->Release();
+#ifdef T3RENDER_PROXY_TEST
+ if(mode=="stop-present" || mode=="stop-error") {
+  BYTE sample=0;
+  assert(T3ProxyTestReadVertex(d,native_vertex.get(),20,&sample,1)==t3render::ir::RegistryResult::Ok);
+  assert(T3ProxyTestReadIndex(d,native_index.get(),4,&sample,1)==t3render::ir::RegistryResult::Ok);
+  if(mode=="stop-present") {
+   stop_on_present=true; SetLastError(25);
+   assert(d->lpVtbl->Present(d,nullptr,nullptr,nullptr,nullptr)==13 && GetLastError()==913);
+  } else {
+   throw_capture=true; stop_on_capture_error=true;
+   assert(d->lpVtbl->DrawPrimitive(d,4,0,1)==14);
+   throw_capture=false;
+  }
+  assert(T3ProxyTestReadVertex(d,native_vertex.get(),20,&sample,1)!=t3render::ir::RegistryResult::Ok);
+  assert(T3ProxyTestReadIndex(d,native_index.get(),4,&sample,1)!=t3render::ir::RegistryResult::Ok);
+  BYTE* later=nullptr;
+  assert(vertex->Lock(20,4,&later,0)==S_OK && later); std::memset(later,0x44,4);
+  assert(vertex->Unlock()==S_OK);
+  assert(T3ProxyTestReadVertex(d,native_vertex.get(),20,&sample,1)!=t3render::ir::RegistryResult::Ok);
+  // The wrappers remain valid COM objects and still unwrap at the device boundary.
+  assert(d->lpVtbl->SetStreamSource(d,0,vertex,20)==S_OK && bound_vertex==native_vertex.get());
+  assert(d->lpVtbl->SetIndices(d,index,1)==S_OK && bound_index==native_index.get());
+  got_vertex=nullptr; got_index=nullptr;
+  assert(d->lpVtbl->GetStreamSource(d,0,&got_vertex,&stride)==S_OK && got_vertex==vertex);
+  assert(d->lpVtbl->GetIndices(d,&got_index,&base)==S_OK && got_index==index);
+  got_vertex->Release(); got_index->Release();
+  assert(d->lpVtbl->SetStreamSource(d,0,nullptr,0)==S_OK);
+  assert(d->lpVtbl->SetIndices(d,nullptr,0)==S_OK);
+  vertex->Release(); index->Release();
+  assert(native_vertex->destroyed && native_index->destroyed);
+  assert(d->lpVtbl->Release(d)==0); assert(f->lpVtbl->Release(f)==0);
+  std::cout<<"buffer boundary "<<mode<<": passed\n"; return 0;
+ }
+#endif
+ if(mode=="opt-in" || mode=="opt-out" || mode=="invalid-opt-in" || mode=="no-capture") {
+  observed_buffer_observer=false; observed_buffer_result=false; observed_buffer_stable=false;
+  assert(d->lpVtbl->DrawPrimitive(d,4,0,1)==14);
+  assert(observed_buffer_observer==wrapped && observed_buffer_result==wrapped);
+  if(wrapped) assert(observed_buffer_observer_valid && observed_buffer_stable);
+ }
+#ifdef T3RENDER_PROXY_TEST
+ if(mode=="set-draw" || mode=="draw-set") {
+  BYTE sample=0;
+  // Ordinary sequential binds must not discard otherwise known data.
+  assert(T3ProxyTestReadVertex(d,native_vertex.get(),20,&sample,1)==t3render::ir::RegistryResult::Ok);
+  assert(T3ProxyTestReadIndex(d,native_index.get(),4,&sample,1)==t3render::ir::RegistryResult::Ok);
+  if(mode=="set-draw") {
+   block_set_stream=true;
+   std::thread setter([&] { assert(d->lpVtbl->SetStreamSource(d,0,vertex,20)==S_OK); });
+   while(!set_stream_entered) std::this_thread::yield();
+   assert(d->lpVtbl->DrawPrimitive(d,4,0,1)==14);
+   allow_set_stream=true; setter.join(); block_set_stream=false;
+  } else {
+   block_draw=true;
+   std::thread drawer([&] { assert(d->lpVtbl->DrawPrimitive(d,4,0,1)==14); });
+   while(!draw_entered) std::this_thread::yield();
+   assert(d->lpVtbl->SetStreamSource(d,0,vertex,20)==S_OK);
+   allow_draw=true; drawer.join(); block_draw=false;
+  }
+  assert(observed_buffer_observer && observed_buffer_result && !observed_buffer_stable);
+  assert(observed_buffer_observer_valid==(mode=="draw-set"));
+  assert(T3ProxyTestReadVertex(d,native_vertex.get(),20,&sample,1)!=t3render::ir::RegistryResult::Ok);
+  assert(T3ProxyTestReadIndex(d,native_index.get(),4,&sample,1)!=t3render::ir::RegistryResult::Ok);
+  assert(d->lpVtbl->SetStreamSource(d,0,nullptr,0)==S_OK);
+  assert(d->lpVtbl->SetIndices(d,nullptr,0)==S_OK);
+  vertex->Release(); index->Release();
+  assert(native_vertex->destroyed && native_index->destroyed);
+  assert(d->lpVtbl->Release(d)==0); assert(f->lpVtbl->Release(f)==0);
+  std::cout<<"buffer boundary "<<mode<<": passed\n"; return 0;
+ }
+#endif
+ if(mode=="up-clears-stream") {
+  // D3D8 DrawPrimitiveUP leaves stream 0 unbound. The next getter must
+  // observe the runtime's null binding rather than an adapter cache.
+  std::array<BYTE,60> immediate{}; up_clears_stream=true;
+  observed_buffer_observer=false; observed_buffer_result=false;
+  assert(d->lpVtbl->DrawPrimitiveUP(d,4,1,immediate.data(),20)==16);
+  assert(!observed_buffer_observer && !observed_buffer_result);
+  got_vertex=reinterpret_cast<IDirect3DVertexBuffer8*>(1); stride=99;
+  assert(d->lpVtbl->GetStreamSource(d,0,&got_vertex,&stride)==S_OK && !got_vertex && stride==0);
+  got_index=nullptr; assert(d->lpVtbl->GetIndices(d,&got_index,&base)==S_OK && got_index==index && base==1);
+  got_index->Release();
+  assert(d->lpVtbl->SetIndices(d,nullptr,0)==S_OK);
+  vertex->Release(); index->Release();
+  assert(native_vertex->destroyed && native_index->destroyed);
+  assert(d->lpVtbl->Release(d)==0); assert(f->lpVtbl->Release(f)==0);
+  std::cout<<"buffer boundary "<<mode<<": passed\n"; return 0;
+ }
+ assert(d->lpVtbl->ProcessVertices(d,0,0,1,vertex,0)==S_OK);
+#ifdef T3RENDER_PROXY_TEST
+ if(wrapped) {
+  BYTE observed=0;
+  assert(T3ProxyTestReadVertex(d,native_vertex.get(),20,&observed,1)!=t3render::ir::RegistryResult::Ok);
+ }
+#endif
+
+ if(mode=="reentrant") {
+  // Last external wrappers go away; the native device still owns its binding.
+  assert(d->lpVtbl->SetIndices(d,nullptr,0)==S_OK);
+  index->Release(); index=nullptr; vertex->Release(); vertex=nullptr;
+  // Leave the native resource's device reference as the last device reference.
+  // Getter simulates an unbind racing the internal capture getter, so its
+  // temporary reference can be the last resource reference on Release.
+  assert(d->lpVtbl->Release(d)==1);
+  reentrant_capture=true; drop_binding_during_get=true; events.clear();
+  assert(d->lpVtbl->DrawPrimitive(d,4,0,1)==14);
+  assert(last_freed==d && native_vertex->destroyed && !bound_vertex);
+  assert(events==std::vector<std::string>({"capture-draw","draw","capture-draw-result","capture-release"}) ||
+         events==std::vector<std::string>({"capture-draw","capture-release","draw","capture-draw-result"}));
+  reentrant_capture=false;
+ } else {
+  if(wrapped) {
+   void* unknown=nullptr;
+   assert(vertex->QueryInterface(IID_IUnknown,&unknown)==S_OK && unknown==vertex);
+   static_cast<IDirect3DVertexBuffer8*>(unknown)->Release();
+   assert(index->QueryInterface(IID_IUnknown,&unknown)==S_OK && unknown==index);
+   static_cast<IDirect3DIndexBuffer8*>(unknown)->Release();
+  }
+  vertex->Release(); index->Release(); vertex=nullptr; index=nullptr;
+  got_vertex=nullptr; got_index=nullptr;
+  assert(d->lpVtbl->GetStreamSource(d,0,&got_vertex,&stride)==S_OK && got_vertex);
+  assert(d->lpVtbl->GetIndices(d,&got_index,&base)==S_OK && got_index);
+#ifdef T3RENDER_PROXY_TEST
+  if(wrapped) {
+   // A weak registry may return a new wrapper or raw fallback. In either case,
+   // previously observed bytes are not evidence after the final wrapper release.
+   BYTE observed=0;
+   assert(T3ProxyTestReadVertex(d,native_vertex.get(),20,&observed,1)!=t3render::ir::RegistryResult::Ok);
+   assert(T3ProxyTestReadIndex(d,native_index.get(),4,&observed,1)!=t3render::ir::RegistryResult::Ok);
+  }
+#endif
+  got_vertex->Release(); got_index->Release();
+  assert(d->lpVtbl->SetStreamSource(d,0,nullptr,0)==S_OK);
+  assert(d->lpVtbl->SetIndices(d,nullptr,0)==S_OK);
+  assert(native_vertex->destroyed && native_index->destroyed);
+  assert(d->lpVtbl->Release(d)==0);
+ }
+ assert(f->lpVtbl->Release(f)==0);
+ std::cout<<"buffer boundary "<<mode<<": passed\n";
+ return 0;
+}
+
+int main(int argc, char** argv) {
+ if(argc==2) return BufferBoundaryTest(argv[1]);
  factory={&factory_vt,1}; devices[0]={&device_vt,1}; devices[1]={&device_vt,1};
  SetLastError(101);
  assert(Proxy_Direct3DCreate8(220)==&factory && factory.lpVtbl==&factory_vt);

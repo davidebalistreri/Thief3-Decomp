@@ -109,6 +109,11 @@ def summarize(path):
                             f"line {lines}: frame {frame} does not match active frame {current['frame']}"
                         )
                     if event in ("draw", "clear"):
+                        has_buffer_data = event == "draw" and "buffer_data" in item
+                        if has_buffer_data and not isinstance(item["buffer_data"], dict):
+                            raise TraceError(f"line {lines}: buffer_data must be an object")
+                        if has_buffer_data and not operation_results:
+                            raise TraceError(f"line {lines}: buffer_data requires operation result capability")
                         if event == "clear":
                             if not operation_results:
                                 raise TraceError(f"line {lines}: clear requires operation result capability")
@@ -154,7 +159,7 @@ def summarize(path):
                             if current["pending"]:
                                 current["overlap"] = True
                             current["last_op"] = op_id
-                            current["pending"][op_id] = event
+                            current["pending"][op_id] = (event, has_buffer_data)
                     if event == "draw":
                         call = item.get("call")
                         if not isinstance(call, str) or not call:
@@ -164,10 +169,16 @@ def summarize(path):
                         calls[call] += 1
                     elif event in ("draw_result", "clear_result"):
                         op_id = item.get("op_id")
-                        if not _is_int(op_id) or current["pending"].get(op_id) != event.removesuffix("_result"):
+                        pending = current["pending"].get(op_id) if _is_int(op_id) else None
+                        if pending is None or pending[0] != event.removesuffix("_result"):
                             raise TraceError(f"line {lines}: result has no matching operation")
                         if not _is_int(item.get("hr")) or not -(1 << 31) <= item["hr"] < (1 << 32):
                             raise TraceError(f"line {lines}: operation hr must be an integer")
+                        if pending[1]:
+                            if not isinstance(item.get("buffer_stable"), bool):
+                                raise TraceError(f"line {lines}: buffered draw result requires boolean buffer_stable")
+                        elif "buffer_stable" in item:
+                            raise TraceError(f"line {lines}: buffer_stable has no matching buffer_data")
                         del current["pending"][op_id]
                     elif event == "frame_end":
                         hr = item.get("present_hr")

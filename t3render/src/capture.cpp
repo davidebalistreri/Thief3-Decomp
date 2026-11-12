@@ -29,6 +29,8 @@ constexpr unsigned kStreamLimit = 16;
 constexpr unsigned kWorldLimit = 4;
 constexpr uint64_t kUpComponentLimit = 256 * 1024;
 constexpr uint64_t kUpFrameLimit = 8 * 1024 * 1024;
+constexpr uint64_t kBufferComponentLimit = 256 * 1024;
+constexpr uint64_t kBufferFrameLimit = 8 * 1024 * 1024;
 constexpr DWORD kClearRectLimit = 256;
 constexpr size_t kPendingOperationLimit = 4096;
 enum class OperationKind { Draw, Clear };
@@ -44,12 +46,14 @@ struct CaptureState {
     bool key_trigger = false;
     bool key_down = false;
     bool triggered = false;
+    bool buffer_requested = false;
     bool begun = false;
     bool had_reset = false;
     uint64_t frame = 0;
     uint64_t target = 0;
     uint64_t draws = 0;
     uint64_t up_bytes = 0;  // successfully emitted raw bytes, not hex characters
+    uint64_t buffer_bytes = 0;
     uint64_t next_operation = 1;
     bool concurrent_operations = false;
     std::unordered_map<uint64_t, OperationKind> pending_operations;
@@ -136,6 +140,7 @@ void Initialize(CaptureState& s) {
     const std::wstring path = Environment(L"T3RENDER_CAPTURE_PATH");
     const std::wstring frame = Environment(L"T3RENDER_CAPTURE_FRAME");
     const std::wstring key = Environment(L"T3RENDER_CAPTURE_KEY");
+    s.buffer_requested = Environment(L"T3RENDER_CAPTURE_BUFFERS") == L"1";
     if (path.empty() || (!frame.empty() && !key.empty()) || (frame.empty() && key.empty())) return;
     if (!key.empty()) {
         if (key != L"F11") return;
@@ -167,8 +172,12 @@ bool Open(CaptureState& s) {
         << "\"trigger\":\"" << (s.key_trigger ? "F11" : "frame") << "\","
         << "\"operation_results\":1,\"clear_rect_limit\":" << kClearRectLimit << ','
         << "\"replayable\":false,\"up_capture\":{\"encoding\":\"hex\",\"component_limit_bytes\":"
-        << kUpComponentLimit << ",\"frame_limit_bytes\":" << kUpFrameLimit << "},\"limitations\":["
-        << "\"resource bytes and T3 asset names are not captured\","
+        << kUpComponentLimit << ",\"frame_limit_bytes\":" << kUpFrameLimit << "},"
+        << "\"buffer_capture\":{\"requested\":" << (s.buffer_requested ? "true" : "false")
+        << ",\"encoding\":\"hex\",\"component_limit_bytes\":" << kBufferComponentLimit
+        << ",\"frame_limit_bytes\":" << kBufferFrameLimit << "},\"limitations\":["
+        << "\"texture bytes and T3 asset names are not captured\","
+        << "\"optional buffer shadows are bounded observations, not proof of driver input\","
         << "\"UP data is bounded, may be unavailable, and may change between snapshot and draw\","
         << "\"indexed UP vertex window uses MinVertexIndex times stride; nonzero behavior is not runtime verified\","
         << "\"draw and clear events describe attempts; results are paired by op_id\","
@@ -555,6 +564,130 @@ void BytesJson(std::ostream& out, const UpBytes& data) {
     else out << "null";
 }
 
+// Read only from already-tracked CPU shadows. No additional D3D Lock occurs.
+// These are pre-draw observations, not a guarantee about driver input: the
+// paired result reports whether the intercepted draw window stayed stable.
+template<typename Resource, typename Reader>
+UpBytes ReadShadow(CaptureState& s, const BufferObserver& observer, IDirect3DDevice8* device,
+                   Resource* resource, Reader reader, uint64_t offset, uint64_t count) {
+    UpBytes result;
+    result.byte_count = count;
+    result.byte_count_known = true;
+    if (!observer.valid) { result.status = "window_unavailable"; return result; }
+    if (!reader) { result.status = "unknown"; return result; }
+    if (!count) { result.status = "empty"; return result; }
+    if (count > kBufferComponentLimit) { result.status = "per_draw_limit"; return result; }
+    if (count > kBufferFrameLimit - s.buffer_bytes) { result.status = "frame_limit"; return result; }
+    if (offset > std::numeric_limits<size_t>::max() || count > std::numeric_limits<size_t>::max()) {
+        result.status = "overflow"; return result;
+    }
+    const size_t size = static_cast<size_t>(count);
+    std::vector<BYTE> copy(size);
+    if (!reader(observer.context, device, resource, static_cast<size_t>(offset), copy.data(), size)) {
+        result.status = "unknown"; return result;
+    }
+    constexpr char digits[] = "0123456789abcdef";
+    result.hex.reserve(size * 2);
+    for (BYTE value : copy) {
+        result.hex.push_back(digits[value >> 4]);
+        result.hex.push_back(digits[value & 0x0f]);
+    }
+    s.buffer_bytes += count;
+    result.status = "captured";
+    return result;
+}
+
+void CaptureBuffered(std::ostream& out, CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw) {
+    const BufferObserver& observer = *draw.buffer_observer;
+    const bool indexed = draw.kind == DrawKind::IndexedPrimitive;
+    ComRef<IDirect3DVertexBuffer8> vb;
+    ComRef<IDirect3DIndexBuffer8> ib;
+    UINT stride = 0, base = 0;
+    const HRESULT vertex_hr = device->GetStreamSource(0, &vb.value, &stride);
+    HRESULT index_hr = E_FAIL;
+    if (indexed) index_hr = device->GetIndices(&ib.value, &base);
+
+    uint64_t elements = 0;
+    const bool elements_known = PrimitiveElements(draw.primitive_type, draw.primitive_count, elements);
+    uint64_t first = 0, vertex_count = 0, vertex_offset = 0, vertex_size = 0;
+    const bool first_known = !indexed || (SUCCEEDED(index_hr) && ib.value);
+    if (first_known) first = indexed ? uint64_t(base) + draw.min_vertex_index : draw.start_vertex;
+    const bool vertex_count_known = indexed || elements_known;
+    if (vertex_count_known) vertex_count = indexed ? (draw.primitive_count ? draw.num_vertices : 0) : elements;
+    const bool stride_known = SUCCEEDED(vertex_hr) && vb.value;
+    const bool offset_known = first_known && stride_known && Product(first, stride, vertex_offset);
+    const bool vertex_size_known = vertex_count_known && stride_known && Product(vertex_count, stride, vertex_size);
+    UpBytes vertex;
+    if (FAILED(vertex_hr)) vertex.status = "getter_failed";
+    else if (!vb.value) vertex.status = "unbound";
+    else if (!first_known || !vertex_count_known) vertex.status = "unknown_range";
+    else if (!offset_known || !vertex_size_known || first > UINT64_C(0xffffffff) ||
+             vertex_count > UINT64_C(0x100000000) - first) vertex.status = "overflow";
+    else if (vertex_count && !stride) vertex.status = "invalid_stride";
+    else {
+        D3DVERTEXBUFFER_DESC desc{};
+        if (FAILED(vb.value->GetDesc(&desc))) vertex.status = "descriptor_failed";
+        else if (vertex_offset > desc.Size || vertex_size > uint64_t(desc.Size) - vertex_offset)
+            vertex.status = "out_of_bounds";
+        else vertex = ReadShadow(s, observer, device, vb.value, observer.read_vertex, vertex_offset, vertex_size);
+    }
+
+    uint64_t index_offset = 0, index_size = 0;
+    bool index_offset_known = false;
+    unsigned index_format = 0;
+    bool index_format_known = false;
+    UpBytes index;
+    if (indexed) {
+        if (FAILED(index_hr)) index.status = "getter_failed";
+        else if (!ib.value) index.status = "unbound";
+        else {
+            D3DINDEXBUFFER_DESC desc{};
+            if (FAILED(ib.value->GetDesc(&desc))) index.status = "descriptor_failed";
+            else {
+                index_format = static_cast<unsigned>(desc.Format);
+                index_format_known = true;
+                const uint64_t width = desc.Format == D3DFMT_INDEX16 ? 2 : desc.Format == D3DFMT_INDEX32 ? 4 : 0;
+                if (!width) index.status = "unsupported_index_format";
+                else if (!elements_known) index.status = "unsupported_topology";
+                else if (!Product(draw.start_index, width, index_offset) || !Product(elements, width, index_size))
+                    index.status = "overflow";
+                else {
+                    index_offset_known = true;
+                    if (index_offset > desc.Size || index_size > uint64_t(desc.Size) - index_offset)
+                        index.status = "out_of_bounds";
+                    else index = ReadShadow(s, observer, device, ib.value, observer.read_index, index_offset, index_size);
+                }
+            }
+        }
+    }
+
+    out << ",\"buffer_data\":{\"source\":\"application_lock_shadow\",\"vertex\":{";
+    BytesJson(out, vertex);
+    out << ",\"resource\":"; Id(out, vb.value);
+    out << ",\"stream\":0,\"first_vertex\":";
+    if (first_known) out << first; else out << "null";
+    out << ",\"vertex_count\":";
+    if (vertex_count_known) out << vertex_count; else out << "null";
+    out << ",\"stride\":";
+    if (stride_known) out << stride; else out << "null";
+    out << ",\"byte_offset\":";
+    if (offset_known) out << vertex_offset; else out << "null";
+    out << "},\"index\":";
+    if (!indexed) out << "null";
+    else {
+        out << '{'; BytesJson(out, index);
+        out << ",\"resource\":"; Id(out, ib.value);
+        out << ",\"index_count\":";
+        if (elements_known) out << elements; else out << "null";
+        out << ",\"index_format\":";
+        if (index_format_known) out << index_format; else out << "null";
+        out << ",\"byte_offset\":";
+        if (index_offset_known) out << index_offset; else out << "null";
+        out << '}';
+    }
+    out << '}';
+}
+
 void CaptureUp(CaptureState& s, const DrawCall& draw, UpBytes& vertex, UpBytes& index,
                uint64_t& vertex_count, uint64_t& vertex_offset, uint64_t& index_count,
                bool& vertex_count_known, bool& offset_known, bool& index_count_known) {
@@ -669,6 +802,7 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
     out << ',';
     const unsigned streams = s.has_caps ? std::min<unsigned>(s.caps.MaxStreams, kStreamLimit) : kStreamLimit;
     BufferBindings(out, device, streams);
+    if (!up && draw.buffer_observer) CaptureBuffered(out, s, device, draw);
     if (up) {
         out << ",\"up_data\":{\"vertex\":{";
         BytesJson(out, vertex);
@@ -728,7 +862,8 @@ uint64_t BeginOperation(CaptureState& s, OperationKind kind) {
 
 void Fail() noexcept;
 
-void FinishOperation(IDirect3DDevice8* device, uint64_t token, HRESULT result, OperationKind kind) {
+void FinishOperation(IDirect3DDevice8* device, uint64_t token, HRESULT result, OperationKind kind,
+                     int buffer_stable = -1) {
     if (!token) return;
     try {
         auto& s = State();
@@ -743,7 +878,10 @@ void FinishOperation(IDirect3DDevice8* device, uint64_t token, HRESULT result, O
         auto out = Json();
         out << "{\"event\":\"" << (kind == OperationKind::Draw ? "draw_result" : "clear_result")
             << "\",\"frame\":" << s.frame << ",\"op_id\":" << token
-            << ",\"hr\":" << static_cast<int32_t>(result) << "}\n";
+            << ",\"hr\":" << static_cast<int32_t>(result);
+        if (kind == OperationKind::Draw && buffer_stable >= 0)
+            out << ",\"buffer_stable\":" << (buffer_stable ? "true" : "false");
+        out << "}\n";
         if (Write(s, out.str())) s.pending_operations.erase(pending);
     } catch (...) { Fail(); }
 }
@@ -814,6 +952,7 @@ void CaptureDeviceReleased(IDirect3DDevice8* device) {
         s.frame = 0;
         s.draws = 0;
         s.up_bytes = 0;
+        s.buffer_bytes = 0;
         s.had_reset = false;
         s.next_operation = 1;
         s.pending_operations.clear();
@@ -845,6 +984,10 @@ uint64_t CaptureDraw(IDirect3DDevice8* device, const DrawCall& draw) {
 
 void CaptureDrawResult(IDirect3DDevice8* device, uint64_t token, HRESULT result) {
     FinishOperation(device, token, result, OperationKind::Draw);
+}
+
+void CaptureBufferedDrawResult(IDirect3DDevice8* device, uint64_t token, HRESULT result, bool stable) {
+    FinishOperation(device, token, result, OperationKind::Draw, stable ? 1 : 0);
 }
 
 uint64_t CaptureClear(IDirect3DDevice8* device, DWORD count, const D3DRECT* source,

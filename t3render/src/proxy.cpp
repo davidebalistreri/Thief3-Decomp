@@ -2,11 +2,13 @@
 // runtime's own; per-object vtables intercept only factory/device lifecycle and
 // draw boundaries. See README for limitations and deployment precautions.
 #include "capture.hpp"
+#include "buffer_proxy.hpp"
 #include "vtable_layout.h"
 
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -45,6 +47,19 @@ using DrawPrimitive = Function<decltype(&IDirect3DDevice8::DrawPrimitive)>;
 using DrawIndexed = Function<decltype(&IDirect3DDevice8::DrawIndexedPrimitive)>;
 using DrawPrimitiveUp = Function<decltype(&IDirect3DDevice8::DrawPrimitiveUP)>;
 using DrawIndexedUp = Function<decltype(&IDirect3DDevice8::DrawIndexedPrimitiveUP)>;
+using CreateVertexBuffer = Function<decltype(&IDirect3DDevice8::CreateVertexBuffer)>;
+using CreateIndexBuffer = Function<decltype(&IDirect3DDevice8::CreateIndexBuffer)>;
+using SetStreamSource = Function<decltype(&IDirect3DDevice8::SetStreamSource)>;
+using GetStreamSource = Function<decltype(&IDirect3DDevice8::GetStreamSource)>;
+using SetIndices = Function<decltype(&IDirect3DDevice8::SetIndices)>;
+using GetIndices = Function<decltype(&IDirect3DDevice8::GetIndices)>;
+using ProcessVertices = Function<decltype(&IDirect3DDevice8::ProcessVertices)>;
+using BeginStateBlock = Function<decltype(&IDirect3DDevice8::BeginStateBlock)>;
+using EndStateBlock = Function<decltype(&IDirect3DDevice8::EndStateBlock)>;
+using ApplyStateBlock = Function<decltype(&IDirect3DDevice8::ApplyStateBlock)>;
+using CaptureStateBlock = Function<decltype(&IDirect3DDevice8::CaptureStateBlock)>;
+using DeleteStateBlock = Function<decltype(&IDirect3DDevice8::DeleteStateBlock)>;
+using CreateStateBlock = Function<decltype(&IDirect3DDevice8::CreateStateBlock)>;
 
 HRESULT STDMETHODCALLTYPE FactoryQuery(IDirect3D8*, REFIID, void**);
 ULONG STDMETHODCALLTYPE FactoryRelease(IDirect3D8*);
@@ -60,6 +75,19 @@ HRESULT STDMETHODCALLTYPE DeviceDrawIndexed(IDirect3DDevice8*, D3DPRIMITIVETYPE,
 HRESULT STDMETHODCALLTYPE DeviceDrawUp(IDirect3DDevice8*, D3DPRIMITIVETYPE, UINT, const void*, UINT);
 HRESULT STDMETHODCALLTYPE DeviceDrawIndexedUp(IDirect3DDevice8*, D3DPRIMITIVETYPE, UINT, UINT, UINT,
                                                const void*, D3DFORMAT, const void*, UINT);
+HRESULT STDMETHODCALLTYPE DeviceCreateVertexBuffer(IDirect3DDevice8*, UINT, DWORD, DWORD, D3DPOOL, IDirect3DVertexBuffer8**);
+HRESULT STDMETHODCALLTYPE DeviceCreateIndexBuffer(IDirect3DDevice8*, UINT, DWORD, D3DFORMAT, D3DPOOL, IDirect3DIndexBuffer8**);
+HRESULT STDMETHODCALLTYPE DeviceSetStreamSource(IDirect3DDevice8*, UINT, IDirect3DVertexBuffer8*, UINT);
+HRESULT STDMETHODCALLTYPE DeviceGetStreamSource(IDirect3DDevice8*, UINT, IDirect3DVertexBuffer8**, UINT*);
+HRESULT STDMETHODCALLTYPE DeviceSetIndices(IDirect3DDevice8*, IDirect3DIndexBuffer8*, UINT);
+HRESULT STDMETHODCALLTYPE DeviceGetIndices(IDirect3DDevice8*, IDirect3DIndexBuffer8**, UINT*);
+HRESULT STDMETHODCALLTYPE DeviceProcessVertices(IDirect3DDevice8*, UINT, UINT, UINT, IDirect3DVertexBuffer8*, DWORD);
+HRESULT STDMETHODCALLTYPE DeviceBeginStateBlock(IDirect3DDevice8*);
+HRESULT STDMETHODCALLTYPE DeviceEndStateBlock(IDirect3DDevice8*, DWORD*);
+HRESULT STDMETHODCALLTYPE DeviceApplyStateBlock(IDirect3DDevice8*, DWORD);
+HRESULT STDMETHODCALLTYPE DeviceCaptureStateBlock(IDirect3DDevice8*, DWORD);
+HRESULT STDMETHODCALLTYPE DeviceDeleteStateBlock(IDirect3DDevice8*, DWORD);
+HRESULT STDMETHODCALLTYPE DeviceCreateStateBlock(IDirect3DDevice8*, D3DSTATEBLOCKTYPE, DWORD*);
 
 static_assert(std::is_same_v<QueryFactory, decltype(&FactoryQuery)>);
 static_assert(std::is_same_v<ReleaseFactory, decltype(&FactoryRelease)>);
@@ -73,6 +101,19 @@ static_assert(std::is_same_v<DrawPrimitive, decltype(&DeviceDraw)>);
 static_assert(std::is_same_v<DrawIndexed, decltype(&DeviceDrawIndexed)>);
 static_assert(std::is_same_v<DrawPrimitiveUp, decltype(&DeviceDrawUp)>);
 static_assert(std::is_same_v<DrawIndexedUp, decltype(&DeviceDrawIndexedUp)>);
+static_assert(std::is_same_v<CreateVertexBuffer, decltype(&DeviceCreateVertexBuffer)>);
+static_assert(std::is_same_v<CreateIndexBuffer, decltype(&DeviceCreateIndexBuffer)>);
+static_assert(std::is_same_v<SetStreamSource, decltype(&DeviceSetStreamSource)>);
+static_assert(std::is_same_v<GetStreamSource, decltype(&DeviceGetStreamSource)>);
+static_assert(std::is_same_v<SetIndices, decltype(&DeviceSetIndices)>);
+static_assert(std::is_same_v<GetIndices, decltype(&DeviceGetIndices)>);
+static_assert(std::is_same_v<ProcessVertices, decltype(&DeviceProcessVertices)>);
+static_assert(std::is_same_v<BeginStateBlock, decltype(&DeviceBeginStateBlock)>);
+static_assert(std::is_same_v<EndStateBlock, decltype(&DeviceEndStateBlock)>);
+static_assert(std::is_same_v<ApplyStateBlock, decltype(&DeviceApplyStateBlock)>);
+static_assert(std::is_same_v<CaptureStateBlock, decltype(&DeviceCaptureStateBlock)>);
+static_assert(std::is_same_v<DeleteStateBlock, decltype(&DeviceDeleteStateBlock)>);
+static_assert(std::is_same_v<CreateStateBlock, decltype(&DeviceCreateStateBlock)>);
 
 const T3VtableLayout& Layout() {
     static const T3VtableLayout layout = T3GetVtableLayout();
@@ -82,12 +123,15 @@ const T3VtableLayout& Layout() {
 struct Binding {
     std::vector<void*> original;
     std::vector<void*> instrumented;
+    std::shared_ptr<t3render::buffers::BufferProxy> buffers;
+    std::atomic<bool> buffer_observing{false};
 };
 
 struct Registry {
     std::mutex mutex;
     std::unordered_map<void*, std::shared_ptr<Binding>> factories;
     std::unordered_map<void*, std::shared_ptr<Binding>> devices;
+    std::shared_ptr<t3render::buffers::BufferProxy> buffers;
 };
 
 // Deliberately process-lifetime: COM objects may still be released during
@@ -165,6 +209,10 @@ bool Bind(void* object, bool device) noexcept {
         auto binding = std::make_shared<Binding>();
         binding->original.assign(current, current + count);
         binding->instrumented = binding->original;
+        if (device) {
+            binding->buffers = registry->buffers;
+            binding->buffer_observing.store(binding->buffers != nullptr, std::memory_order_relaxed);
+        }
         auto& v = binding->instrumented;
         if (device) {
             v[l.device_query] = reinterpret_cast<void*>(&DeviceQuery);
@@ -176,6 +224,21 @@ bool Bind(void* object, bool device) noexcept {
             v[l.device_draw_indexed] = reinterpret_cast<void*>(&DeviceDrawIndexed);
             v[l.device_draw_up] = reinterpret_cast<void*>(&DeviceDrawUp);
             v[l.device_draw_indexed_up] = reinterpret_cast<void*>(&DeviceDrawIndexedUp);
+            if (binding->buffers) {
+                v[l.device_create_vertex_buffer] = reinterpret_cast<void*>(&DeviceCreateVertexBuffer);
+                v[l.device_create_index_buffer] = reinterpret_cast<void*>(&DeviceCreateIndexBuffer);
+                v[l.device_set_stream] = reinterpret_cast<void*>(&DeviceSetStreamSource);
+                v[l.device_get_stream] = reinterpret_cast<void*>(&DeviceGetStreamSource);
+                v[l.device_set_indices] = reinterpret_cast<void*>(&DeviceSetIndices);
+                v[l.device_get_indices] = reinterpret_cast<void*>(&DeviceGetIndices);
+                v[l.device_process_vertices] = reinterpret_cast<void*>(&DeviceProcessVertices);
+                v[l.device_begin_state_block] = reinterpret_cast<void*>(&DeviceBeginStateBlock);
+                v[l.device_end_state_block] = reinterpret_cast<void*>(&DeviceEndStateBlock);
+                v[l.device_apply_state_block] = reinterpret_cast<void*>(&DeviceApplyStateBlock);
+                v[l.device_capture_state_block] = reinterpret_cast<void*>(&DeviceCaptureStateBlock);
+                v[l.device_delete_state_block] = reinterpret_cast<void*>(&DeviceDeleteStateBlock);
+                v[l.device_create_state_block] = reinterpret_cast<void*>(&DeviceCreateStateBlock);
+            }
         } else {
             v[l.factory_query] = reinterpret_cast<void*>(&FactoryQuery);
             v[l.factory_release] = reinterpret_cast<void*>(&FactoryRelease);
@@ -212,6 +275,78 @@ struct ErrorState {
     void Restore() const { SetLastError(value); }
     void Capture() { value = GetLastError(); }
 };
+
+// Buffer observation is independent of the normal capture opt-in. The reader
+// never dereferences an application's lock pointer; incomplete kernel copies
+// are rejected by the buffer manager. No additional D3D buffer locks occur.
+bool ReadBufferSnapshot(void*, const void* source, void* destination, std::size_t length) {
+    if (!source || !destination) return false;
+    SIZE_T copied = 0;
+    return ReadProcessMemory(GetCurrentProcess(), source, destination, length, &copied) && copied == length;
+}
+
+bool ReadObservedVertex(void* context, IDirect3DDevice8* device, IDirect3DVertexBuffer8* native,
+                        std::size_t offset, void* destination, std::size_t length) {
+    auto* manager = static_cast<t3render::buffers::BufferProxy*>(context);
+    return manager && manager->ReadVertex(device, native, offset, destination, length) == t3render::ir::RegistryResult::Ok;
+}
+bool ReadObservedIndex(void* context, IDirect3DDevice8* device, IDirect3DIndexBuffer8* native,
+                       std::size_t offset, void* destination, std::size_t length) {
+    auto* manager = static_cast<t3render::buffers::BufferProxy*>(context);
+    return manager && manager->ReadIndex(device, native, offset, destination, length) == t3render::ir::RegistryResult::Ok;
+}
+
+void EnableBufferObserver() noexcept {
+    try {
+        wchar_t option[2]{};
+        if (GetEnvironmentVariableW(L"T3RENDER_CAPTURE_BUFFERS", option, 2) != 1 || option[0] != L'1') return;
+        Registry* registry = GetRegistry();
+        if (!registry) return;
+        auto candidate = t3render::buffers::BufferProxy::Create(ReadBufferSnapshot, nullptr);
+        if (!candidate) return;
+        std::lock_guard<std::mutex> lock(registry->mutex);
+        if (!registry->buffers) registry->buffers = std::move(candidate);
+    } catch (...) {
+        Diagnostic("T3Render: buffer observation could not be enabled\n");
+    }
+}
+
+// CaptureDraw queries buffers while it holds CaptureState's mutex. Rewrapping
+// an internal getter could release a wrapper there and reenter DeviceRelease.
+// Return the native COM refs to these internal queries instead. If a final
+// DeviceRelease still occurs during a query, defer only its capture notification
+// until that mutex is no longer held. The saved pointer is an ID, not a live
+// object; a final release concurrent with Draw remains invalid caller lifetime.
+thread_local IDirect3DDevice8* capture_query_device = nullptr;
+thread_local bool capture_query_release_deferred = false;
+
+struct CaptureQueryScope {
+    IDirect3DDevice8* const previous_device;
+    const bool previous_deferred;
+    IDirect3DDevice8* const device;
+    explicit CaptureQueryScope(IDirect3DDevice8* value) noexcept
+        : previous_device(capture_query_device), previous_deferred(capture_query_release_deferred), device(value) {
+        capture_query_device = value;
+        capture_query_release_deferred = false;
+    }
+    ~CaptureQueryScope() noexcept {
+        const bool deferred = capture_query_release_deferred;
+        capture_query_device = previous_device;
+        capture_query_release_deferred = previous_deferred;
+        if (deferred) Observe([&] { t3render::CaptureDeviceReleased(device); });
+    }
+};
+
+// Check only after a capture call has returned and released CaptureState's
+// mutex. Existing wrappers must remain alive for device forwarding, but their
+// shadow copies can be abandoned immediately after capture ends or fails.
+void StopBufferObservationIfCaptureInactive(const std::shared_ptr<Binding>& binding) noexcept {
+    if (!binding->buffers || !binding->buffer_observing.load(std::memory_order_acquire)) return;
+    bool configured = true;
+    Observe([&] { configured = t3render::CaptureConfigured(); });
+    if (!configured && binding->buffer_observing.exchange(false, std::memory_order_acq_rel))
+        binding->buffers->StopObservation();
+}
 
 HRESULT STDMETHODCALLTYPE FactoryQuery(IDirect3D8* object, REFIID iid, void** result) {
     ErrorState error;
@@ -264,6 +399,12 @@ HRESULT STDMETHODCALLTYPE DeviceQuery(IDirect3DDevice8* device, REFIID iid, void
     error.Restore();
     HRESULT hr = reinterpret_cast<QueryDevice>(binding->original[Layout().device_query])(device, iid, result);
     error.Capture();
+    if (binding->buffers && SUCCEEDED(hr) && result && *result &&
+        (*result != device || (!IsEqualIID(iid, IID_IDirect3DDevice8) && !IsEqualIID(iid, IID_IUnknown)))) {
+        binding->buffers->InvalidateDevice(device);
+        if (*result != device && IsEqualIID(iid, IID_IDirect3DDevice8))
+            binding->buffers->InvalidateDevice(static_cast<IDirect3DDevice8*>(*result));
+    }
     if (SUCCEEDED(hr) && result && *result && IsEqualIID(iid, IID_IDirect3DDevice8) && !Bind(*result, true)) {
         Diagnostic("T3Render: could not instrument a Direct3DDevice8 interface alias\n");
     }
@@ -278,9 +419,14 @@ ULONG STDMETHODCALLTYPE DeviceRelease(IDirect3DDevice8* device) {
     ULONG refs = reinterpret_cast<ReleaseDevice>(binding->original[Layout().device_release])(device);
     error.Capture();
     if (refs == 0) {
+        if (binding->buffers) binding->buffers->InvalidateDevice(device);
         // The object is already destroyed; capture may compare the address but
         // must never dereference it.
-        Observe([&] { t3render::CaptureDeviceReleased(device); });
+        if (capture_query_device == device) capture_query_release_deferred = true;
+        else {
+            Observe([&] { t3render::CaptureDeviceReleased(device); });
+            StopBufferObservationIfCaptureInactive(binding);
+        }
         Forget(device, true, binding);
     }
     return refs;
@@ -290,6 +436,7 @@ HRESULT STDMETHODCALLTYPE DeviceReset(IDirect3DDevice8* device, D3DPRESENT_PARAM
     ErrorState error;
     auto binding = Find(device, true);
     if (!binding) return D3DERR_INVALIDCALL;
+    if (binding->buffers) binding->buffers->InvalidateDevice(device);
     error.Restore();
     HRESULT hr = reinterpret_cast<ResetDevice>(binding->original[Layout().device_reset])(device, params);
     error.Capture();
@@ -307,7 +454,154 @@ HRESULT STDMETHODCALLTYPE DevicePresent(IDirect3DDevice8* device, const RECT* so
         device, source, dest, window, dirty);
     error.Capture();
     Observe([&] { t3render::CapturePresent(device, hr); });
+    StopBufferObservationIfCaptureInactive(binding);
     return hr;
+}
+
+HRESULT STDMETHODCALLTYPE DeviceCreateVertexBuffer(IDirect3DDevice8* device, UINT size, DWORD usage, DWORD fvf,
+                                                     D3DPOOL pool, IDirect3DVertexBuffer8** output) {
+    ErrorState error;
+    auto binding = Find(device, true);
+    if (!binding) return D3DERR_INVALIDCALL;
+    error.Restore();
+    const HRESULT hr = reinterpret_cast<CreateVertexBuffer>(binding->original[Layout().device_create_vertex_buffer])(
+        device, size, usage, fvf, pool, output);
+    error.Capture();
+    if (binding->buffers && SUCCEEDED(hr) && output && *output) {
+        auto* wrapped = binding->buffers->AdoptVertex(device, *output, size, true);
+        if (wrapped) *output = wrapped;
+        else binding->buffers->InvalidateDevice(device);
+    }
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE DeviceCreateIndexBuffer(IDirect3DDevice8* device, UINT size, DWORD usage, D3DFORMAT format,
+                                                    D3DPOOL pool, IDirect3DIndexBuffer8** output) {
+    ErrorState error;
+    auto binding = Find(device, true);
+    if (!binding) return D3DERR_INVALIDCALL;
+    error.Restore();
+    const HRESULT hr = reinterpret_cast<CreateIndexBuffer>(binding->original[Layout().device_create_index_buffer])(
+        device, size, usage, format, pool, output);
+    error.Capture();
+    if (binding->buffers && SUCCEEDED(hr) && output && *output) {
+        auto* wrapped = binding->buffers->AdoptIndex(device, *output, size, true);
+        if (wrapped) *output = wrapped;
+        else binding->buffers->InvalidateDevice(device);
+    }
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE DeviceSetStreamSource(IDirect3DDevice8* device, UINT stream,
+                                                 IDirect3DVertexBuffer8* buffer, UINT stride) {
+    ErrorState error;
+    auto binding = Find(device, true);
+    if (!binding || !binding->buffers) return D3DERR_INVALIDCALL;
+    auto pin = binding->buffers->UnwrapVertex(device, buffer);
+    const std::uint64_t mutation = binding->buffers->BeginBindingMutation(device);
+    error.Restore();
+    const HRESULT hr = reinterpret_cast<SetStreamSource>(binding->original[Layout().device_set_stream])(
+        device, stream, pin.native(), stride);
+    error.Capture();
+    if (mutation) binding->buffers->EndBindingMutation(device, mutation);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE DeviceGetStreamSource(IDirect3DDevice8* device, UINT stream,
+                                                 IDirect3DVertexBuffer8** output, UINT* stride) {
+    ErrorState error;
+    auto binding = Find(device, true);
+    if (!binding || !binding->buffers) return D3DERR_INVALIDCALL;
+    error.Restore();
+    const HRESULT hr = reinterpret_cast<GetStreamSource>(binding->original[Layout().device_get_stream])(
+        device, stream, output, stride);
+    error.Capture();
+    if (capture_query_device != device && SUCCEEDED(hr) && output && *output) {
+        auto* wrapped = binding->buffers->AdoptVertex(device, *output, 0, false);
+        if (wrapped) *output = wrapped;
+        else binding->buffers->InvalidateDevice(device);
+    }
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE DeviceSetIndices(IDirect3DDevice8* device, IDirect3DIndexBuffer8* buffer, UINT base) {
+    ErrorState error;
+    auto binding = Find(device, true);
+    if (!binding || !binding->buffers) return D3DERR_INVALIDCALL;
+    auto pin = binding->buffers->UnwrapIndex(device, buffer);
+    const std::uint64_t mutation = binding->buffers->BeginBindingMutation(device);
+    error.Restore();
+    const HRESULT hr = reinterpret_cast<SetIndices>(binding->original[Layout().device_set_indices])(
+        device, pin.native(), base);
+    error.Capture();
+    if (mutation) binding->buffers->EndBindingMutation(device, mutation);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE DeviceGetIndices(IDirect3DDevice8* device, IDirect3DIndexBuffer8** output, UINT* base) {
+    ErrorState error;
+    auto binding = Find(device, true);
+    if (!binding || !binding->buffers) return D3DERR_INVALIDCALL;
+    error.Restore();
+    const HRESULT hr = reinterpret_cast<GetIndices>(binding->original[Layout().device_get_indices])(
+        device, output, base);
+    error.Capture();
+    if (capture_query_device != device && SUCCEEDED(hr) && output && *output) {
+        auto* wrapped = binding->buffers->AdoptIndex(device, *output, 0, false);
+        if (wrapped) *output = wrapped;
+        else binding->buffers->InvalidateDevice(device);
+    }
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE DeviceProcessVertices(IDirect3DDevice8* device, UINT source, UINT destination, UINT count,
+                                                 IDirect3DVertexBuffer8* target, DWORD flags) {
+    ErrorState error;
+    auto binding = Find(device, true);
+    if (!binding || !binding->buffers) return D3DERR_INVALIDCALL;
+    auto pin = binding->buffers->UnwrapVertex(device, target);
+    const std::uint64_t mutation = binding->buffers->BeginBindingMutation(device);
+    binding->buffers->InvalidateVertex(device, target);
+    error.Restore();
+    const HRESULT hr = reinterpret_cast<ProcessVertices>(binding->original[Layout().device_process_vertices])(
+        device, source, destination, count, pin.native(), flags);
+    error.Capture();
+    if (mutation) binding->buffers->EndBindingMutation(device, mutation);
+    return hr;
+}
+
+// State blocks can retain or restore native bindings without passing through
+// SetStreamSource/SetIndices. Until their resource lifetime is represented,
+// invalidate evidence before the call even if the runtime later rejects it.
+template <typename Method, typename... Args>
+HRESULT ForwardBufferInvalidating(IDirect3DDevice8* device, std::size_t slot, Args... args) {
+    ErrorState error;
+    auto binding = Find(device, true);
+    if (!binding) return D3DERR_INVALIDCALL;
+    if (binding->buffers) binding->buffers->InvalidateDevice(device);
+    error.Restore();
+    const HRESULT hr = reinterpret_cast<Method>(binding->original[slot])(device, args...);
+    error.Capture();
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE DeviceBeginStateBlock(IDirect3DDevice8* device) {
+    return ForwardBufferInvalidating<BeginStateBlock>(device, Layout().device_begin_state_block);
+}
+HRESULT STDMETHODCALLTYPE DeviceEndStateBlock(IDirect3DDevice8* device, DWORD* token) {
+    return ForwardBufferInvalidating<EndStateBlock>(device, Layout().device_end_state_block, token);
+}
+HRESULT STDMETHODCALLTYPE DeviceApplyStateBlock(IDirect3DDevice8* device, DWORD token) {
+    return ForwardBufferInvalidating<ApplyStateBlock>(device, Layout().device_apply_state_block, token);
+}
+HRESULT STDMETHODCALLTYPE DeviceCaptureStateBlock(IDirect3DDevice8* device, DWORD token) {
+    return ForwardBufferInvalidating<CaptureStateBlock>(device, Layout().device_capture_state_block, token);
+}
+HRESULT STDMETHODCALLTYPE DeviceDeleteStateBlock(IDirect3DDevice8* device, DWORD token) {
+    return ForwardBufferInvalidating<DeleteStateBlock>(device, Layout().device_delete_state_block, token);
+}
+HRESULT STDMETHODCALLTYPE DeviceCreateStateBlock(IDirect3DDevice8* device, D3DSTATEBLOCKTYPE type, DWORD* token) {
+    return ForwardBufferInvalidating<CreateStateBlock>(device, Layout().device_create_state_block, type, token);
 }
 
 HRESULT STDMETHODCALLTYPE DeviceClear(IDirect3DDevice8* device, DWORD count, const D3DRECT* rectangles,
@@ -322,6 +616,7 @@ HRESULT STDMETHODCALLTYPE DeviceClear(IDirect3DDevice8* device, DWORD count, con
         device, count, rectangles, flags, color, depth, stencil);
     error.Capture();
     Observe([&] { t3render::CaptureClearResult(device, token, hr); });
+    StopBufferObservationIfCaptureInactive(binding);
     return hr;
 }
 
@@ -334,12 +629,20 @@ HRESULT STDMETHODCALLTYPE DeviceDraw(IDirect3DDevice8* device, D3DPRIMITIVETYPE 
     call.primitive_type = primitive;
     call.start_vertex = start;
     call.primitive_count = count;
+    const bool observing = binding->buffers && binding->buffer_observing.load(std::memory_order_acquire);
+    const std::uint64_t buffer_token = observing ? binding->buffers->BeginDraw(device) : 0;
+    t3render::BufferObserver observer{binding->buffers.get(), buffer_token != 0, ReadObservedVertex, ReadObservedIndex};
+    if (observing) call.buffer_observer = &observer;
     std::uint64_t token = 0;
-    Observe([&] { token = t3render::CaptureDraw(device, call); });
+    Observe([&] { CaptureQueryScope scope(device); token = t3render::CaptureDraw(device, call); });
     error.Restore();
     HRESULT hr = reinterpret_cast<DrawPrimitive>(binding->original[Layout().device_draw])(device, primitive, start, count);
     error.Capture();
-    Observe([&] { t3render::CaptureDrawResult(device, token, hr); });
+    if (observing) {
+        const bool stable = buffer_token && binding->buffers->EndDraw(device, buffer_token);
+        Observe([&] { t3render::CaptureBufferedDrawResult(device, token, hr, stable); });
+    } else Observe([&] { t3render::CaptureDrawResult(device, token, hr); });
+    StopBufferObservationIfCaptureInactive(binding);
     return hr;
 }
 
@@ -355,13 +658,21 @@ HRESULT STDMETHODCALLTYPE DeviceDrawIndexed(IDirect3DDevice8* device, D3DPRIMITI
     call.num_vertices = vertices;
     call.start_index = start_index;
     call.primitive_count = count;
+    const bool observing = binding->buffers && binding->buffer_observing.load(std::memory_order_acquire);
+    const std::uint64_t buffer_token = observing ? binding->buffers->BeginDraw(device) : 0;
+    t3render::BufferObserver observer{binding->buffers.get(), buffer_token != 0, ReadObservedVertex, ReadObservedIndex};
+    if (observing) call.buffer_observer = &observer;
     std::uint64_t token = 0;
-    Observe([&] { token = t3render::CaptureDraw(device, call); });
+    Observe([&] { CaptureQueryScope scope(device); token = t3render::CaptureDraw(device, call); });
     error.Restore();
     HRESULT hr = reinterpret_cast<DrawIndexed>(binding->original[Layout().device_draw_indexed])(
         device, primitive, min_index, vertices, start_index, count);
     error.Capture();
-    Observe([&] { t3render::CaptureDrawResult(device, token, hr); });
+    if (observing) {
+        const bool stable = buffer_token && binding->buffers->EndDraw(device, buffer_token);
+        Observe([&] { t3render::CaptureBufferedDrawResult(device, token, hr, stable); });
+    } else Observe([&] { t3render::CaptureDrawResult(device, token, hr); });
+    StopBufferObservationIfCaptureInactive(binding);
     return hr;
 }
 
@@ -376,13 +687,17 @@ HRESULT STDMETHODCALLTYPE DeviceDrawUp(IDirect3DDevice8* device, D3DPRIMITIVETYP
     call.primitive_count = count;
     call.vertex_stride = stride;
     call.vertex_data = vertices;
+    const std::uint64_t buffer_token = binding->buffers && binding->buffer_observing.load(std::memory_order_acquire)
+        ? binding->buffers->BeginDraw(device) : 0;
     std::uint64_t token = 0;
-    Observe([&] { token = t3render::CaptureDraw(device, call); });
+    Observe([&] { CaptureQueryScope scope(device); token = t3render::CaptureDraw(device, call); });
     error.Restore();
     HRESULT hr = reinterpret_cast<DrawPrimitiveUp>(binding->original[Layout().device_draw_up])(
         device, primitive, count, vertices, stride);
     error.Capture();
+    if (binding->buffers && buffer_token) (void)binding->buffers->EndDraw(device, buffer_token);
     Observe([&] { t3render::CaptureDrawResult(device, token, hr); });
+    StopBufferObservationIfCaptureInactive(binding);
     return hr;
 }
 
@@ -402,13 +717,17 @@ HRESULT STDMETHODCALLTYPE DeviceDrawIndexedUp(IDirect3DDevice8* device, D3DPRIMI
     call.vertex_stride = stride;
     call.vertex_data = vertex_data;
     call.index_data = indices;
+    const std::uint64_t buffer_token = binding->buffers && binding->buffer_observing.load(std::memory_order_acquire)
+        ? binding->buffers->BeginDraw(device) : 0;
     std::uint64_t token = 0;
-    Observe([&] { token = t3render::CaptureDraw(device, call); });
+    Observe([&] { CaptureQueryScope scope(device); token = t3render::CaptureDraw(device, call); });
     error.Restore();
     HRESULT hr = reinterpret_cast<DrawIndexedUp>(binding->original[Layout().device_draw_indexed_up])(
         device, primitive, min_index, vertices, count, indices, format, vertex_data, stride);
     error.Capture();
+    if (binding->buffers && buffer_token) (void)binding->buffers->EndDraw(device, buffer_token);
     Observe([&] { t3render::CaptureDrawResult(device, token, hr); });
+    StopBufferObservationIfCaptureInactive(binding);
     return hr;
 }
 
@@ -446,6 +765,23 @@ Direct3DCreate8Fn RealCreate8() noexcept {
 
 }  // namespace
 
+#ifdef T3RENDER_PROXY_TEST
+// Host tests inspect the manager without adding an export to the production
+// DLL. `native` is the runtime resource, not a wrapper pointer.
+t3render::ir::RegistryResult T3ProxyTestReadVertex(IDirect3DDevice8* owner, IDirect3DVertexBuffer8* native,
+                                                   std::size_t offset, void* output, std::size_t length) {
+    auto binding = Find(owner, true);
+    return binding && binding->buffers ? binding->buffers->ReadVertex(owner, native, offset, output, length)
+                                       : t3render::ir::RegistryResult::UnknownResource;
+}
+t3render::ir::RegistryResult T3ProxyTestReadIndex(IDirect3DDevice8* owner, IDirect3DIndexBuffer8* native,
+                                                  std::size_t offset, void* output, std::size_t length) {
+    auto binding = Find(owner, true);
+    return binding && binding->buffers ? binding->buffers->ReadIndex(owner, native, offset, output, length)
+                                       : t3render::ir::RegistryResult::UnknownResource;
+}
+#endif
+
 extern "C" IDirect3D8* WINAPI Proxy_Direct3DCreate8(UINT sdk_version) {
     ErrorState error;
     Direct3DCreate8Fn real = RealCreate8();
@@ -469,6 +805,7 @@ extern "C" IDirect3D8* WINAPI Proxy_Direct3DCreate8(UINT sdk_version) {
     error.Capture();
     bool configured = false;
     Observe([&] { configured = t3render::CaptureConfigured(); });
+    if (configured) Observe([&] { EnableBufferObserver(); });
     // Without a valid opt-in, there is no change to the returned object.
     if (factory && configured && !Bind(factory, false)) {
         Diagnostic("T3Render: could not instrument IDirect3D8; rendering continues without capture\n");

@@ -116,6 +116,103 @@ class CaptureHostTests(unittest.TestCase):
             for key, value in stage["states"].items():
                 self.assertEqual(value, stage["stage"] * 1000 + int(key))
 
+    def test_buffered_observations_preserve_exact_ranges_and_result_stability(self):
+        self.run_capture("buffered", frame="1")
+        events = self.records()
+        draws = [event for event in events if event["event"] == "draw"]
+        results = {event["op_id"]: event for event in events if event["event"] == "draw_result"}
+        self.assertEqual(len(draws), 21)
+        self.assertEqual(trace_summary.summarize(self.path)["draw_count"], len(draws))
+        nonindexed, indexed = draws[:2]
+        self.assertEqual(nonindexed["buffer_data"]["source"], "application_lock_shadow")
+        vertex = nonindexed["buffer_data"]["vertex"]
+        self.assertEqual((vertex["status"], vertex["stream"], vertex["first_vertex"],
+                          vertex["vertex_count"], vertex["stride"], vertex["byte_offset"], vertex["byte_count"]),
+                         ("captured", 0, 2, 3, 32, 64, 96))
+        self.assertEqual(bytes.fromhex(vertex["data"]), bytes(range(64, 160)))
+        self.assertEqual(vertex["resource"], nonindexed["streams"][0]["buffer"])
+        self.assertIsNone(nonindexed["buffer_data"]["index"])
+        self.assertTrue(results[nonindexed["op_id"]]["buffer_stable"])
+
+        vertex = indexed["buffer_data"]["vertex"]
+        index = indexed["buffer_data"]["index"]
+        self.assertEqual((vertex["status"], vertex["first_vertex"], vertex["vertex_count"],
+                          vertex["byte_offset"], vertex["byte_count"]), ("captured", 5, 3, 160, 96))
+        self.assertEqual(bytes.fromhex(vertex["data"]), bytes(range(160, 256)))
+        self.assertEqual((index["status"], index["index_count"], index["index_format"],
+                          index["byte_offset"], index["byte_count"]), ("captured", 3, 101, 2, 6))
+        self.assertEqual(bytes.fromhex(index["data"]), b"\x02\x00\x03\x00\x04\x00")
+        self.assertEqual(index["resource"], indexed["indices"]["buffer"])
+        self.assertFalse(results[indexed["op_id"]]["buffer_stable"])
+
+        # Callback failure after a partial write cannot leak those bytes.
+        self.assertEqual(draws[2]["buffer_data"]["vertex"]["status"], "unknown")
+        self.assertIsNone(draws[2]["buffer_data"]["vertex"]["data"])
+        self.assertEqual(draws[2]["buffer_data"]["index"]["status"], "captured")
+        self.assertEqual(draws[3]["buffer_data"]["vertex"]["status"], "captured")
+        self.assertEqual(draws[3]["buffer_data"]["index"]["status"], "unknown")
+        self.assertIsNone(draws[3]["buffer_data"]["index"]["data"])
+        self.assertEqual(draws[4]["buffer_data"]["vertex"]["status"], "window_unavailable")
+        self.assertEqual(draws[4]["buffer_data"]["index"]["status"], "window_unavailable")
+        self.assertFalse(results[draws[4]["op_id"]]["buffer_stable"])
+        self.assertEqual(results[draws[5]["op_id"]]["hr"], -1)
+        self.assertTrue(results[draws[5]["op_id"]]["buffer_stable"])
+        self.assertEqual(draws[6]["buffer_data"]["vertex"]["status"], "unknown")
+        self.assertNotIn("buffer_data", draws[7])
+        self.assertNotIn("buffer_stable", results[draws[7]["op_id"]])
+        self.assertNotIn("buffer_data", draws[8])  # UP ignores an observer
+        self.assertNotIn("buffer_stable", results[draws[8]["op_id"]])
+
+    def test_buffered_observations_fail_closed_for_invalid_bindings_and_ranges(self):
+        self.run_capture("buffered", frame="1")
+        draws = [event for event in self.records() if event["event"] == "draw"]
+        def statuses(index):
+            data = draws[index]["buffer_data"]
+            return data["vertex"]["status"], None if data["index"] is None else data["index"]["status"]
+        self.assertEqual(statuses(9), ("empty", None))
+        self.assertEqual(draws[9]["buffer_data"]["vertex"]["data"], "")
+        self.assertEqual(statuses(10), ("overflow", "captured"))
+        self.assertEqual(statuses(11), ("getter_failed", "getter_failed"))
+        self.assertEqual(statuses(12), ("unbound", "unbound"))
+        self.assertEqual(statuses(13), ("descriptor_failed", "descriptor_failed"))
+        self.assertEqual(statuses(14), ("invalid_stride", "captured"))
+        self.assertEqual(statuses(15), ("out_of_bounds", "out_of_bounds"))
+        self.assertEqual(statuses(16), ("captured", "unsupported_index_format"))
+        self.assertEqual(statuses(17), ("captured", "unsupported_topology"))
+        self.assertEqual(statuses(18), ("unknown_range", None))
+        self.assertEqual(statuses(19), ("per_draw_limit", None))
+        self.assertEqual(statuses(20), ("captured", "captured"))
+        index32 = draws[20]["buffer_data"]["index"]
+        self.assertEqual((index32["index_format"], index32["byte_offset"], index32["byte_count"]), (102, 4, 12))
+        for draw in draws:
+            if "buffer_data" not in draw: continue
+            for component in draw["buffer_data"].values():
+                if isinstance(component, dict) and component["status"] not in ("captured", "empty"):
+                    self.assertIsNone(component["data"])
+
+    def test_buffered_budget_counts_only_successful_shadow_bytes(self):
+        self.run_capture("buffer_budget", frame="1")
+        draws = [event for event in self.records() if event["event"] == "draw"]
+        self.assertEqual(len(draws), 33)
+        self.assertTrue(all(draw["buffer_data"]["vertex"]["status"] == "captured" for draw in draws[:32]))
+        self.assertEqual(draws[32]["buffer_data"]["vertex"]["status"], "frame_limit")
+        self.assertIsNone(draws[32]["buffer_data"]["vertex"]["data"])
+        self.path.unlink()
+        self.run_capture("buffer_budget_fail", frame="1")
+        draws = [event for event in self.records() if event["event"] == "draw"]
+        self.assertEqual(len(draws), 41)
+        self.assertTrue(all(draw["buffer_data"]["vertex"]["status"] == "unknown" for draw in draws[:40]))
+        self.assertEqual(draws[40]["buffer_data"]["vertex"]["status"], "captured")
+        self.path.unlink()
+        self.run_capture("buffer_budget_mixed", frame="1")
+        draws = [event for event in self.records() if event["event"] == "draw"]
+        self.assertEqual(len(draws), 33)
+        self.assertEqual(draws[31]["buffer_data"]["vertex"]["byte_count"], 262136)
+        self.assertEqual(draws[31]["buffer_data"]["index"]["status"], "captured")
+        self.assertEqual(draws[32]["buffer_data"]["vertex"]["status"], "empty")
+        self.assertEqual(draws[32]["buffer_data"]["index"]["status"], "frame_limit")
+        self.assertIsNone(draws[32]["buffer_data"]["index"]["data"])
+
     def test_clear_before_draw_and_operation_results_are_ordered(self):
         self.run_capture("clear", frame="1")
         events = self.records()

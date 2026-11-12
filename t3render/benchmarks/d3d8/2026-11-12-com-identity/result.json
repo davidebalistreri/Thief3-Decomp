@@ -1,0 +1,869 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_resource_identity",
+  "date": "2026-11-12",
+  "status": "PASS",
+  "host": {
+    "os": "macOS 27.2.1",
+    "architecture": "arm64",
+    "gpu": "Apple M5 Pro"
+  },
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86"
+  },
+  "source_sha256": {
+    "t3render/tests/d3d8_identity_fixture.cpp": "e8dc3c07e7b15986754d009f95624b9744951ba82198a119df6929226ba79ee4",
+    "t3render/tools/run_d3d8_identity_probe.py": "2f2cd9b4829517e3c5a67d614d8c98d0a769348d1add0c2bb7b50623229c937a"
+  },
+  "fixture_sha256": "220ca07c64fc35e4654f274a84abd861ddf842b3d152ed5dd08db8dd9f736dee",
+  "proxy_sha256": "124bc771aa7ef4d133fc9ac6b69e0bebd6c09f62d6b70887437d545d94f3e01a",
+  "baseline_log_sha256": "fecc906c1a70ba2c6adc08b32db3cfca4348fb8b8e520d0fda483ca26fbc3416",
+  "proxy_log_sha256": "13fa81110cdd0cb97d2e1018b8c3266a7ae83d923bdfdd12267328e9d4c76a1d",
+  "proxy_trace_sha256": "4f6583603b04ae2e57eff5ac0b673eccdda076e84fef9c1b83a6c715dc51218e",
+  "observations": [
+    {
+      "event": "header",
+      "schema": 1,
+      "auto_depth": true
+    },
+    {
+      "event": "device",
+      "path": "device.QueryInterface(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "device.QueryInterface(IDirect3DDevice8):QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "create",
+      "path": "device.GetBackBuffer",
+      "hr": "0x00000000",
+      "success": true,
+      "object_nonnull": true
+    },
+    {
+      "event": "device",
+      "path": "device.GetBackBuffer.GetDevice",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "device.GetBackBuffer.GetDevice:QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "container",
+      "path": "device.GetBackBuffer.GetContainer",
+      "iid": "IUnknown",
+      "hr": "0x00000000",
+      "success": true,
+      "same_device_iunknown": true,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "device",
+      "path": "device.GetBackBuffer.GetContainer:IUnknown.QueryInterface(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "device.GetBackBuffer.GetContainer:IUnknown.QueryInterface(IDirect3DDevice8):QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "container",
+      "path": "device.GetBackBuffer.GetContainer",
+      "iid": "IDirect3DDevice8",
+      "hr": "0x00000000",
+      "success": true,
+      "same_device_iunknown": true,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "device",
+      "path": "device.GetBackBuffer.GetContainer:IDirect3DDevice8",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "device.GetBackBuffer.GetContainer:IDirect3DDevice8:QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "container",
+      "path": "device.GetBackBuffer.GetContainer",
+      "iid": "IDirect3DSwapChain8",
+      "hr": "0x80004002",
+      "success": false,
+      "same_device_iunknown": null,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "create",
+      "path": "device.GetRenderTarget",
+      "hr": "0x00000000",
+      "success": true,
+      "object_nonnull": true
+    },
+    {
+      "event": "device",
+      "path": "device.GetRenderTarget.GetDevice",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "device.GetRenderTarget.GetDevice:QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "container",
+      "path": "device.GetRenderTarget.GetContainer",
+      "iid": "IUnknown",
+      "hr": "0x00000000",
+      "success": true,
+      "same_device_iunknown": true,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "device",
+      "path": "device.GetRenderTarget.GetContainer:IUnknown.QueryInterface(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "device.GetRenderTarget.GetContainer:IUnknown.QueryInterface(IDirect3DDevice8):QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "container",
+      "path": "device.GetRenderTarget.GetContainer",
+      "iid": "IDirect3DDevice8",
+      "hr": "0x00000000",
+      "success": true,
+      "same_device_iunknown": true,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "device",
+      "path": "device.GetRenderTarget.GetContainer:IDirect3DDevice8",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "device.GetRenderTarget.GetContainer:IDirect3DDevice8:QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "container",
+      "path": "device.GetRenderTarget.GetContainer",
+      "iid": "IDirect3DSwapChain8",
+      "hr": "0x80004002",
+      "success": false,
+      "same_device_iunknown": null,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "create",
+      "path": "device.GetDepthStencilSurface",
+      "hr": "0x00000000",
+      "success": true,
+      "object_nonnull": true
+    },
+    {
+      "event": "device",
+      "path": "device.GetDepthStencilSurface.GetDevice",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "device.GetDepthStencilSurface.GetDevice:QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "container",
+      "path": "device.GetDepthStencilSurface.GetContainer",
+      "iid": "IUnknown",
+      "hr": "0x00000000",
+      "success": true,
+      "same_device_iunknown": true,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "device",
+      "path": "device.GetDepthStencilSurface.GetContainer:IUnknown.QueryInterface(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "device.GetDepthStencilSurface.GetContainer:IUnknown.QueryInterface(IDirect3DDevice8):QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "container",
+      "path": "device.GetDepthStencilSurface.GetContainer",
+      "iid": "IDirect3DDevice8",
+      "hr": "0x00000000",
+      "success": true,
+      "same_device_iunknown": true,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "device",
+      "path": "device.GetDepthStencilSurface.GetContainer:IDirect3DDevice8",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "device.GetDepthStencilSurface.GetContainer:IDirect3DDevice8:QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "container",
+      "path": "device.GetDepthStencilSurface.GetContainer",
+      "iid": "IDirect3DSwapChain8",
+      "hr": "0x80004002",
+      "success": false,
+      "same_device_iunknown": null,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "create",
+      "path": "device.CreateImageSurface",
+      "hr": "0x00000000",
+      "success": true,
+      "object_nonnull": true
+    },
+    {
+      "event": "device",
+      "path": "device.CreateImageSurface.GetDevice",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "device.CreateImageSurface.GetDevice:QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "container",
+      "path": "device.CreateImageSurface.GetContainer",
+      "iid": "IUnknown",
+      "hr": "0x80004002",
+      "success": false,
+      "same_device_iunknown": null,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "container",
+      "path": "device.CreateImageSurface.GetContainer",
+      "iid": "IDirect3DDevice8",
+      "hr": "0x80004002",
+      "success": false,
+      "same_device_iunknown": null,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "container",
+      "path": "device.CreateImageSurface.GetContainer",
+      "iid": "IDirect3DSwapChain8",
+      "hr": "0x80004002",
+      "success": false,
+      "same_device_iunknown": null,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "create",
+      "path": "device.CreateRenderTarget",
+      "hr": "0x00000000",
+      "success": true,
+      "object_nonnull": true
+    },
+    {
+      "event": "device",
+      "path": "device.CreateRenderTarget.GetDevice",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "device.CreateRenderTarget.GetDevice:QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "container",
+      "path": "device.CreateRenderTarget.GetContainer",
+      "iid": "IUnknown",
+      "hr": "0x80004002",
+      "success": false,
+      "same_device_iunknown": null,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "container",
+      "path": "device.CreateRenderTarget.GetContainer",
+      "iid": "IDirect3DDevice8",
+      "hr": "0x80004002",
+      "success": false,
+      "same_device_iunknown": null,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "container",
+      "path": "device.CreateRenderTarget.GetContainer",
+      "iid": "IDirect3DSwapChain8",
+      "hr": "0x80004002",
+      "success": false,
+      "same_device_iunknown": null,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "create",
+      "path": "device.CreateDepthStencilSurface",
+      "hr": "0x00000000",
+      "success": true,
+      "object_nonnull": true
+    },
+    {
+      "event": "device",
+      "path": "device.CreateDepthStencilSurface.GetDevice",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "device.CreateDepthStencilSurface.GetDevice:QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "container",
+      "path": "device.CreateDepthStencilSurface.GetContainer",
+      "iid": "IUnknown",
+      "hr": "0x80004002",
+      "success": false,
+      "same_device_iunknown": null,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "container",
+      "path": "device.CreateDepthStencilSurface.GetContainer",
+      "iid": "IDirect3DDevice8",
+      "hr": "0x80004002",
+      "success": false,
+      "same_device_iunknown": null,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "container",
+      "path": "device.CreateDepthStencilSurface.GetContainer",
+      "iid": "IDirect3DSwapChain8",
+      "hr": "0x80004002",
+      "success": false,
+      "same_device_iunknown": null,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "create",
+      "path": "device.CreateTexture",
+      "hr": "0x00000000",
+      "success": true,
+      "object_nonnull": true
+    },
+    {
+      "event": "device",
+      "path": "texture.GetDevice",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "texture.GetDevice:QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "operation",
+      "path": "device.SetTexture",
+      "hr": "0x00000000",
+      "success": true
+    },
+    {
+      "event": "create",
+      "path": "device.GetTexture",
+      "hr": "0x00000000",
+      "success": true,
+      "object_nonnull": true
+    },
+    {
+      "event": "device",
+      "path": "device.GetTexture.GetDevice",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "device.GetTexture.GetDevice:QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "resource_identity",
+      "path": "device.GetTexture.IUnknown",
+      "hr": "0x00000000",
+      "success": true,
+      "same_parent_iunknown": true
+    },
+    {
+      "event": "operation",
+      "path": "device.SetTexture(null)",
+      "hr": "0x00000000",
+      "success": true
+    },
+    {
+      "event": "create",
+      "path": "texture.GetSurfaceLevel",
+      "hr": "0x00000000",
+      "success": true,
+      "object_nonnull": true
+    },
+    {
+      "event": "device",
+      "path": "texture.GetSurfaceLevel.GetDevice",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "texture.GetSurfaceLevel.GetDevice:QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "container",
+      "path": "texture.GetSurfaceLevel.GetContainer",
+      "iid": "IUnknown",
+      "hr": "0x00000000",
+      "success": true,
+      "same_device_iunknown": false,
+      "same_parent_iunknown": true
+    },
+    {
+      "event": "container",
+      "path": "texture.GetSurfaceLevel.GetContainer",
+      "iid": "IDirect3DDevice8",
+      "hr": "0x80004002",
+      "success": false,
+      "same_device_iunknown": null,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "container",
+      "path": "texture.GetSurfaceLevel.GetContainer",
+      "iid": "IDirect3DTexture8",
+      "hr": "0x00000000",
+      "success": true,
+      "same_device_iunknown": false,
+      "same_parent_iunknown": true
+    },
+    {
+      "event": "create",
+      "path": "device.CreateCubeTexture",
+      "hr": "0x00000000",
+      "success": true,
+      "object_nonnull": true
+    },
+    {
+      "event": "device",
+      "path": "cube.GetDevice",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "cube.GetDevice:QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "create",
+      "path": "cube.GetCubeMapSurface",
+      "hr": "0x00000000",
+      "success": true,
+      "object_nonnull": true
+    },
+    {
+      "event": "device",
+      "path": "cube.GetCubeMapSurface.GetDevice",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "cube.GetCubeMapSurface.GetDevice:QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "container",
+      "path": "cube.GetCubeMapSurface.GetContainer",
+      "iid": "IUnknown",
+      "hr": "0x00000000",
+      "success": true,
+      "same_device_iunknown": false,
+      "same_parent_iunknown": true
+    },
+    {
+      "event": "container",
+      "path": "cube.GetCubeMapSurface.GetContainer",
+      "iid": "IDirect3DDevice8",
+      "hr": "0x80004002",
+      "success": false,
+      "same_device_iunknown": null,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "container",
+      "path": "cube.GetCubeMapSurface.GetContainer",
+      "iid": "IDirect3DCubeTexture8",
+      "hr": "0x00000000",
+      "success": true,
+      "same_device_iunknown": false,
+      "same_parent_iunknown": true
+    },
+    {
+      "event": "create",
+      "path": "device.CreateVolumeTexture",
+      "hr": "0x00000000",
+      "success": true,
+      "object_nonnull": true
+    },
+    {
+      "event": "device",
+      "path": "volume_texture.GetDevice",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "volume_texture.GetDevice:QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "create",
+      "path": "volume_texture.GetVolumeLevel",
+      "hr": "0x00000000",
+      "success": true,
+      "object_nonnull": true
+    },
+    {
+      "event": "device",
+      "path": "volume_texture.GetVolumeLevel.GetDevice",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "volume_texture.GetVolumeLevel.GetDevice:QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "container",
+      "path": "volume_texture.GetVolumeLevel.GetContainer",
+      "iid": "IUnknown",
+      "hr": "0x00000000",
+      "success": true,
+      "same_device_iunknown": false,
+      "same_parent_iunknown": true
+    },
+    {
+      "event": "container",
+      "path": "volume_texture.GetVolumeLevel.GetContainer",
+      "iid": "IDirect3DDevice8",
+      "hr": "0x80004002",
+      "success": false,
+      "same_device_iunknown": null,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "container",
+      "path": "volume_texture.GetVolumeLevel.GetContainer",
+      "iid": "IDirect3DVolumeTexture8",
+      "hr": "0x00000000",
+      "success": true,
+      "same_device_iunknown": false,
+      "same_parent_iunknown": true
+    },
+    {
+      "event": "create",
+      "path": "device.CreateAdditionalSwapChain",
+      "hr": "0x00000000",
+      "success": true,
+      "object_nonnull": true
+    },
+    {
+      "event": "device",
+      "path": "swapchain.QueryInterface(IDirect3DDevice8)",
+      "hr": "0x80004002",
+      "success": false,
+      "same_interface": null,
+      "same_iunknown": null,
+      "same_vtable": null
+    },
+    {
+      "event": "create",
+      "path": "swapchain.GetBackBuffer",
+      "hr": "0x00000000",
+      "success": true,
+      "object_nonnull": true
+    },
+    {
+      "event": "device",
+      "path": "swapchain.GetBackBuffer.GetDevice",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "swapchain.GetBackBuffer.GetDevice:QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "container",
+      "path": "swapchain.GetBackBuffer.GetContainer",
+      "iid": "IUnknown",
+      "hr": "0x00000000",
+      "success": true,
+      "same_device_iunknown": true,
+      "same_parent_iunknown": false
+    },
+    {
+      "event": "device",
+      "path": "swapchain.GetBackBuffer.GetContainer:IUnknown.QueryInterface(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "swapchain.GetBackBuffer.GetContainer:IUnknown.QueryInterface(IDirect3DDevice8):QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "container",
+      "path": "swapchain.GetBackBuffer.GetContainer",
+      "iid": "IDirect3DDevice8",
+      "hr": "0x00000000",
+      "success": true,
+      "same_device_iunknown": true,
+      "same_parent_iunknown": false
+    },
+    {
+      "event": "device",
+      "path": "swapchain.GetBackBuffer.GetContainer:IDirect3DDevice8",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "device",
+      "path": "swapchain.GetBackBuffer.GetContainer:IDirect3DDevice8:QI(IUnknown).QI(IDirect3DDevice8)",
+      "hr": "0x00000000",
+      "success": true,
+      "same_interface": true,
+      "same_iunknown": true,
+      "same_vtable": true
+    },
+    {
+      "event": "container",
+      "path": "swapchain.GetBackBuffer.GetContainer",
+      "iid": "IDirect3DSwapChain8",
+      "hr": "0x80004002",
+      "success": false,
+      "same_device_iunknown": null,
+      "same_parent_iunknown": null
+    },
+    {
+      "event": "clear",
+      "hr": "0x00000000",
+      "success": true
+    },
+    {
+      "event": "present",
+      "hr": "0x00000000",
+      "success": true
+    },
+    {
+      "event": "end",
+      "valid": true
+    }
+  ],
+  "comparison": "The listed address-free observations were identical in baseline and buffer-opt-in proxy runs; all 46 successful device queries compared equal within their respective process.",
+  "limitations": [
+    "Synthetic resources only; TDS was not launched and no wrapped buffers were passed through aliases.",
+    "PASS means the required measurements completed; failed optional interfaces are retained below.",
+    "Equal pointers and vtables in this Wine execution do not establish safety on Windows or through untested aliases and lifetimes."
+  ]
+}

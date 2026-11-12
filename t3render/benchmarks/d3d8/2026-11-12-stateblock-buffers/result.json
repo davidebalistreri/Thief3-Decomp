@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_stateblock_writeonly_buffers",
+  "date": "2026-11-12",
+  "status": "PASS",
+  "host": {
+    "os": "macOS 27.2.1",
+    "architecture": "arm64",
+    "gpu": "Apple M5 Pro"
+  },
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86"
+  },
+  "source_sha256": {
+    "t3render/tests/d3d8_stateblock_buffer_fixture.cpp": "7dc64bbf00f7525143acba4cf3aee19a715e40da02f1658efec171dfaa67817e",
+    "t3render/tools/run_d3d8_stateblock_fixture.py": "556a1cb257c45b1818f7848029150352e2cc273aa26cfa22d5e4ac07dc451047"
+  },
+  "fixture_sha256": "36d7fb989fdfa7aedca3a50a11d84482254447a074a7bba660b11a0b16816962",
+  "proxy_sha256": "b51d3f8c64d39d2f62bc4f5e4e0bb56111dae448969c95dc11dd6f9d4d5ca23c",
+  "result": {
+    "operations": [
+      "CreateStateBlock",
+      "BeginStateBlock",
+      "EndStateBlock",
+      "ApplyStateBlock",
+      "CaptureStateBlock",
+      "DeleteStateBlock"
+    ],
+    "resource": "MANAGED WRITEONLY VB/IB; bindings restored and state-block retained native buffers after wrapper release",
+    "baseline_log_sha256": "5d7696591f94fbe78c8c08082bdaacca0ba3aa693a564e4e41e45dbb20f74efa",
+    "proxy_log_sha256": "ea7d71987b3c30be09c891688b2cc9a45394452f145702b63ac12720e552623a",
+    "proxy_trace_sha256": "ba75dec932f0d3f640183d09433c915c7600f6081b28d6801bd77f7f6b90b65d",
+    "ppm_sha256_both": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679",
+    "image": "triangle.png",
+    "image_sha256": "a60caf03c78a1a0741fed841e940c5b565934424db66cefe02e306e656f7dde5",
+    "draw": "DrawIndexedPrimitive",
+    "buffer_stable": false,
+    "vertex_status": "window_unavailable",
+    "index_status": "window_unavailable"
+  },
+  "limitations": [
+    "Synthetic D3D8 state-block fixture; no TDS process or game data.",
+    "Buffer observations are intentionally unavailable after state-block calls.",
+    "Resource/device alias closure, concurrent calls, reset and Windows are not tested.",
+    "Image comparison covers RGB, not alpha.",
+    "The fixture combines operations: it does not separately establish safety of each state-block method."
+  ]
+}

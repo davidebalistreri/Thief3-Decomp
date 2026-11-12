@@ -9,9 +9,12 @@ newly-created scratch directory is removed; logs and results remain in a new
 output directory, including on failure.
 
 The test does not start TDS or Steam and does not enable buffer observation.
-Passing it would not prove that Steam or the game's launcher propagates the
-same environment, nor that buffer wrappers are safe in TDS. The test is not
-yet verified on a real Highball run; host orchestration tests use fake Wine.
+On the tested Highball CrossOver 26.3 r30 runtime it **failed**: Wine loaded
+its builtin system `d3d8.dll` even with the proxy directory in `WINEPATH`.
+See the [failure record](../benchmarks/d3d8/2026-11-12-winepath-proxy-failure/result.json).
+This is not a supported deployment method on that runtime. Even a pass on a
+different runtime would not prove that Steam or the game's launcher propagates
+the environment, or that buffer wrappers are safe in TDS.
 
 With an existing x86 MinGW build that includes
 `T3RENDER_BUILD_D3D8_UP_FIXTURE=ON`, run from `t3sdk` when the bottle is idle:

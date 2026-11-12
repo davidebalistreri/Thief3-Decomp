@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_pre_reset_hypothesis",
+  "date": "2026-11-12",
+  "status": "PASS",
+  "host": {
+    "os": "macOS 27.2.1",
+    "architecture": "arm64"
+  },
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86"
+  },
+  "repository_head_at_capture": "7b0cbbc448993340c8b1436fb3e0299f3663928c",
+  "proxy_source_state": "uncommitted changes at capture; see exact source hashes",
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "c23a8f360de5d550f2f689a61db9b3731a450d4ea6d44f01461e13418c5436ba",
+    "t3render/src/proxy.cpp": "fb69cbec2c4e8eaed91604d8bea8015ac69662a0fe79ff4ef78539855a244822",
+    "t3render/src/buffer_proxy.cpp": "07713f49baa4edf25063d238b5e98f7d7e83f88164c3b70c583f0888c9548f14",
+    "t3render/src/buffer_proxy.hpp": "b4077c53dd35a8a4d1cf68a9e526a70be2da4fe23fa4868a1d920aa25b37f151",
+    "t3render/src/vtable_layout.c": "f7893ae8b98f1d6c46eea2447678d6da7e97c1752a05c650875219c5659e6358",
+    "t3render/src/vtable_layout.h": "338d41bfb312fba5742555e8e09ab19da30fe039538ef22ebbce30b2157654de",
+    "t3render/src/capture.cpp": "1546e6426b3f925a4ecf1f44b89bf77d87dce942e3ecd6ee23de626b14024f05",
+    "t3render/src/capture.hpp": "b5590e2862d47cb01b594e8a117d5a48a8121d42b769a81c8a45b518e0b6d36f",
+    "t3render/src/d3d8_mingw.def": "fc91ff1781931d7f0f8bd5ab400872d980ff1d4a92b4fc59b38951434ec989e9",
+    "t3render/ir/buffer_shadow.cpp": "9cfed54a6fcf4718e80fd1d8301a8afa5f84852ac70b428938b06d1e64cddafe",
+    "t3render/ir/buffer_shadow.hpp": "55b7aaf05cbd2f1d8047572abacf66e88d7485c9e243a78ce37c1213565a017d",
+    "t3render/ir/buffer_registry.cpp": "9e24931212d54e0ee58b7be7313a85510e9fc867f3a3b20297eff3e1f6138b84",
+    "t3render/ir/buffer_registry.hpp": "c7ff088b36ff035945f56482aeb45d3e1359e11710437798fa83fba179e85260",
+    "t3render/ir/vertex_declaration.cpp": "b2aaae1f322bd12f42e78f45dd449271ae700d402af86325862fd431c25054b6",
+    "t3render/ir/vertex_declaration.hpp": "001e8c4bcdc37c860b8c86db3f81094a9a23923e78896fe838ae764bfe4dc2a5",
+    "t3render/ir/vertex_declaration_registry.cpp": "d73b35d86a352d26d76504e0afba955748e8ed069d08fa57df488f2dc4ebf3bd",
+    "t3render/ir/vertex_declaration_registry.hpp": "b46ab7e4904bca03e4b036ecde827e9e4f2698e4e79008c13a1c40e913593b48",
+    "t3render/tests/d3d8_shader_reset_fixture.cpp": "7a0e47435111e101c17969133be0f0b6b2ff410493045d8a96222d0f7b7550e8",
+    "t3render/tests/d3d8_declaration_fixture.cpp": "8f9159f0ab16b4a6456ad16f9334df718e2894b85779a0e5fa871acff6fac067",
+    "t3render/tools/run_d3d8_shader_reset_history_fixture.py": "0f3dadbbb5ca2eaf6b5742bd17d9e03566b4c06a503ef5cbdb599a8117f04f6a",
+    "t3render/tools/run_d3d8_shader_reset_fixture.py": "8a5b9771cbb66d0a3e49ae7dfd39c7f992bdb503567f243823e9764f20fefbbd",
+    "t3render/tools/run_synthetic_up_replay.py": "114c356a1febf4efa3106789039aeef3aa52dd3f6c37de6cf4180965618ed334",
+    "t3render/tools/run_d3d8_stateblock_experiment.py": "e8cd0fcb98744d8789d963fbb270a595b346d21b8bc9ffeffa7b24d20184c0f7",
+    "t3render/tools/trace_summary.py": "3c1e1942e378363de0d0ab8894b3565231ce440d69a89bdb5a6e34571a8717ec",
+    "t3render/tools/trace_to_ir.py": "23942eaf4d54e830a2c1967fada145f9a1f008eaa91935b585c0384e33b26323"
+  },
+  "proxy_sha256": "9079a629a133e7b002c5200515260af3a21385d46a8abd3e2f9f33642d678437",
+  "fixture_sha256": "95b3ac9415f4c5bb3123e985d090d76a27da4b7428ec5f21c06a1735a95aedea",
+  "scenarios": {
+    "valid-only": {
+      "status": "PASS",
+      "history_hypotheses": 2,
+      "reset_rebind_epochs": [
+        [
+          4,
+          5
+        ],
+        [
+          7,
+          8
+        ]
+      ],
+      "standard_post_reset": "unavailable; words null"
+    },
+    "recovery": {
+      "status": "PASS",
+      "history_hypotheses": 0,
+      "failed_reset_alone": "not_observed",
+      "standard_post_reset": "unavailable; words null"
+    }
+  },
+  "comparison": {
+    "modes": [
+      "builtin",
+      "proxy_declarations_off",
+      "proxy_declarations_on",
+      "proxy_history_on"
+    ],
+    "rgb_ppm_sha256": "5c13a1848569e78c8d35c4aeab416aa738892bc9a9e4cba59ac9f72db43b11c2",
+    "pixel_and_hresult_parity": true,
+    "reference_result_sha256": "25787704df1548d5768766875161bf9a1a328a3aff63a25509ed2d57a5391721",
+    "logs_and_traces_sha256": {
+      "valid-only/history.log": "0043459ad6434ba5be736665e976f21b14296a05518572afd3ccd7b686935bcd",
+      "valid-only/history.jsonl": "292497bfe69dfd3d71048cfce179560d1acd0796f5ac51c64275eb3b8c5ca872",
+      "valid-only/baseline.log": "1e149656e02cea0b0dd6febefa0e0f456e5f454fe01dc755fc7dbae481a74bd3",
+      "valid-only/proxy_off.log": "b1da4ff4a93635f9460565da4057533bc3dc01d0850f7c4061075954b8870a25",
+      "valid-only/proxy_on.log": "af5e38001835dcc6f24f878cff9dbeed063d3d98dc32988cd940377c0027af39",
+      "valid-only/proxy_off.jsonl": "b0c6b49ae064fa840b8dca8ab969e36d253e20f5845769a982019a083598affb",
+      "valid-only/proxy_on.jsonl": "41225dd1f7126166be101a5ae1b378a899aea3795cdbe8cbc0fe9ac0a0a982f3",
+      "recovery/history.log": "e596c8c2068fd82f7551837d8a3fd2582f4cbc37cd2682de7c621e067f452fe2",
+      "recovery/history.jsonl": "003da19eb016893be2ab4222dfad7eccec198e5578e851cbc2e1a7ac0b162c66",
+      "recovery/baseline.log": "26425137ea34fccf4e11041f32d61f1d4b9d0c7e8a05d1df8fb411082d67ca0d",
+      "recovery/proxy_off.log": "3e0f525f44ee95f934d94cfd2d2d459eddc92b0a3c80537d1491f50ae432c18a",
+      "recovery/proxy_on.log": "d1b10c54af116dda443d887f6f885d0b6b67dcb6dad6879fbddfe9b437c21ae3",
+      "recovery/proxy_off.jsonl": "5a3f3fbb5cf39bbee28bd9af657b596c3763ec8a8b5f8581c27863abfb82898e",
+      "recovery/proxy_on.jsonl": "309931bc3ecad6ae8004cbbaf840d67ac6929e0290003906e55ec183b390a781"
+    }
+  },
+  "local_details": "build/t3render-diagnostics/2026-11-12-declaration-history",
+  "limitations": [
+    "Synthetic x86 fixture only; no TDS process or game data.",
+    "Pre-Reset bytes are a hypothesis, not proof of driver state or shader identity.",
+    "No device queries or drawing occur between failed Reset and successful recovery.",
+    "Failed Reset alone is not observed; native Windows and gameplay are not tested.",
+    "Retained history is application memory, not a normal candidate or proof of shader identity.",
+    "The same numeric value may be FVF, and unobserved aliases or mutations may bypass observation."
+  ]
+}

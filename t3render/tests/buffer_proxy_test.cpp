@@ -313,6 +313,213 @@ void BindingMutationWindows() {
     }
 }
 
+// A draw or binding mutation must cover the whole native lock window, even
+// while Lock/Unlock is still executing. Exercise both buffer types and orderings.
+void NativeLockWindows() {
+    const BYTE data[]{4, 5};
+    for (bool indexed : {false, true}) for (bool mutation : {false, true})
+        for (int phase = 0; phase != 3; ++phase) {
+            Reader reader;
+            auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+            Vertex vb; Index ib;
+            auto* v = proxy->AdoptVertex(Owner(), &vb, 8, true);
+            auto* i = proxy->AdoptIndex(Owner(), &ib, 8, true);
+            Fill(v, 0, data, 2); Fill(i, 0, data, 2);
+            BYTE out[2]{}, *mapped = nullptr;
+            auto rejected = [&] {
+                const auto token = mutation ? proxy->BeginBindingMutation(Owner()) : proxy->BeginDraw(Owner());
+                assert(token == 0);
+                assert(proxy->ReadVertex(Owner(), &vb, 0, out, 2) == RegistryResult::Unavailable);
+                assert(proxy->ReadIndex(Owner(), &ib, 0, out, 2) == RegistryResult::Unavailable);
+            };
+            auto exercise = [&](auto* buffer, auto& raw) {
+                if (phase == 0) raw.on_lock = rejected;
+                assert(buffer->Lock(0, 2, &mapped, 0) == S_OK && mapped && GetLastError() == 840);
+                if (phase == 1) rejected();
+                if (phase == 2) raw.on_unlock = rejected;
+                assert(buffer->Unlock() == S_OK && GetLastError() == 850);
+                raw.on_lock = {}; raw.on_unlock = {};
+                assert(proxy->BeginDraw(Owner()) == 0);
+            };
+            if (indexed) exercise(i, ib); else exercise(v, vb);
+            assert(v->Release() == 0 && i->Release() == 0);
+        }
+}
+
+void ConcurrentNativeLockWindows() {
+    const BYTE data[]{4, 5};
+    for (bool pending_unlock : {false, true}) for (bool mutation : {false, true}) {
+        Reader reader;
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        Vertex vb; Index ib;
+        auto* v = proxy->AdoptVertex(Owner(), &vb, 8, true);
+        auto* i = proxy->AdoptIndex(Owner(), &ib, 8, true);
+        Fill(i, 0, data, 2);
+        std::atomic<bool> entered{false}, proceed{false};
+        auto wait = [&] {
+            entered.store(true, std::memory_order_release);
+            while (!proceed.load(std::memory_order_acquire)) std::this_thread::yield();
+        };
+        if (pending_unlock) vb.on_unlock = wait; else vb.on_lock = wait;
+        std::thread worker([&] {
+            BYTE* mapped = nullptr;
+            assert(v->Lock(0, 2, &mapped, 0) == S_OK && mapped && GetLastError() == 840);
+            assert(v->Unlock() == S_OK && GetLastError() == 850);
+        });
+        while (!entered.load(std::memory_order_acquire)) std::this_thread::yield();
+        const auto token = mutation ? proxy->BeginBindingMutation(Owner()) : proxy->BeginDraw(Owner());
+        assert(token == 0);
+        proceed.store(true, std::memory_order_release);
+        worker.join();
+        BYTE out[2]{};
+        assert(proxy->ReadIndex(Owner(), &ib, 0, out, 2) == RegistryResult::Unavailable);
+        assert(v->Release() == 0 && i->Release() == 0);
+    }
+}
+
+void UnknownNativeLocks() {
+    const BYTE data[]{6, 7}; BYTE out[2]{}, *mapped = nullptr;
+    // A successful native lock with an unreadable result pointer is still
+    // open, even though the shadow is abandoned. The other buffer must not
+    // produce a seemingly stable observation.
+    {
+        Reader reader;
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        Vertex vb; Index ib;
+        auto* v = proxy->AdoptVertex(Owner(), &vb, 8, true);
+        auto* i = proxy->AdoptIndex(Owner(), &ib, 8, true);
+        Fill(v, 0, data, 2); Fill(i, 0, data, 2);
+        reader.fail = true;
+        assert(v->Lock(0, 2, &mapped, 0) == S_OK && mapped && GetLastError() == 840);
+        reader.fail = false;
+        assert(proxy->BeginDraw(Owner()) == 0);
+        assert(proxy->ReadIndex(Owner(), &ib, 0, out, 2) == RegistryResult::Unavailable);
+        assert(v->Unlock() == S_OK && GetLastError() == 850);
+        assert(v->Release() == 0 && i->Release() == 0);
+    }
+    // Unsupported flags/ranges still reach the driver, which may accept them.
+    for (bool invalid_range : {false, true}) {
+        Reader reader;
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        Vertex vb; Index ib;
+        auto* v = proxy->AdoptVertex(Owner(), &vb, 8, true);
+        auto* i = proxy->AdoptIndex(Owner(), &ib, 8, true);
+        Fill(i, 0, data, 2);
+        assert(v->Lock(invalid_range ? 1 : 0, invalid_range ? 0 : 2, &mapped,
+                       invalid_range ? 0 : 0x40000000u) == S_OK && mapped);
+        assert(proxy->BeginDraw(Owner()) == 0);
+        assert(proxy->ReadIndex(Owner(), &ib, 0, out, 2) == RegistryResult::Unavailable);
+        assert(v->Unlock() == S_OK);
+        assert(v->Release() == 0 && i->Release() == 0);
+    }
+    // Unlock failure does not establish whether the driver closed the lock.
+    {
+        Reader reader;
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        Vertex vb; Index ib;
+        auto* v = proxy->AdoptVertex(Owner(), &vb, 8, true);
+        auto* i = proxy->AdoptIndex(Owner(), &ib, 8, true);
+        Fill(i, 0, data, 2);
+        assert(v->Lock(0, 2, &mapped, 0) == S_OK);
+        vb.unlock_result = E_FAIL;
+        assert(v->Unlock() == E_FAIL && GetLastError() == 850);
+        assert(proxy->BeginDraw(Owner()) == 0);
+        assert(proxy->ReadIndex(Owner(), &ib, 0, out, 2) == RegistryResult::Unavailable);
+        assert(v->Release() == 0 && i->Release() == 0);
+    }
+    // A binding may retain the native object after the final wrapper Release.
+    {
+        Reader reader;
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        Vertex vb; Index ib;
+        auto* v = proxy->AdoptVertex(Owner(), &vb, 8, true);
+        auto* i = proxy->AdoptIndex(Owner(), &ib, 8, true);
+        Fill(i, 0, data, 2);
+        vb.AddRef();
+        assert(v->Lock(0, 2, &mapped, 0) == S_OK);
+        assert(v->Release() == 0 && !vb.destroyed);
+        assert(proxy->BeginDraw(Owner()) == 0);
+        assert(proxy->ReadIndex(Owner(), &ib, 0, out, 2) == RegistryResult::Unavailable);
+        assert(vb.Unlock() == S_OK && vb.Release() == 0);
+        assert(i->Release() == 0);
+    }
+    // GPU-side invalidation must not silently erase an open native lock.
+    {
+        Reader reader;
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        Vertex vb; Index ib;
+        auto* v = proxy->AdoptVertex(Owner(), &vb, 8, true);
+        auto* i = proxy->AdoptIndex(Owner(), &ib, 8, true);
+        Fill(i, 0, data, 2);
+        assert(v->Lock(0, 2, &mapped, 0) == S_OK);
+        proxy->InvalidateVertex(Owner(), v);
+        assert(proxy->BeginDraw(Owner()) == 0);
+        assert(proxy->ReadIndex(Owner(), &ib, 0, out, 2) == RegistryResult::Unavailable);
+        assert(v->Unlock() == S_OK);
+        assert(v->Release() == 0 && i->Release() == 0);
+    }
+}
+
+void LockCountsAndInvalidation() {
+    const BYTE data[]{1, 2}; BYTE out[2]{}, *a = nullptr, *b = nullptr;
+    // Counts are per-device and include READONLY and NOOVERWRITE locks. One
+    // successful Unlock must not hide a second still-open resource.
+    for (bool leave_one_open : {false, true}) {
+        Reader reader;
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        Vertex vb, other; Index ib;
+        auto* v = proxy->AdoptVertex(Owner(1), &vb, 8, true);
+        auto* i = proxy->AdoptIndex(Owner(1), &ib, 8, true);
+        auto* o = proxy->AdoptVertex(Owner(2), &other, 8, true);
+        Fill(v, 0, data, 2); Fill(i, 0, data, 2); Fill(o, 0, data, 2);
+        assert(v->Lock(0, 2, &a, D3DLOCK_READONLY) == S_OK);
+        assert(i->Lock(0, 2, &b, D3DLOCK_NOOVERWRITE) == S_OK);
+        assert(v->Unlock() == S_OK);
+        const auto other_draw = proxy->BeginDraw(Owner(2));
+        assert(other_draw && proxy->EndDraw(Owner(2), other_draw));
+        if (leave_one_open) {
+            assert(proxy->BeginDraw(Owner(1)) == 0);
+            assert(i->Unlock() == S_OK);
+            assert(proxy->ReadVertex(Owner(2), &other, 0, out, 2) == RegistryResult::Ok);
+        } else {
+            assert(i->Unlock() == S_OK);
+            const auto draw = proxy->BeginDraw(Owner(1));
+            assert(draw && proxy->EndDraw(Owner(1), draw));
+        }
+        assert(v->Release() == 0 && i->Release() == 0 && o->Release() == 0);
+    }
+    // A failed native Lock opens no window; do not poison unrelated buffers.
+    {
+        Reader reader;
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        Vertex vb; Index ib;
+        auto* v = proxy->AdoptVertex(Owner(), &vb, 8, true);
+        auto* i = proxy->AdoptIndex(Owner(), &ib, 8, true);
+        Fill(i, 0, data, 2);
+        vb.lock_result = E_FAIL;
+        assert(v->Lock(0, 2, &a, 0) == E_FAIL && GetLastError() == 840);
+        const auto draw = proxy->BeginDraw(Owner());
+        assert(draw && proxy->ReadIndex(Owner(), &ib, 0, out, 2) == RegistryResult::Ok);
+        assert(proxy->EndDraw(Owner(), draw));
+        assert(v->Release() == 0 && i->Release() == 0);
+    }
+    // Invalidating observation during a pending native call makes its finish
+    // stale; it must not underflow the count or prevent normal forwarding.
+    for (bool stop : {false, true}) for (bool pending_unlock : {false, true}) {
+        Reader reader;
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        Vertex vb;
+        auto* v = proxy->AdoptVertex(Owner(), &vb, 8, true);
+        auto invalidate = [&] { if (stop) proxy->StopObservation(); else proxy->InvalidateDevice(Owner()); };
+        if (!pending_unlock) vb.on_lock = invalidate;
+        assert(v->Lock(0, 2, &a, 0) == S_OK && GetLastError() == 840);
+        if (pending_unlock) vb.on_unlock = invalidate;
+        assert(v->Unlock() == S_OK && GetLastError() == 850);
+        assert(proxy->BeginDraw(Owner()) == 0);
+        assert(v->Release() == 0);
+    }
+}
+
 void OwnerIsolationAndFlagModes() {
     Reader reader;
     auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
@@ -458,6 +665,10 @@ int main() {
     DrawHazardsAndUnknownInput();
     CanonicalAliasAndConcurrency();
     BindingMutationWindows();
+    NativeLockWindows();
+    ConcurrentNativeLockWindows();
+    UnknownNativeLocks();
+    LockCountsAndInvalidation();
     OwnerIsolationAndFlagModes();
     UnlockFailureAndCopyFailures();
     CapacityAndUnknownBuffersForward();

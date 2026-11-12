@@ -142,6 +142,33 @@ class CaptureHostTests(unittest.TestCase):
         self.assertEqual(self.records()[-1]["frames"], 2)
         self.assertEqual(self.records()[0]["requested_frames"], 2)
 
+    def test_file_trigger_captures_next_consecutive_frames(self):
+        marker = Path(self.temp.name) / "capture.ready"
+        self.run_capture("window_file", extra={"T3RENDER_CAPTURE_TRIGGER_PATH": str(marker),
+                                               "T3RENDER_CAPTURE_FRAMES": "2"})
+        self.assertTrue(marker.exists())  # the writer observes but does not remove it
+        self.assertEqual([f["frame"] for f in trace_summary.summarize(self.path)["frames"]], [2, 3])
+        self.assertEqual(self.records()[0]["trigger"], "file")
+        self.assertEqual(self.records()[-1]["frames"], 2)
+
+    def test_file_trigger_rejects_stale_missing_parent_and_conflicting_triggers(self):
+        marker = Path(self.temp.name) / "capture.ready"
+        marker.touch()
+        for signal, frame in ((marker, None), (Path(self.temp.name) / "missing" / "marker", None),
+                              (Path(self.temp.name) / "unused", "1"), (self.path, None)):
+            with self.subTest(signal=signal, frame=frame):
+                output = self.run_capture(frame=frame, extra={"T3RENDER_CAPTURE_TRIGGER_PATH": str(signal)})
+                self.assertIn("configured=0 getters=0", output)
+                self.assertFalse(self.path.exists())
+
+    def test_file_trigger_does_not_transfer_to_replacement_device(self):
+        for scenario in ("file_release_armed", "file_release_pending"):
+            with self.subTest(scenario=scenario):
+                marker = Path(self.temp.name) / "capture.ready"
+                self.run_capture(scenario, extra={"T3RENDER_CAPTURE_TRIGGER_PATH": str(marker)})
+                self.assertFalse(self.path.exists())
+                marker.unlink()
+
     def test_frame_window_resets_up_and_buffer_budgets(self):
         self.run_capture("window_budget", frame="1", extra={"T3RENDER_CAPTURE_FRAMES": "2"})
         draws = [event for event in self.records() if event["event"] == "draw"]

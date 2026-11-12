@@ -44,6 +44,7 @@ struct CaptureState {
     bool enabled = false;
     bool complete = false;
     bool key_trigger = false;
+    bool file_trigger = false;
     bool key_down = false;
     bool triggered = false;
     bool buffer_requested = false;
@@ -61,6 +62,7 @@ struct CaptureState {
     std::unordered_map<uint64_t, OperationKind> pending_operations;
     HANDLE file = INVALID_HANDLE_VALUE;
     std::wstring path;
+    std::wstring trigger_path;
     IDirect3DDevice8* device = nullptr;  // identity only; never dereferenced after replacement
     D3DPRESENT_PARAMETERS presentation{};
     bool has_presentation = false;
@@ -142,6 +144,7 @@ void Initialize(CaptureState& s) {
     const std::wstring path = Environment(L"T3RENDER_CAPTURE_PATH");
     const std::wstring frame = Environment(L"T3RENDER_CAPTURE_FRAME");
     const std::wstring key = Environment(L"T3RENDER_CAPTURE_KEY");
+    const std::wstring trigger_path = Environment(L"T3RENDER_CAPTURE_TRIGGER_PATH");
     s.buffer_requested = Environment(L"T3RENDER_CAPTURE_BUFFERS") == L"1";
     // Missing means the legacy single frame; an explicitly empty, truncated,
     // or malformed value must not silently start a capture.
@@ -155,10 +158,19 @@ void Initialize(CaptureState& s) {
     } else {
         s.frames_requested = static_cast<unsigned>(frames[0] - L'0');
     }
-    if (path.empty() || (!frame.empty() && !key.empty()) || (frame.empty() && key.empty())) return;
+    const unsigned triggers = static_cast<unsigned>(!frame.empty()) +
+        static_cast<unsigned>(!key.empty()) + static_cast<unsigned>(!trigger_path.empty());
+    if (path.empty() || triggers != 1) return;
     if (!key.empty()) {
         if (key != L"F11") return;
         s.key_trigger = true;
+    } else if (!trigger_path.empty()) {
+        // A stale signal must never accidentally capture the launch screen.
+        // The parent directory must already exist and be accessible.
+        if (path == trigger_path || GetFileAttributesW(trigger_path.c_str()) != INVALID_FILE_ATTRIBUTES ||
+            GetLastError() != ERROR_FILE_NOT_FOUND) return;
+        s.trigger_path = trigger_path;
+        s.file_trigger = true;
     } else {
         if (frame.empty() || frame[0] == L'-' || frame[0] == L'+') return;
         for (wchar_t c : frame) if (c < L'0' || c > L'9') return;
@@ -184,7 +196,7 @@ bool Open(CaptureState& s) {
     if (s.file == INVALID_HANDLE_VALUE) { Stop(s); return false; }
     auto out = Json();
     out << "{\"event\":\"header\",\"format\":\"t3render-d3d8-diagnostic\",\"version\":1,"
-        << "\"trigger\":\"" << (s.key_trigger ? "F11" : "frame") << "\","
+        << "\"trigger\":\"" << (s.key_trigger ? "F11" : s.file_trigger ? "file" : "frame") << "\","
         << "\"requested_frames\":" << s.frames_requested << ','
         << "\"operation_results\":1,\"clear_rect_limit\":" << kClearRectLimit << ','
         << "\"replayable\":false,\"up_capture\":{\"encoding\":\"hex\",\"component_limit_bytes\":"
@@ -918,6 +930,22 @@ void CheckKey(CaptureState& s) {
     s.key_down = down;
 }
 
+// An external marker arms the next frame without relying on the game's input
+// queue. It is observed only; the proxy does not create or delete the marker.
+void CheckTriggerFile(CaptureState& s) {
+    if (s.triggered) return;
+    const DWORD attributes = GetFileAttributesW(s.trigger_path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        if (GetLastError() != ERROR_FILE_NOT_FOUND) Stop(s);
+        return;
+    }
+    if (attributes & FILE_ATTRIBUTE_DIRECTORY) { Stop(s); return; }
+    if (s.frame < std::numeric_limits<uint64_t>::max() - s.frames_requested) {
+        s.target = s.frame + 1;
+        s.triggered = true;
+    }
+}
+
 void Fail() noexcept {
     try {
         auto& state = State();
@@ -962,6 +990,16 @@ void CaptureDeviceReleased(IDirect3DDevice8* device) {
             Stop(s);
             return;
         }
+        if (s.file_trigger) {
+            // A marker associated with the retiring device must never be
+            // silently reapplied to a newly created device or another scene.
+            // Check also a marker created since the last Present.
+            const DWORD attributes = GetFileAttributesW(s.trigger_path.c_str());
+            if (s.triggered || attributes != INVALID_FILE_ATTRIBUTES || GetLastError() != ERROR_FILE_NOT_FOUND) {
+                Stop(s);
+                return;
+            }
+        }
         s.device = nullptr;
         s.presentation = {};
         s.has_presentation = false;
@@ -975,7 +1013,7 @@ void CaptureDeviceReleased(IDirect3DDevice8* device) {
         s.next_operation = 1;
         s.pending_operations.clear();
         s.concurrent_operations = false;
-        if (s.key_trigger) {
+        if (s.key_trigger || s.file_trigger) {
             s.triggered = false;
             s.target = 0;
             // Keep key_down: a key still held across device creation is not a
@@ -1091,6 +1129,7 @@ void CapturePresent(IDirect3DDevice8* device, HRESULT result) {
             return;
         }
         if (s.key_trigger) CheckKey(s);
+        if (s.file_trigger) CheckTriggerFile(s);
         if (s.frame != std::numeric_limits<uint64_t>::max()) ++s.frame;
         else Stop(s);
     } catch (...) { Fail(); }

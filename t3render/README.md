@@ -150,6 +150,14 @@ one trigger before launching the game:
   input queue; if it does not see the key, use the numbered trigger.
 - `T3RENDER_CAPTURE_FRAME=N`: capture frame `N`, counting from zero at device
   creation. A game restart or replacement device starts the count again.
+- `T3RENDER_CAPTURE_TRIGGER_PATH=C:\\path\\capture.ready`: after the game has
+  reached the desired scene, create this file to capture the next frame. The
+  parent directory must exist and the marker must not exist at startup. The
+  proxy only observes the marker; remove it after the test. A directory,
+  inaccessible marker or stale marker fails closed. This avoids relying on the
+  Present thread's keyboard queue but does not verify which scene is active.
+  If the device is released after the marker appears, capture is stopped rather
+  than transferring the request to a replacement device.
 
 Optionally set `T3RENDER_CAPTURE_FRAMES=1`, `2` or `3` to capture that many
 consecutive Present-delimited frames in the same JSONL file. The default is

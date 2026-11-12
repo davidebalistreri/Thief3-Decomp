@@ -29,6 +29,8 @@ constexpr DWORD GENERIC_WRITE = 1;
 constexpr DWORD FILE_SHARE_READ = 2;
 constexpr DWORD CREATE_NEW = 3;
 constexpr DWORD FILE_ATTRIBUTE_NORMAL = 4;
+constexpr DWORD FILE_ATTRIBUTE_DIRECTORY = 0x10;
+constexpr DWORD INVALID_FILE_ATTRIBUTES = 0xffffffffu;
 constexpr unsigned VK_F11 = 0x7a;
 constexpr DWORD MEM_COMMIT = 0x1000;
 constexpr DWORD PAGE_NOACCESS = 0x01;
@@ -40,12 +42,15 @@ constexpr DWORD PAGE_EXECUTE_READWRITE = 0x40;
 constexpr DWORD PAGE_EXECUTE_WRITECOPY = 0x80;
 constexpr DWORD PAGE_GUARD = 0x100;
 constexpr DWORD ERROR_SUCCESS = 0;
+constexpr DWORD ERROR_FILE_NOT_FOUND = 2;
+constexpr DWORD ERROR_PATH_NOT_FOUND = 3;
 constexpr DWORD ERROR_ENVVAR_NOT_FOUND = 203;
 
 #define SUCCEEDED(hr) ((hr) >= 0)
 #define FAILED(hr) ((hr) < 0)
 
 DWORD GetEnvironmentVariableW(const wchar_t*, wchar_t*, DWORD);
+DWORD GetFileAttributesW(const wchar_t*);
 DWORD GetLastError();
 void SetLastError(DWORD);
 HANDLE CreateFileW(const wchar_t*, DWORD, DWORD, void*, DWORD, DWORD, void*);

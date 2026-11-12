@@ -10,6 +10,7 @@
 #include <iostream>
 #include <limits>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace {
@@ -206,6 +207,17 @@ DWORD GetEnvironmentVariableW(const wchar_t* name, wchar_t* buffer, DWORD size) 
     buffer[length] = 0;
     return length;
 }
+DWORD GetFileAttributesW(const wchar_t* path) {
+    const std::string name = Narrow(path);
+    struct stat info{};
+    if (stat(name.c_str(), &info) == 0)
+        return S_ISDIR(info.st_mode) ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+    const auto slash = name.find_last_of('/');
+    const std::string parent = slash == std::string::npos ? "." : name.substr(0, slash);
+    SetLastError(stat(parent.c_str(), &info) == 0 && S_ISDIR(info.st_mode)
+        ? ERROR_FILE_NOT_FOUND : ERROR_PATH_NOT_FOUND);
+    return INVALID_FILE_ATTRIBUTES;
+}
 HANDLE CreateFileW(const wchar_t* path, DWORD access, DWORD, void*, DWORD disposition, DWORD, void*) {
     ++opens;
     if (access != GENERIC_WRITE || disposition != CREATE_NEW) {
@@ -304,12 +316,22 @@ int main(int argc, char** argv) {
     fake_index[32] = 3; fake_index[36] = 4; fake_index[40] = 5;
 
     bool second_used = false;
-    if (scenario == "window" || scenario == "window_key" || scenario == "window_pending" ||
+    if (scenario == "window" || scenario == "window_key" || scenario == "window_file" || scenario == "window_pending" ||
         scenario == "window_release" || scenario == "window_budget") {
         if (scenario == "window_key") {
             t3render::CapturePresent(&device, S_OK); // frame 0, F11 not pressed
             key_down = true;
             t3render::CapturePresent(&device, S_OK); // arm frame 2
+        } else if (scenario == "window_file") {
+            SimulatedDraw(&device, draw); // no signal: nothing is captured
+            t3render::CapturePresent(&device, S_OK);
+            const char* marker = std::getenv("T3RENDER_CAPTURE_TRIGGER_PATH");
+            if (marker) {
+                const int signal = open(marker, O_CREAT | O_EXCL | O_WRONLY, 0600);
+                if (signal < 0) return 9;
+                close(signal);
+            }
+            t3render::CapturePresent(&device, S_OK); // signal arms frame 2
         } else {
             t3render::CapturePresent(&device, S_OK); // advance to frame 1
         }
@@ -560,6 +582,20 @@ int main(int argc, char** argv) {
             SimulatedDraw(&device, call);
         }
         t3render::CapturePresent(&device, S_OK);
+    } else if (scenario == "file_release_armed" || scenario == "file_release_pending") {
+        t3render::CapturePresent(&device, S_OK);
+        const char* marker = std::getenv("T3RENDER_CAPTURE_TRIGGER_PATH");
+        if (!marker) return 9;
+        const int signal = open(marker, O_CREAT | O_EXCL | O_WRONLY, 0600);
+        if (signal < 0) return 9;
+        close(signal);
+        if (scenario == "file_release_armed") t3render::CapturePresent(&device, S_OK);
+        t3render::CaptureDeviceReleased(&device);
+        t3render::CaptureDevice(&unrelated, &presentation);
+        second_used = true;
+        t3render::CapturePresent(&unrelated, S_OK);
+        SimulatedDraw(&unrelated, draw);
+        t3render::CapturePresent(&unrelated, S_OK);
     } else if (scenario == "release_before" || scenario == "release_key" || scenario == "release_key_held") {
         if (scenario != "release_before") key_down = true;
         t3render::CapturePresent(&device, S_OK);  // F11 can arm the first device.

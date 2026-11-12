@@ -1,15 +1,18 @@
 # Synthetic D3D8 capture to D3D12 replay
 
 This experiment connects a captured D3D8 draw to a D3D12 offscreen draw. It
-is deliberately limited to an isolated synthetic fixture, not a TDS frame or
-a general replay backend. The D3D8 fixture has two modes, each drawing one
-flat, opaque red triangle with `DrawPrimitiveUP`:
+is deliberately limited to isolated synthetic fixtures, not a TDS frame or
+a general replay backend. The D3D8 fixture has these UP modes:
 
 - Screen-space `XYZRHW|DIFFUSE` vertices produce a `T3R_UP_V1` packet.
 - `--camera` uses `XYZ|DIFFUSE` vertices and nonidentity world, view and
   perspective projection matrices. Its `T3R_XYZ_V1` packet preserves the
   captured row-major matrices; the D3D12 vertex shader applies them in D3D8
   row-vector order, followed by a half-pixel adjustment.
+- `--multi-camera` draws two overlapping, flat opaque `XYZ|DIFFUSE`
+  triangles in order with different world, view and projection matrices for
+  each draw. Its `T3R_MULTI_XYZ_V1` packet preserves that order and each
+  matrix. Depth and blending are disabled.
 
 The proxy records vertex bytes and state; the fixture-specific converter
 validates the trace and selects the packet format from the observed FVF.
@@ -41,6 +44,14 @@ proxy images matched on the tested runtime; see the
 The host runner's `--buffered` mode compares the two D3D8 images and validates
 the indexed draw, buffer bindings and offsets in the trace. Separate opt-in
 experiments can replay fixture-owned snapshots or a bounded proxy observation.
+
+The [multi-camera benchmark](../benchmarks/d3d12/2026-11-12-multi-camera/result.json)
+also produced identical D3D8 baseline, proxy-captured D3D8 and DX12 RGB images
+on the tested Highball runtime. The runner validates the exact known fixture's
+two draws, vertices, colors and matrices before replay. Separate changes to
+the order and each second-draw transform changed replay pixels, as documented
+in the manifest. The converter can represent 2–32 ordered camera draws, but
+requires fixture attestation and cannot certify unobserved D3D8 operations.
 
 The screen-space and camera UP replays do not exercise indexed draws. None of
 these fixture replays tests depth, textures, game shader programs, lighting,
@@ -91,10 +102,12 @@ This uses Wine and the bottle; it does not test launching TDS. Inspect its
 result manifest and logs along with the images. On a different runtime,
 compare results and image differences before inferring any parity failure.
 Add `--camera` and use another new output directory to exercise the second mode.
+Add `--multi-camera` instead to capture and replay the two-draw fixture; its
+manifest validates both colors and the green overlap at the center.
 For the indexed buffer capture test, use a new output directory and pass
 `--buffered` instead. Without an additional replay option, the manifest records
 `dx12_replay: not_run` and no replay executable is required.
-`--camera` and `--buffered` are mutually exclusive.
+`--camera`, `--multi-camera` and `--buffered` are mutually exclusive.
 
 With a new output directory, add `--buffered --proxy-buffer-replay` to replay
 the proxy's observed WRITEONLY application writes. The runner passes

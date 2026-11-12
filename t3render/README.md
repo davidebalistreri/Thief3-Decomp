@@ -2,7 +2,7 @@
 
 T3Render is a separate renderer experiment. Its first step observes the
 original D3D8 device; it does not replace the renderer or change the game's
-stealth calculations. A separate DX12 replay covers synthetic single-draw
+stealth calculations. A separate DX12 replay covers synthetic single- and multi-draw
 fixtures, including a fixture-owned indexed buffer snapshot; this is not a
 general TDS frame replay or production backend.
 
@@ -32,7 +32,7 @@ Add `-DT3RENDER_BUILD_SMOKE_TEST=ON` at configuration time to build a
 standalone D3D8 program in the `smoke/` subdirectory. It draws four synthetic
 triangles, checks one pixel of each and prints a backbuffer hash. Compare that
 hash with and without the proxy only on the same adapter, format and runtime.
-`-DT3RENDER_BUILD_D3D8_UP_FIXTURE=ON` instead adds a single-draw synthetic
+`-DT3RENDER_BUILD_D3D8_UP_FIXTURE=ON` instead adds a synthetic
 fixture in `d3d8_up_fixture/`, with optional PPM readback for replay testing.
 The fixture's explicit `--buffered --verify-buffer-readback` mode also locks
 its managed, non-write-only VB/IB with `D3DLOCK_READONLY` and compares only the
@@ -105,8 +105,8 @@ the [result manifest](benchmarks/d3d12/2026-11-12/result.json) and
 Windows test, a TDS frame, or a replay.
 
 A separate [synthetic D3D8-to-DX12 replay](tools/README_synthetic_replay.md)
-validates captured UP vertices in screen space and with nonidentity camera
-transforms and an indexed fixture-owned readback. Reference, captured and
+validates captured UP vertices in screen space, ordered draws with nonidentity
+camera transforms, and an indexed fixture-owned readback. Reference, captured and
 replay images match on the tested Wine runtime. General buffered capture,
 textures and actual TDS frames remain unsupported.
 

@@ -24,6 +24,7 @@ import trace_to_up_packet
 
 
 CONVERTER = Path(__file__).resolve().with_name("trace_to_up_packet.py")
+MULTI_CONVERTER = Path(__file__).resolve().with_name("trace_to_multi_xyz_packet.py")
 BUFFER_CONVERTER = Path(__file__).resolve().with_name("buffer_snapshot_to_up_packet.py")
 PROXY_BUFFER_CONVERTER = Path(__file__).resolve().with_name("trace_buffer_to_up_packet.py")
 PPM_HEADER = b"P6\n256 256\n255\n"
@@ -127,6 +128,52 @@ def image_data(path):
     return data
 
 
+def validate_multi_camera_image(data):
+    """Require both triangles and an overlapped pixel won by the second draw."""
+    pixels = data[len(PPM_HEADER):]
+    center = (128 * 256 + 128) * 3
+    red = sum(pixels[i:i + 3] == b"\xff\x00\x00" for i in range(0, len(pixels), 3))
+    green = sum(pixels[i:i + 3] == b"\x00\xff\x00" for i in range(0, len(pixels), 3))
+    if pixels[center:center + 3] != b"\x00\xff\x00" or red <= 100 or green <= 1000:
+        raise RunError("multi-camera image lacks both colors or the second draw at the center")
+
+
+def validate_multi_camera_packet(path):
+    """Check the known fixture, since pixel parity alone can hide duplicate draws."""
+    def f32(value):
+        return struct.unpack("<f", struct.pack("<f", value))[0]
+
+    world = [0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0.1, -0.05, 2, 1]
+    view = [0.9, 0, 0, 0, 0, 1.1, 0, 0, 0, 0, 1, 0, -0.05, 0.05, 0.5, 1]
+    projection = [1.8, 0, 0, 0, 0, 1.8, 0, 0, 0, 0, 8/7.5, 1, 0, 0, -4/7.5, 0]
+    second_world, second_view, second_projection = world[:], view[:], projection[:]
+    second_world[12] = f32(f32(0.1) + f32(0.3))
+    second_view[12] = f32(f32(-0.05) - f32(0.08))
+    second_projection[0] = second_projection[5] = f32(f32(1.8) * f32(0.95))
+    vertices = [(-0.7, 0.8, 0), (0.8, 0, 0.2), (-0.7, -0.8, 0.1)]
+    try:
+        with path.open("rb") as source:
+            content = source.read(65537)
+        if len(content) > 65536:
+            raise ValueError("packet too large")
+        lines = content.decode("ascii").splitlines()
+        if len(lines) != 16 or lines[:4] != ["T3R_MULTI_XYZ_V1", "256 256", "4278190080", "2"]:
+            raise ValueError("expected exactly two draws and the fixture header")
+        for index, (matrices, color) in enumerate((([world, view, projection], 0xffff0000),
+                                                    ([second_world, second_view, second_projection], 0xff00ff00))):
+            offset = 4 + index * 6
+            for line, expected in zip(lines[offset:offset + 3], matrices):
+                values = [float(value) for value in line.split()]
+                if len(values) != 16 or struct.pack("<16f", *values) != struct.pack("<16f", *expected):
+                    raise ValueError("fixture matrices differ")
+            for line, expected in zip(lines[offset + 3:offset + 6], vertices):
+                values = line.split()
+                if len(values) != 4 or struct.pack("<3f", *map(float, values[:3])) != struct.pack("<3f", *expected) or int(values[3]) != color:
+                    raise ValueError("fixture vertices or colors differ")
+    except (OSError, UnicodeError, ValueError, OverflowError, struct.error) as exc:
+        raise RunError(f"multi-camera packet does not match the known fixture: {exc}") from exc
+
+
 def validate_buffer_readback_log(path):
     with path.open("rb") as log:
         markers = [line.rstrip(b"\r\n") for line in log if line.startswith(b"buffer_readback ")]
@@ -210,9 +257,9 @@ def validate_buffered_trace(path, wrapped_buffers=False):
 
 def execute(engine, bottle, build, output, timeout, camera=False, buffered=False,
             verify_buffer_readback=False, replay_buffer_snapshot=False, wrapped_buffers=False,
-            proxy_buffer_replay=False):
-    if camera and buffered:
-        raise RunError("camera and buffered are exclusive")
+            proxy_buffer_replay=False, multi_camera=False):
+    if sum((camera, buffered, multi_camera)) > 1:
+        raise RunError("camera, multi-camera and buffered are exclusive")
     if verify_buffer_readback and not buffered:
         raise RunError("buffer readback verification requires buffered mode")
     if wrapped_buffers and not buffered:
@@ -264,6 +311,8 @@ def execute(engine, bottle, build, output, timeout, camera=False, buffered=False
                       "buffer bytes. Indexed vertices are converted to one unindexed synthetic triangle.")
     elif buffered:
         mode_limit = "Buffered capture records draw and binding metadata only; buffer bytes and DX12 replay are not available."
+    elif multi_camera:
+        mode_limit = "Two overlapping DrawPrimitiveUP XYZ triangles use distinct captured world, view and projection matrices; depth is disabled."
     elif camera:
         mode_limit = "Camera mode uses one DrawPrimitiveUP XYZ triangle and captured world, view and projection matrices."
     else:
@@ -273,9 +322,9 @@ def execute(engine, bottle, build, output, timeout, camera=False, buffered=False
                  "synthetic_d3d8_indexed_buffer_capture" if buffered else "synthetic_d3d8_up_dx12_replay")
     result = {"schema": 1, "test": test_name,
               "status": "FAIL", "dx12_replay": "not_run" if buffered else "performed_on_success",
-              "fixture_mode": "buffered" if buffered else ("camera" if camera else "screen_space"),
+              "fixture_mode": "buffered" if buffered else ("multi_camera" if multi_camera else "camera" if camera else "screen_space"),
               "engine": str(engine), "bottle": str(bottle), "build_dir": str(build),
-              "limitations": [mode_limit, *LIMITATIONS], "stages": [], "sha256": {}}
+              "limitations": [mode_limit, *(LIMITATIONS[1:] if multi_camera else LIMITATIONS)], "stages": [], "sha256": {}}
     if replay_buffer_snapshot:
         producer = "fixture_wrapper_not_proxy_trace" if wrapped_buffers else "fixture_readback_not_proxy_trace"
         result["buffer_snapshot"] = {"producer": producer, "conversion": "not_verified"}
@@ -328,7 +377,7 @@ def execute(engine, bottle, build, output, timeout, camera=False, buffered=False
         baseline_ppm, captured_ppm, replay_ppm = (output / name for name in ("baseline.ppm", "captured.ppm", "replay.ppm"))
         trace, packet = output / "capture.jsonl", output / "packet.txt"
         buffer_snapshot = output / "buffer-snapshot.txt"
-        fixture_args = ["--buffered"] if buffered else (["--camera"] if camera else [])
+        fixture_args = ["--buffered"] if buffered else (["--multi-camera"] if multi_camera else ["--camera"] if camera else [])
         if verify_buffer_readback:
             fixture_args.append("--verify-buffer-readback")
         if wrapped_buffers:
@@ -369,13 +418,15 @@ def execute(engine, bottle, build, output, timeout, camera=False, buffered=False
             stage = "convert"
             conversion_source = buffer_snapshot if replay_buffer_snapshot else trace
             converter = (PROXY_BUFFER_CONVERTER if proxy_buffer_replay else
-                         BUFFER_CONVERTER if replay_buffer_snapshot else CONVERTER)
+                         BUFFER_CONVERTER if replay_buffer_snapshot else MULTI_CONVERTER if multi_camera else CONVERTER)
             run_stage(stage, [sys.executable, "-B", converter, conversion_source, "--synthetic-fixture", "-o", packet],
                       output, env, output / "convert.log", timeout)
             with packet.open("rb") as source:
                 header = source.readline(32).rstrip(b"\r\n")
-            if header != (b"T3R_XYZ_V1" if camera else b"T3R_UP_V1"):
+            if header != (b"T3R_MULTI_XYZ_V1" if multi_camera else b"T3R_XYZ_V1" if camera else b"T3R_UP_V1"):
                 raise RunError("converted packet does not match the selected fixture mode")
+            if multi_camera:
+                validate_multi_camera_packet(packet)
             if replay_buffer_snapshot:
                 result["buffer_snapshot"]["conversion"] = "PASS"
             if proxy_buffer_replay:
@@ -401,6 +452,8 @@ def execute(engine, bottle, build, output, timeout, camera=False, buffered=False
             result["sha256"][name] = sha256(path)
         if not all(image == images[0] for image in images[1:]):
             raise RunError("fixture images differ byte for byte")
+        if multi_camera:
+            validate_multi_camera_image(images[0])
         result["stages"].append(stage)
         result["status"] = "PASS"
     except (RunError, OSError) as exc:
@@ -426,6 +479,7 @@ def main(argv=None):
     parser.add_argument("--timeout", type=float, default=120, help="per-stage timeout in seconds (default: 120)")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--camera", action="store_true", help="replay the synthetic XYZ camera fixture")
+    modes.add_argument("--multi-camera", action="store_true", help="replay two ordered overlapping XYZ camera draws")
     modes.add_argument("--buffered", action="store_true", help="compare indexed D3D8 draws; replay only with --replay-buffer-snapshot")
     buffer_methods = parser.add_mutually_exclusive_group()
     buffer_methods.add_argument("--verify-buffer-readback", action="store_true",
@@ -448,7 +502,7 @@ def main(argv=None):
     try:
         result = execute(args.engine, args.bottle, args.build_dir, args.output_dir, args.timeout,
                          args.camera, args.buffered, args.verify_buffer_readback, args.replay_buffer_snapshot,
-                         args.wrapped_buffers, args.proxy_buffer_replay)
+                         args.wrapped_buffers, args.proxy_buffer_replay, args.multi_camera)
     except RunError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

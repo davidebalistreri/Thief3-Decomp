@@ -200,6 +200,11 @@ def validate_camera_triangle(vertices, matrices):
 def convert(path, *, synthetic_fixture=False):
     require(synthetic_fixture is True, "--synthetic-fixture is required; general frame replay is not supported")
     records = validated_records(path)
+    return _convert_records(records)
+
+
+def _convert_records(records):
+    """Validate one draw from an already validated, explicitly attested fixture."""
     expected = ["header", "frame_begin", "clear", "clear_result", "draw", "draw_result", "frame_end", "capture_end"]
     require([record.get("event") for record in records] == expected,
             "fixture requires exactly one ordered clear and one draw; observed extra events are unsupported")

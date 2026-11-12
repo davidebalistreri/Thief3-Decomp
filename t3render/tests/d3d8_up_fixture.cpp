@@ -1,7 +1,7 @@
-// Synthetic single-draw D3D8 references for offline replay. No game assets
-// are loaded. The camera fixture uses XYZ vertices with distinct matrices;
-// the buffered fixture uses an indexed draw with nonzero offsets. Raster
-// rules may differ from D3D12.
+// Synthetic D3D8 references for offline replay. No game assets are loaded.
+// The camera fixtures use XYZ vertices and non-identity matrices; the buffered
+// fixture uses an indexed draw with nonzero offsets. Raster rules may differ
+// from D3D12.
 #include "d3d12_probe_pixels.hpp"
 #include "d3d8_buffer_readback.hpp"
 #include "d3d8_buffer_snapshot.hpp"
@@ -23,7 +23,7 @@ constexpr UINT kWidth = 256;
 constexpr UINT kHeight = 256;
 constexpr DWORD kFvfScreen = D3DFVF_XYZRHW | D3DFVF_DIFFUSE;
 constexpr DWORD kFvfCamera = D3DFVF_XYZ | D3DFVF_DIFFUSE;
-enum class Fixture { Screen, Camera, Buffered };
+enum class Fixture { Screen, Camera, MultiCamera, Buffered };
 
 // XYZRHW is four float32 values followed by D3DCOLOR AARRGGBB (little endian
 // bytes BB GG RR AA). The captured stride is 20 and there are three vertices.
@@ -164,7 +164,8 @@ bool ReadBackbuffer(IDirect3DDevice8* device, std::vector<std::uint8_t>& rgba, D
 
 bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buffer_readback,
             const wchar_t* buffer_snapshot_path, bool wrapped_buffers, bool writeonly_buffers) {
-    const bool camera = fixture == Fixture::Camera;
+    const bool multi_camera = fixture == Fixture::MultiCamera;
+    const bool camera = fixture == Fixture::Camera || multi_camera;
     const bool buffered = fixture == Fixture::Buffered;
     ComPtr<IDirect3D8> d3d;
     d3d.value = Direct3DCreate8(D3D_SDK_VERSION);
@@ -200,6 +201,14 @@ bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buf
         {-0.7f, 0.8f, 0.0f, 0xffff0000},
         {0.8f, 0.0f, 0.2f, 0xffff0000},
         {-0.7f, -0.8f, 0.1f, 0xffff0000},
+    };
+    // Identical object-space vertices but distinct world, view and projection
+    // matrices. The green draw overlaps the first, and must win at the center
+    // with depth and blending disabled. Red remains visible at the edge.
+    const CameraVertex second_camera_vertices[] = {
+        {-0.7f, 0.8f, 0.0f, 0xff00ff00},
+        {0.8f, 0.0f, 0.2f, 0xff00ff00},
+        {-0.7f, -0.8f, 0.1f, 0xff00ff00},
     };
     D3DMATRIX world{};
     world.m[0][1] = 1.0f; world.m[1][0] = -1.0f; world.m[2][2] = 1.0f;
@@ -323,10 +332,24 @@ bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buf
         !Check(device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xff000000, 1.0f, 0), "Clear") ||
         !Check(device->BeginScene(), "BeginScene")) return false;
 
-    const bool drawn = buffered
+    bool drawn = buffered
         ? Check(device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, kBufferedMinimumIndex, kBufferedVertexCount,
                                              kBufferedStartIndex, 1), "DrawIndexedPrimitive")
         : Check(device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, vertex_data, stride), "DrawPrimitiveUP");
+    if (drawn && multi_camera) {
+        D3DMATRIX second_world = world;
+        second_world.m[3][0] += 0.3f;
+        D3DMATRIX second_view = view;
+        second_view.m[3][0] -= 0.08f;
+        D3DMATRIX second_projection = projection;
+        second_projection.m[0][0] *= 0.95f;
+        second_projection.m[1][1] *= 0.95f;
+        drawn = Check(device->SetTransform(D3DTS_WORLD, &second_world), "SetTransform(WORLD, second draw)") &&
+                Check(device->SetTransform(D3DTS_VIEW, &second_view), "SetTransform(VIEW, second draw)") &&
+                Check(device->SetTransform(D3DTS_PROJECTION, &second_projection), "SetTransform(PROJECTION, second draw)") &&
+                Check(device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, second_camera_vertices,
+                                              sizeof(CameraVertex)), "DrawPrimitiveUP(second draw)");
+    }
     const bool ended = Check(device->EndScene(), "EndScene");
     if (!drawn || !ended) return false;
 
@@ -334,7 +357,20 @@ bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buf
     D3DFORMAT format = D3DFMT_UNKNOWN;
     if (!ReadBackbuffer(device.value, rgba, format)) return false;
     d3d12_probe::PixelStats stats;
-    const bool pixels_ok = camera
+    std::size_t green_pixels = 0;
+    if (multi_camera) {
+        for (std::size_t i = 0; i < rgba.size(); i += 4) {
+            if (rgba[i] == 0 && rgba[i + 1] == 255 && rgba[i + 2] == 0 && rgba[i + 3] == 255)
+                ++green_pixels;
+        }
+    }
+    const std::size_t center = (std::size_t(kHeight / 2) * kWidth + kWidth / 2) * 4;
+    const bool center_green = rgba[center] == 0 && rgba[center + 1] == 255 &&
+                              rgba[center + 2] == 0 && rgba[center + 3] == 255;
+    const bool pixels_ok = multi_camera
+        ? d3d12_probe::AnalyzePixels(rgba.data(), rgba.size(), 0, kWidth * 4, kWidth, kHeight, stats) &&
+          center_green && stats.corners_black && stats.red_pixels > 100 && green_pixels > 1000
+        : camera
         ? d3d12_probe::AnalyzePixels(rgba.data(), rgba.size(), 0, kWidth * 4, kWidth, kHeight, stats) &&
           stats.center_red && stats.corners_black && stats.red_pixels > 1000 && stats.red_pixels < kWidth * kHeight
         : d3d12_probe::AnalyzeTriangle256(rgba.data(), rgba.size(), 0, kWidth * 4, stats);
@@ -372,9 +408,11 @@ bool Render(HWND window, const wchar_t* output, Fixture fixture, bool verify_buf
                                                index_snapshot.data(), index_snapshot.size(), packet) ||
             !WriteBufferPacket(buffer_snapshot_path, packet)) return false;
     }
-    std::printf("d3d8_up_fixture mode=%s width=%u height=%u format=%lu draws=1 stride=%u fvf=0x%08lx "
-                "red_pixels=%zu fnv1a=%016llx\n", camera ? "camera" : (buffered ? "buffered" : "screen"), kWidth, kHeight,
-                static_cast<unsigned long>(format), stride, static_cast<unsigned long>(fvf), stats.red_pixels,
+    std::printf("d3d8_up_fixture mode=%s width=%u height=%u format=%lu draws=%u stride=%u fvf=0x%08lx "
+                "red_pixels=%zu green_pixels=%zu fnv1a=%016llx\n",
+                multi_camera ? "multi-camera" : (camera ? "camera" : (buffered ? "buffered" : "screen")), kWidth, kHeight,
+                static_cast<unsigned long>(format), multi_camera ? 2u : 1u, stride, static_cast<unsigned long>(fvf), stats.red_pixels,
+                green_pixels,
                 static_cast<unsigned long long>(stats.fnv1a));
     std::printf("result=PASS; edge pixels may differ from D3D12 due to raster/half-pixel rules\n");
     return true;
@@ -390,6 +428,7 @@ int wmain(int argc, wchar_t** argv) {
     bool writeonly_buffers = false;
     for (int i = 1; i < argc; ++i) {
         if (!std::wcscmp(argv[i], L"--camera") && fixture == Fixture::Screen) fixture = Fixture::Camera;
+        else if (!std::wcscmp(argv[i], L"--multi-camera") && fixture == Fixture::Screen) fixture = Fixture::MultiCamera;
         else if (!std::wcscmp(argv[i], L"--buffered") && fixture == Fixture::Screen) fixture = Fixture::Buffered;
         else if (!std::wcscmp(argv[i], L"--verify-buffer-readback") && !verify_buffer_readback) verify_buffer_readback = true;
         else if (!std::wcscmp(argv[i], L"--wrapped-buffers") && !wrapped_buffers) wrapped_buffers = true;
@@ -398,7 +437,7 @@ int wmain(int argc, wchar_t** argv) {
                  argv[i + 1][0] && std::wcsncmp(argv[i + 1], L"--", 2) != 0) buffer_snapshot_path = argv[++i];
         else if (!std::wcscmp(argv[i], L"--output") && !output && i + 1 < argc && argv[i + 1][0]) output = argv[++i];
         else {
-            std::fwprintf(stderr, L"usage: d3d8_up_fixture [--camera | --buffered [--writeonly-buffers | --wrapped-buffers | --verify-buffer-readback] [--buffer-snapshot new-file]] [--output new-image.ppm]\n");
+            std::fwprintf(stderr, L"usage: d3d8_up_fixture [--camera | --multi-camera | --buffered [--writeonly-buffers | --wrapped-buffers | --verify-buffer-readback] [--buffer-snapshot new-file]] [--output new-image.ppm]\n");
             return 2;
         }
     }

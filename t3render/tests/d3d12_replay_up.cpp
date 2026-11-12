@@ -1,6 +1,7 @@
 // Bounded one-triangle D3D12 replay of synthetic D3D8 XYZRHW|DIFFUSE or
-// XYZ|DIFFUSE with captured WORLD/VIEW/PROJECTION. Flat opaque color only;
-// this is not a general frame reader, D3D8 emulator, or T3 replay.
+// XYZ|DIFFUSE with captured WORLD/VIEW/PROJECTION. A bounded synthetic scene
+// may contain several ordered XYZ draws. Flat opaque color only; this is not a
+// general frame reader, D3D8 emulator, or T3 replay.
 #ifndef T3RENDER_REPLAY_PARSER_TEST
 #include <windows.h>
 #include <d3d12.h>
@@ -18,12 +19,14 @@
 #include <locale>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
 constexpr std::uint32_t kWidth = 256;
 constexpr std::uint32_t kHeight = 256;
-constexpr std::size_t kMaxInputBytes = 4096;
+constexpr std::size_t kMaxInputBytes = 65536;
+constexpr std::uint32_t kMaxSceneDraws = 32;
 #ifndef T3RENDER_REPLAY_PARSER_TEST
 constexpr DWORD kFenceTimeoutMs = 10000;
 constexpr DXGI_FORMAT kFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -51,11 +54,16 @@ struct Vertex {
     std::uint32_t argb;
 };
 static_assert(sizeof(Vertex) == 20, "FVF XYZRHW|DIFFUSE must have a 20-byte stride");
+struct SceneDraw {
+    Vertex vertices[3]{};
+    float matrices[3][16]{};
+};
 struct Frame {
     std::uint32_t clear_argb = 0;
     Vertex vertices[3]{};
     bool camera = false;
     float matrices[3][16]{}; // D3D8 row-major WORLD, VIEW, PROJECTION
+    std::vector<SceneDraw> scene; // synthetic ordered camera draws, depth disabled
 };
 
 #ifndef T3RENDER_REPLAY_PARSER_TEST
@@ -124,6 +132,47 @@ bool ParseFrameBytes(const char* bytes, std::size_t size, Frame& frame) {
     std::string lines[9];
     if (!std::getline(stream, lines[0])) { std::fprintf(stderr, "missing header\n"); return false; }
     if (!lines[0].empty() && lines[0].back() == '\r') lines[0].pop_back();
+    if (lines[0] == "T3R_MULTI_XYZ_V1") {
+        std::string viewport, clear, count_line, count_text;
+        std::uint32_t count = 0;
+        if (!std::getline(stream, viewport) || !std::getline(stream, clear) ||
+            !std::getline(stream, count_line)) {
+            std::fprintf(stderr, "missing scene header\n"); return false;
+        }
+        if (!viewport.empty() && viewport.back() == '\r') viewport.pop_back();
+        if (!clear.empty() && clear.back() == '\r') clear.pop_back();
+        if (!count_line.empty() && count_line.back() == '\r') count_line.pop_back();
+        auto count_stream = Line(count_line);
+        if (!(count_stream >> count_text) || !AtEnd(count_stream) || !DecimalU32(count_text, count) ||
+            count < 2 || count > kMaxSceneDraws) {
+            std::fprintf(stderr, "invalid scene draw count\n"); return false;
+        }
+        std::vector<SceneDraw> draws;
+        draws.reserve(count);
+        std::uint32_t clear_argb = 0;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            std::string packet = "T3R_XYZ_V1\n" + viewport + "\n" + clear + "\n";
+            for (unsigned j = 0; j < 6; ++j) {
+                std::string line;
+                if (!std::getline(stream, line)) { std::fprintf(stderr, "missing scene draw\n"); return false; }
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                packet += line + "\n";
+            }
+            Frame single;
+            if (!ParseFrameBytes(packet.data(), packet.size(), single)) return false;
+            SceneDraw draw;
+            std::memcpy(draw.vertices, single.vertices, sizeof(draw.vertices));
+            std::memcpy(draw.matrices, single.matrices, sizeof(draw.matrices));
+            draws.push_back(draw);
+            clear_argb = single.clear_argb;
+        }
+        if (!AtEnd(stream)) { std::fprintf(stderr, "trailing scene input\n"); return false; }
+        frame = Frame{};
+        frame.clear_argb = clear_argb;
+        frame.camera = true;
+        frame.scene = std::move(draws);
+        return true;
+    }
     if (lines[0] != "T3R_UP_V1" && lines[0] != "T3R_XYZ_V1") {
         std::fprintf(stderr, "invalid header\n"); return false;
     }
@@ -391,10 +440,19 @@ int Replay(const Frame& frame, const wchar_t* output) {
     if (!Check(device->CreateCommittedResource(&read_heap, D3D12_HEAP_FLAG_NONE, &read_desc,
             D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(readback.put())), "CreateReadback")) return 1;
 
+    std::vector<Vertex> scene_vertices;
+    if (frame.scene.empty()) {
+        scene_vertices.assign(frame.vertices, frame.vertices + 3);
+    } else {
+        scene_vertices.reserve(frame.scene.size() * 3);
+        for (const auto& draw : frame.scene)
+            scene_vertices.insert(scene_vertices.end(), draw.vertices, draw.vertices + 3);
+    }
+    const auto vertex_bytes = scene_vertices.size() * sizeof(Vertex);
     D3D12_HEAP_PROPERTIES upload_heap{}; upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
     upload_heap.CreationNodeMask = 1; upload_heap.VisibleNodeMask = 1;
     D3D12_RESOURCE_DESC vertex_desc{}; vertex_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    vertex_desc.Width = sizeof(frame.vertices); vertex_desc.Height = 1;
+    vertex_desc.Width = vertex_bytes; vertex_desc.Height = 1;
     vertex_desc.DepthOrArraySize = 1; vertex_desc.MipLevels = 1; vertex_desc.SampleDesc.Count = 1;
     vertex_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     ComPtr<ID3D12Resource> vertices;
@@ -403,8 +461,8 @@ int Replay(const Frame& frame, const wchar_t* output) {
     void* upload = nullptr;
     const D3D12_RANGE no_read{0, 0};
     if (!Check(vertices->Map(0, &no_read, &upload), "VertexUpload Map") || !upload) return 1;
-    std::memcpy(upload, frame.vertices, sizeof(frame.vertices));
-    const D3D12_RANGE written{0, sizeof(frame.vertices)};
+    std::memcpy(upload, scene_vertices.data(), vertex_bytes);
+    const D3D12_RANGE written{0, vertex_bytes};
     vertices->Unmap(0, &written);
 
     D3D12_ROOT_PARAMETER parameters[2]{};
@@ -454,23 +512,27 @@ int Replay(const Frame& frame, const wchar_t* output) {
                                          IID_PPV_ARGS(list.put())), "CreateCommandList")) return 1;
     list->SetGraphicsRootSignature(root.value);
     const float viewport_size[2] = {static_cast<float>(kWidth), static_cast<float>(kHeight)};
-    if (frame.camera) list->SetGraphicsRoot32BitConstants(0, 48, frame.matrices, 0);
     list->SetGraphicsRoot32BitConstants(0, 2, viewport_size, frame.camera ? 48 : 0);
-    const std::uint32_t argb = frame.vertices[0].argb;
-    const float diffuse[4] = {static_cast<float>((argb >> 16) & 255) / 255.0f,
-                              static_cast<float>((argb >> 8) & 255) / 255.0f,
-                              static_cast<float>(argb & 255) / 255.0f,
-                              static_cast<float>((argb >> 24) & 255) / 255.0f};
-    list->SetGraphicsRoot32BitConstants(1, 4, diffuse, 0);
     const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(kWidth), static_cast<float>(kHeight), 0, 1};
     const D3D12_RECT scissor{0, 0, static_cast<LONG>(kWidth), static_cast<LONG>(kHeight)};
     list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &scissor);
     list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
     list->ClearRenderTargetView(rtv, clear.Color, 0, nullptr);
-    const D3D12_VERTEX_BUFFER_VIEW view{vertices->GetGPUVirtualAddress(), sizeof(frame.vertices), sizeof(Vertex)};
+    const D3D12_VERTEX_BUFFER_VIEW view{vertices->GetGPUVirtualAddress(), static_cast<UINT>(vertex_bytes), sizeof(Vertex)};
     list->IASetVertexBuffers(0, 1, &view);
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    list->DrawInstanced(3, 1, 0, 0);
+    const std::size_t draw_count = frame.scene.empty() ? 1 : frame.scene.size();
+    for (std::size_t i = 0; i < draw_count; ++i) {
+        const float (*matrices)[16] = frame.scene.empty() ? frame.matrices : frame.scene[i].matrices;
+        if (frame.camera) list->SetGraphicsRoot32BitConstants(0, 48, matrices, 0);
+        const std::uint32_t argb = scene_vertices[i * 3].argb;
+        const float diffuse[4] = {static_cast<float>((argb >> 16) & 255) / 255.0f,
+                                  static_cast<float>((argb >> 8) & 255) / 255.0f,
+                                  static_cast<float>(argb & 255) / 255.0f,
+                                  static_cast<float>((argb >> 24) & 255) / 255.0f};
+        list->SetGraphicsRoot32BitConstants(1, 4, diffuse, 0);
+        list->DrawInstanced(3, 1, static_cast<UINT>(i * 3), 0);
+    }
     D3D12_RESOURCE_BARRIER barrier{}; barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition.pResource = target.value; barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
@@ -524,7 +586,7 @@ int Replay(const Frame& frame, const wchar_t* output) {
     }
     if (!output_ok) return 1;
     std::printf("replay=%s viewport=%ux%u pitch=%u changed_pixels=%zu fnv1a64=%016llx\n",
-                frame.camera ? "T3R_XYZ_V1" : "T3R_UP_V1", kWidth, kHeight,
+                !frame.scene.empty() ? "T3R_MULTI_XYZ_V1" : frame.camera ? "T3R_XYZ_V1" : "T3R_UP_V1", kWidth, kHeight,
                 footprint.Footprint.RowPitch, changed_rgb, static_cast<unsigned long long>(hash));
     std::printf("pixel_centers=D3D8_integer_plus_0.5_to_DX12 (assumption); output=RGBA8\n");
     std::printf("result=PASS; no general D3D8 parity claimed\n");

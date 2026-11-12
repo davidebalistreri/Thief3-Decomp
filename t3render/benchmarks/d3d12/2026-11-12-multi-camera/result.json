@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_multi_camera_capture_to_d3d12_replay",
+  "date": "2026-11-12",
+  "host": {
+    "os": "macOS 27.2.1",
+    "architecture": "arm64",
+    "gpu": "Apple M5 Pro"
+  },
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "d3d12_chain": "Wine D3D12/vkd3d -> Vulkan -> MoltenVK -> Metal"
+  },
+  "fixture": {
+    "description": "Two ordered, overlapping flat opaque XYZ|DIFFUSE UP triangles with distinct captured world, view and projection matrices.",
+    "packet": "fixture.txt",
+    "packet_sha256": "a22d8dce676f8d28e3821b1824b2c952bc49e63fc9c881ce1e336b863e795d66",
+    "capture_sha256": "81e93bf4899938f4e8f4f36f52260a5793410ebe454b7966c2dde52b3a93c835",
+    "source_sha256": {
+      "t3render/tests/d3d8_up_fixture.cpp": "8aa0aa331a345cfe809f054d44c2fca65cceda409db4b7f3c007bed9d6ff89a9",
+      "t3render/tests/d3d12_replay_up.cpp": "bb0f334c68baa90cc51b58c367481af9363ec0c0127022d1ce4a63f8109087cb",
+      "t3render/tools/trace_to_up_packet.py": "69e107a87b88514a649f3963c2dc8a1c5e7fbc600a43a45a97fdbba986d59bcf",
+      "t3render/tools/trace_to_multi_xyz_packet.py": "9180d7eb08d389b442114925b34eb52da2a7b3f0d0fb6361bdaf465af05c214e"
+    },
+    "executable_sha256": {
+      "fixture_exe": "b76a23fe646967a109669c5201b3c12c116db60c4d6d39136cee839bb67b59d4",
+      "proxy_dll": "1b09cd3935ee0159cab840489f701564cd813d0952e7ecc1122d51394564e918",
+      "replay_exe": "4d126991d28869530e23729f89bf3cc03a25637d194a7f8461823346903979c2"
+    }
+  },
+  "result": {
+    "width": 256,
+    "height": 256,
+    "red_pixels": 2751,
+    "green_pixels": 8445,
+    "ppm_sha256_all_three": "bbf771cb10f5e0cd296c0c8c044f1ec7afb283a25520817405584594d75a2098",
+    "rgba_fnv1a64_assuming_opaque_alpha": "c027e8e154e2d7d3",
+    "comparison": "D3D8 baseline, captured D3D8 and D3D12 replay P6 PPM bytes match.",
+    "image": "scene.png",
+    "image_sha256": "ecd5495be78c3ec9d4a8ed0f8eb2614de5e42f71e7a44fae86848919463e165d",
+    "image_note": "Lossless RGB conversion of the reference PPM."
+  },
+  "replay_sensitivity": {
+    "description": "Separate DX12 replays swapped draw order or changed the second draw world, view or projection independently; each was compared with the saved replay.",
+    "changed_pixels": {
+      "draw_order": 6658,
+      "world": 2019,
+      "view": 2236,
+      "projection": 1608
+    },
+    "note": "Mutated packets and images were temporary; this tests sensitivity, not parity of modified scenes."
+  },
+  "limitations": [
+    "Isolated synthetic UP fixture; no TDS frame or gameplay test.",
+    "Depth, texture sampling, buffer-bound draws, game shaders, lighting and materials are not tested.",
+    "RGB equality on this runtime does not guarantee general D3D8 parity; PPM omits alpha.",
+    "No native Windows D3D12 GPU, swapchain presentation or GPU timing was validated."
+  ]
+}

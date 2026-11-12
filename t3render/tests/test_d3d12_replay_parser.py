@@ -16,6 +16,14 @@ int main() {
     const std::string bytes((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
     Frame frame{};
     if (!ParseFrameBytes(bytes.data(), bytes.size(), frame)) return 2;
+    if (!frame.scene.empty()) {
+        std::cout << "scene " << frame.scene.size() << ' ' << frame.clear_argb << ' '
+                  << frame.scene[0].matrices[0][12] << ' ' << frame.scene[1].matrices[0][12] << ' '
+                  << frame.scene[0].matrices[1][12] << ' ' << frame.scene[1].matrices[1][12] << ' '
+                  << frame.scene[0].matrices[2][0] << ' ' << frame.scene[1].matrices[2][0] << ' '
+                  << frame.scene[0].vertices[0].argb << ' ' << frame.scene[1].vertices[0].argb << '\n';
+        return 0;
+    }
     if (frame.camera) {
         std::cout << "camera " << frame.matrices[0][12] << ' ' << frame.matrices[1][0] << ' '
                   << frame.matrices[2][11] << ' ' << frame.vertices[0].x << ' '
@@ -120,6 +128,22 @@ class D3D12ReplayParserTests(unittest.TestCase):
             CAMERA_HEADER.replace(b"4278190080", b"0") + WORLD + VIEW + PROJECTION + CAMERA_VERTICES,
         ):
             with self.subTest(data=data): self.assert_rejected(data)
+
+    def test_scene_preserves_draw_order_transforms_and_colors(self):
+        first = WORLD + VIEW + PROJECTION + CAMERA_VERTICES
+        second = WORLD.replace(b"0.1 -0.05", b"0.4 -0.05") + VIEW.replace(b"-0.05 0.05", b"-0.13 0.05") + \
+            PROJECTION.replace(b"1.8", b"1.71") + \
+            CAMERA_VERTICES.replace(b"4294901760", b"4278255360")
+        data = b"T3R_MULTI_XYZ_V1\n256 256\n4278190080\n2\n" + first + second
+        result = self.parse(data)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        self.assertEqual(result.stdout, b"scene 2 4278190080 0.1 0.4 -0.05 -0.13 1.8 1.71 4294901760 4278255360\n")
+        for bad in (data.replace(b"\n2\n", b"\n1\n", 1),
+                    data.replace(b"\n2\n", b"\n33\n", 1),
+                    data.replace(b"\n2\n", b"\n2 extra\n", 1),
+                    data + b"extra", data[:-30],
+                    data.replace(b"4294901760", b"0", 1)):
+            with self.subTest(data=bad[:80]): self.assert_rejected(bad)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 """Exercise the full host orchestration with a fake Wine, never the game."""
+import copy
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_trace_to_up_packet import fixture, VERTICES
 from test_trace_to_camera_packet import fixture as camera_fixture
+from test_trace_to_multi_xyz_packet import fixture as multi_fixture
 from test_trace_buffer_to_up_packet import fixture as proxy_buffer_fixture
 
 
@@ -55,6 +57,14 @@ assert args[-2] == "--output"
 out = host(args[-1])
 assert not out.exists()
 data = b"P6\n256 256\n255\n" + (b"\x00\x00\x00" * (256 * 256 - 1)) + b"\xff\x00\x00"
+multi = "--multi-camera" in args or (kind == "replay" and host(args[1]).read_text().startswith("T3R_MULTI_XYZ_V1\n"))
+if multi and not os.environ.get("FAKE_SCENE_MISSING"):
+    pixels = bytearray(256 * 256 * 3)
+    for i in range(101): pixels[3*i:3*i+3] = b"\xff\x00\x00"
+    for i in range(200, 1201): pixels[3*i:3*i+3] = b"\x00\xff\x00"
+    center = (128 * 256 + 128) * 3
+    pixels[center:center+3] = b"\x00\xff\x00"
+    data = b"P6\n256 256\n255\n" + pixels
 if os.environ.get("FAKE_DIFFER") == kind:
     data = data[:-3] + b"\x00\xff\x00"
 out.write_bytes(data)
@@ -63,7 +73,8 @@ if kind == "capture":
     assert not trace.exists()
     name = ("FAKE_TRACE_BUFFERED_PROXY" if "--writeonly-buffers" in args else
             "FAKE_TRACE_BUFFERED_WRAPPED" if "--wrapped-buffers" in args else
-            "FAKE_TRACE_BUFFERED" if "--buffered" in args else ("FAKE_TRACE_CAMERA" if "--camera" in args else "FAKE_TRACE"))
+            "FAKE_TRACE_BUFFERED" if "--buffered" in args else ("FAKE_TRACE_MULTI" if "--multi-camera" in args else
+            "FAKE_TRACE_CAMERA" if "--camera" in args else "FAKE_TRACE"))
     shutil.copyfile(os.environ[name], trace)
     if "--buffer-snapshot" in args and not os.environ.get("FAKE_SNAPSHOT_MISSING"):
         snapshot = host(args[args.index("--buffer-snapshot") + 1])
@@ -73,7 +84,7 @@ if kind == "capture":
         else:
             shutil.copyfile(os.environ["FAKE_SNAPSHOT"], snapshot)
 if kind == "replay":
-    assert host(args[1]).read_text().splitlines()[0] in ("T3R_UP_V1", "T3R_XYZ_V1")
+    assert host(args[1]).read_text().splitlines()[0] in ("T3R_UP_V1", "T3R_XYZ_V1", "T3R_MULTI_XYZ_V1")
 '''
 
 
@@ -127,6 +138,8 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
         self.trace.write_text("".join(json.dumps(event) + "\n" for event in fixture()), encoding="utf-8")
         self.camera_trace = self.root / "camera.jsonl"
         self.camera_trace.write_text("".join(json.dumps(event) + "\n" for event in camera_fixture()), encoding="utf-8")
+        self.multi_trace = self.root / "multi.jsonl"
+        self.multi_trace.write_text("".join(json.dumps(event) + "\n" for event in multi_fixture()), encoding="utf-8")
         self.buffered_trace = self.root / "buffered.jsonl"
         self.buffered_trace.write_text("".join(json.dumps(event) + "\n" for event in buffered_fixture()), encoding="utf-8")
         self.wrapped_trace = self.root / "wrapped.jsonl"
@@ -146,9 +159,10 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
 
     def run_runner(self, *, output=None, extra_env=None, timeout="5", engine=None, bottle=None, build=None,
                    camera=False, buffered=False, verify_buffer_readback=False, replay_buffer_snapshot=False,
-                   wrapped_buffers=False, proxy_buffer_replay=False):
+                   wrapped_buffers=False, proxy_buffer_replay=False, multi_camera=False):
         env = os.environ.copy()
         env.update({"FAKE_TRACE": str(self.trace), "FAKE_TRACE_CAMERA": str(self.camera_trace),
+                    "FAKE_TRACE_MULTI": str(self.multi_trace),
                     "FAKE_TRACE_BUFFERED": str(self.buffered_trace), "FAKE_TRACE_BUFFERED_WRAPPED": str(self.wrapped_trace),
                     "FAKE_TRACE_BUFFERED_PROXY": str(self.proxy_trace),
                     "FAKE_SNAPSHOT": str(self.buffer_snapshot),
@@ -163,6 +177,8 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
                                "--output-dir", str(output or self.output), "--timeout", timeout]
         if camera:
             args.append("--camera")
+        if multi_camera:
+            args.append("--multi-camera")
         if buffered:
             args.append("--buffered")
         if verify_buffer_readback:
@@ -285,6 +301,43 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
         for stage in ("baseline", "capture"):
             self.assertIn("--camera", self.log(stage)["args"])
         self.assertIn("--synthetic-fixture", (self.output / "convert.log").read_text())
+
+    def test_multi_camera_replays_ordered_draws_and_checks_overlap(self):
+        result = self.run_runner(multi_camera=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.manifest()["fixture_mode"], "multi_camera")
+        self.assertIn("--multi-camera", self.log("baseline")["args"])
+        self.assertIn("--multi-camera", self.log("capture")["args"])
+        self.assertTrue((self.output / "packet.txt").read_text().startswith("T3R_MULTI_XYZ_V1\n"))
+        self.assertEqual(self.manifest()["sha256"]["baseline_ppm"], self.manifest()["sha256"]["replay_ppm"])
+
+    def test_multi_camera_rejects_identical_but_missing_scene(self):
+        result = self.run_runner(multi_camera=True, extra_env={"FAKE_SCENE_MISSING": "1"})
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.manifest()["failed_stage"], "compare")
+        self.assertIn("lacks both colors", self.manifest()["error"])
+
+    def test_multi_camera_rejects_extra_draw_or_wrong_camera_even_if_pixels_match(self):
+        for case in ("duplicate", "camera"):
+            events = multi_fixture()
+            if case == "duplicate":
+                duplicate = copy.deepcopy(events[4])
+                duplicate["op_id"] = 3
+                events[6]["op_id"] = events[7]["op_id"] = 4
+                events[6:6] = [duplicate, {"event": "draw_result", "frame": 0, "op_id": 3, "hr": 0}]
+                events[-2]["draws"] = 3
+            else:
+                events[6]["transforms"]["view"][12] = 0.0
+            trace = self.root / f"wrong-{case}.jsonl"
+            trace.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+            output = self.root / f"wrong-{case}"
+            result = self.run_runner(multi_camera=True, output=output, extra_env={"FAKE_TRACE_MULTI": str(trace)})
+            with self.subTest(case=case):
+                self.assertNotEqual(result.returncode, 0)
+                manifest = json.loads((output / "result.json").read_text())
+                self.assertEqual(manifest["failed_stage"], "convert")
+                self.assertIn("known fixture", manifest["error"])
+                self.assertFalse((output / "replay.log").exists())
 
     def test_camera_mode_rejects_a_screen_space_capture(self):
         result = self.run_runner(camera=True, extra_env={"FAKE_TRACE_CAMERA": str(self.trace)})

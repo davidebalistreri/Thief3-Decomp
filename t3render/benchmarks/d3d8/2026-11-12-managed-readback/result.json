@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_managed_buffer_readback",
+  "date": "2026-11-12",
+  "environment": {
+    "host": "macOS arm64, Apple M5 Pro",
+    "runtime": "Highball, CrossOver 26.3 r30, Wine x86"
+  },
+  "fixture": {
+    "source_commit": "8d9dd18b",
+    "options": [
+      "--buffered",
+      "--verify-buffer-readback"
+    ],
+    "fixture_source_sha256": "d1aa28cfae017b9f867acf2619dc08c4fc86f296ab88e271c1d0c9c358a00ed4",
+    "readback_source_sha256": "295887a76d5d03d7b8807df7dd59001d53ac743e86090a6c1c176ab79a03bb7a",
+    "fixture_executable_sha256": "3ee1a295ebeee1e2f1130de1087af4cb659d0c81b7b6488f8590a94acc0edfce",
+    "proxy_sha256": "c41d9e504b0946f5f9b0738e984ee757422cd0c41589eac587f8fa5860307444",
+    "pool": "D3DPOOL_MANAGED",
+    "usage": "non-WRITEONLY",
+    "read_flag": "D3DLOCK_READONLY",
+    "vertex_offset": 20,
+    "vertex_bytes": 80,
+    "index_offset": 4,
+    "index_bytes": 6
+  },
+  "result": {
+    "baseline": "PASS",
+    "capture_with_proxy": "PASS",
+    "draw": "DrawIndexedPrimitive",
+    "baseline_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679",
+    "captured_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679",
+    "comparison": "Each fixture compared readback with the data it wrote; PPM images also matched byte for byte.",
+    "dx12_replay": "not run"
+  },
+  "limitations": [
+    "Fixture-owned diagnostic read locks add D3D8 calls and may synchronize, stall or fail.",
+    "This synthetic test does not prove passive capture or support for WRITEONLY, default-pool or other TDS buffers.",
+    "The buffer bytes are not serialized in the proxy trace and no buffered geometry is replayed on DX12.",
+    "This Wine translation-layer result is not native Windows or TDS validation."
+  ]
+}

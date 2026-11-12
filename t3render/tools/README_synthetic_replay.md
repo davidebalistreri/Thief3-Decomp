@@ -96,6 +96,15 @@ For the indexed buffer capture test, use a new output directory and pass
 observed draw parameters; no replay executable is required in this mode.
 `--camera` and `--buffered` are mutually exclusive.
 
+For the buffered fixture only, add `--verify-buffer-readback` to have both
+fixture runs use read locks and compare the known written vertex/index ranges
+with their expected bytes. The runner requires a PASS with the expected ranges
+in each log and records it in the manifest. These are driver calls: locks can
+stall or fail on other resources or runtimes. The bytes are not serialized in
+the capture trace, and this option does not provide buffered replay. See the
+[managed readback result](../benchmarks/d3d8/2026-11-12-managed-readback/result.json)
+for the tested runtime and image hashes.
+
 An experimental buffer-vtable replacement failed a Wine assertion and was
 discarded. The [failure manifest](../benchmarks/d3d8/2026-11-12-buffer-tracking-failure/result.json)
 records the isolated test and its limits; it did not modify or launch TDS.

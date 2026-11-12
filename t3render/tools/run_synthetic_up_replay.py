@@ -26,6 +26,7 @@ import trace_to_up_packet
 CONVERTER = Path(__file__).resolve().with_name("trace_to_up_packet.py")
 PPM_HEADER = b"P6\n256 256\n255\n"
 PPM_SIZE = len(PPM_HEADER) + 256 * 256 * 3
+READBACK_MARKER = b"buffer_readback vertex_offset=20 vertex_bytes=80 index_offset=4 index_bytes=6 result=PASS"
 LIMITATIONS = [
     "Synthetic single triangle, 256x256, uniform opaque color.",
     "This is not a general T3 frame replay, gameplay parity, a PBR test, or a native Windows test.",
@@ -122,6 +123,13 @@ def image_data(path):
     return data
 
 
+def validate_buffer_readback_log(path):
+    with path.open("rb") as log:
+        markers = [line.rstrip(b"\r\n") for line in log if line.startswith(b"buffer_readback ")]
+    if markers != [READBACK_MARKER]:
+        raise RunError(f"missing or invalid buffer readback PASS for expected ranges; see {path}")
+
+
 def validate_buffered_trace(path):
     """Validate only the observed binding and draw metadata, not resource bytes."""
     try:
@@ -181,9 +189,11 @@ def validate_buffered_trace(path):
         raise RunError(f"invalid buffered fixture trace: {exc}") from exc
 
 
-def execute(engine, bottle, build, output, timeout, camera=False, buffered=False):
+def execute(engine, bottle, build, output, timeout, camera=False, buffered=False, verify_buffer_readback=False):
     if camera and buffered:
         raise RunError("camera and buffered are exclusive")
+    if verify_buffer_readback and not buffered:
+        raise RunError("buffer readback verification requires buffered mode")
     engine, bottle, build, output = map(valid_path, (engine, bottle, build, output))
     wine = engine / "engine/bin/wine"
     wineserver = engine / "engine/bin/wineserver"
@@ -226,6 +236,12 @@ def execute(engine, bottle, build, output, timeout, camera=False, buffered=False
               "fixture_mode": "buffered" if buffered else ("camera" if camera else "screen_space"),
               "engine": str(engine), "bottle": str(bottle), "build_dir": str(build),
               "limitations": [mode_limit, *LIMITATIONS], "stages": [], "sha256": {}}
+    if verify_buffer_readback:
+        result["buffer_readback"] = {"requested": True, "baseline": "not_verified", "capture": "not_verified",
+                                     "vertex_offset": 20, "vertex_bytes": 80, "index_offset": 4, "index_bytes": 6}
+        result["limitations"].append(
+            "The fixture compares readback ranges against its known inputs; buffer contents are not serialized in the trace. "
+            "Driver read locks may stall or fail for other resources and runtimes.")
     stage = "setup"
     try:
         baseline = output / "baseline"
@@ -259,9 +275,14 @@ def execute(engine, bottle, build, output, timeout, camera=False, buffered=False
         baseline_ppm, captured_ppm, replay_ppm = (output / name for name in ("baseline.ppm", "captured.ppm", "replay.ppm"))
         trace, packet = output / "capture.jsonl", output / "packet.txt"
         fixture_args = ["--buffered"] if buffered else (["--camera"] if camera else [])
+        if verify_buffer_readback:
+            fixture_args.append("--verify-buffer-readback")
         stage = "baseline"
         run_stage(stage, [wine, baseline_exe, *fixture_args, "--output", windows_path(baseline_ppm)], baseline, env,
                   output / "baseline.log", timeout)
+        if verify_buffer_readback:
+            validate_buffer_readback_log(output / "baseline.log")
+            result["buffer_readback"]["baseline"] = "PASS"
         result["stages"].append(stage)
         capture_env = env.copy()
         capture_env.update({"WINEDLLOVERRIDES": "d3d8=n,b;nvapi64,nvngx=n,b;winemenubuilder.exe=d",
@@ -269,6 +290,9 @@ def execute(engine, bottle, build, output, timeout, camera=False, buffered=False
         stage = "capture"
         run_stage(stage, [wine, captured_exe, *fixture_args, "--output", windows_path(captured_ppm)], captured,
                   capture_env, output / "capture.log", timeout)
+        if verify_buffer_readback:
+            validate_buffer_readback_log(output / "capture.log")
+            result["buffer_readback"]["capture"] = "PASS"
         result["stages"].append(stage)
         if buffered:
             stage = "trace_validation"
@@ -323,10 +347,14 @@ def main(argv=None):
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--camera", action="store_true", help="replay the synthetic XYZ camera fixture")
     modes.add_argument("--buffered", action="store_true", help="compare indexed D3D8 draws; no DX12 replay")
+    parser.add_argument("--verify-buffer-readback", action="store_true",
+                        help="verify fixture readback in both runs (requires --buffered)")
     args = parser.parse_args(argv)
+    if args.verify_buffer_readback and not args.buffered:
+        parser.error("--verify-buffer-readback requires --buffered")
     try:
         result = execute(args.engine, args.bottle, args.build_dir, args.output_dir, args.timeout,
-                         args.camera, args.buffered)
+                         args.camera, args.buffered, args.verify_buffer_readback)
     except RunError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

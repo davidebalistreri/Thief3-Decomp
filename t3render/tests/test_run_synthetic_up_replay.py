@@ -28,6 +28,13 @@ if os.environ.get("FAKE_TIMEOUT") == kind:
     time.sleep(30)
 if os.environ.get("FAKE_FAIL") == kind:
     sys.exit(37)
+if "--verify-buffer-readback" in args and os.environ.get("FAKE_READBACK_MISSING") != kind:
+    marker = "buffer_readback vertex_offset=20 vertex_bytes=80 index_offset=4 index_bytes=6 result=PASS"
+    if os.environ.get("FAKE_READBACK_BAD") == kind:
+        marker = marker.replace("index_bytes=6", "index_bytes=5")
+    print(marker, flush=True)
+    if os.environ.get("FAKE_READBACK_DUPLICATE") == kind:
+        print(marker, flush=True)
 def host(path):
     assert path.startswith("Z:")
     return pathlib.Path(path[2:].replace("\\", "/"))
@@ -103,7 +110,7 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
         self.output = self.root / "output with spaces"
 
     def run_runner(self, *, output=None, extra_env=None, timeout="5", engine=None, bottle=None, build=None,
-                   camera=False, buffered=False):
+                   camera=False, buffered=False, verify_buffer_readback=False):
         env = os.environ.copy()
         env.update({"FAKE_TRACE": str(self.trace), "FAKE_TRACE_CAMERA": str(self.camera_trace),
                     "FAKE_TRACE_BUFFERED": str(self.buffered_trace),
@@ -119,6 +126,8 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
             args.append("--camera")
         if buffered:
             args.append("--buffered")
+        if verify_buffer_readback:
+            args.append("--verify-buffer-readback")
         return subprocess.run(args, env=env, text=True, capture_output=True, timeout=20)
 
     def manifest(self):
@@ -195,6 +204,45 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
         result = self.run_runner(camera=True, buffered=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.output.exists())
+
+    def test_buffered_readback_checks_both_runs_and_reports_ranges(self):
+        result = self.run_runner(buffered=True, verify_buffer_readback=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        manifest = self.manifest()
+        self.assertEqual(manifest["buffer_readback"], {"requested": True, "baseline": "PASS", "capture": "PASS",
+                         "vertex_offset": 20, "vertex_bytes": 80, "index_offset": 4, "index_bytes": 6})
+        self.assertEqual(manifest["dx12_replay"], "not_run")
+        self.assertTrue(any("not serialized" in item for item in manifest["limitations"]))
+        for stage in ("baseline", "capture"):
+            self.assertIn("--verify-buffer-readback", self.log(stage)["args"])
+            self.assertIn("buffer_readback vertex_offset=20 vertex_bytes=80 index_offset=4 index_bytes=6 result=PASS",
+                          (self.output / f"{stage}.log").read_text())
+
+    def test_readback_missing_wrong_or_duplicate_result_fails_closed(self):
+        cases = (("FAKE_READBACK_MISSING", "baseline"), ("FAKE_READBACK_MISSING", "capture"),
+                 ("FAKE_READBACK_BAD", "baseline"), ("FAKE_READBACK_BAD", "capture"),
+                 ("FAKE_READBACK_DUPLICATE", "capture"))
+        for variable, stage in cases:
+            with self.subTest(variable=variable, stage=stage):
+                output = self.root / f"{variable}-{stage}"
+                result = self.run_runner(buffered=True, verify_buffer_readback=True, output=output,
+                                         extra_env={variable: stage})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("buffer readback PASS", result.stderr)
+                manifest = json.loads((output / "result.json").read_text())
+                self.assertEqual(manifest["failed_stage"], stage)
+                self.assertEqual(manifest["buffer_readback"][stage], "not_verified")
+                if stage == "capture":
+                    self.assertEqual(manifest["buffer_readback"]["baseline"], "PASS")
+                self.assertFalse((output / "replay.log").exists())
+
+    def test_readback_requires_buffered_mode_before_any_output(self):
+        for camera in (False, True):
+            with self.subTest(camera=camera):
+                result = self.run_runner(camera=camera, verify_buffer_readback=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("requires --buffered", result.stderr)
+                self.assertFalse(self.output.exists())
 
     def test_buffered_trace_malformed_or_wrong_bindings_fail(self):
         def remove_stream(draw): draw.pop("streams")

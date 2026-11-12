@@ -38,9 +38,9 @@ A separate `--buffered` fixture draws the same screen-space triangle with
 nonzero base vertex, minimum vertex and start index. Its D3D8 reference and
 proxy images matched on the tested runtime; see the
 [buffered fixture result](../benchmarks/d3d8/2026-11-12-buffered/result.json).
-This is a capture test only: buffer bytes and buffered DX12 replay are not yet
-implemented. The host runner's `--buffered` mode compares the two D3D8 images and validates
-the indexed draw, buffer bindings and offsets in the trace. An additional
+The proxy trace does not yet contain buffered bytes or support buffered DX12
+replay. The host runner's `--buffered` mode compares the two D3D8 images and
+validates the indexed draw, buffer bindings and offsets in the trace. An additional
 fixture snapshot experiment, described below, can replay its read-back bytes.
 
 The screen-space and camera UP replays do not exercise indexed draws. None of
@@ -106,12 +106,23 @@ the capture trace, and this option alone does not replay them. See the
 [managed readback result](../benchmarks/d3d8/2026-11-12-managed-readback/result.json)
 for the tested runtime and image hashes.
 
-Add `--replay-buffer-snapshot` together with `--buffered` and
-`--verify-buffer-readback` to replay the fixture-owned snapshot on DX12. The
-converter resolves its captured 16-bit indices, base vertex and offsets into a
-single UP triangle. It requires an explicit fixture attestation: the sidecar
-contains no independently verified render state or origin and is not a proxy
-trace. See the [snapshot replay result](../benchmarks/d3d12/2026-11-12-buffer-snapshot-replay/result.json).
+Instead of `--verify-buffer-readback`, pass `--wrapped-buffers` with
+`--buffered` to exercise fixture-owned wrappers around MANAGED, WRITEONLY
+vertex and index buffers. The fixture observes its application writes and
+unwraps the real resources at the device boundary. The runner requires both
+write and lifetime PASS markers in each log and checks both buffer descriptions
+in the proxy trace. This wrapper is isolated to the fixture,
+not the proxy, and is not a general COM replacement or a test of TDS.
+
+Add `--replay-buffer-snapshot` together with `--buffered` and either
+`--verify-buffer-readback` or `--wrapped-buffers` to replay the fixture-owned
+snapshot on DX12. The two buffer methods are mutually exclusive. The converter
+resolves 16-bit indices, base vertex and offsets into a single UP triangle. It
+requires an explicit fixture attestation: the sidecar contains no independently
+verified render state or origin and is not a proxy trace. The manifest records
+which fixture method produced the snapshot. See the [readback snapshot replay
+result](../benchmarks/d3d12/2026-11-12-buffer-snapshot-replay/result.json) and
+[WRITEONLY wrapper replay result](../benchmarks/d3d12/2026-11-12-wrapped-writeonly-replay/result.json).
 
 An experimental buffer-vtable replacement failed a Wine assertion and was
 discarded. The [failure manifest](../benchmarks/d3d8/2026-11-12-buffer-tracking-failure/result.json)

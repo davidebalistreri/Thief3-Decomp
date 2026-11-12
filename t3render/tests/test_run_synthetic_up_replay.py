@@ -35,6 +35,17 @@ if "--verify-buffer-readback" in args and os.environ.get("FAKE_READBACK_MISSING"
     print(marker, flush=True)
     if os.environ.get("FAKE_READBACK_DUPLICATE") == kind:
         print(marker, flush=True)
+if "--wrapped-buffers" in args:
+    for marker_name, marker in (("writes", "wrapped_buffer_writes vertex_bytes=80 index_bytes=6 result=PASS"),
+                                ("lifetime", "wrapped_buffer_lifetime result=PASS")):
+        case = kind + ":" + marker_name
+        if os.environ.get("FAKE_WRAP_MISSING") == case:
+            continue
+        if os.environ.get("FAKE_WRAP_BAD") == case:
+            marker = marker.replace("result=PASS", "result=FAIL")
+        print(marker, flush=True)
+        if os.environ.get("FAKE_WRAP_DUPLICATE") == case:
+            print(marker, flush=True)
 def host(path):
     assert path.startswith("Z:")
     return pathlib.Path(path[2:].replace("\\", "/"))
@@ -48,7 +59,8 @@ out.write_bytes(data)
 if kind == "capture":
     trace = host(os.environ["T3RENDER_CAPTURE_PATH"])
     assert not trace.exists()
-    name = "FAKE_TRACE_BUFFERED" if "--buffered" in args else ("FAKE_TRACE_CAMERA" if "--camera" in args else "FAKE_TRACE")
+    name = ("FAKE_TRACE_BUFFERED_WRAPPED" if "--wrapped-buffers" in args else
+            "FAKE_TRACE_BUFFERED" if "--buffered" in args else ("FAKE_TRACE_CAMERA" if "--camera" in args else "FAKE_TRACE"))
     shutil.copyfile(os.environ[name], trace)
     if "--buffer-snapshot" in args and not os.environ.get("FAKE_SNAPSHOT_MISSING"):
         snapshot = host(args[args.index("--buffer-snapshot") + 1])
@@ -74,15 +86,15 @@ def write_pe(path, *, machine=0x14c, dll=False, magic=0x10b):
     path.write_bytes(dos + header + optional)
 
 
-def buffered_fixture():
+def buffered_fixture(wrapped=False):
     events = fixture()
     draw = events[4]
     draw.update(call="DrawIndexedPrimitive", min_vertex_index=1, num_vertices=3, start_index=2,
                 vertex_stride=0, index_format=0,
                 streams=[{"stream": 0, "hr": 0, "buffer": "0x1234", "stride": 20,
-                          "description": {"size": 100, "fvf": 0x44}}],
+                          "description": {"size": 100, "fvf": 0x44, "usage": 8 if wrapped else 0, "pool": 1}}],
                 indices={"hr": 0, "buffer": "0x5678", "base_vertex_index": 1,
-                         "description": {"format": 101, "size": 10}})
+                         "description": {"format": 101, "size": 10, "usage": 8 if wrapped else 0, "pool": 1}})
     draw.pop("up_data")
     return events
 
@@ -114,6 +126,8 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
         self.camera_trace.write_text("".join(json.dumps(event) + "\n" for event in camera_fixture()), encoding="utf-8")
         self.buffered_trace = self.root / "buffered.jsonl"
         self.buffered_trace.write_text("".join(json.dumps(event) + "\n" for event in buffered_fixture()), encoding="utf-8")
+        self.wrapped_trace = self.root / "wrapped.jsonl"
+        self.wrapped_trace.write_text("".join(json.dumps(event) + "\n" for event in buffered_fixture(wrapped=True)), encoding="utf-8")
         self.buffer_snapshot = self.root / "buffer-snapshot.txt"
         vertices = [VERTICES[0], *VERTICES]
         vb = b"".join(struct.pack("<4fI", *vertex) for vertex in vertices)
@@ -123,10 +137,12 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
         self.output = self.root / "output with spaces"
 
     def run_runner(self, *, output=None, extra_env=None, timeout="5", engine=None, bottle=None, build=None,
-                   camera=False, buffered=False, verify_buffer_readback=False, replay_buffer_snapshot=False):
+                   camera=False, buffered=False, verify_buffer_readback=False, replay_buffer_snapshot=False,
+                   wrapped_buffers=False):
         env = os.environ.copy()
         env.update({"FAKE_TRACE": str(self.trace), "FAKE_TRACE_CAMERA": str(self.camera_trace),
-                    "FAKE_TRACE_BUFFERED": str(self.buffered_trace), "FAKE_SNAPSHOT": str(self.buffer_snapshot),
+                    "FAKE_TRACE_BUFFERED": str(self.buffered_trace), "FAKE_TRACE_BUFFERED_WRAPPED": str(self.wrapped_trace),
+                    "FAKE_SNAPSHOT": str(self.buffer_snapshot),
                     "WINEDLLPATH": "poison/dxmt",
                     "WINEDLLPATH_PREPEND": "poison/dxmt", "DYLD_LIBRARY_PATH": "poison",
                     "DYLD_FRAMEWORK_PATH": "poison", "T3RENDER_CAPTURE_KEY": "F11",
@@ -141,6 +157,8 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
             args.append("--buffered")
         if verify_buffer_readback:
             args.append("--verify-buffer-readback")
+        if wrapped_buffers:
+            args.append("--wrapped-buffers")
         if replay_buffer_snapshot:
             args.append("--replay-buffer-snapshot")
         return subprocess.run(args, env=env, text=True, capture_output=True, timeout=20)
@@ -248,6 +266,129 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
         self.assertIn("--buffer-snapshot", self.log("capture")["args"])
         self.assertIn("buffer_snapshot_to_up_packet.py", (self.output / "convert.log").read_text())
         self.assertTrue(any("proxy trace does not contain" in item for item in manifest["limitations"]))
+
+    def test_wrapped_buffer_capture_validates_write_and_lifetime_in_both_runs(self):
+        result = self.run_runner(buffered=True, wrapped_buffers=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        manifest = self.manifest()
+        self.assertEqual(manifest["status"], "PASS")
+        self.assertEqual(manifest["dx12_replay"], "not_run")
+        self.assertEqual(manifest["wrapped_buffers"], {"requested": True, "baseline": "PASS", "capture": "PASS"})
+        self.assertEqual((manifest["buffered_draw"]["vertex_usage"], manifest["buffered_draw"]["index_usage"]), (8, 8))
+        self.assertEqual((manifest["buffered_draw"]["vertex_pool"], manifest["buffered_draw"]["index_pool"]), (1, 1))
+        self.assertNotIn("buffer_readback", manifest)
+        self.assertNotIn("buffer_snapshot", manifest)
+        self.assertTrue(any("not integrated into the proxy" in text for text in manifest["limitations"]))
+        for stage in ("baseline", "capture"):
+            args = self.log(stage)["args"]
+            self.assertIn("--wrapped-buffers", args)
+            self.assertNotIn("--verify-buffer-readback", args)
+            self.assertNotIn("--buffer-snapshot", args)
+            log = (self.output / f"{stage}.log").read_text()
+            self.assertIn("wrapped_buffer_writes vertex_bytes=80 index_bytes=6 result=PASS", log)
+            self.assertIn("wrapped_buffer_lifetime result=PASS", log)
+        self.assertFalse((self.output / "replay.log").exists())
+
+    def test_wrapped_buffer_snapshot_replays_fixture_write_bytes(self):
+        result = self.run_runner(buffered=True, wrapped_buffers=True, replay_buffer_snapshot=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        manifest = self.manifest()
+        self.assertEqual(manifest["status"], "PASS")
+        self.assertEqual(manifest["dx12_replay"], "completed")
+        self.assertEqual(manifest["wrapped_buffers"], {"requested": True, "baseline": "PASS", "capture": "PASS"})
+        self.assertEqual(manifest["buffer_snapshot"], {"producer": "fixture_wrapper_not_proxy_trace", "conversion": "PASS"})
+        self.assertNotIn("buffer_readback", manifest)
+        self.assertEqual(manifest["stages"], ["baseline", "capture", "trace_validation", "convert", "replay", "compare"])
+        self.assertEqual(manifest["sha256"]["baseline_ppm"], manifest["sha256"]["replay_ppm"])
+        self.assertIn("buffer_snapshot", manifest["sha256"])
+        self.assertTrue((self.output / "packet.txt").read_text().startswith("T3R_UP_V1\n"))
+        self.assertNotIn("--buffer-snapshot", self.log("baseline")["args"])
+        self.assertIn("--buffer-snapshot", self.log("capture")["args"])
+        self.assertTrue(any("proxy trace does not contain" in item for item in manifest["limitations"]))
+
+    def test_wrapped_marker_missing_wrong_or_duplicate_fails_closed(self):
+        for variable in ("FAKE_WRAP_MISSING", "FAKE_WRAP_BAD", "FAKE_WRAP_DUPLICATE"):
+            for stage in ("baseline", "capture"):
+                for marker in ("writes", "lifetime"):
+                    with self.subTest(variable=variable, stage=stage, marker=marker):
+                        output = self.root / f"{variable}-{stage}-{marker}"
+                        result = self.run_runner(buffered=True, wrapped_buffers=True, replay_buffer_snapshot=True,
+                                                 output=output, extra_env={variable: stage + ":" + marker})
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("wrapped buffer write/lifetime PASS", result.stderr)
+                        manifest = json.loads((output / "result.json").read_text())
+                        self.assertEqual(manifest["failed_stage"], stage)
+                        self.assertEqual(manifest["wrapped_buffers"][stage], "not_verified")
+                        if stage == "capture":
+                            self.assertEqual(manifest["wrapped_buffers"]["baseline"], "PASS")
+                        self.assertFalse((output / "replay.log").exists())
+
+    def test_wrapped_requires_writeonly_usage_on_both_bound_buffers(self):
+        for binding in ("vertex", "index"):
+            for value in (0, None, True):
+                with self.subTest(binding=binding, value=value):
+                    events = buffered_fixture(wrapped=True)
+                    draw = events[4]
+                    desc = draw["streams"][0]["description"] if binding == "vertex" else draw["indices"]["description"]
+                    if value is None:
+                        del desc["usage"]
+                    else:
+                        desc["usage"] = value
+                    self.wrapped_trace.write_text("".join(json.dumps(event) + "\n" for event in events))
+                    output = self.root / f"usage-{binding}-{value}"
+                    result = self.run_runner(buffered=True, wrapped_buffers=True, replay_buffer_snapshot=True, output=output)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("WRITEONLY", result.stderr)
+                    manifest = json.loads((output / "result.json").read_text())
+                    self.assertEqual(manifest["failed_stage"], "trace_validation")
+                    self.assertFalse((output / "replay.log").exists())
+
+    def test_wrapped_requires_managed_pool_on_both_bound_buffers(self):
+        for binding in ("vertex", "index"):
+            for value in (0, None, True):
+                with self.subTest(binding=binding, value=value):
+                    events = buffered_fixture(wrapped=True)
+                    draw = events[4]
+                    desc = draw["streams"][0]["description"] if binding == "vertex" else draw["indices"]["description"]
+                    if value is None:
+                        del desc["pool"]
+                    else:
+                        desc["pool"] = value
+                    self.wrapped_trace.write_text("".join(json.dumps(event) + "\n" for event in events))
+                    output = self.root / f"pool-{binding}-{value}"
+                    result = self.run_runner(buffered=True, wrapped_buffers=True, replay_buffer_snapshot=True, output=output)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("MANAGED", result.stderr)
+                    manifest = json.loads((output / "result.json").read_text())
+                    self.assertEqual(manifest["failed_stage"], "trace_validation")
+                    self.assertFalse((output / "replay.log").exists())
+
+    def test_wrapped_snapshot_absent_or_corrupt_fails_before_replay(self):
+        for name in ("FAKE_SNAPSHOT_MISSING", "FAKE_SNAPSHOT_CORRUPT"):
+            with self.subTest(name=name):
+                output = self.root / ("wrapped-" + name)
+                result = self.run_runner(buffered=True, wrapped_buffers=True, replay_buffer_snapshot=True,
+                                         output=output, extra_env={name: "1"})
+                self.assertNotEqual(result.returncode, 0)
+                manifest = json.loads((output / "result.json").read_text())
+                self.assertEqual(manifest["failed_stage"], "convert")
+                self.assertEqual(manifest["buffer_snapshot"]["producer"], "fixture_wrapper_not_proxy_trace")
+                self.assertEqual(manifest["buffer_snapshot"]["conversion"], "not_verified")
+                self.assertEqual(manifest["dx12_replay"], "not_run")
+                self.assertFalse((output / "replay.log").exists())
+
+    def test_wrapped_mode_requires_buffered_and_excludes_readback(self):
+        for options in ({"wrapped_buffers": True},
+                        {"wrapped_buffers": True, "camera": True},
+                        {"wrapped_buffers": True, "buffered": True, "verify_buffer_readback": True}):
+            with self.subTest(options=options):
+                result = self.run_runner(**options)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.output.exists())
+        result = self.run_runner(buffered=True, replay_buffer_snapshot=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--verify-buffer-readback or --wrapped-buffers", result.stderr)
+        self.assertFalse(self.output.exists())
 
     def test_buffer_snapshot_absent_or_corrupt_fails_before_replay(self):
         for name in ("FAKE_SNAPSHOT_MISSING", "FAKE_SNAPSHOT_CORRUPT"):

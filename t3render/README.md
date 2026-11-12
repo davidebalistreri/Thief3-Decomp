@@ -49,7 +49,8 @@ The fixture explicitly unwraps resources before passing them to the real
 device. An optional `--buffer-snapshot new-file` serializes the observed
 application writes without READONLY locks on the buffers. The fixture also checks
 getter identity while wrappers are alive and that the device retains its raw
-bindings after the last wrapper reference is released.
+bindings after the last wrapper reference is released. Its [benchmark](benchmarks/d3d12/2026-11-12-wrapped-writeonly-replay/result.json)
+compares the synthetic D3D8 outputs and the DX12 replay.
 
 This harness is only for controlled, serial fixture calls; it is not connected
 to the proxy or TDS. Its `GetDevice` exposes the native device, unknown IIDs can

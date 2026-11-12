@@ -28,6 +28,8 @@ BUFFER_CONVERTER = Path(__file__).resolve().with_name("buffer_snapshot_to_up_pac
 PPM_HEADER = b"P6\n256 256\n255\n"
 PPM_SIZE = len(PPM_HEADER) + 256 * 256 * 3
 READBACK_MARKER = b"buffer_readback vertex_offset=20 vertex_bytes=80 index_offset=4 index_bytes=6 result=PASS"
+WRAPPED_WRITES_MARKER = b"wrapped_buffer_writes vertex_bytes=80 index_bytes=6 result=PASS"
+WRAPPED_LIFETIME_MARKER = b"wrapped_buffer_lifetime result=PASS"
 LIMITATIONS = [
     "Synthetic single triangle, 256x256, uniform opaque color.",
     "This is not a general T3 frame replay, gameplay parity, a PBR test, or a native Windows test.",
@@ -131,7 +133,16 @@ def validate_buffer_readback_log(path):
         raise RunError(f"missing or invalid buffer readback PASS for expected ranges; see {path}")
 
 
-def validate_buffered_trace(path):
+def validate_wrapped_buffers_log(path):
+    with path.open("rb") as log:
+        lines = [line.rstrip(b"\r\n") for line in log]
+    writes = [line for line in lines if line.startswith(b"wrapped_buffer_writes")]
+    lifetime = [line for line in lines if line.startswith(b"wrapped_buffer_lifetime")]
+    if writes != [WRAPPED_WRITES_MARKER] or lifetime != [WRAPPED_LIFETIME_MARKER]:
+        raise RunError(f"missing or invalid wrapped buffer write/lifetime PASS markers; see {path}")
+
+
+def validate_buffered_trace(path, wrapped_buffers=False):
     """Validate only the observed binding and draw metadata, not resource bytes."""
     try:
         records = trace_to_up_packet.validated_records(path)
@@ -183,21 +194,31 @@ def validate_buffered_trace(path):
         if (not bound(index) or integer(index.get("base_vertex_index")) != 1 or not isinstance(index_desc, dict) or
                 integer(index_desc.get("format")) != 101 or integer(index_desc.get("size")) != 10):
             raise RunError("buffered fixture index binding, base or description differs")
-        return {"call": "DrawIndexedPrimitive", **expected_draw, "stream": 0, "stride": 20,
-                "vertex_buffer_size": 100, "index_format": 101, "index_buffer_size": 10,
-                "base_vertex_index": 1}
+        if wrapped_buffers and (integer(vertex_desc.get("usage")) != 8 or integer(index_desc.get("usage")) != 8 or
+                                integer(vertex_desc.get("pool")) != 1 or integer(index_desc.get("pool")) != 1):
+            raise RunError("wrapped fixture requires WRITEONLY usage and MANAGED pool on both observed buffer bindings")
+        observed = {"call": "DrawIndexedPrimitive", **expected_draw, "stream": 0, "stride": 20,
+                    "vertex_buffer_size": 100, "index_format": 101, "index_buffer_size": 10,
+                    "base_vertex_index": 1}
+        if wrapped_buffers:
+            observed.update(vertex_usage=8, index_usage=8, vertex_pool=1, index_pool=1)
+        return observed
     except (trace_summary.TraceError, OSError, UnicodeError, ValueError) as exc:
         raise RunError(f"invalid buffered fixture trace: {exc}") from exc
 
 
 def execute(engine, bottle, build, output, timeout, camera=False, buffered=False,
-            verify_buffer_readback=False, replay_buffer_snapshot=False):
+            verify_buffer_readback=False, replay_buffer_snapshot=False, wrapped_buffers=False):
     if camera and buffered:
         raise RunError("camera and buffered are exclusive")
     if verify_buffer_readback and not buffered:
         raise RunError("buffer readback verification requires buffered mode")
-    if replay_buffer_snapshot and not (buffered and verify_buffer_readback):
-        raise RunError("buffer snapshot replay requires buffered mode and buffer readback verification")
+    if wrapped_buffers and not buffered:
+        raise RunError("wrapped buffers require buffered mode")
+    if wrapped_buffers and verify_buffer_readback:
+        raise RunError("wrapped buffers and buffer readback verification are exclusive")
+    if replay_buffer_snapshot and not (buffered and (verify_buffer_readback or wrapped_buffers)):
+        raise RunError("buffer snapshot replay requires buffered mode and either buffer readback verification or wrapped buffers")
     needs_replay = not buffered or replay_buffer_snapshot
     engine, bottle, build, output = map(valid_path, (engine, bottle, build, output))
     wine = engine / "engine/bin/wine"
@@ -231,7 +252,8 @@ def execute(engine, bottle, build, output, timeout, camera=False, buffered=False
         raise RunError(f"cannot create new output directory {output}: {exc}") from exc
 
     if replay_buffer_snapshot:
-        mode_limit = ("Only the fixture-owned READONLY snapshot is replayed; the proxy trace does not contain "
+        method = "wrapper-observed WRITEONLY" if wrapped_buffers else "READONLY"
+        mode_limit = (f"Only the fixture-owned {method} snapshot is replayed; the proxy trace does not contain "
                       "buffer bytes. Indexed vertices are converted to one unindexed synthetic triangle.")
     elif buffered:
         mode_limit = "Buffered capture records draw and binding metadata only; buffer bytes and DX12 replay are not available."
@@ -247,7 +269,13 @@ def execute(engine, bottle, build, output, timeout, camera=False, buffered=False
               "engine": str(engine), "bottle": str(bottle), "build_dir": str(build),
               "limitations": [mode_limit, *LIMITATIONS], "stages": [], "sha256": {}}
     if replay_buffer_snapshot:
-        result["buffer_snapshot"] = {"producer": "fixture_readback_not_proxy_trace", "conversion": "not_verified"}
+        producer = "fixture_wrapper_not_proxy_trace" if wrapped_buffers else "fixture_readback_not_proxy_trace"
+        result["buffer_snapshot"] = {"producer": producer, "conversion": "not_verified"}
+    if wrapped_buffers:
+        result["wrapped_buffers"] = {"requested": True, "baseline": "not_verified", "capture": "not_verified"}
+        result["limitations"].append(
+            "Fixture-owned wrappers observe writes to WRITEONLY buffers; they are not integrated into the proxy "
+            "and do not validate TDS or a general COM wrapper.")
     if verify_buffer_readback:
         result["buffer_readback"] = {"requested": True, "baseline": "not_verified", "capture": "not_verified",
                                      "vertex_offset": 20, "vertex_bytes": 80, "index_offset": 4, "index_bytes": 6}
@@ -290,12 +318,17 @@ def execute(engine, bottle, build, output, timeout, camera=False, buffered=False
         fixture_args = ["--buffered"] if buffered else (["--camera"] if camera else [])
         if verify_buffer_readback:
             fixture_args.append("--verify-buffer-readback")
+        if wrapped_buffers:
+            fixture_args.append("--wrapped-buffers")
         stage = "baseline"
         run_stage(stage, [wine, baseline_exe, *fixture_args, "--output", windows_path(baseline_ppm)], baseline, env,
                   output / "baseline.log", timeout)
         if verify_buffer_readback:
             validate_buffer_readback_log(output / "baseline.log")
             result["buffer_readback"]["baseline"] = "PASS"
+        if wrapped_buffers:
+            validate_wrapped_buffers_log(output / "baseline.log")
+            result["wrapped_buffers"]["baseline"] = "PASS"
         result["stages"].append(stage)
         capture_env = env.copy()
         capture_env.update({"WINEDLLOVERRIDES": "d3d8=n,b;nvapi64,nvngx=n,b;winemenubuilder.exe=d",
@@ -307,10 +340,13 @@ def execute(engine, bottle, build, output, timeout, camera=False, buffered=False
         if verify_buffer_readback:
             validate_buffer_readback_log(output / "capture.log")
             result["buffer_readback"]["capture"] = "PASS"
+        if wrapped_buffers:
+            validate_wrapped_buffers_log(output / "capture.log")
+            result["wrapped_buffers"]["capture"] = "PASS"
         result["stages"].append(stage)
         if buffered:
             stage = "trace_validation"
-            result["buffered_draw"] = validate_buffered_trace(trace)
+            result["buffered_draw"] = validate_buffered_trace(trace, wrapped_buffers=wrapped_buffers)
             result["stages"].append(stage)
         if needs_replay:
             stage = "convert"
@@ -371,18 +407,24 @@ def main(argv=None):
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--camera", action="store_true", help="replay the synthetic XYZ camera fixture")
     modes.add_argument("--buffered", action="store_true", help="compare indexed D3D8 draws; replay only with --replay-buffer-snapshot")
-    parser.add_argument("--verify-buffer-readback", action="store_true",
-                        help="verify fixture readback in both runs (requires --buffered)")
+    buffer_methods = parser.add_mutually_exclusive_group()
+    buffer_methods.add_argument("--verify-buffer-readback", action="store_true",
+                                help="verify fixture readback in both runs (requires --buffered)")
+    buffer_methods.add_argument("--wrapped-buffers", action="store_true",
+                                help="observe WRITEONLY fixture buffers through fixture-owned wrappers (requires --buffered)")
     parser.add_argument("--replay-buffer-snapshot", action="store_true",
-                        help="replay the fixture-owned indexed buffer snapshot on DX12 (requires --buffered --verify-buffer-readback)")
+                        help="replay the fixture-owned buffer snapshot on DX12 (requires --buffered and one buffer method)")
     args = parser.parse_args(argv)
     if args.verify_buffer_readback and not args.buffered:
         parser.error("--verify-buffer-readback requires --buffered")
-    if args.replay_buffer_snapshot and not (args.buffered and args.verify_buffer_readback):
-        parser.error("--replay-buffer-snapshot requires --buffered and --verify-buffer-readback")
+    if args.wrapped_buffers and not args.buffered:
+        parser.error("--wrapped-buffers requires --buffered")
+    if args.replay_buffer_snapshot and not (args.buffered and (args.verify_buffer_readback or args.wrapped_buffers)):
+        parser.error("--replay-buffer-snapshot requires --buffered and either --verify-buffer-readback or --wrapped-buffers")
     try:
         result = execute(args.engine, args.bottle, args.build_dir, args.output_dir, args.timeout,
-                         args.camera, args.buffered, args.verify_buffer_readback, args.replay_buffer_snapshot)
+                         args.camera, args.buffered, args.verify_buffer_readback, args.replay_buffer_snapshot,
+                         args.wrapped_buffers)
     except RunError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

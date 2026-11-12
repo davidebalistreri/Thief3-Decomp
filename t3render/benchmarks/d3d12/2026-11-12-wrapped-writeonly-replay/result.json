@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "test": "synthetic_writeonly_buffer_wrapper_dx12_replay",
+  "date": "2026-11-12",
+  "host": {
+    "os": "macOS 27.2.1",
+    "architecture": "arm64",
+    "gpu": "Apple M5 Pro"
+  },
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "d3d12_chain": "Wine D3D12/vkd3d -> Vulkan -> MoltenVK -> Metal"
+  },
+  "fixture": {
+    "source_commit": "b0b2b65",
+    "converter_source_commit": "e871c68",
+    "replay_source_commit": "0d89e00",
+    "fixture_source_sha256": "be19f98bc07fce0622d82c5d12465a15981603ed06555694a6ee377d5f0e4d66",
+    "wrapper_source_sha256": "6bd5eb0f5b08260597d440dbc874d6c7d3b5636e2b4229e240cd7a693c8bab51",
+    "fixture_executable_sha256": "09b03fc6b43fe921cb5ff1af7631602598ac477ae711c36fbad8990274f7127d",
+    "proxy_sha256": "c41d9e504b0946f5f9b0738e984ee757422cd0c41589eac587f8fa5860307444",
+    "replay_executable_sha256": "69624e092ded55b743a77bfe7b80832be83980d7699bf13c83f4baf7e895a5e0",
+    "producer": "isolated fixture COM wrappers observing application Lock/Unlock writes; not the proxy trace",
+    "pool": "D3DPOOL_MANAGED",
+    "usage": "D3DUSAGE_WRITEONLY for both VB and IB",
+    "vertex_offset": 20,
+    "vertex_bytes": 80,
+    "index_offset": 4,
+    "index_bytes": 6,
+    "base_vertex_index": 1,
+    "min_vertex_index": 1,
+    "num_vertices": 3,
+    "start_index": 2,
+    "snapshot": "buffer-snapshot.txt",
+    "snapshot_sha256": "29e651e9b59ce6af8b41f432fd68c74ee198666dd76656ae195395f494512708",
+    "converted_packet": "packet.txt",
+    "packet_sha256": "e1db18a81787457bd1197227484a5aa635551f222b88fef0c43d3ef0b9d946e5"
+  },
+  "result": {
+    "baseline_d3d8": "PASS",
+    "captured_d3d8": "PASS",
+    "d3d12_replay": "PASS",
+    "wrapper_application_writes": "PASS",
+    "wrapper_lifetime": "PASS",
+    "width": 256,
+    "height": 256,
+    "red_pixels": 19648,
+    "rgba_fnv1a64": "10b6d7ca2fd8394d",
+    "ppm_sha256_all_three": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679",
+    "image": "../2026-11-12-up-replay/triangle.png",
+    "comparison": "Reference D3D8, D3D8 with proxy, and synthetic DX12 replay PPM streams matched byte for byte."
+  },
+  "limitations": [
+    "Fixture wrappers are not integrated into the TDS proxy or a complete device wrapper.",
+    "The snapshot comes from fixture wrappers observing application write locks, not from proxy trace data.",
+    "Native GetDevice/unknown interfaces and duplicate adoption can escape or break COM identity; state blocks and global device alias invalidation are not covered.",
+    "One controlled, serial indexed triangle is tested; indexed vertices are expanded to an unindexed UP replay packet.",
+    "This Wine translation-layer test does not establish native Windows, TDS, gameplay, PBR or stealth correctness."
+  ]
+}

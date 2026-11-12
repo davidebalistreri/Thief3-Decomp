@@ -104,6 +104,45 @@ class CaptureHostTests(unittest.TestCase):
                 self.assertEqual([item["event"] for item in self.records()], ["header", "frame_begin", "draw"])
                 self.path.unlink()
 
+    def test_pre_reset_history_requires_opt_in_and_valid_framing(self):
+        self.run_capture("shader_history", frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1"})
+        records = self.records()
+        self.assertNotIn("declaration_history", records[0])
+        self.assertTrue(all("vertex_declaration_pre_reset" not in e for e in records if e["event"] == "draw"))
+        self.path.unlink()
+        self.run_capture("shader_history", frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1",
+                                                               "T3RENDER_CAPTURE_DECLARATION_HISTORY": "1"})
+        records = self.records()
+        self.assertEqual(records[0]["declaration_history"], {"requested": True, "words_per_observation": 1024,
+                         "words_per_frame": 262144, "words_per_device": 8192})
+        draws = [e for e in records if e["event"] == "draw"]
+        self.assertEqual(["vertex_declaration_pre_reset" in e for e in draws], [True, True, False, False, False])
+        self.assertEqual(draws[0]["vertex_declaration_pre_reset"], {
+            "status": "hypothesis", "source": "application_memory_before_reset", "generation": 9,
+            "reset_epoch": 3, "reset_hr": 0, "rebind_epoch": 4, "words": [0x20000000, 0xffffffff]})
+        self.assertEqual(draws[0]["vertex_declaration"]["status"], "unavailable")
+        self.assertIsNone(draws[0]["vertex_declaration"]["words"])
+        results = {e["op_id"]: e for e in records if e["event"] == "draw_result"}
+        self.assertFalse(results[draws[1]["op_id"]]["shader_stable"])
+        converted = subprocess.run([sys.executable, "-B", str(ROOT / "tools" / "trace_to_ir.py"), str(self.path)],
+                                   text=True, capture_output=True)
+        self.assertEqual(converted.returncode, 0, converted.stderr)
+        ir = json.loads(converted.stdout)
+        self.assertFalse(ir["replayable"])
+        commands = ir["frames"][0]["commands"]
+        self.assertEqual(commands[0]["vertex_declaration_pre_reset"]["status"], "hypothesis")
+        self.assertEqual(commands[0]["vertex_declaration_observed"]["status"], "unavailable")
+        self.assertNotIn("vertex_declaration_pre_reset", commands[1])
+
+    def test_pre_reset_history_frame_budget_resets_between_frames(self):
+        self.run_capture("shader_history_budget", frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1",
+            "T3RENDER_CAPTURE_DECLARATION_HISTORY": "1", "T3RENDER_CAPTURE_FRAMES": "2"})
+        draws = [e for e in self.records() if e["event"] == "draw"]
+        self.assertEqual(len(draws), 258)
+        self.assertTrue(all("vertex_declaration_pre_reset" in e for e in draws[:256]))
+        self.assertNotIn("vertex_declaration_pre_reset", draws[256])
+        self.assertIn("vertex_declaration_pre_reset", draws[257])
+
     def test_shader_unavailable_reason_contains_no_partial_words(self):
         self.run_capture("shader_reason", frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1"})
         records = self.records()

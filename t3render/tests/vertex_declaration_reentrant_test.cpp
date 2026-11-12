@@ -127,6 +127,20 @@ void ObservationAllocationFailureHasGenerationReason() {
     assert(next && registry.Observe(next, 98).status == ShaderObservationStatus::Candidate && registry.End(next));
 }
 
+void ResetHistoryCopyReentryDropsTheHypothesis() {
+    VertexDeclarationRegistry registry({1, 4, 8, 32, true});
+    active_registry = &registry;
+    active_device = registry.OpenDevice();
+    Register(registry, active_device, 97);
+    auto reset = registry.BeginReset(active_device); assert(reset && registry.EndReset(reset, 0));
+    auto set = registry.BeginSet(active_device); assert(set && registry.EndSet(set, 0, 97));
+    const auto draw = registry.BeginDraw(active_device); assert(draw);
+    allocation_hook = InvalidateActiveDevice;
+    auto result = registry.Observe(draw, 97);
+    assert(!allocation_hook.load() && result.status == ShaderObservationStatus::Unsafe &&
+           result.words.empty() && result.pre_reset_words.empty() && !registry.End(draw));
+}
+
 void MarkUnsafeDefersDeallocation() {
     VertexDeclarationRegistry registry({2, 4, 8, 32});
     active_registry = &registry;
@@ -380,6 +394,7 @@ int main() {
     AllocationCanReenterWithoutDeadlock();
     ReentrantInvalidationDiscardsCopiedObservation();
     ObservationAllocationFailureHasGenerationReason();
+    ResetHistoryCopyReentryDropsTheHypothesis();
     MarkUnsafeDefersDeallocation();
     DeallocationCanReenterWithoutDeadlock();
     ReentrantCloseDuringResetKeepsOldTicketInvalid();

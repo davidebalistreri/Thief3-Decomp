@@ -210,6 +210,30 @@ an earlier Reset attempt. Its HRESULT and shader survival were not recorded.
 This does not validate unobserved aliases or gameplay. The observer does not
 capture shader bytecode or constants and cannot make the frame replayable.
 
+#### Pre-reset history hypothesis
+
+`T3RENDER_CAPTURE_DECLARATION_HISTORY=1`, together with declaration capture,
+retains eligible complete application-memory snapshots across successful Reset
+calls. It is independently opt-in and suppressed when buffer observation is
+active. A later successful explicit `SetVertexShader` for the same numeric
+value permits an additional `vertex_declaration_pre_reset` field, labelled
+`hypothesis` with the pre-reset source and Reset/rebind sequence numbers. The
+ordinary declaration remains `unavailable` with null words. The optional IR
+field is available only after a matching successful, stable draw result; it is
+never used as a standard candidate or replay evidence. The numeric match can
+still be an FVF or reflect an unobserved alias, and even a completed scan can
+differ from the driver input. A failed or unobserved Reset, failed Set, Delete,
+collision, overlap or detected escape suppresses or discards the hypothesis.
+
+History mode reduces the entire per-device declaration payload budget,
+including live and retired/pinned data, to 8192 DWORDs (32 KiB); transient
+snapshot copies are outside that budget. Serialization is limited to 1024
+DWORDs per observation and 262144 per frame. A limit or allocation failure
+omits evidence or invalidates the device; it never invents data. A successful
+fixture Reset only characterizes its tested Highball runtime, not TDS or other
+drivers. Existing traces cannot recover words that were discarded before this
+option was enabled.
+
 ### Experimental buffered capture — isolated fixture only
 
 Set `T3RENDER_CAPTURE_BUFFERS=1` in addition to the capture configuration to

@@ -212,6 +212,102 @@ void UnavailableReasonsPreserveScannerStatus() {
            invalid.words.empty());
 }
 
+void ResetHistoryRequiresSuccessfulResetAndRebind() {
+    VertexDeclarationRegistry registry({2, 4, 8, 16, true});
+    const auto device = registry.OpenDevice();
+    const auto other = registry.OpenDevice();
+    Register(registry, device, 0x44);
+    Register(registry, other, 0x44, Complete({kStream0, kEnd}));
+    const auto original = Observe(registry, device, 0x44);
+    assert(original.status == ShaderObservationStatus::Candidate && original.pre_reset_words.empty());
+
+    auto pre_set = registry.BeginSet(device);
+    assert(pre_set && registry.EndSet(pre_set, 0, 0x44));
+    auto reset = registry.BeginReset(device);
+    assert(reset && registry.EndReset(reset, 0));
+    auto unbound = Observe(registry, device, 0x44);
+    assert(unbound.status == ShaderObservationStatus::Unavailable &&
+           unbound.reason == ShaderUnavailableReason::ResetAttempt && unbound.words.empty() && unbound.pre_reset_words.empty());
+    auto set = registry.BeginSet(device);
+    assert(set && registry.EndSet(set, 0, 0x44));
+    auto history = Observe(registry, device, 0x44);
+    assert(history.status == ShaderObservationStatus::Unavailable && history.words.empty() &&
+           history.reason == ShaderUnavailableReason::ResetAttempt && history.scan_status == DeclarationStatus::Complete &&
+           history.generation == original.generation && history.pre_reset_words == original.words &&
+           history.reset_epoch == reset.sequence && history.reset_hr == 0 && history.rebind_epoch == set.sequence &&
+           history.rebind_epoch > history.reset_epoch);
+    assert(Observe(registry, other, 0x44).status == ShaderObservationStatus::Candidate);
+
+    // A generic End does not claim that a native Set succeeded.
+    set = registry.BeginSet(device); assert(set && registry.End(set));
+    assert(Observe(registry, device, 0x44).pre_reset_words.empty());
+    set = registry.BeginSet(device); assert(set && registry.EndSet(set, 0, 0x44));
+    // Any different or failed Set removes the prior explicit rebind proof.
+    set = registry.BeginSet(device); assert(set && registry.EndSet(set, 0, 0x55));
+    assert(Observe(registry, device, 0x44).pre_reset_words.empty());
+    set = registry.BeginSet(device); assert(set && registry.EndSet(set, 0x80004005u, 0x44));
+    assert(Observe(registry, device, 0x44).pre_reset_words.empty());
+    set = registry.BeginSet(device); assert(set && registry.EndSet(set, 0, 0x44));
+    assert(!Observe(registry, device, 0x44).pre_reset_words.empty());
+
+    // Each new Reset requires another successful explicit Set. An unknown
+    // generic End, or a failed native Reset, irreversibly discards history.
+    reset = registry.BeginReset(device); assert(reset && registry.EndReset(reset, 1));
+    assert(Observe(registry, device, 0x44).pre_reset_words.empty());
+    set = registry.BeginSet(device); assert(set && registry.EndSet(set, 0, 0x44));
+    history = Observe(registry, device, 0x44);
+    assert(history.reset_epoch == reset.sequence && history.reset_hr == 1 && history.rebind_epoch == set.sequence);
+    reset = registry.BeginReset(device); assert(reset && registry.EndReset(reset, 0x80004005u));
+    set = registry.BeginSet(device); assert(set && registry.EndSet(set, 0, 0x44));
+    assert(Observe(registry, device, 0x44).pre_reset_words.empty());
+    reset = registry.BeginReset(device); assert(reset && registry.EndReset(reset, 0));
+    set = registry.BeginSet(device); assert(set && registry.EndSet(set, 0, 0x44));
+    assert(Observe(registry, device, 0x44).pre_reset_words.empty());
+
+    // Successful Delete then re-Create produces a fresh generation only.
+    auto deletion = registry.BeginDelete(device, 0x44);
+    assert(deletion && registry.EndDelete(deletion, true));
+    Register(registry, device, 0x44, Complete({kStream0, kEnd}));
+    const auto fresh = Observe(registry, device, 0x44);
+    assert(fresh.status == ShaderObservationStatus::Candidate && fresh.generation != original.generation &&
+           fresh.pre_reset_words.empty() && fresh.words.size() == 2);
+    reset = registry.BeginReset(device); assert(reset && registry.EndReset(reset, 0));
+    set = registry.BeginSet(device); assert(set && registry.EndSet(set, 0, 0x44));
+    assert(Observe(registry, device, 0x44).pre_reset_words == fresh.words);
+    deletion = registry.BeginDelete(device, 0x44); assert(deletion && registry.EndDelete(deletion, false));
+    set = registry.BeginSet(device); assert(set && registry.EndSet(set, 0, 0x44));
+    assert(Observe(registry, device, 0x44).pre_reset_words.empty());
+    registry.CloseDevice(device); registry.CloseDevice(other);
+}
+
+void ResetHistoryFailsClosedOnCollisionBudgetAndUnknownResult() {
+    VertexDeclarationRegistry registry({2, 4, 8, 8, true});
+    const auto device = registry.OpenDevice();
+    Register(registry, device, 1);
+    auto reset = registry.BeginReset(device); assert(reset && registry.EndReset(reset, 0));
+    auto set = registry.BeginSet(device); assert(set && registry.EndSet(set, 0, 1));
+    assert(!Observe(registry, device, 1).pre_reset_words.empty());
+    Register(registry, device, 1); // numeric collision destroys the old association
+    set = registry.BeginSet(device); assert(set && registry.EndSet(set, 0, 1));
+    auto observed = Observe(registry, device, 1);
+    assert(observed.reason == ShaderUnavailableReason::HandleCollision && observed.pre_reset_words.empty());
+
+    const auto other = registry.OpenDevice();
+    Register(registry, other, 2);
+    reset = registry.BeginReset(other); assert(reset && registry.End(reset)); // no native HRESULT
+    set = registry.BeginSet(other); assert(set && registry.EndSet(set, 0, 2));
+    assert(Observe(registry, other, 2).pre_reset_words.empty());
+    registry.CloseDevice(other);
+
+    VertexDeclarationRegistry bounded({1, 4, 8, 3, true});
+    const auto limited = bounded.OpenDevice();
+    Register(bounded, limited, 1);
+    reset = bounded.BeginReset(limited); assert(reset && bounded.EndReset(reset, 0));
+    const auto create = bounded.BeginCreate(limited);
+    assert(create && !bounded.EndCreate(create, true, true, 2, Complete())); // retained payload remains charged
+    assert(!bounded.BeginDraw(limited)); // budget exhaustion never produces a hypothesis
+}
+
 void TombstonesReleaseBoundedStorage() {
     VertexDeclarationRegistry registry({1, 2, 4, 4});
     const auto device = registry.OpenDevice();
@@ -281,6 +377,8 @@ int main() {
     DeviceLifetimeReuseAndFailures();
     UnavailableAndCapacityFailClosed();
     UnavailableReasonsPreserveScannerStatus();
+    ResetHistoryRequiresSuccessfulResetAndRebind();
+    ResetHistoryFailsClosedOnCollisionBudgetAndUnknownResult();
     TombstonesReleaseBoundedStorage();
     OverlapInvalidatesOnlyAffectedDevice();
     InvalidProtocolAndEscapeAreConservative();

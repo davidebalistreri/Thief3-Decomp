@@ -430,7 +430,17 @@ void EnableDeclarationObserver() noexcept {
         if (GetEnvironmentVariableW(L"T3RENDER_CAPTURE_DECLARATIONS", option, 2) != 1 || option[0] != L'1') return;
         Registry* registry = GetRegistry();
         if (!registry) return;
-        auto candidate = std::make_shared<t3render::ir::VertexDeclarationRegistry>();
+        wchar_t history[2]{};
+        const bool history_requested = GetEnvironmentVariableW(L"T3RENDER_CAPTURE_DECLARATION_HISTORY", history, 2) == 1 &&
+                                       history[0] == L'1';
+        t3render::ir::ShaderRegistryLimits limits;
+        if (history_requested) {
+            limits.preserve_reset_history = true;
+            // History mode's entire per-device payload budget (including live,
+            // pinned and retired words) is 32 KiB; no parallel history cache.
+            limits.words_per_device = 8192;
+        }
+        auto candidate = std::make_shared<t3render::ir::VertexDeclarationRegistry>(limits);
         std::lock_guard<std::mutex> lock(registry->mutex);
         if (!registry->declarations) registry->declarations = std::move(candidate);
     } catch (...) {
@@ -699,7 +709,7 @@ HRESULT STDMETHODCALLTYPE DeviceReset(IDirect3DDevice8* device, D3DPRESENT_PARAM
     error.Restore();
     const HRESULT hr = reinterpret_cast<ResetDevice>(binding->original[Layout().device_reset])(device, params);
     error.Capture();
-    if (binding->declarations) (void)binding->declarations->End(ticket);
+    if (binding->declarations) (void)binding->declarations->EndReset(ticket, static_cast<std::uint32_t>(hr));
     Observe([&] { CaptureQueryScope scope(device); t3render::CaptureReset(device, params, hr); });
     return hr;
 }
@@ -880,7 +890,7 @@ HRESULT STDMETHODCALLTYPE DeviceSetVertexShader(IDirect3DDevice8* device, DWORD 
     error.Restore();
     const HRESULT hr = reinterpret_cast<SetVertexShader>(binding->original[Layout().device_set_vertex_shader])(device, value);
     error.Capture();
-    (void)binding->declarations->End(ticket);
+    (void)binding->declarations->EndSet(ticket, static_cast<std::uint32_t>(hr), value);
     return hr;
 }
 

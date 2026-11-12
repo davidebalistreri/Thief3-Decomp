@@ -92,6 +92,35 @@ data is removed after validation. No third-party modules are needed.
   what the driver consumes. `shader_stable` does not establish alias coverage,
   shader identity, GPU input or replayability. Generations are scoped to the
   observed device lifetime and are not persistent asset identifiers.
+- A separate optional `vertex_declaration_pre_reset` is an **unverified
+  hypothesis**, never a candidate for replay. It reports DWORDs sampled from
+  application memory before a Reset, with the recorded generation, numeric
+  shader value, reset/rebind epochs and Reset/draw HRESULTs. It does not
+  establish shader survival, identity, the driver's declaration or the data
+  used by the draw. A successful Reset and a later observed rebind are
+  necessary, not sufficient, evidence.
+
+  The header must request `declaration_history` and advertise positive limits
+  of at most 1024 words per observation and 262144 words per frame, with the
+  latter at least the former. The normal declaration observer must also be
+  requested. The source record must identify itself as `hypothesis` from
+  `application_memory_before_reset`, have a nonzero uint64 generation and
+  reset epoch, a later uint64 rebind epoch, a successful Reset HRESULT and a
+  framed declaration within the advertised observation limit. The same
+  draw's separately validated declaration must be `unavailable` with
+  `reason=reset_attempt`, `scan_status=complete`, and the same generation.
+  The corresponding draw result must match by operation ID in the same frame,
+  succeed and have `shader_stable=true`; the shader value must be uint32.
+  Failure of any condition omits the hypothesis from the command.
+
+  The frame budget counts every raw history word in all draw attempts, even
+  failed, unstable or otherwise ineligible draws. If an emitted payload's
+  words are missing, malformed, exceed the advertised per-observation limit or their
+  size cannot be determined, or the total exceeds the frame limit, the IR
+  omits **all** such hypotheses for that frame. Budgets are independent
+  between frames. Raw fields are preserved without validation in the D3D8
+  compatibility extension. Old traces retain their previous shape; no history
+  makes the frame replayable.
 - Material values are captured legacy parameters and texture slots, not PBR
   values or texture roles. Lights are reported only when observed: the list is
   explicitly incomplete even when empty, since capture samples a limited range

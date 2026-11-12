@@ -37,12 +37,18 @@ struct ShaderObservation {
     bool has_scan_status = false;
     DeclarationStatus scan_status = DeclarationStatus::Unreadable;
     std::vector<std::uint32_t> words;
+    // Quarantined pre-reset application data. This is a distinct hypothesis,
+    // never a candidate or proof of the post-reset driver input.
+    std::uint64_t reset_epoch = 0, rebind_epoch = 0;
+    std::uint32_t reset_hr = 0;
+    std::vector<std::uint32_t> pre_reset_words;
 };
 struct ShaderRegistryLimits {
     std::size_t devices = 8;
     std::size_t handles_per_device = 1024;
     std::size_t words_per_declaration = 1024;
     std::size_t words_per_device = 65536;
+    bool preserve_reset_history = false;
 };
 
 class VertexDeclarationRegistry final {
@@ -78,6 +84,10 @@ public:
     // Only a successful native Delete removes the unavailable handle; a failed
     // Delete keeps the tombstone so a later Create cannot silently reuse it.
     bool EndDelete(ShaderTicket ticket, bool native_success) noexcept;
+    // HRESULT is preserved as raw 32-bit bits. Failed Reset or Set never
+    // authorizes pre-reset history; native calls are never made here.
+    bool EndReset(ShaderTicket ticket, std::uint32_t hr) noexcept;
+    bool EndSet(ShaderTicket ticket, std::uint32_t hr, std::uint32_t value) noexcept;
     bool End(ShaderTicket ticket) noexcept;
 
     // Only during a live Draw ticket. The caller must also require End(draw)
@@ -98,6 +108,9 @@ private:
         std::uint64_t generation = 0;
         ShaderUnavailableReason reason = ShaderUnavailableReason::None;
         DeclarationStatus scan_status = DeclarationStatus::Unreadable;
+        bool reset_history = false;
+        std::uint64_t reset_epoch = 0;
+        std::uint32_t reset_hr = 0;
         Device* owner = nullptr;
         Entry* retired_next = nullptr;
         std::shared_ptr<const Payload> payload;
@@ -109,6 +122,8 @@ private:
         std::uint64_t next_operation = 1, next_generation = 1;
         ShaderTicket pending{};
         std::uint32_t pending_handle = 0;
+        std::uint32_t rebind_value = 0;
+        std::uint64_t rebind_epoch = 0;
         std::size_t words = 0;
         std::size_t preparing = 0, retiring = 0;
         std::vector<Entry> handles;

@@ -57,6 +57,12 @@ class ProxyTest(unittest.TestCase):
                      "decl-entry-wants-draw"):
             with self.subTest(mode=mode): self.run_mode(mode, timeout=10)
 
+    def test_pre_reset_history_is_separate_opt_in_and_fail_closed(self):
+        for mode in ("hist-on", "hist-opt-out", "hist-invalid-option", "hist-without-decl", "hist-combined",
+                     "hist-failed-reset", "hist-failed-rebind", "hist-no-rebind", "hist-other-rebind",
+                     "hist-delete-fail", "hist-collision", "hist-stateblock", "hist-alias", "hist-overlap"):
+            with self.subTest(mode=mode): self.run_mode(mode, timeout=10)
+
     def test_forwarding_and_lifecycle(self):
         self.run_mode()
 

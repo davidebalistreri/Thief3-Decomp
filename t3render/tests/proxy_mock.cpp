@@ -43,7 +43,9 @@ t3render::ir::RegistryResult T3ProxyTestReadIndex(IDirect3DDevice8*, IDirect3DIn
 static std::vector<std::string> events;
 static bool enabled = false, writable = true, reject_swap = false, recursive = false;
 static bool buffers_requested = false;
-static bool declarations_requested = false, declaration_testing = false, wants_draw = true;
+static bool declarations_requested = false, history_requested = false, invalid_history_option = false;
+static bool declaration_testing = false, wants_draw = true;
+static bool declaration_reset_fails = false, declaration_set_fails = false, declaration_delete_fails = false;
 static bool declaration_create_fails = false, declaration_output_unreadable = false;
 static bool declaration_getter_fails = false, declaration_draw_fails = false;
 static int shader_getter_reentry = 0, shader_writer_reentry = 0;
@@ -198,9 +200,10 @@ extern "C" UINT GetSystemDirectoryW(wchar_t* out,UINT) { const wchar_t path[]=L"
 extern "C" DWORD GetEnvironmentVariableW(const wchar_t* name, wchar_t* value, DWORD size) {
  const bool buffers = !std::wcscmp(name,L"T3RENDER_CAPTURE_BUFFERS");
  const bool declarations = !std::wcscmp(name,L"T3RENDER_CAPTURE_DECLARATIONS");
- if ((!buffers || !buffers_requested) && (!declarations || !declarations_requested)) return 0;
+ const bool history = !std::wcscmp(name,L"T3RENDER_CAPTURE_DECLARATION_HISTORY");
+ if ((!buffers || !buffers_requested) && (!declarations || !declarations_requested) && (!history || !history_requested)) return 0;
  if (size < 2) return 2;
- value[0]=(buffers && invalid_buffer_option) ? L'0' : L'1'; value[1]=0; return 1;
+ value[0]=((buffers && invalid_buffer_option) || (history && invalid_history_option)) ? L'0' : L'1'; value[1]=0; return 1;
 }
 extern "C" HANDLE GetCurrentProcess() { return reinterpret_cast<HANDLE>(1); }
 extern "C" BOOL ReadProcessMemory(HANDLE,const void* source,void* destination,SIZE_T length,SIZE_T* copied) {
@@ -306,7 +309,7 @@ std::uint64_t CaptureClear(IDirect3DDevice8* d,DWORD count,const D3DRECT* rectan
 void CaptureClearResult(IDirect3DDevice8* d,std::uint64_t token,HRESULT hr) {
  SetLastError(991); MockWriterEntry(3,d); assert(token && hr==-71); events.push_back("capture-clear-result");
 }
-void CaptureReset(IDirect3DDevice8* d,const D3DPRESENT_PARAMETERS* p,HRESULT hr) { SetLastError(991); MockWriterEntry(5,d); assert(hr==12); observed_params=const_cast<D3DPRESENT_PARAMETERS*>(p); events.push_back("capture-reset"); }
+void CaptureReset(IDirect3DDevice8* d,const D3DPRESENT_PARAMETERS* p,HRESULT hr) { SetLastError(991); MockWriterEntry(5,d); assert(hr==(declaration_reset_fails ? -81 : 12)); observed_params=const_cast<D3DPRESENT_PARAMETERS*>(p); events.push_back("capture-reset"); }
 void CapturePresent(IDirect3DDevice8* d,HRESULT hr) {
  SetLastError(991); MockWriterEntry(4,d); assert(hr==13); events.push_back("capture-present");
  if(stop_on_present) enabled=false;
@@ -326,7 +329,7 @@ static HRESULT query_device(IDirect3DDevice8* d,REFIID,void** out) {
 }
 static ULONG add_device(IDirect3DDevice8* d) { return ++d->refs; }
 static ULONG release_device(IDirect3DDevice8* d) { ULONG refs=--d->refs; if (!refs) last_freed=d; return refs; }
-static HRESULT reset(IDirect3DDevice8*,D3DPRESENT_PARAMETERS*) { reset_input_error=GetLastError(); SetLastError(912); events.push_back("reset"); return 12; }
+static HRESULT reset(IDirect3DDevice8*,D3DPRESENT_PARAMETERS*) { reset_input_error=GetLastError(); SetLastError(912); events.push_back("reset"); return declaration_reset_fails ? -81 : 12; }
 static HRESULT present(IDirect3DDevice8*,const RECT*,const RECT*,HWND,const RGNDATA*) { present_input_error=GetLastError(); SetLastError(913); events.push_back("present"); return 13; }
 static HRESULT clear(IDirect3DDevice8*,DWORD count,const D3DRECT* rectangles,DWORD flags,D3DCOLOR color,float depth,DWORD stencil) {
  clear_input_error=GetLastError(); assert(count==2 && rectangles==clear_rectangles && flags==7 && color==0x12345678 && depth==0.75f && stencil==9);
@@ -410,7 +413,9 @@ static HRESULT create_shader(IDirect3DDevice8*,const DWORD*,const DWORD*,DWORD* 
  return S_OK;
 }
 static HRESULT set_shader(IDirect3DDevice8*,DWORD value) {
- shader_input_error=GetLastError(); SetLastError(952); shader_value=value; return S_OK;
+ shader_input_error=GetLastError(); SetLastError(952);
+ if (declaration_set_fails) return -82;
+ shader_value=value; return S_OK;
 }
 static HRESULT get_shader(IDirect3DDevice8* device,DWORD* out) {
  ++declaration_getter_count;
@@ -423,12 +428,77 @@ static HRESULT get_shader(IDirect3DDevice8* device,DWORD* out) {
  if (declaration_getter_fails) return E_FAIL;
  *out=shader_value; return S_OK;
 }
-static HRESULT delete_shader(IDirect3DDevice8*,DWORD) { shader_input_error=GetLastError(); SetLastError(954); return S_OK; }
+static HRESULT delete_shader(IDirect3DDevice8*,DWORD) { shader_input_error=GetLastError(); SetLastError(954); return declaration_delete_fails ? -83 : S_OK; }
 static IDirect3D8Vtbl factory_vt{query_factory,add_factory,release_factory,make_device};
 static IDirect3DDevice8Vtbl device_vt{query_device,add_device,release_device,reset,present,clear,draw,draw_indexed,draw_up,draw_indexed_up,
  create_vertex,create_index,set_stream,get_stream,set_indices,get_indices,process_vertices,
  begin_state_block,end_state_block,apply_state_block,capture_state_block,delete_state_block,create_state_block,
  create_shader,set_shader,get_shader,delete_shader};
+
+static int DeclarationHistoryBoundaryTest(const std::string& mode) {
+ using t3render::ir::ShaderObservationStatus;
+ events.reserve(1024);
+ enabled=true; declaration_testing=true; declarations_requested=mode!="hist-without-decl";
+ history_requested=mode!="hist-opt-out"; invalid_history_option=mode=="hist-invalid-option";
+ buffers_requested=mode=="hist-combined";
+ factory={&factory_vt,1}; devices[0]={&device_vt,1}; devices[1]={&device_vt,1};
+ auto* f=Proxy_Direct3DCreate8(220); D3DPRESENT_PARAMETERS params{23}; IDirect3DDevice8* d=nullptr;
+ assert(f->lpVtbl->CreateDevice(f,0,0,nullptr,0,&params,&d)==S_OK);
+ const DWORD words[]={1u<<29,(2u<<29)|(2u<<16),0xffffffffu};
+ DWORD handle=0;
+ SetLastError(101);
+ assert(d->lpVtbl->CreateVertexShader(d,words,nullptr,&handle,0)==S_OK && shader_input_error==101 && GetLastError()==951);
+ SetLastError(102);
+ assert(d->lpVtbl->SetVertexShader(d,handle)==S_OK && shader_input_error==102 && GetLastError()==952);
+ declaration_reset_fails=mode=="hist-failed-reset";
+ SetLastError(103);
+ assert(d->lpVtbl->Reset(d,&params)==(declaration_reset_fails ? -81 : 12) && reset_input_error==103 && GetLastError()==912);
+ if (declaration_reset_fails) {
+  declaration_reset_fails=false;
+  assert(d->lpVtbl->Reset(d,&params)==12); // recovery cannot revive an unknown failed-reset lifetime
+ }
+ if (mode=="hist-collision") { DWORD duplicate=0; assert(d->lpVtbl->CreateVertexShader(d,words,nullptr,&duplicate,0)==S_OK); }
+ if (mode=="hist-delete-fail") {
+  declaration_delete_fails=true;
+  SetLastError(104); assert(d->lpVtbl->DeleteVertexShader(d,handle)==-83 && shader_input_error==104 && GetLastError()==954);
+  declaration_delete_fails=false;
+ }
+ if (mode=="hist-stateblock") assert(d->lpVtbl->ApplyStateBlock(d,7)==23);
+ if (mode=="hist-alias") { device_query_alias=true; void* alias=nullptr; assert(d->lpVtbl->QueryInterface(d,IID_IDirect3DDevice8,&alias)==S_OK); }
+ if (mode!="hist-no-rebind") {
+  declaration_set_fails=mode=="hist-failed-rebind";
+  SetLastError(105);
+  assert(d->lpVtbl->SetVertexShader(d,mode=="hist-other-rebind" ? 0xf0000002u : handle)==
+         (declaration_set_fails ? -82 : S_OK));
+  assert(shader_input_error==105 && GetLastError()==952);
+  declaration_set_fails=false;
+ }
+ if (mode=="hist-other-rebind") shader_value=handle; // simulate an untracked alias changing the current value
+ if (mode=="hist-overlap") {
+  block_draw=true; std::thread drawer([&] { assert(d->lpVtbl->DrawPrimitive(d,4,0,1)==14); });
+  while (!draw_entered) std::this_thread::yield();
+  assert(d->lpVtbl->SetVertexShader(d,handle)==S_OK);
+  allow_draw=true; drawer.join(); block_draw=false;
+ } else {
+  SetLastError(106); assert(d->lpVtbl->DrawPrimitive(d,4,0,1)==14 && draw_input_error==106 && GetLastError()==955);
+ }
+ if (!declarations_requested || buffers_requested) {
+  assert(!observed_shader_present && !observed_shader_result);
+  return 0;
+ }
+ assert(observed_shader_present && observed_shader_result && observed_shader_buffer_stable==-1);
+ const bool expected = mode=="hist-on" || mode=="hist-overlap";
+ if (expected) {
+  assert(observed_shader.declaration.status==ShaderObservationStatus::Unavailable &&
+         observed_shader.declaration.reason==t3render::ir::ShaderUnavailableReason::ResetAttempt &&
+         observed_shader.declaration.words.empty() &&
+         observed_shader.declaration.pre_reset_words==std::vector<std::uint32_t>(std::begin(words),std::end(words)) &&
+         observed_shader.declaration.reset_hr==12 && observed_shader.declaration.reset_epoch &&
+         observed_shader.declaration.rebind_epoch>observed_shader.declaration.reset_epoch);
+ } else assert(observed_shader.declaration.pre_reset_words.empty());
+ assert(observed_shader_stable==(mode!="hist-stateblock" && mode!="hist-alias" && mode!="hist-overlap"));
+ return 0;
+}
 
 static int DeclarationBoundaryTest(const std::string& mode) {
  using t3render::ir::ShaderObservationStatus;
@@ -975,6 +1045,7 @@ static int BufferBoundaryTest(const std::string& mode) {
 }
 
 int main(int argc, char** argv) {
+ if(argc==2 && std::string(argv[1]).find("hist-")==0) return DeclarationHistoryBoundaryTest(argv[1]);
  if(argc==2 && std::string(argv[1]).find("decl-")==0) return DeclarationBoundaryTest(argv[1]);
  if(argc==2) return BufferBoundaryTest(argv[1]);
  factory={&factory_vt,1}; devices[0]={&device_vt,1}; devices[1]={&device_vt,1};

@@ -331,6 +331,55 @@ def observed_declaration(draw, result, header):
     return observed
 
 
+def pre_reset_frame_words(draw, header):
+    """Account for every emitted history payload, including failed draws.
+
+    An unmeasurable or malformed payload makes the frame's history unusable;
+    the raw trace remains available in the compatibility extension.
+    """
+    if "vertex_declaration_pre_reset" not in draw:
+        return 0
+    raw = draw["vertex_declaration_pre_reset"]
+    if not isinstance(raw, dict) or not framed_declaration(raw.get("words")):
+        return None
+    limit = uint32(object_or_empty(header.get("declaration_history")).get("words_per_observation"))
+    if limit is None or len(raw["words"]) > limit:
+        return None
+    return len(raw["words"])
+
+
+def pre_reset_declaration(draw, result, header, within_frame_budget):
+    """Keep prior application-memory data explicitly separate from candidates."""
+    capability = object_or_empty(header.get("declaration_history"))
+    per_observation = uint32(capability.get("words_per_observation"))
+    per_frame = uint32(capability.get("words_per_frame"))
+    if (capability.get("requested") is not True or per_observation is None or
+            not 1 <= per_observation <= 1024 or per_frame is None or
+            not per_observation <= per_frame <= 262144 or not within_frame_budget):
+        return None
+    raw = draw.get("vertex_declaration_pre_reset")
+    if not isinstance(raw, dict) or raw.get("status") != "hypothesis" or \
+            raw.get("source") != "application_memory_before_reset":
+        return None
+    generation = integer(raw.get("generation"))
+    reset_epoch = integer(raw.get("reset_epoch"))
+    rebind_epoch = integer(raw.get("rebind_epoch"))
+    if (generation is None or not 1 <= generation <= 0xffffffffffffffff or
+            reset_epoch is None or not 1 <= reset_epoch <= 0xffffffffffffffff or
+            rebind_epoch is None or not reset_epoch < rebind_epoch <= 0xffffffffffffffff or
+            hresult_succeeded(raw.get("reset_hr")) is not True or
+            not framed_declaration(raw.get("words")) or len(raw["words"]) > per_observation):
+        return None
+    observation = observed_declaration(draw, result, header)
+    if (observation["status"] != "unavailable" or observation.get("reason") != "reset_attempt" or
+            observation.get("scan_status") != "complete" or observation["generation"] != generation):
+        return None
+    return {"status": "hypothesis", "source": raw["source"], "shader_value": observation["shader_value"],
+            "generation": generation, "words": raw["words"][:], "reset_epoch": reset_epoch,
+            "reset_hr": raw["reset_hr"], "rebind_epoch": rebind_epoch,
+            "shader_stable": observation["shader_stable"], "draw_hresult": observation["draw_hresult"]}
+
+
 def buffer_binding(record):
     """Validate a getter's resource identity and declared byte size."""
     if not isinstance(record, dict) or hresult_succeeded(record.get("hr")) is not True:
@@ -544,6 +593,8 @@ def convert(path):
     shader_pending = {}
     buffered_results = []
     frame_buffer_bytes = 0
+    pre_reset_results = []
+    frame_history_words = 0
     draw_index = 0
     for line_number, event in enumerate(records, 1):
         kind = event["event"]
@@ -556,6 +607,8 @@ def convert(path):
             shader_pending = {}
             buffered_results = []
             frame_buffer_bytes = 0
+            pre_reset_results = []
+            frame_history_words = 0
             current = {"frame": event["frame"], "commands": [],
                        "compatibility": {"d3d8": {"frame_begin": event, "events": [], "frame_end": None}}}
             ir["frames"].append(current)
@@ -564,9 +617,18 @@ def convert(path):
             within_budget = frame_buffer_bytes is not None and limit is not None and frame_buffer_bytes <= limit
             for mesh_record, draw, result, indexed in buffered_results:
                 mesh_record["buffered_data_observed"] = buffered_data(draw, result, records[0], indexed, within_budget)
+            limit = uint32(object_or_empty(records[0].get("declaration_history")).get("words_per_frame"))
+            within_budget = frame_history_words is not None and limit is not None and frame_history_words <= limit
+            for command, draw, result in pre_reset_results:
+                history = pre_reset_declaration(draw, result, records[0], within_budget)
+                if history is not None:
+                    command["vertex_declaration_pre_reset"] = history
             current["compatibility"]["d3d8"]["frame_end"] = event
             current = None
         elif kind == "draw":
+            used_words = pre_reset_frame_words(event, records[0])
+            frame_history_words = (frame_history_words + used_words
+                                   if frame_history_words is not None and used_words is not None else None)
             if "buffer_data" in event:
                 used = buffered_frame_bytes(event)
                 frame_buffer_bytes = (frame_buffer_bytes + used
@@ -599,6 +661,8 @@ def convert(path):
                 command, draw = shader_pending.pop(event["op_id"])
                 if "vertex_declaration" in draw or "shader_stable" in event:
                     command["vertex_declaration_observed"] = observed_declaration(draw, event, records[0])
+                if "vertex_declaration_pre_reset" in draw:
+                    pre_reset_results.append((command, draw, event))
             if kind == "draw_result" and event.get("op_id") in buffered_pending:
                 mesh_record, draw, indexed = buffered_pending.pop(event["op_id"])
                 buffered_results.append((mesh_record, draw, event, indexed))

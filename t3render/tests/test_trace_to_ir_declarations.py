@@ -20,11 +20,24 @@ DRAW = {"event": "draw", "frame": 0, "op_id": 1, "call": "DrawPrimitiveUP", "ver
         "vertex_declaration": DECLARATION}
 RESULT = {"event": "draw_result", "frame": 0, "op_id": 1, "hr": 0, "shader_stable": True}
 END = {"event": "frame_end", "frame": 0, "present_hr": 0, "concurrent_operations": False}
+HISTORY = {"status": "hypothesis", "source": "application_memory_before_reset", "generation": 5,
+           "words": [0x20000000, 0x40020000, 0xffffffff], "reset_epoch": 1,
+           "reset_hr": 0, "rebind_epoch": 2}
 
 
 def events():
     return copy.deepcopy([HEADER, {"event": "frame_begin", "frame": 0}, DRAW, RESULT, END,
                           {"event": "capture_end", "frames": 1}])
+
+
+def history_events():
+    records = events()
+    records[0]["declaration_history"] = {"requested": True, "words_per_observation": 1024,
+                                         "words_per_frame": 262144}
+    records[2]["vertex_declaration"] = {"status": "unavailable", "generation": 5, "words": None,
+                                        "reason": "reset_attempt", "scan_status": "complete"}
+    records[2]["vertex_declaration_pre_reset"] = copy.deepcopy(HISTORY)
+    return records
 
 
 class DeclarationTraceTests(unittest.TestCase):
@@ -216,6 +229,131 @@ class DeclarationTraceTests(unittest.TestCase):
         del records[2]["vertex_declaration"]; del records[3]["shader_stable"]
         command = self.convert(records)["frames"][0]["commands"][0]
         self.assertNotIn("vertex_declaration_observed", command)
+
+    def test_pre_reset_is_a_separate_paired_hypothesis(self):
+        records = history_events()
+        output = self.convert(records)
+        command = output["frames"][0]["commands"][0]
+        self.assertEqual(command["vertex_declaration_pre_reset"], {
+            **HISTORY, "shader_value": 0x44, "shader_stable": True, "draw_hresult": 0})
+        self.assertEqual(command["vertex_declaration_observed"]["status"], "unavailable")
+        self.assertIsNone(command["vertex_declaration_observed"]["words"])
+        self.assertEqual(command["compatibility"]["d3d8"]["draw"], records[2])
+        self.assertFalse(output["replayable"])
+        records[2]["vertex_declaration_pre_reset"]["reset_hr"] = 1  # S_FALSE is successful
+        self.assertEqual(self.convert(records)["frames"][0]["commands"][0]
+                         ["vertex_declaration_pre_reset"]["reset_hr"], 1)
+
+    def test_pre_reset_rejects_invalid_capabilities_and_results(self):
+        cases = ("missing_header", "disabled", "not_bool", "capture_disabled", "no_capture_header",
+                 "word_limit_zero", "word_limit_bool", "word_limit_large", "word_limit_small",
+                 "frame_limit_zero", "frame_limit_large", "frame_limit_bool", "failed_signed",
+                 "failed_unsigned", "unstable", "missing_stability", "bad_shader")
+        for case in cases:
+            records = history_events()
+            cap = records[0]["declaration_history"]
+            if case == "missing_header": del records[0]["declaration_history"]
+            if case == "disabled": cap["requested"] = False
+            if case == "not_bool": cap["requested"] = "true"
+            if case == "capture_disabled": records[0]["declaration_capture"]["requested"] = False
+            if case == "no_capture_header": del records[0]["declaration_capture"]
+            if case == "word_limit_zero": cap["words_per_observation"] = 0
+            if case == "word_limit_bool": cap["words_per_observation"] = True
+            if case == "word_limit_large": cap["words_per_observation"] = 1025
+            if case == "word_limit_small": cap["words_per_observation"] = 2
+            if case == "frame_limit_zero": cap["words_per_frame"] = 0
+            if case == "frame_limit_large": cap["words_per_frame"] = 262145
+            if case == "frame_limit_bool": cap["words_per_frame"] = True
+            if case == "failed_signed": records[3]["hr"] = -1
+            if case == "failed_unsigned": records[3]["hr"] = 0x80004005
+            if case == "unstable": records[3]["shader_stable"] = False
+            if case == "missing_stability": del records[3]["shader_stable"]
+            if case == "bad_shader": records[2]["vertex_shader"] = True
+            with self.subTest(case=case):
+                command = self.convert(records)["frames"][0]["commands"][0]
+                self.assertNotIn("vertex_declaration_pre_reset", command)
+                self.assertEqual(command["compatibility"]["d3d8"]["draw"], records[2])
+
+    def test_pre_reset_requires_matching_unavailable_generation_and_reset_rebind(self):
+        mutations = (("status", "candidate"), ("reason", "delete_failed"), ("scan_status", "unreadable"),
+                     ("generation", 6), ("generation", None), ("words", [0xffffffff]))
+        for field, value in mutations:
+            records = history_events(); records[2]["vertex_declaration"][field] = value
+            with self.subTest(declaration_field=field, value=value):
+                self.assertNotIn("vertex_declaration_pre_reset", self.convert(records)["frames"][0]["commands"][0])
+        mutations = (("status", "candidate"), ("source", "driver"), ("generation", 0),
+                     ("generation", True), ("generation", 1 << 64), ("reset_epoch", 0),
+                     ("reset_epoch", True), ("reset_epoch", 2), ("reset_epoch", 1 << 64),
+                     ("rebind_epoch", 1), ("rebind_epoch", True), ("rebind_epoch", 1 << 64),
+                     ("reset_hr", -1), ("reset_hr", 0x80004005), ("reset_hr", True),
+                     ("reset_hr", 1 << 32), ("words", None), ("words", []),
+                     ("words", [0xffffffff, 0]), ("words", [True, 0xffffffff]),
+                     ("words", [0] * 1024 + [0xffffffff]))
+        for field, value in mutations:
+            records = history_events(); records[2]["vertex_declaration_pre_reset"][field] = value
+            with self.subTest(history_field=field, value=str(value)[:30]):
+                self.assertNotIn("vertex_declaration_pre_reset", self.convert(records)["frames"][0]["commands"][0])
+        for field in HISTORY:
+            records = history_events(); del records[2]["vertex_declaration_pre_reset"][field]
+            with self.subTest(missing=field):
+                self.assertNotIn("vertex_declaration_pre_reset", self.convert(records)["frames"][0]["commands"][0])
+
+    def test_pre_reset_budget_includes_failed_unstable_and_malformed_later_draws(self):
+        for mode in ("exact", "over", "failed", "unstable", "bad_type", "bad_framing", "bad_component_limit"):
+            records = history_events()
+            frame_limit = 6 if mode == "exact" else 10 if mode == "bad_component_limit" else 5
+            records[0]["declaration_history"].update(words_per_observation=3, words_per_frame=frame_limit)
+            second = copy.deepcopy(records[2]); second["op_id"] = 2
+            result = dict(RESULT, op_id=2)
+            if mode == "failed": result["hr"] = -1
+            if mode == "unstable": result["shader_stable"] = False
+            if mode == "bad_type": second["vertex_declaration_pre_reset"]["words"] = "unmeasurable"
+            if mode == "bad_framing": second["vertex_declaration_pre_reset"]["words"] = [0]
+            if mode == "bad_component_limit": second["vertex_declaration_pre_reset"]["words"] = [0, 0, 0, 0xffffffff]
+            records[2:4] = [records[2], second, result, records[3]]
+            records[-2]["concurrent_operations"] = True
+            with self.subTest(mode=mode):
+                commands = self.convert(records)["frames"][0]["commands"]
+                self.assertEqual(["vertex_declaration_pre_reset" in command for command in commands],
+                                 [True, True] if mode == "exact" else [False, False])
+
+    def test_pre_reset_budget_is_independent_per_frame_and_ids_are_frame_local(self):
+        first = history_events()[:-1]
+        first[0]["declaration_history"].update(words_per_observation=3, words_per_frame=3)
+        second = history_events()[1:-1]
+        for item in second: item["frame"] = 1
+        second[1]["vertex_declaration"]["generation"] = 8
+        second[1]["vertex_declaration_pre_reset"]["generation"] = 8
+        records = first + second + [{"event": "capture_end", "frames": 2}]
+        frames = self.convert(records)["frames"]
+        self.assertEqual([frame["commands"][0]["vertex_declaration_pre_reset"]["generation"] for frame in frames],
+                         [5, 8])
+        first[2]["vertex_declaration_pre_reset"]["words"] = None
+        frames = self.convert(records)["frames"]
+        self.assertNotIn("vertex_declaration_pre_reset", frames[0]["commands"][0])
+        self.assertEqual(frames[1]["commands"][0]["vertex_declaration_pre_reset"]["generation"], 8)
+
+    def test_pre_reset_bad_metadata_discards_only_its_draw_but_still_counts_words(self):
+        records = history_events()
+        records[0]["declaration_history"].update(words_per_observation=3, words_per_frame=6)
+        second = copy.deepcopy(records[2]); second["op_id"] = 2
+        second["vertex_declaration_pre_reset"]["rebind_epoch"] = 1
+        records[2:4] = [records[2], records[3], second, dict(RESULT, op_id=2)]
+        commands = self.convert(records)["frames"][0]["commands"]
+        self.assertIn("vertex_declaration_pre_reset", commands[0])
+        self.assertNotIn("vertex_declaration_pre_reset", commands[1])
+        records[0]["declaration_history"]["words_per_frame"] = 5
+        commands = self.convert(records)["frames"][0]["commands"]
+        self.assertTrue(all("vertex_declaration_pre_reset" not in command for command in commands))
+
+    def test_pre_reset_without_paired_result_cannot_escape_validation(self):
+        for mutation in ("missing", "wrong_id", "wrong_frame"):
+            records = history_events()
+            if mutation == "missing": del records[3]
+            if mutation == "wrong_id": records[3]["op_id"] = 2
+            if mutation == "wrong_frame": records[3]["frame"] = 1
+            with self.subTest(mutation=mutation), self.assertRaises(trace_summary.TraceError):
+                self.convert(records)
 
 
 if __name__ == "__main__":

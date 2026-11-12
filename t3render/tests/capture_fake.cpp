@@ -324,6 +324,45 @@ int main(int argc, char** argv) {
         t3render::CaptureAbandonDevice(scenario == "shader_abandon_all" ? nullptr : &device);
         t3render::CaptureDrawResult(&device, token, S_OK);
         t3render::CapturePresent(&device, S_OK);
+    } else if (scenario == "shader_history" || scenario == "shader_history_budget") {
+        t3render::CapturePresent(&device, S_OK);
+        t3render::ShaderSnapshot snapshot;
+        snapshot.getter_result = S_OK;
+        snapshot.value = 0xf0000001u;
+        auto& declaration = snapshot.declaration;
+        declaration.status = t3render::ir::ShaderObservationStatus::Unavailable;
+        declaration.reason = t3render::ir::ShaderUnavailableReason::ResetAttempt;
+        declaration.generation = 9;
+        declaration.has_scan_status = true;
+        declaration.scan_status = t3render::ir::DeclarationStatus::Complete;
+        declaration.reset_epoch = 3;
+        declaration.reset_hr = 0;
+        declaration.rebind_epoch = 4;
+        declaration.pre_reset_words = {0x20000000u, 0xffffffffu};
+        if (scenario == "shader_history_budget") {
+            declaration.pre_reset_words.assign(1024, 0);
+            declaration.pre_reset_words.back() = 0xffffffffu;
+        }
+        auto call = draw; call.shader_snapshot = &snapshot;
+        const unsigned count = scenario == "shader_history_budget" ? 257 : 5;
+        for (unsigned i=0; i<count; ++i) {
+            if (scenario == "shader_history") {
+                if (i == 2) declaration.rebind_epoch = declaration.reset_epoch; // no post-reset rebind
+                if (i == 3) { declaration.rebind_epoch = 4; declaration.reason = t3render::ir::ShaderUnavailableReason::HandleCollision; }
+                if (i == 4) { declaration.reason = t3render::ir::ShaderUnavailableReason::ResetAttempt;
+                              declaration.pre_reset_words = {0x20000000u}; } // no END
+            }
+            const auto token = t3render::CaptureDraw(&device, call);
+            if (!token) return 8;
+            t3render::CaptureShaderDrawResult(&device, token, S_OK, -1, i!=1);
+        }
+        t3render::CapturePresent(&device, S_OK);
+        if (scenario == "shader_history_budget") {
+            const auto token = t3render::CaptureDraw(&device, call);
+            if (!token) return 8;
+            t3render::CaptureShaderDrawResult(&device, token, S_OK, -1, true);
+            t3render::CapturePresent(&device, S_OK);
+        }
     } else if (scenario == "shader_reason") {
         t3render::CapturePresent(&device, S_OK);
         t3render::ShaderSnapshot snapshot;

@@ -18,7 +18,12 @@ tokens and tracks observed numeric handles with generations and bounded memory.
 Begin/end tickets are intended to bracket intercepted Create/Delete/Set/Reset
 and draw calls without holding registry locks across any driver call. Overlap
 poisons that device's observations; Delete and Reset mark known handles
-unavailable before the native call, even if it later fails. A failed Delete
+unavailable before the native call, even if it later fails. In the optional
+history mode only, complete available payloads are quarantined across a
+successful Reset under the same per-device budget. A successful explicit Set
+of the same numeric value after that Reset can expose a separate pre-reset
+hypothesis; it never restores the standard candidate. Failed or unknown Reset
+results, Delete attempts, collisions and unsafe overlaps discard that payload. A failed Delete
 retains an unavailable tombstone; only a successful Delete removes it. Reset
 retains tombstones because shader survival across Reset has not been verified.
 If a successful Create returns an already-observed handle, its declaration is

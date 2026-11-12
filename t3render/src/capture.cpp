@@ -31,6 +31,9 @@ constexpr uint64_t kUpComponentLimit = 256 * 1024;
 constexpr uint64_t kUpFrameLimit = 8 * 1024 * 1024;
 constexpr uint64_t kBufferComponentLimit = 256 * 1024;
 constexpr uint64_t kBufferFrameLimit = 8 * 1024 * 1024;
+constexpr uint64_t kHistoryObservationWords = 1024;
+constexpr uint64_t kHistoryFrameWords = 262144;
+constexpr uint64_t kHistoryDeviceWords = 8192;
 constexpr DWORD kClearRectLimit = 256;
 constexpr size_t kPendingOperationLimit = 4096;
 enum class OperationKind { Draw, Clear };
@@ -49,6 +52,7 @@ struct CaptureState {
     bool triggered = false;
     bool buffer_requested = false;
     bool declaration_requested = false;
+    bool history_requested = false;
     bool begun = false;
     bool had_reset = false;
     uint64_t frame = 0;
@@ -58,6 +62,7 @@ struct CaptureState {
     uint64_t draws = 0;
     uint64_t up_bytes = 0;  // successfully emitted raw bytes, not hex characters
     uint64_t buffer_bytes = 0;
+    uint64_t history_words = 0;
     uint64_t next_operation = 1;
     bool concurrent_operations = false;
     std::unordered_map<uint64_t, OperationKind> pending_operations;
@@ -148,6 +153,7 @@ void Initialize(CaptureState& s) {
     const std::wstring trigger_path = Environment(L"T3RENDER_CAPTURE_TRIGGER_PATH");
     s.buffer_requested = Environment(L"T3RENDER_CAPTURE_BUFFERS") == L"1";
     s.declaration_requested = Environment(L"T3RENDER_CAPTURE_DECLARATIONS") == L"1";
+    s.history_requested = Environment(L"T3RENDER_CAPTURE_DECLARATION_HISTORY") == L"1";
     // Missing means the legacy single frame; an explicitly empty, truncated,
     // or malformed value must not silently start a capture.
     wchar_t frames[2]{};
@@ -206,7 +212,11 @@ bool Open(CaptureState& s) {
         << "\"buffer_capture\":{\"requested\":" << (s.buffer_requested ? "true" : "false")
         << ",\"encoding\":\"hex\",\"component_limit_bytes\":" << kBufferComponentLimit
         << ",\"frame_limit_bytes\":" << kBufferFrameLimit << "},\"declaration_capture\":{\"requested\":"
-        << (s.declaration_requested ? "true" : "false") << "},\"limitations\":["
+        << (s.declaration_requested ? "true" : "false") << '}';
+    if (s.history_requested) out << ",\"declaration_history\":{\"requested\":true,\"words_per_observation\":"
+        << kHistoryObservationWords << ",\"words_per_frame\":" << kHistoryFrameWords
+        << ",\"words_per_device\":" << kHistoryDeviceWords << '}';
+    out << ",\"limitations\":["
         << "\"texture bytes and T3 asset names are not captured\","
         << "\"optional buffer shadows are bounded observations, not proof of driver input\","
         << "\"UP data is bounded, may be unavailable, and may change between snapshot and draw\","
@@ -779,6 +789,29 @@ const char* DeclarationUnavailableReason(ir::ShaderUnavailableReason value) noex
     return "unknown";
 }
 
+// Validate framing without allocating inside the capture mutex. CONST/EXT
+// payload DWORDs are opaque and can themselves equal the END token.
+bool FramedHistory(const std::vector<std::uint32_t>& words) noexcept {
+    if (words.empty() || words.size() > kHistoryObservationWords) return false;
+    size_t position = 0;
+    while (position < words.size()) {
+        const auto token = words[position++];
+        if (token == 0xffffffffu) return position == words.size();
+        const unsigned type = token >> 29;
+        size_t payload = 0;
+        switch (type) {
+        case 0: if (token != 0) return false; break;
+        case 1: case 2: case 3: break;
+        case 4: payload = ((token >> 25) & 0x0fu) * 4u; break;
+        case 5: payload = (token >> 24) & 0x1fu; break;
+        default: return false;
+        }
+        if (payload > words.size() - position) return false;
+        position += payload;
+    }
+    return false;
+}
+
 bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint64_t operation) {
     const bool up = draw.kind == DrawKind::PrimitiveUP || draw.kind == DrawKind::IndexedPrimitiveUP;
     UpBytes vertex, index;
@@ -862,6 +895,7 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
     }
     const HRESULT ps_hr = device->GetPixelShader(&ps);
     out << "],\"vertex_shader\":";
+    uint64_t history_words_emitted = 0;
     if (SUCCEEDED(vs_hr)) out << vs; else out << "null";
     if (draw.shader_snapshot) {
         const auto& declaration = draw.shader_snapshot->declaration;
@@ -889,6 +923,25 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
                 << "\",\"scan_status\":\"" << DeclarationScanStatus(declaration.scan_status) << '\"';
         }
         out << '}';
+        const auto count = declaration.pre_reset_words.size();
+        if (s.history_requested && s.declaration_requested && SUCCEEDED(vs_hr) &&
+            declaration.status == ir::ShaderObservationStatus::Unavailable &&
+            declaration.reason == ir::ShaderUnavailableReason::ResetAttempt && declaration.has_scan_status &&
+            declaration.scan_status == ir::DeclarationStatus::Complete && declaration.generation &&
+            declaration.reset_epoch && declaration.rebind_epoch > declaration.reset_epoch &&
+            !(declaration.reset_hr & 0x80000000u) && FramedHistory(declaration.pre_reset_words) &&
+            s.history_words <= kHistoryFrameWords && count <= kHistoryFrameWords - s.history_words) {
+            out << ",\"vertex_declaration_pre_reset\":{\"status\":\"hypothesis\","
+                << "\"source\":\"application_memory_before_reset\",\"generation\":" << declaration.generation
+                << ",\"reset_epoch\":" << declaration.reset_epoch << ",\"reset_hr\":" << declaration.reset_hr
+                << ",\"rebind_epoch\":" << declaration.rebind_epoch << ",\"words\":[";
+            for (size_t i = 0; i < count; ++i) {
+                if (i) out << ',';
+                out << declaration.pre_reset_words[i];
+            }
+            out << "]}";
+            history_words_emitted = count;
+        }
     }
     out << ",\"pixel_shader\":";
     if (SUCCEEDED(ps_hr)) out << ps; else out << "null";
@@ -916,6 +969,7 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
     }
     out << "}\n";
     if (!Write(s, out.str())) return false;
+    s.history_words += history_words_emitted;
     ++s.draws;
     return true;
 }
@@ -1075,6 +1129,7 @@ void CaptureDeviceReleased(IDirect3DDevice8* device) {
         s.draws = 0;
         s.up_bytes = 0;
         s.buffer_bytes = 0;
+        s.history_words = 0;
         s.had_reset = false;
         s.next_operation = 1;
         s.pending_operations.clear();
@@ -1208,6 +1263,7 @@ void CapturePresent(IDirect3DDevice8* device, HRESULT result) {
             s.draws = 0;
             s.up_bytes = 0;
             s.buffer_bytes = 0;
+            s.history_words = 0;
             s.had_reset = false;
             s.concurrent_operations = false;
             ++s.frame;

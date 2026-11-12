@@ -1,0 +1,236 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_buffer_alias",
+  "date": "2026-11-12",
+  "environment": "macOS, Highball x64-crossover26.3-r30, Games bottle",
+  "proxy_source_commit": "996e878",
+  "status": "PARTIAL",
+  "fixture_sha256": "06cb7ecc00910e2212f5cdd70ef8b8861144e41a4fc7cb205a6dc0f187387d78",
+  "proxy_sha256": "be7a3882694208d381ba26fdd3cd941ed76e28f8d139b0eca04edd470c22e4aa",
+  "original_result_sha256": "f5ef52c75a1689e28e0f2e4a9a10d9a69b5688c30b83d046c80e581455a06869",
+  "artifact_directory": "build/t3render-captures/buffer-alias-isolated-20261112-review-1",
+  "summary": {
+    "cases": 20,
+    "aliases_exercised": 18,
+    "acquisition_failures": 2,
+    "control_draws_with_captured_writeonly_vb_ib": 20,
+    "alias_draws_with_unavailable_buffer_window": 4,
+    "rgb_images_match": 20,
+    "process_vertices_successes": 18
+  },
+  "interpretation": [
+    "The four unavailable buffer windows follow successful GetDevice on VB/IB wrappers, which deliberately invalidates observation.",
+    "Both surface-container acquisitions returned 0x80004002 in baseline and proxy.",
+    "The original manifest was partial for the two acquisition failures. The updated runner additionally marks unstable alias draws partial and validated all 20 retained traces."
+  ],
+  "limitations": [
+    "Synthetic fixture only; no TDS process or game data and no real TDS frame capture.",
+    "Only same-pointer and same-vtable aliases were exercised; distinct aliases are never given wrapped buffers.",
+    "Successful ProcessVertices HRESULTs do not establish correctness of the transformed output bytes.",
+    "RGB parity is not proof of alpha parity, complete COM coverage, reset, state-block or concurrent lifetime safety.",
+    "The result is specific to this Wine/Highball runtime; native Windows and gameplay remain untested.",
+    "The observer remains fixture-only and is not proven safe for TDS."
+  ],
+  "cases": {
+    "device_qi": {
+      "acquisition_status": "exercised",
+      "acquisition_stage": "device_qi",
+      "acquisition_hresult": "0x00000000",
+      "alias_buffer_stable": true,
+      "baseline_log_sha256": "5a752f6e05647145c6d4165e034ba659b3737da21d1802bb0284b79d9f514ac8",
+      "proxy_log_sha256": "d0162e499dc5dace30f25d1198560db70b7fa4c7a4889cdda5004a3cc7732d28",
+      "proxy_trace_sha256": "9941c16cd068652d706aaaada8d9426c73b472bca005d5dd26113fedd26d002c",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    },
+    "vb_device": {
+      "acquisition_status": "exercised",
+      "acquisition_stage": "buffer_get_device",
+      "acquisition_hresult": "0x00000000",
+      "alias_buffer_stable": false,
+      "baseline_log_sha256": "f4c285721abeafe7e0eb82eab089977522b220a1f61a3fe9f49857a618520c77",
+      "proxy_log_sha256": "ad1bfdb36a546cc5291c51faff6912d824df137721ef1659098f6ac1d2483dcf",
+      "proxy_trace_sha256": "832ffa49da6db09fb2d83e7f58a46782b369de17b4635e9b71ca66328b26df47",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    },
+    "ib_device": {
+      "acquisition_status": "exercised",
+      "acquisition_stage": "buffer_get_device",
+      "acquisition_hresult": "0x00000000",
+      "alias_buffer_stable": false,
+      "baseline_log_sha256": "5960c6dbbdd41be46d427184f2f10bd6861e8d92feedbec47b6cdd43d68047c2",
+      "proxy_log_sha256": "763f57a8478cc7b9eef87cd3ec3d048f23063bee09ee921f39ed0219c7bd4726",
+      "proxy_trace_sha256": "832ffa49da6db09fb2d83e7f58a46782b369de17b4635e9b71ca66328b26df47",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    },
+    "vb_unknown": {
+      "acquisition_status": "exercised",
+      "acquisition_stage": "buffer_roundtrip_get_device",
+      "acquisition_hresult": "0x00000000",
+      "alias_buffer_stable": false,
+      "baseline_log_sha256": "96e04b2a3f5f9a22737568ebddb6882aa0ea939e2db83c86ccb4aecf34d95118",
+      "proxy_log_sha256": "a12ec3f9bdd79ba1dedc94767a0e9396fe6f5ebbe02c66153495e5efc1b14bc3",
+      "proxy_trace_sha256": "cfd695b036ff8902809e945bf72b828c6a9fd52ff301fa23c999613b11b48eb2",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    },
+    "ib_unknown": {
+      "acquisition_status": "exercised",
+      "acquisition_stage": "buffer_roundtrip_get_device",
+      "acquisition_hresult": "0x00000000",
+      "alias_buffer_stable": false,
+      "baseline_log_sha256": "95968966a435e4f71bb5db83b3d98a7f25fd575a03dad5e14fd0c803a46f60d8",
+      "proxy_log_sha256": "a7269e98f96faf69de47661d67f5126e750449fc4ee4c8f83d9ea192f9d3ca38",
+      "proxy_trace_sha256": "cfd695b036ff8902809e945bf72b828c6a9fd52ff301fa23c999613b11b48eb2",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    },
+    "texture_device": {
+      "acquisition_status": "exercised",
+      "acquisition_stage": "texture_get_device",
+      "acquisition_hresult": "0x00000000",
+      "alias_buffer_stable": true,
+      "baseline_log_sha256": "e16200fd43af2d599c212ab12370d690b7d4534d6804ce49ba345913c84646b9",
+      "proxy_log_sha256": "96493d2bd40395f3b54cf94ef2c22d80d886101de654c247486c0f033ff6f34c",
+      "proxy_trace_sha256": "494f8292ae58215eec7825c4e0af8725c02c64e476ca4936c1befd9f42cc8807",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    },
+    "texture_resource": {
+      "acquisition_status": "exercised",
+      "acquisition_stage": "texture_resource_get_device",
+      "acquisition_hresult": "0x00000000",
+      "alias_buffer_stable": true,
+      "baseline_log_sha256": "91ca9bc8a3e331d3db2363fe4334e09dadb01fb3aa54ca10a8dc5c08dbe56d6a",
+      "proxy_log_sha256": "c377d98c5dccacfc173a26fb796607cc204e919d0defb611d74c363ad062876a",
+      "proxy_trace_sha256": "5bfe241e44a6cee89d42737bf7107945b9821b5556eb98e17517bdbcb4415fe5",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    },
+    "texture_base": {
+      "acquisition_status": "exercised",
+      "acquisition_stage": "texture_base_get_device",
+      "acquisition_hresult": "0x00000000",
+      "alias_buffer_stable": true,
+      "baseline_log_sha256": "a59f29511e3b28e188387d708a8d2754ac8a6f327c531cf4a13377f5d897f713",
+      "proxy_log_sha256": "ee29c309f9ab2d42c32a595994b7cbf13c05e3b607a30dbb3fbd28c7451e870e",
+      "proxy_trace_sha256": "64eebcb3de8f09d6615546dfa5d70e613736e3bd23216f7b40bcb35faee75eb2",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    },
+    "texture_bound": {
+      "acquisition_status": "exercised",
+      "acquisition_stage": "bound_texture_get_device",
+      "acquisition_hresult": "0x00000000",
+      "alias_buffer_stable": true,
+      "baseline_log_sha256": "4603769ea60bf59d38e99117f7e95ae121b8fe597cd2e3382ca93732cea8b166",
+      "proxy_log_sha256": "033d2c9faab11eb256f86ac635a98db8e2f16076e67d1f276fc63bb21c96eb57",
+      "proxy_trace_sha256": "717e556a5bcef5ff603e13c908fff0c8f3c301efe64161bbedd0cd59645c5285",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    },
+    "surface_device": {
+      "acquisition_status": "exercised",
+      "acquisition_stage": "surface_get_device",
+      "acquisition_hresult": "0x00000000",
+      "alias_buffer_stable": true,
+      "baseline_log_sha256": "38f182d524b677a1a2abedef9d0306921a09d9591afa0f8fed303c4b50cbd64b",
+      "proxy_log_sha256": "f72a6c7bd14644aa036f31c46c0cc1e987240c2488d15b378c1632e7436fe13c",
+      "proxy_trace_sha256": "494f8292ae58215eec7825c4e0af8725c02c64e476ca4936c1befd9f42cc8807",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    },
+    "surface_container_device": {
+      "acquisition_status": "acquisition_failed",
+      "acquisition_stage": "surface_container_device",
+      "acquisition_hresult": "0x80004002",
+      "alias_buffer_stable": null,
+      "baseline_log_sha256": "5b641ebf5a0fc52ddef39aab19e6b75407cf10286c7d9f76962e6a10511eecb6",
+      "proxy_log_sha256": "0bb7bd640ea7c087bfe9a4896c87b5989e92dc5020e2ab3b46b59781d562d506",
+      "proxy_trace_sha256": "cd5a1741c6888a0a1afab39d9fab59cbaab58dc570673a5dd06ee3d5275fbf82",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    },
+    "surface_container_unknown": {
+      "acquisition_status": "acquisition_failed",
+      "acquisition_stage": "container_unknown_qi_device",
+      "acquisition_hresult": "0x80004002",
+      "alias_buffer_stable": null,
+      "baseline_log_sha256": "805f61c6f6e4e5a5cc259ddc2e493c77e0c5555c2b6c11b33c8398257d3870ed",
+      "proxy_log_sha256": "50b19669a5ba2fa1c1c627fdb9e222f48fb918352e90631ecc6b4bb50a257a62",
+      "proxy_trace_sha256": "b241b4e4a2da1dfb4af80d374abf87f907e60c2ec023db39a0cde497dde81272",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    },
+    "surface_container_texture": {
+      "acquisition_status": "exercised",
+      "acquisition_stage": "container_texture_get_device",
+      "acquisition_hresult": "0x00000000",
+      "alias_buffer_stable": true,
+      "baseline_log_sha256": "350f9263c9adc78025f3db0901db6f9b5d377f8ad661069894ff81f9a6e415e8",
+      "proxy_log_sha256": "1940a8882de5439a7ab156ffee5dbaf1f7e585d1b51f4988ab6082d8f92a08aa",
+      "proxy_trace_sha256": "7bbcc4eef8e725e4c48f4935af486326621292f90d007c5214cc17ec4976ba53",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    },
+    "backbuffer_device": {
+      "acquisition_status": "exercised",
+      "acquisition_stage": "backbuffer_get_device",
+      "acquisition_hresult": "0x00000000",
+      "alias_buffer_stable": true,
+      "baseline_log_sha256": "d836bca3e456dbc2be9cbf8e6b2af4dcfad0b179c20818ab58f859da3a4da6e8",
+      "proxy_log_sha256": "ed0a7a8cc5aba480415b78d2e62c1bd10a01af99eac989a6ccb8aea3a37c70b4",
+      "proxy_trace_sha256": "f445041a1d8e0d22fd09951153f109dd3004faca645ba5c6cc6f5b828cbd7e44",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    },
+    "backbuffer_container_device": {
+      "acquisition_status": "exercised",
+      "acquisition_stage": "backbuffer_container_device",
+      "acquisition_hresult": "0x00000000",
+      "alias_buffer_stable": true,
+      "baseline_log_sha256": "a34fcce5b3825d1e1d1fe9eb6d23504d91336bddf0a7a5e6651ecd75317938ed",
+      "proxy_log_sha256": "ac2aa5d5b977626824ac3251525ab2fb8ba88a2a4b06389a55cbab359bdf3018",
+      "proxy_trace_sha256": "717b338a9b1ae8a6a76ef9f627e7c68f33fef0382112a2c64a63cf7321f5738e",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    },
+    "cube_device": {
+      "acquisition_status": "exercised",
+      "acquisition_stage": "cube_get_device",
+      "acquisition_hresult": "0x00000000",
+      "alias_buffer_stable": true,
+      "baseline_log_sha256": "e5763f1c0e8a5f9d40e640d04fee59dbaddeafc6df67487d2751c9443218e186",
+      "proxy_log_sha256": "f8210c14401124e5bf1401e2d6440bf4ebcfded1af2b7dcdd1b821ab65146676",
+      "proxy_trace_sha256": "9c89d250fb632ae9b0ec7d37f0520de29617fad4313abf2a647dba2e8d83847e",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    },
+    "cube_face_device": {
+      "acquisition_status": "exercised",
+      "acquisition_stage": "cube_face_get_device",
+      "acquisition_hresult": "0x00000000",
+      "alias_buffer_stable": true,
+      "baseline_log_sha256": "da528d937fee5cb63e23551e9e0440c9001315ed025e8d64efc02519003b91be",
+      "proxy_log_sha256": "5a5c95c3fd7c38a3d1245368d49db2e2170f28498c345fd081e911ff91453aae",
+      "proxy_trace_sha256": "5bfe241e44a6cee89d42737bf7107945b9821b5556eb98e17517bdbcb4415fe5",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    },
+    "volume_texture_device": {
+      "acquisition_status": "exercised",
+      "acquisition_stage": "volume_texture_get_device",
+      "acquisition_hresult": "0x00000000",
+      "alias_buffer_stable": true,
+      "baseline_log_sha256": "64a238590e13dd848ec5d76492cc32a450c9055dfd9dea477752f805362ba3ef",
+      "proxy_log_sha256": "e4276f3b0136f275739d15345492800bcb692fc43f4aca8cf32c1cc742cd4128",
+      "proxy_trace_sha256": "9923407cc0d0638c467096b3459f0737d7c09920e4022d5a1d54359966796eb8",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    },
+    "volume_device": {
+      "acquisition_status": "exercised",
+      "acquisition_stage": "volume_get_device",
+      "acquisition_hresult": "0x00000000",
+      "alias_buffer_stable": true,
+      "baseline_log_sha256": "74e4393b715e3d6fc8f8561f66afbf505e71c9f33c15cb040948f6c0f137d077",
+      "proxy_log_sha256": "6f252a1a6fbc43e47f338635e918956c90bae3aa5d00bd5aeacff7c7c64b04cf",
+      "proxy_trace_sha256": "717e556a5bcef5ff603e13c908fff0c8f3c301efe64161bbedd0cd59645c5285",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    },
+    "swap_surface_device": {
+      "acquisition_status": "exercised",
+      "acquisition_stage": "swap_surface_get_device",
+      "acquisition_hresult": "0x00000000",
+      "alias_buffer_stable": true,
+      "baseline_log_sha256": "bb33e973059bc00d8655a66a4ea311bb0b6f5cf08bc06b3068ef25bbb1f41bc5",
+      "proxy_log_sha256": "66254e9f2a65557f4e58aa5ba4a500680c49518b38c012b7fbdad721d2d8e99c",
+      "proxy_trace_sha256": "fa28b3712331d3c28a4e9d1fe3debe107bd1ed6a3335d03bdbf1b8d3fbc3e3b2",
+      "baseline_and_proxy_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+    }
+  }
+}

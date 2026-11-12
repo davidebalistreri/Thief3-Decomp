@@ -1,0 +1,474 @@
+#pragma once
+
+// Fixture only. This deliberately incomplete COM facade forwards native
+// resources unchanged. A resource GetDevice/GetContainer may expose the real
+// device. Never use it with resource wrappers, in TDS, or as a COM boundary.
+#include <windows.h>
+#include <d3d8.h>
+
+#include <atomic>
+#include <new>
+
+namespace t3render::fixture {
+
+class FixtureReferenceCount final {
+public:
+    struct Decrement { ULONG count; bool final; };
+    ULONG Add() noexcept {
+        ULONG value = refs_.load(std::memory_order_relaxed);
+        for (;;) {
+            // Saturation intentionally leaks instead of wrapping.
+            if (!value || value == kSaturated) return value;
+            if (refs_.compare_exchange_weak(value, value + 1, std::memory_order_acquire,
+                                            std::memory_order_relaxed)) return value + 1;
+        }
+    }
+    Decrement Release() noexcept {
+        ULONG value = refs_.load(std::memory_order_relaxed);
+        for (;;) {
+            if (!value || value == kSaturated) return {value, false};
+            if (refs_.compare_exchange_weak(value, value - 1, std::memory_order_acq_rel,
+                                            std::memory_order_relaxed)) return {value - 1, value == 1};
+        }
+    }
+private:
+    static constexpr ULONG kSaturated = static_cast<ULONG>(~ULONG{0});
+    std::atomic<ULONG> refs_{1};
+};
+
+class DeviceFixtureFactory;
+
+class DeviceFixture final : public IDirect3DDevice8 {
+public:
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (!IsEqualIID(iid, IID_IUnknown) && !IsEqualIID(iid, IID_IDirect3DDevice8)) return E_NOINTERFACE;
+        if (!AddRef()) return E_FAIL;
+        *output = static_cast<IDirect3DDevice8*>(this);
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return refs_.Add(); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const auto result = refs_.Release();
+        if (!result.final) return result.count;
+        const DWORD before = GetLastError();
+        IDirect3DDevice8* native = native_;
+        IDirect3D8* parent = factory_;
+        delete this;
+        SetLastError(before);
+        native->Release();
+        const DWORD after_native = GetLastError();
+        parent->Release();
+        SetLastError(after_native);
+        return 0;
+    }
+    HRESULT STDMETHODCALLTYPE GetDirect3D(IDirect3D8** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        IDirect3D8* native_parent = nullptr;
+        const HRESULT hr = native_->GetDirect3D(&native_parent);
+        const DWORD after_native = GetLastError();
+        if (FAILED(hr) || !native_parent) {
+            // An output from a failed COM call has no ownership guarantee.
+            SetLastError(after_native);
+            return FAILED(hr) ? hr : E_FAIL;
+        }
+        native_parent->Release();
+        if (!factory_->AddRef()) { SetLastError(after_native); return E_FAIL; }
+        *output = factory_;
+        SetLastError(after_native);
+        return hr;
+    }
+    HRESULT STDMETHODCALLTYPE TestCooperativeLevel() override {
+        return native_->TestCooperativeLevel();
+    }
+    UINT STDMETHODCALLTYPE GetAvailableTextureMem() override {
+        return native_->GetAvailableTextureMem();
+    }
+    HRESULT STDMETHODCALLTYPE ResourceManagerDiscardBytes(DWORD Bytes) override {
+        return native_->ResourceManagerDiscardBytes(Bytes);
+    }
+    HRESULT STDMETHODCALLTYPE GetDeviceCaps(D3DCAPS8 * pCaps) override {
+        return native_->GetDeviceCaps(pCaps);
+    }
+    HRESULT STDMETHODCALLTYPE GetDisplayMode(D3DDISPLAYMODE * pMode) override {
+        return native_->GetDisplayMode(pMode);
+    }
+    HRESULT STDMETHODCALLTYPE GetCreationParameters(D3DDEVICE_CREATION_PARAMETERS * pParameters) override {
+        return native_->GetCreationParameters(pParameters);
+    }
+    HRESULT STDMETHODCALLTYPE SetCursorProperties(UINT XHotSpot, UINT YHotSpot, IDirect3DSurface8 * pCursorBitmap) override {
+        return native_->SetCursorProperties(XHotSpot, YHotSpot, pCursorBitmap);
+    }
+    void STDMETHODCALLTYPE SetCursorPosition(UINT XScreenSpace, UINT YScreenSpace,DWORD Flags) override {
+        return native_->SetCursorPosition(XScreenSpace, YScreenSpace, Flags);
+    }
+    BOOL STDMETHODCALLTYPE ShowCursor(BOOL bShow) override {
+        return native_->ShowCursor(bShow);
+    }
+    HRESULT STDMETHODCALLTYPE CreateAdditionalSwapChain(D3DPRESENT_PARAMETERS * pPresentationParameters, IDirect3DSwapChain8 ** pSwapChain) override {
+        return native_->CreateAdditionalSwapChain(pPresentationParameters, pSwapChain);
+    }
+    HRESULT STDMETHODCALLTYPE Reset(D3DPRESENT_PARAMETERS * pPresentationParameters) override {
+        return native_->Reset(pPresentationParameters);
+    }
+    HRESULT STDMETHODCALLTYPE Present(const RECT *src_rect, const RECT *dst_rect, HWND dst_window_override, const RGNDATA *dirty_region) override {
+        return native_->Present(src_rect, dst_rect, dst_window_override, dirty_region);
+    }
+    HRESULT STDMETHODCALLTYPE GetBackBuffer(UINT BackBuffer,D3DBACKBUFFER_TYPE Type,IDirect3DSurface8 ** ppBackBuffer) override {
+        return native_->GetBackBuffer(BackBuffer, Type, ppBackBuffer);
+    }
+    HRESULT STDMETHODCALLTYPE GetRasterStatus(D3DRASTER_STATUS * pRasterStatus) override {
+        return native_->GetRasterStatus(pRasterStatus);
+    }
+    void STDMETHODCALLTYPE SetGammaRamp(DWORD flags, const D3DGAMMARAMP *ramp) override {
+        return native_->SetGammaRamp(flags, ramp);
+    }
+    void STDMETHODCALLTYPE GetGammaRamp(D3DGAMMARAMP * pRamp) override {
+        return native_->GetGammaRamp(pRamp);
+    }
+    HRESULT STDMETHODCALLTYPE CreateTexture(UINT Width,UINT Height,UINT Levels,DWORD Usage,D3DFORMAT Format,D3DPOOL Pool,IDirect3DTexture8 ** ppTexture) override {
+        return native_->CreateTexture(Width, Height, Levels, Usage, Format, Pool, ppTexture);
+    }
+    HRESULT STDMETHODCALLTYPE CreateVolumeTexture(UINT Width,UINT Height,UINT Depth,UINT Levels,DWORD Usage,D3DFORMAT Format,D3DPOOL Pool,IDirect3DVolumeTexture8 ** ppVolumeTexture) override {
+        return native_->CreateVolumeTexture(Width, Height, Depth, Levels, Usage, Format, Pool, ppVolumeTexture);
+    }
+    HRESULT STDMETHODCALLTYPE CreateCubeTexture(UINT EdgeLength,UINT Levels,DWORD Usage,D3DFORMAT Format,D3DPOOL Pool,IDirect3DCubeTexture8 ** ppCubeTexture) override {
+        return native_->CreateCubeTexture(EdgeLength, Levels, Usage, Format, Pool, ppCubeTexture);
+    }
+    HRESULT STDMETHODCALLTYPE CreateVertexBuffer(UINT Length,DWORD Usage,DWORD FVF,D3DPOOL Pool,IDirect3DVertexBuffer8 ** ppVertexBuffer) override {
+        return native_->CreateVertexBuffer(Length, Usage, FVF, Pool, ppVertexBuffer);
+    }
+    HRESULT STDMETHODCALLTYPE CreateIndexBuffer(UINT Length,DWORD Usage,D3DFORMAT Format,D3DPOOL Pool,IDirect3DIndexBuffer8 ** ppIndexBuffer) override {
+        return native_->CreateIndexBuffer(Length, Usage, Format, Pool, ppIndexBuffer);
+    }
+    HRESULT STDMETHODCALLTYPE CreateRenderTarget(UINT Width,UINT Height,D3DFORMAT Format,D3DMULTISAMPLE_TYPE MultiSample,BOOL Lockable,IDirect3DSurface8 ** ppSurface) override {
+        return native_->CreateRenderTarget(Width, Height, Format, MultiSample, Lockable, ppSurface);
+    }
+    HRESULT STDMETHODCALLTYPE CreateDepthStencilSurface(UINT Width,UINT Height,D3DFORMAT Format,D3DMULTISAMPLE_TYPE MultiSample,IDirect3DSurface8 ** ppSurface) override {
+        return native_->CreateDepthStencilSurface(Width, Height, Format, MultiSample, ppSurface);
+    }
+    HRESULT STDMETHODCALLTYPE CreateImageSurface(UINT Width,UINT Height,D3DFORMAT Format,IDirect3DSurface8 ** ppSurface) override {
+        return native_->CreateImageSurface(Width, Height, Format, ppSurface);
+    }
+    HRESULT STDMETHODCALLTYPE CopyRects(IDirect3DSurface8 *src_surface, const RECT *src_rects, UINT rect_count, IDirect3DSurface8 *dst_surface, const POINT *dst_points) override {
+        return native_->CopyRects(src_surface, src_rects, rect_count, dst_surface, dst_points);
+    }
+    HRESULT STDMETHODCALLTYPE UpdateTexture(IDirect3DBaseTexture8 * pSourceTexture,IDirect3DBaseTexture8 * pDestinationTexture) override {
+        return native_->UpdateTexture(pSourceTexture, pDestinationTexture);
+    }
+    HRESULT STDMETHODCALLTYPE GetFrontBuffer(IDirect3DSurface8 * pDestSurface) override {
+        return native_->GetFrontBuffer(pDestSurface);
+    }
+    HRESULT STDMETHODCALLTYPE SetRenderTarget(IDirect3DSurface8 * pRenderTarget,IDirect3DSurface8 * pNewZStencil) override {
+        return native_->SetRenderTarget(pRenderTarget, pNewZStencil);
+    }
+    HRESULT STDMETHODCALLTYPE GetRenderTarget(IDirect3DSurface8 ** ppRenderTarget) override {
+        return native_->GetRenderTarget(ppRenderTarget);
+    }
+    HRESULT STDMETHODCALLTYPE GetDepthStencilSurface(IDirect3DSurface8 ** ppZStencilSurface) override {
+        return native_->GetDepthStencilSurface(ppZStencilSurface);
+    }
+    HRESULT STDMETHODCALLTYPE BeginScene() override {
+        return native_->BeginScene();
+    }
+    HRESULT STDMETHODCALLTYPE EndScene() override {
+        return native_->EndScene();
+    }
+    HRESULT STDMETHODCALLTYPE Clear(DWORD rect_count, const D3DRECT *rects, DWORD flags, D3DCOLOR color, float z, DWORD stencil) override {
+        return native_->Clear(rect_count, rects, flags, color, z, stencil);
+    }
+    HRESULT STDMETHODCALLTYPE SetTransform(D3DTRANSFORMSTATETYPE state, const D3DMATRIX *matrix) override {
+        return native_->SetTransform(state, matrix);
+    }
+    HRESULT STDMETHODCALLTYPE GetTransform(D3DTRANSFORMSTATETYPE State,D3DMATRIX * pMatrix) override {
+        return native_->GetTransform(State, pMatrix);
+    }
+    HRESULT STDMETHODCALLTYPE MultiplyTransform(D3DTRANSFORMSTATETYPE state, const D3DMATRIX *matrix) override {
+        return native_->MultiplyTransform(state, matrix);
+    }
+    HRESULT STDMETHODCALLTYPE SetViewport(const D3DVIEWPORT8 *viewport) override {
+        return native_->SetViewport(viewport);
+    }
+    HRESULT STDMETHODCALLTYPE GetViewport(D3DVIEWPORT8 * pViewport) override {
+        return native_->GetViewport(pViewport);
+    }
+    HRESULT STDMETHODCALLTYPE SetMaterial(const D3DMATERIAL8 *material) override {
+        return native_->SetMaterial(material);
+    }
+    HRESULT STDMETHODCALLTYPE GetMaterial(D3DMATERIAL8 *pMaterial) override {
+        return native_->GetMaterial(pMaterial);
+    }
+    HRESULT STDMETHODCALLTYPE SetLight(DWORD index, const D3DLIGHT8 *light) override {
+        return native_->SetLight(index, light);
+    }
+    HRESULT STDMETHODCALLTYPE GetLight(DWORD Index,D3DLIGHT8 * pLight) override {
+        return native_->GetLight(Index, pLight);
+    }
+    HRESULT STDMETHODCALLTYPE LightEnable(DWORD Index,BOOL Enable) override {
+        return native_->LightEnable(Index, Enable);
+    }
+    HRESULT STDMETHODCALLTYPE GetLightEnable(DWORD Index,BOOL * pEnable) override {
+        return native_->GetLightEnable(Index, pEnable);
+    }
+    HRESULT STDMETHODCALLTYPE SetClipPlane(DWORD index, const float *plane) override {
+        return native_->SetClipPlane(index, plane);
+    }
+    HRESULT STDMETHODCALLTYPE GetClipPlane(DWORD Index,float * pPlane) override {
+        return native_->GetClipPlane(Index, pPlane);
+    }
+    HRESULT STDMETHODCALLTYPE SetRenderState(D3DRENDERSTATETYPE State,DWORD Value) override {
+        return native_->SetRenderState(State, Value);
+    }
+    HRESULT STDMETHODCALLTYPE GetRenderState(D3DRENDERSTATETYPE State,DWORD * pValue) override {
+        return native_->GetRenderState(State, pValue);
+    }
+    HRESULT STDMETHODCALLTYPE BeginStateBlock() override {
+        return native_->BeginStateBlock();
+    }
+    HRESULT STDMETHODCALLTYPE EndStateBlock(DWORD * pToken) override {
+        return native_->EndStateBlock(pToken);
+    }
+    HRESULT STDMETHODCALLTYPE ApplyStateBlock(DWORD Token) override {
+        return native_->ApplyStateBlock(Token);
+    }
+    HRESULT STDMETHODCALLTYPE CaptureStateBlock(DWORD Token) override {
+        return native_->CaptureStateBlock(Token);
+    }
+    HRESULT STDMETHODCALLTYPE DeleteStateBlock(DWORD Token) override {
+        return native_->DeleteStateBlock(Token);
+    }
+    HRESULT STDMETHODCALLTYPE CreateStateBlock(D3DSTATEBLOCKTYPE Type,DWORD * pToken) override {
+        return native_->CreateStateBlock(Type, pToken);
+    }
+    HRESULT STDMETHODCALLTYPE SetClipStatus(const D3DCLIPSTATUS8 *clip_status) override {
+        return native_->SetClipStatus(clip_status);
+    }
+    HRESULT STDMETHODCALLTYPE GetClipStatus(D3DCLIPSTATUS8 * pClipStatus) override {
+        return native_->GetClipStatus(pClipStatus);
+    }
+    HRESULT STDMETHODCALLTYPE GetTexture(DWORD Stage,IDirect3DBaseTexture8 ** ppTexture) override {
+        return native_->GetTexture(Stage, ppTexture);
+    }
+    HRESULT STDMETHODCALLTYPE SetTexture(DWORD Stage,IDirect3DBaseTexture8 * pTexture) override {
+        return native_->SetTexture(Stage, pTexture);
+    }
+    HRESULT STDMETHODCALLTYPE GetTextureStageState(DWORD Stage,D3DTEXTURESTAGESTATETYPE Type,DWORD * pValue) override {
+        return native_->GetTextureStageState(Stage, Type, pValue);
+    }
+    HRESULT STDMETHODCALLTYPE SetTextureStageState(DWORD Stage,D3DTEXTURESTAGESTATETYPE Type,DWORD Value) override {
+        return native_->SetTextureStageState(Stage, Type, Value);
+    }
+    HRESULT STDMETHODCALLTYPE ValidateDevice(DWORD * pNumPasses) override {
+        return native_->ValidateDevice(pNumPasses);
+    }
+    HRESULT STDMETHODCALLTYPE GetInfo(DWORD DevInfoID,void * pDevInfoStruct,DWORD DevInfoStructSize) override {
+        return native_->GetInfo(DevInfoID, pDevInfoStruct, DevInfoStructSize);
+    }
+    HRESULT STDMETHODCALLTYPE SetPaletteEntries(UINT palette_idx, const PALETTEENTRY *entries) override {
+        return native_->SetPaletteEntries(palette_idx, entries);
+    }
+    HRESULT STDMETHODCALLTYPE GetPaletteEntries(UINT PaletteNumber,PALETTEENTRY * pEntries) override {
+        return native_->GetPaletteEntries(PaletteNumber, pEntries);
+    }
+    HRESULT STDMETHODCALLTYPE SetCurrentTexturePalette(UINT PaletteNumber) override {
+        return native_->SetCurrentTexturePalette(PaletteNumber);
+    }
+    HRESULT STDMETHODCALLTYPE GetCurrentTexturePalette(UINT * PaletteNumber) override {
+        return native_->GetCurrentTexturePalette(PaletteNumber);
+    }
+    HRESULT STDMETHODCALLTYPE DrawPrimitive(D3DPRIMITIVETYPE PrimitiveType,UINT StartVertex,UINT PrimitiveCount) override {
+        return native_->DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount);
+    }
+    HRESULT STDMETHODCALLTYPE DrawIndexedPrimitive(D3DPRIMITIVETYPE PrimitiveType,UINT minIndex,UINT NumVertices,UINT startIndex,UINT primCount) override {
+        return native_->DrawIndexedPrimitive(PrimitiveType, minIndex, NumVertices, startIndex, primCount);
+    }
+    HRESULT STDMETHODCALLTYPE DrawPrimitiveUP(D3DPRIMITIVETYPE primitive_type, UINT primitive_count, const void *data, UINT stride) override {
+        return native_->DrawPrimitiveUP(primitive_type, primitive_count, data, stride);
+    }
+    HRESULT STDMETHODCALLTYPE DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE primitive_type, UINT min_vertex_idx, UINT vertex_count, UINT primitive_count, const void *index_data, D3DFORMAT index_format, const void *data, UINT stride) override {
+        return native_->DrawIndexedPrimitiveUP(primitive_type, min_vertex_idx, vertex_count, primitive_count, index_data, index_format, data, stride);
+    }
+    HRESULT STDMETHODCALLTYPE ProcessVertices(UINT SrcStartIndex,UINT DestIndex,UINT VertexCount,IDirect3DVertexBuffer8 * pDestBuffer,DWORD Flags) override {
+        return native_->ProcessVertices(SrcStartIndex, DestIndex, VertexCount, pDestBuffer, Flags);
+    }
+    HRESULT STDMETHODCALLTYPE CreateVertexShader(const DWORD *declaration, const DWORD *byte_code, DWORD *shader, DWORD usage) override {
+        return native_->CreateVertexShader(declaration, byte_code, shader, usage);
+    }
+    HRESULT STDMETHODCALLTYPE SetVertexShader(DWORD Handle) override {
+        return native_->SetVertexShader(Handle);
+    }
+    HRESULT STDMETHODCALLTYPE GetVertexShader(DWORD * pHandle) override {
+        return native_->GetVertexShader(pHandle);
+    }
+    HRESULT STDMETHODCALLTYPE DeleteVertexShader(DWORD Handle) override {
+        return native_->DeleteVertexShader(Handle);
+    }
+    HRESULT STDMETHODCALLTYPE SetVertexShaderConstant(DWORD reg_idx, const void *data, DWORD count) override {
+        return native_->SetVertexShaderConstant(reg_idx, data, count);
+    }
+    HRESULT STDMETHODCALLTYPE GetVertexShaderConstant(DWORD Register,void * pConstantData,DWORD ConstantCount) override {
+        return native_->GetVertexShaderConstant(Register, pConstantData, ConstantCount);
+    }
+    HRESULT STDMETHODCALLTYPE GetVertexShaderDeclaration(DWORD Handle,void * pData,DWORD * pSizeOfData) override {
+        return native_->GetVertexShaderDeclaration(Handle, pData, pSizeOfData);
+    }
+    HRESULT STDMETHODCALLTYPE GetVertexShaderFunction(DWORD Handle,void * pData,DWORD * pSizeOfData) override {
+        return native_->GetVertexShaderFunction(Handle, pData, pSizeOfData);
+    }
+    HRESULT STDMETHODCALLTYPE SetStreamSource(UINT StreamNumber,IDirect3DVertexBuffer8 * pStreamData,UINT Stride) override {
+        return native_->SetStreamSource(StreamNumber, pStreamData, Stride);
+    }
+    HRESULT STDMETHODCALLTYPE GetStreamSource(UINT StreamNumber,IDirect3DVertexBuffer8 ** ppStreamData,UINT * pStride) override {
+        return native_->GetStreamSource(StreamNumber, ppStreamData, pStride);
+    }
+    HRESULT STDMETHODCALLTYPE SetIndices(IDirect3DIndexBuffer8 * pIndexData,UINT BaseVertexIndex) override {
+        return native_->SetIndices(pIndexData, BaseVertexIndex);
+    }
+    HRESULT STDMETHODCALLTYPE GetIndices(IDirect3DIndexBuffer8 ** ppIndexData,UINT * pBaseVertexIndex) override {
+        return native_->GetIndices(ppIndexData, pBaseVertexIndex);
+    }
+    HRESULT STDMETHODCALLTYPE CreatePixelShader(const DWORD *byte_code, DWORD *shader) override {
+        return native_->CreatePixelShader(byte_code, shader);
+    }
+    HRESULT STDMETHODCALLTYPE SetPixelShader(DWORD Handle) override {
+        return native_->SetPixelShader(Handle);
+    }
+    HRESULT STDMETHODCALLTYPE GetPixelShader(DWORD * pHandle) override {
+        return native_->GetPixelShader(pHandle);
+    }
+    HRESULT STDMETHODCALLTYPE DeletePixelShader(DWORD Handle) override {
+        return native_->DeletePixelShader(Handle);
+    }
+    HRESULT STDMETHODCALLTYPE SetPixelShaderConstant(DWORD reg_idx, const void *data, DWORD count) override {
+        return native_->SetPixelShaderConstant(reg_idx, data, count);
+    }
+    HRESULT STDMETHODCALLTYPE GetPixelShaderConstant(DWORD Register,void * pConstantData,DWORD ConstantCount) override {
+        return native_->GetPixelShaderConstant(Register, pConstantData, ConstantCount);
+    }
+    HRESULT STDMETHODCALLTYPE GetPixelShaderFunction(DWORD Handle,void * pData,DWORD * pSizeOfData) override {
+        return native_->GetPixelShaderFunction(Handle, pData, pSizeOfData);
+    }
+    HRESULT STDMETHODCALLTYPE DrawRectPatch(UINT handle, const float *segment_count, const D3DRECTPATCH_INFO *patch_info) override {
+        return native_->DrawRectPatch(handle, segment_count, patch_info);
+    }
+    HRESULT STDMETHODCALLTYPE DrawTriPatch(UINT handle, const float *segment_count, const D3DTRIPATCH_INFO *patch_info) override {
+        return native_->DrawTriPatch(handle, segment_count, patch_info);
+    }
+    HRESULT STDMETHODCALLTYPE DeletePatch(UINT Handle) override {
+        return native_->DeletePatch(Handle);
+    }
+
+private:
+    friend class DeviceFixtureFactory;
+    DeviceFixture(IDirect3DDevice8* native, IDirect3D8* factory) noexcept : native_(native), factory_(factory) {
+        factory_->AddRef();
+    }
+    ~DeviceFixture() = default;
+    IDirect3DDevice8* const native_;
+    IDirect3D8* const factory_;
+    FixtureReferenceCount refs_;
+};
+
+class DeviceFixtureFactory final : public IDirect3D8 {
+public:
+    static IDirect3D8* Adopt(IDirect3D8* native) noexcept {
+        const DWORD before = GetLastError();
+        IDirect3D8* facade = native ? new (std::nothrow) DeviceFixtureFactory(native) : nullptr;
+        SetLastError(before);
+        return facade;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (!IsEqualIID(iid, IID_IUnknown) && !IsEqualIID(iid, IID_IDirect3D8)) return E_NOINTERFACE;
+        if (!AddRef()) return E_FAIL;
+        *output = static_cast<IDirect3D8*>(this);
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return refs_.Add(); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const auto result = refs_.Release();
+        if (!result.final) return result.count;
+        const DWORD before = GetLastError();
+        IDirect3D8* native = native_;
+        delete this;
+        SetLastError(before);
+        native->Release();
+        return 0;
+    }
+    HRESULT STDMETHODCALLTYPE CreateDevice(UINT adapter, D3DDEVTYPE type, HWND focus, DWORD behavior,
+                                            D3DPRESENT_PARAMETERS* presentation, IDirect3DDevice8** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        IDirect3DDevice8* native_device = nullptr;
+        const HRESULT hr = native_->CreateDevice(adapter, type, focus, behavior, presentation, &native_device);
+        const DWORD after_native = GetLastError();
+        if (FAILED(hr) || !native_device) {
+            // An output from a failed COM call has no ownership guarantee.
+            SetLastError(after_native);
+            return FAILED(hr) ? hr : E_FAIL;
+        }
+        auto* facade = new (std::nothrow) DeviceFixture(native_device, this);
+        if (!facade) {
+            native_device->Release();
+            SetLastError(after_native);
+            return E_OUTOFMEMORY;
+        }
+        *output = facade;
+        SetLastError(after_native);
+        return hr;
+    }
+    HRESULT STDMETHODCALLTYPE RegisterSoftwareDevice(void * pInitializeFunction) override {
+        return native_->RegisterSoftwareDevice(pInitializeFunction);
+    }
+    UINT STDMETHODCALLTYPE GetAdapterCount() override {
+        return native_->GetAdapterCount();
+    }
+    HRESULT STDMETHODCALLTYPE GetAdapterIdentifier(UINT Adapter, DWORD Flags, D3DADAPTER_IDENTIFIER8 * pIdentifier) override {
+        return native_->GetAdapterIdentifier(Adapter, Flags, pIdentifier);
+    }
+    UINT STDMETHODCALLTYPE GetAdapterModeCount(UINT Adapter) override {
+        return native_->GetAdapterModeCount(Adapter);
+    }
+    HRESULT STDMETHODCALLTYPE EnumAdapterModes(UINT Adapter, UINT Mode, D3DDISPLAYMODE * pMode) override {
+        return native_->EnumAdapterModes(Adapter, Mode, pMode);
+    }
+    HRESULT STDMETHODCALLTYPE GetAdapterDisplayMode(UINT Adapter, D3DDISPLAYMODE * pMode) override {
+        return native_->GetAdapterDisplayMode(Adapter, pMode);
+    }
+    HRESULT STDMETHODCALLTYPE CheckDeviceType(UINT Adapter, D3DDEVTYPE CheckType, D3DFORMAT DisplayFormat, D3DFORMAT BackBufferFormat, BOOL Windowed) override {
+        return native_->CheckDeviceType(Adapter, CheckType, DisplayFormat, BackBufferFormat, Windowed);
+    }
+    HRESULT STDMETHODCALLTYPE CheckDeviceFormat(UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT AdapterFormat, DWORD Usage, D3DRESOURCETYPE RType, D3DFORMAT CheckFormat) override {
+        return native_->CheckDeviceFormat(Adapter, DeviceType, AdapterFormat, Usage, RType, CheckFormat);
+    }
+    HRESULT STDMETHODCALLTYPE CheckDeviceMultiSampleType(UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT SurfaceFormat, BOOL Windowed, D3DMULTISAMPLE_TYPE MultiSampleType) override {
+        return native_->CheckDeviceMultiSampleType(Adapter, DeviceType, SurfaceFormat, Windowed, MultiSampleType);
+    }
+    HRESULT STDMETHODCALLTYPE CheckDepthStencilMatch(UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT AdapterFormat, D3DFORMAT RenderTargetFormat, D3DFORMAT DepthStencilFormat) override {
+        return native_->CheckDepthStencilMatch(Adapter, DeviceType, AdapterFormat, RenderTargetFormat, DepthStencilFormat);
+    }
+    HRESULT STDMETHODCALLTYPE GetDeviceCaps(UINT Adapter, D3DDEVTYPE DeviceType, D3DCAPS8 * pCaps) override {
+        return native_->GetDeviceCaps(Adapter, DeviceType, pCaps);
+    }
+    HMONITOR STDMETHODCALLTYPE GetAdapterMonitor(UINT Adapter) override {
+        return native_->GetAdapterMonitor(Adapter);
+    }
+
+private:
+    explicit DeviceFixtureFactory(IDirect3D8* native) noexcept : native_(native) {}
+    ~DeviceFixtureFactory() = default;
+    IDirect3D8* const native_;
+    FixtureReferenceCount refs_;
+};
+
+// On success adopts the caller's native +1 reference. On null/allocation
+// failure returns null and leaves that reference owned by the caller. Call
+// only once per native factory identity; there is no alias deduplication.
+inline IDirect3D8* CreateDeviceFacadeFactory(IDirect3D8* native) noexcept {
+    return DeviceFixtureFactory::Adopt(native);
+}
+
+}  // namespace t3render::fixture

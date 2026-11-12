@@ -200,10 +200,12 @@ the hooks. Detected device aliases, state blocks and overlapping shader
 operations invalidate evidence conservatively. A nested draw, clear, reset or
 present during a writer getter abandons the partial trace; payload retirement
 is deferred until the writer lock has been released. Unknown, incomplete or
-unsafe observations contain no declaration words. The optional observer is host-tested
-and cross-compiled, but has **not** been run in TDS. It does not capture shader
-bytecode or constants, and cannot reconstruct programmable camera transforms or
-make the frame replayable.
+unsafe observations contain no declaration words. On Highball, a real TDS
+bedroom capture produced 285 unavailable and 16 unknown observations, with no
+usable candidate; this version did not record why the data was unavailable.
+See the [result](benchmarks/d3d8/2026-11-12-tds-bedroom-declarations/result.json).
+This does not validate unobserved aliases or gameplay. The observer does not
+capture shader bytecode or constants and cannot make the frame replayable.
 
 ### Experimental buffered capture — isolated fixture only
 

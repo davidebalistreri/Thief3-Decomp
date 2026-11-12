@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "test": "tds_bedroom_d3d8_declarations",
+  "date": "2026-11-12",
+  "status": "PARTIAL",
+  "environment": {
+    "os": "macOS 27.2.1 (26B131)",
+    "gpu": "Apple M5 Pro",
+    "runtime": "Highball CrossOver 26.3 r30 / Wine x86"
+  },
+  "scenario": {
+    "map": "SouthQuarter1_int1.gmp",
+    "save_slot": "Garrett’s Building",
+    "camera": "User oriented toward the bed; no same-frame screenshot or exact camera transform.",
+    "launcher_display_argument": [
+      1168,
+      755
+    ],
+    "captured_presentation": {
+      "width": 1024,
+      "height": 768,
+      "format": 21,
+      "count": 1,
+      "multisample": 0,
+      "swap_effect": 3,
+      "windowed": true,
+      "auto_depth_stencil": true,
+      "depth_stencil_format": 75,
+      "flags": 0,
+      "refresh_hz": 0,
+      "present_interval": 0
+    },
+    "requested_frames": 1,
+    "declaration_observation": true,
+    "buffer_observation": false
+  },
+  "proxy": {
+    "sha256": "be7a3882694208d381ba26fdd3cd941ed76e28f8d139b0eca04edd470c22e4aa",
+    "source_commit": "996e878",
+    "temporary_install_removed": true
+  },
+  "result": {
+    "frame": 10211,
+    "draw_count": 301,
+    "calls": {
+      "DrawIndexedPrimitive": 292,
+      "DrawPrimitiveUP": 9
+    },
+    "clear_count": 6,
+    "present_hresult": 0,
+    "concurrent_operations": false,
+    "declaration_status": {
+      "unavailable": 285,
+      "unknown": 16
+    },
+    "stable_results": 301,
+    "stable_candidates": 0,
+    "trace_sha256": "3b86319bfc96872a78c9067f33ef86e7359126795ecd84867497acdc714f1aee",
+    "partial_ir_sha256": "ef596106cd4a894e3dca5462cf2fbf956efafbc60445b16a31d06c1db496ef8f",
+    "wine_log_sha256": "97b61707736f1541e87b1dd4ae19cf9c40e26e1965fc4c9742c78b8d65ad63c5"
+  },
+  "limitations": [
+    "No declaration candidate is available; the reason is not recorded by this version.",
+    "The stable flag covers observed overlap, not declaration availability or untracked device aliases.",
+    "The capture excluded VB/IB contents, shader programs and constants, and texture bytes.",
+    "The presentation parameters differ from the launcher display argument; no matched screenshot was captured.",
+    "This frame is not replayable and is not a pixel comparison, native Windows test, or proof of gameplay/stealth parity."
+  ]
+}

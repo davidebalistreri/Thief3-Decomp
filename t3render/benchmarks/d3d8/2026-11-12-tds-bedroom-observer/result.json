@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "test": "tds_bedroom_d3d8_observer",
+  "date": "2026-11-12",
+  "status": "PARTIAL",
+  "environment": {
+    "os": "macOS 27.2.1 (26B131)",
+    "gpu": "Apple M5 Pro",
+    "runtime": "Highball CrossOver 26.3 r30 / Wine x86",
+    "moltenvk": "1.4.2"
+  },
+  "scenario": {
+    "map": "SouthQuarter1_int1.gmp",
+    "save_slot": "Garrett’s Building",
+    "camera": "User oriented toward bed; no recorded exact camera transform or simultaneous screenshot.",
+    "resolution": [
+      1168,
+      755
+    ],
+    "trigger": "external marker after load; foreground required for this run",
+    "requested_frames": 1,
+    "buffer_observation": false
+  },
+  "proxy": {
+    "sha256": "c8b4f0f47ffcf565edcebf17813551d10ab96ab3239fa8779e8554117609494d",
+    "temporary_install_removed": true,
+    "native_proxy_loaded": true,
+    "game_d3d8_forwarded_to": "Wine system32 builtin"
+  },
+  "result": {
+    "frame": 2913,
+    "draw_count": 416,
+    "calls": {
+      "DrawIndexedPrimitive": 407,
+      "DrawPrimitiveUP": 9
+    },
+    "clear_count": 11,
+    "present_hresult": 0,
+    "concurrent_operations": false,
+    "distinct_texture_bindings": 55,
+    "draws_with_fixed_function_light_records": 0,
+    "vertex_shader_values_high_bit_set": 394,
+    "indexed_draws_distinct_vertex_shader_values": 17,
+    "indexed_draws_index_format": "D3DFMT_INDEX16",
+    "indexed_draws_with_zero_vertex_buffer_fvf": 406,
+    "trace_sha256": "6e72367bc76f0ec4fbceafb80338ded1e51ac4121d1b6bfa6a81fb5a460f82d2",
+    "partial_ir_sha256": "1c578356351efa6ae98f7212fc5bcdd548c77ad4cb04a403b01a8cbec29407c1",
+    "wine_log_sha256": "1781acbbb0fc66b99fa4f332f7b0b57c4be0e190e6983766f6425b236d86fa18",
+    "earlier_reference_screenshot_sha256": "64245c6fcd296d16210d9d8e5115bc8c13f8e1477b350c576132a1cc7387f81f"
+  },
+  "observations": [
+    "The user reported that text glitches seen during an earlier run were absent in this run.",
+    "The marker was processed after the game returned to foreground; pause on focus loss is plausible, not proven."
+  ],
+  "limitations": [
+    "No captured VB/IB bytes for the 407 indexed draws; the trace cannot replay room geometry.",
+    "Texture content, shader programs and declarations are not captured.",
+    "The earlier screenshot is a framing reference, not an image of the captured frame.",
+    "No matched original/replay image, GPU timing, or native Windows test.",
+    "The observed absence of fixed-function light records does not establish absence of shader lighting.",
+    "No claim of gameplay or stealth parity."
+  ]
+}

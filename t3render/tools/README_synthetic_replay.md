@@ -39,12 +39,13 @@ nonzero base vertex, minimum vertex and start index. Its D3D8 reference and
 proxy images matched on the tested runtime; see the
 [buffered fixture result](../benchmarks/d3d8/2026-11-12-buffered/result.json).
 This is a capture test only: buffer bytes and buffered DX12 replay are not yet
-implemented. The host runner's `--buffered` mode compares the two D3D8 images
-and validates the indexed draw, buffer bindings and offsets in the trace. It
-does not invoke the converter or DX12 replay.
+implemented. The host runner's `--buffered` mode compares the two D3D8 images and validates
+the indexed draw, buffer bindings and offsets in the trace. An additional
+fixture snapshot experiment, described below, can replay its read-back bytes.
 
-Neither replay mode exercises buffered or indexed draws, depth, textures, game shader
-programs, lighting, PBR, or TDS gameplay. The pixel-center adjustment is
+The screen-space and camera UP replays do not exercise indexed draws. None of
+these fixture replays tests depth, textures, game shader programs, lighting,
+PBR, or TDS gameplay. The pixel-center adjustment is
 tested only against these fixtures and this runtime. The
 trace contains observations, not all possible D3D8 operations; the converter
 requires explicit `--synthetic-fixture` attestation and rejects unsupported
@@ -101,9 +102,16 @@ fixture runs use read locks and compare the known written vertex/index ranges
 with their expected bytes. The runner requires a PASS with the expected ranges
 in each log and records it in the manifest. These are driver calls: locks can
 stall or fail on other resources or runtimes. The bytes are not serialized in
-the capture trace, and this option does not provide buffered replay. See the
+the capture trace, and this option alone does not replay them. See the
 [managed readback result](../benchmarks/d3d8/2026-11-12-managed-readback/result.json)
 for the tested runtime and image hashes.
+
+Add `--replay-buffer-snapshot` together with `--buffered` and
+`--verify-buffer-readback` to replay the fixture-owned snapshot on DX12. The
+converter resolves its captured 16-bit indices, base vertex and offsets into a
+single UP triangle. It requires an explicit fixture attestation: the sidecar
+contains no independently verified render state or origin and is not a proxy
+trace. See the [snapshot replay result](../benchmarks/d3d12/2026-11-12-buffer-snapshot-replay/result.json).
 
 An experimental buffer-vtable replacement failed a Wine assertion and was
 discarded. The [failure manifest](../benchmarks/d3d8/2026-11-12-buffer-tracking-failure/result.json)

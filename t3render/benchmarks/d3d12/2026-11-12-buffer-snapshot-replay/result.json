@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "test": "synthetic_indexed_buffer_snapshot_dx12_replay",
+  "date": "2026-11-12",
+  "host": {
+    "os": "macOS 27.2.1",
+    "architecture": "arm64",
+    "gpu": "Apple M5 Pro"
+  },
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "d3d12_chain": "Wine D3D12/vkd3d -> Vulkan -> MoltenVK -> Metal"
+  },
+  "fixture": {
+    "fixture_source_commit": "9c95a29",
+    "converter_source_commit": "e871c68",
+    "replay_source_commit": "0d89e00",
+    "fixture_source_sha256": "a8a774d093dd8d107ddf76ed347d4047350d6ff74b4fd3df09587afb3312bf97",
+    "snapshot_encoder_sha256": "f595499f228c18cf5621d94765ed4f9d366060881e752d51234fcba9c591a6db",
+    "converter_sha256": "1e14993918622e3ecb2c78caed7ced05325388a9c495c87514ab3f5056cffe11",
+    "replay_source_sha256": "0e04854298bbcd7a18da14ba919918a499c35fbcfc846cfdbc116e99bb4a3cd6",
+    "fixture_executable_sha256": "d7b26baa15ab18dbf9e2dc706964e8b275f2b7a5280d5fd3ec02939e95fb06d3",
+    "proxy_sha256": "c41d9e504b0946f5f9b0738e984ee757422cd0c41589eac587f8fa5860307444",
+    "replay_executable_sha256": "69624e092ded55b743a77bfe7b80832be83980d7699bf13c83f4baf7e895a5e0",
+    "producer": "fixture-owned D3DLOCK_READONLY buffer snapshot, not the proxy trace",
+    "vertex_offset": 20,
+    "vertex_bytes": 80,
+    "index_offset": 4,
+    "index_bytes": 6,
+    "base_vertex_index": 1,
+    "min_vertex_index": 1,
+    "num_vertices": 3,
+    "start_index": 2,
+    "snapshot": "buffer-snapshot.txt",
+    "snapshot_sha256": "29e651e9b59ce6af8b41f432fd68c74ee198666dd76656ae195395f494512708",
+    "converted_packet": "packet.txt",
+    "packet_sha256": "e1db18a81787457bd1197227484a5aa635551f222b88fef0c43d3ef0b9d946e5"
+  },
+  "result": {
+    "baseline_d3d8": "PASS",
+    "captured_d3d8": "PASS",
+    "d3d12_replay": "PASS",
+    "width": 256,
+    "height": 256,
+    "red_pixels": 19648,
+    "rgba_fnv1a64": "10b6d7ca2fd8394d",
+    "ppm_sha256_all_three": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679",
+    "image": "../2026-11-12-up-replay/triangle.png",
+    "comparison": "The two D3D8 PPMs and the D3D12 replay PPM were byte-identical on this runtime."
+  },
+  "limitations": [
+    "The snapshot is produced by the synthetic fixture using additional read locks, not by the D3D8 proxy.",
+    "Only one managed, non-WRITEONLY buffer draw is represented; the converter resolves indexed vertices into a single UP triangle.",
+    "The sidecar does not verify its own origin or complete render state; the converter requires an explicit fixture attestation.",
+    "This is not a TDS frame, native Windows validation, general buffered replay, PBR, gameplay or stealth validation."
+  ]
+}

@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_trace_to_up_packet import fixture
+from test_trace_to_up_packet import fixture, VERTICES
 from test_trace_to_camera_packet import fixture as camera_fixture
 
 
@@ -50,6 +50,13 @@ if kind == "capture":
     assert not trace.exists()
     name = "FAKE_TRACE_BUFFERED" if "--buffered" in args else ("FAKE_TRACE_CAMERA" if "--camera" in args else "FAKE_TRACE")
     shutil.copyfile(os.environ[name], trace)
+    if "--buffer-snapshot" in args and not os.environ.get("FAKE_SNAPSHOT_MISSING"):
+        snapshot = host(args[args.index("--buffer-snapshot") + 1])
+        assert not snapshot.exists()
+        if os.environ.get("FAKE_SNAPSHOT_CORRUPT"):
+            snapshot.write_text("invalid snapshot\n")
+        else:
+            shutil.copyfile(os.environ["FAKE_SNAPSHOT"], snapshot)
 if kind == "replay":
     assert host(args[1]).read_text().splitlines()[0] in ("T3R_UP_V1", "T3R_XYZ_V1")
 '''
@@ -107,13 +114,19 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
         self.camera_trace.write_text("".join(json.dumps(event) + "\n" for event in camera_fixture()), encoding="utf-8")
         self.buffered_trace = self.root / "buffered.jsonl"
         self.buffered_trace.write_text("".join(json.dumps(event) + "\n" for event in buffered_fixture()), encoding="utf-8")
+        self.buffer_snapshot = self.root / "buffer-snapshot.txt"
+        vertices = [VERTICES[0], *VERTICES]
+        vb = b"".join(struct.pack("<4fI", *vertex) for vertex in vertices)
+        ib = struct.pack("<3H", 1, 2, 3)
+        self.buffer_snapshot.write_text("\n".join(["T3R_BUFFER_V1", "256 256", "4278190080", "1 1 3 2",
+                                                     "20 20 80", "4 6", vb.hex(), ib.hex(), ""]))
         self.output = self.root / "output with spaces"
 
     def run_runner(self, *, output=None, extra_env=None, timeout="5", engine=None, bottle=None, build=None,
-                   camera=False, buffered=False, verify_buffer_readback=False):
+                   camera=False, buffered=False, verify_buffer_readback=False, replay_buffer_snapshot=False):
         env = os.environ.copy()
         env.update({"FAKE_TRACE": str(self.trace), "FAKE_TRACE_CAMERA": str(self.camera_trace),
-                    "FAKE_TRACE_BUFFERED": str(self.buffered_trace),
+                    "FAKE_TRACE_BUFFERED": str(self.buffered_trace), "FAKE_SNAPSHOT": str(self.buffer_snapshot),
                     "WINEDLLPATH": "poison/dxmt",
                     "WINEDLLPATH_PREPEND": "poison/dxmt", "DYLD_LIBRARY_PATH": "poison",
                     "DYLD_FRAMEWORK_PATH": "poison", "T3RENDER_CAPTURE_KEY": "F11",
@@ -128,6 +141,8 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
             args.append("--buffered")
         if verify_buffer_readback:
             args.append("--verify-buffer-readback")
+        if replay_buffer_snapshot:
+            args.append("--replay-buffer-snapshot")
         return subprocess.run(args, env=env, text=True, capture_output=True, timeout=20)
 
     def manifest(self):
@@ -217,6 +232,65 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
             self.assertIn("--verify-buffer-readback", self.log(stage)["args"])
             self.assertIn("buffer_readback vertex_offset=20 vertex_bytes=80 index_offset=4 index_bytes=6 result=PASS",
                           (self.output / f"{stage}.log").read_text())
+
+    def test_buffer_snapshot_replays_fixture_bytes_on_dx12(self):
+        result = self.run_runner(buffered=True, verify_buffer_readback=True, replay_buffer_snapshot=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        manifest = self.manifest()
+        self.assertEqual(manifest["status"], "PASS")
+        self.assertEqual(manifest["dx12_replay"], "completed")
+        self.assertEqual(manifest["buffer_snapshot"], {"producer": "fixture_readback_not_proxy_trace", "conversion": "PASS"})
+        self.assertEqual(manifest["stages"], ["baseline", "capture", "trace_validation", "convert", "replay", "compare"])
+        self.assertEqual(manifest["sha256"]["baseline_ppm"], manifest["sha256"]["replay_ppm"])
+        self.assertIn("buffer_snapshot", manifest["sha256"])
+        self.assertTrue((self.output / "packet.txt").read_text().startswith("T3R_UP_V1\n"))
+        self.assertNotIn("--buffer-snapshot", self.log("baseline")["args"])
+        self.assertIn("--buffer-snapshot", self.log("capture")["args"])
+        self.assertIn("buffer_snapshot_to_up_packet.py", (self.output / "convert.log").read_text())
+        self.assertTrue(any("proxy trace does not contain" in item for item in manifest["limitations"]))
+
+    def test_buffer_snapshot_absent_or_corrupt_fails_before_replay(self):
+        for name in ("FAKE_SNAPSHOT_MISSING", "FAKE_SNAPSHOT_CORRUPT"):
+            with self.subTest(name=name):
+                output = self.root / name
+                result = self.run_runner(buffered=True, verify_buffer_readback=True, replay_buffer_snapshot=True,
+                                         output=output, extra_env={name: "1"})
+                self.assertNotEqual(result.returncode, 0)
+                manifest = json.loads((output / "result.json").read_text())
+                self.assertEqual(manifest["failed_stage"], "convert")
+                self.assertEqual(manifest["buffer_snapshot"]["conversion"], "not_verified")
+                self.assertEqual(manifest["dx12_replay"], "not_run")
+                self.assertFalse((output / "replay.log").exists())
+
+    def test_buffer_snapshot_failed_replay_is_recorded_as_attempted(self):
+        result = self.run_runner(buffered=True, verify_buffer_readback=True, replay_buffer_snapshot=True,
+                                 extra_env={"FAKE_FAIL": "replay"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.manifest()["failed_stage"], "replay")
+        self.assertEqual(self.manifest()["dx12_replay"], "attempted")
+
+    def test_buffer_snapshot_replay_detects_pixel_mismatch(self):
+        result = self.run_runner(buffered=True, verify_buffer_readback=True, replay_buffer_snapshot=True,
+                                 extra_env={"FAKE_DIFFER": "replay"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.manifest()["failed_stage"], "compare")
+        self.assertEqual(self.manifest()["dx12_replay"], "completed")
+        self.assertNotEqual(self.manifest()["sha256"]["baseline_ppm"], self.manifest()["sha256"]["replay_ppm"])
+
+    def test_buffer_snapshot_replay_requires_both_flags_before_output(self):
+        for buffered, readback in ((False, False), (True, False), (False, True)):
+            with self.subTest(buffered=buffered, readback=readback):
+                result = self.run_runner(buffered=buffered, verify_buffer_readback=readback, replay_buffer_snapshot=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("requires", result.stderr)
+                self.assertFalse(self.output.exists())
+
+    def test_buffer_snapshot_replay_requires_x86_executable(self):
+        (self.build / "t3render_d3d12_replay_up.exe").unlink()
+        result = self.run_runner(buffered=True, verify_buffer_readback=True, replay_buffer_snapshot=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("PE32", result.stderr)
+        self.assertFalse(self.output.exists())
 
     def test_readback_missing_wrong_or_duplicate_result_fails_closed(self):
         cases = (("FAKE_READBACK_MISSING", "baseline"), ("FAKE_READBACK_MISSING", "capture"),

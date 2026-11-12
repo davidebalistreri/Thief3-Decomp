@@ -59,6 +59,20 @@ class StateBlockRunnerTests(unittest.TestCase):
             with self.subTest(edit=edit), self.assertRaises(runner.RunError):
                 self.inspect_trace(records)
 
+    def test_rejects_invalid_buffer_range_metadata(self):
+        fields = (("vertex", "stream"), ("vertex", "first_vertex"), ("vertex", "vertex_count"),
+                  ("vertex", "stride"), ("vertex", "byte_offset"), ("vertex", "byte_count"),
+                  ("index", "index_count"), ("index", "index_format"),
+                  ("index", "byte_offset"), ("index", "byte_count"))
+        for component, field in fields:
+            for bad in (999, None, True, "0", "missing"):
+                events = trace_fixture()
+                part = events[4]["buffer_data"][component]
+                if bad == "missing": del part[field]
+                else: part[field] = bad
+                with self.subTest(component=component, field=field, bad=bad), self.assertRaises(runner.RunError):
+                    self.inspect_trace(events)
+
     def test_markers_require_complete_order_and_valid_outcomes(self):
         path = self.root / "fixture.log"
         path.write_text("\n".join(runner.MARKERS) + "\n", encoding="utf-8")

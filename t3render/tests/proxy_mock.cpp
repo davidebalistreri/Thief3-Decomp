@@ -63,6 +63,17 @@ static HRESULT create_vertex_result = 0, create_index_result = 0;
 static HRESULT set_stream_result = 0, get_stream_result = 0, set_indices_result = 0, get_indices_result = 0;
 static DWORD vertex_create_error = 0, index_create_error = 0, stream_set_error = 0, stream_get_error = 0;
 static DWORD indices_set_error = 0, indices_get_error = 0;
+#ifdef T3RENDER_STATEBLOCK_TEST_FIXTURE
+static std::atomic<bool> block_stateblock{false}, stateblock_entered{false}, allow_stateblock{false};
+static bool fail_stateblock = false;
+static DWORD stateblock_input_error = 0;
+static HRESULT stateblock_call(HRESULT success) {
+ stateblock_input_error=GetLastError();
+ if(block_stateblock) { stateblock_entered=true; while(!allow_stateblock) std::this_thread::yield(); }
+ SetLastError(947);
+ return fail_stateblock ? -98 : success;
+}
+#endif
 
 template<class Interface, class Desc, int Type>
 struct NativeBuffer final : Interface {
@@ -275,12 +286,21 @@ static HRESULT get_indices(IDirect3DDevice8*,IDirect3DIndexBuffer8** out,UINT* b
 static HRESULT process_vertices(IDirect3DDevice8*,UINT,UINT,UINT,IDirect3DVertexBuffer8* target,DWORD) {
  assert(!target || target==native_vertex.get()); return S_OK;
 }
+#ifdef T3RENDER_STATEBLOCK_TEST_FIXTURE
+static HRESULT begin_state_block(IDirect3DDevice8*) { return stateblock_call(21); }
+static HRESULT end_state_block(IDirect3DDevice8*,DWORD* token) { auto hr=stateblock_call(22); if(SUCCEEDED(hr) && token) *token=7; return hr; }
+static HRESULT apply_state_block(IDirect3DDevice8*,DWORD) { return stateblock_call(23); }
+static HRESULT capture_state_block(IDirect3DDevice8*,DWORD) { return stateblock_call(24); }
+static HRESULT delete_state_block(IDirect3DDevice8*,DWORD) { return stateblock_call(25); }
+static HRESULT create_state_block(IDirect3DDevice8*,D3DSTATEBLOCKTYPE,DWORD* token) { auto hr=stateblock_call(26); if(SUCCEEDED(hr) && token) *token=8; return hr; }
+#else
 static HRESULT begin_state_block(IDirect3DDevice8*) { return 21; }
 static HRESULT end_state_block(IDirect3DDevice8*,DWORD* token) { if(token) *token=7; return 22; }
 static HRESULT apply_state_block(IDirect3DDevice8*,DWORD) { return 23; }
 static HRESULT capture_state_block(IDirect3DDevice8*,DWORD) { return 24; }
 static HRESULT delete_state_block(IDirect3DDevice8*,DWORD) { return 25; }
 static HRESULT create_state_block(IDirect3DDevice8*,D3DSTATEBLOCKTYPE,DWORD* token) { if(token) *token=8; return 26; }
+#endif
 static IDirect3D8Vtbl factory_vt{query_factory,add_factory,release_factory,make_device};
 static IDirect3DDevice8Vtbl device_vt{query_device,add_device,release_device,reset,present,clear,draw,draw_indexed,draw_up,draw_indexed_up,
  create_vertex,create_index,set_stream,get_stream,set_indices,get_indices,process_vertices,
@@ -416,6 +436,118 @@ static int BufferBoundaryTest(const std::string& mode) {
  SetLastError(24); assert(d->lpVtbl->GetIndices(d,&got_index,&base)==S_OK);
  assert(got_index==index && base==1 && indices_get_error==24 && GetLastError()==946);
  got_vertex->Release(); got_index->Release();
+#if defined(T3RENDER_PROXY_TEST) && defined(T3RENDER_STATEBLOCK_TEST_FIXTURE)
+ if(mode.rfind("state-exp-",0)==0) {
+  BYTE sample=0;
+  auto known=[&] {
+   std::array<BYTE,80> vb{}; std::array<BYTE,6> ib{};
+   assert(T3ProxyTestReadVertex(d,native_vertex.get(),20,vb.data(),vb.size())==t3render::ir::RegistryResult::Ok);
+   assert(T3ProxyTestReadIndex(d,native_index.get(),4,ib.data(),ib.size())==t3render::ir::RegistryResult::Ok);
+   for(unsigned i=0;i<vb.size();++i) assert(vb[i]==i);
+   for(unsigned i=0;i<ib.size();++i) assert(ib[i]==i+3);
+  };
+  auto unavailable=[&] {
+   assert(T3ProxyTestReadVertex(d,native_vertex.get(),20,&sample,1)==t3render::ir::RegistryResult::Unavailable);
+   assert(T3ProxyTestReadIndex(d,native_index.get(),4,&sample,1)==t3render::ir::RegistryResult::Unavailable);
+  };
+  auto finish=[&] {
+   assert(d->lpVtbl->SetStreamSource(d,0,nullptr,0)==S_OK);
+   assert(d->lpVtbl->SetIndices(d,nullptr,0)==S_OK);
+   vertex->Release(); index->Release();
+   assert(native_vertex->destroyed && native_index->destroyed);
+   assert(d->lpVtbl->Release(d)==0); assert(f->lpVtbl->Release(f)==0);
+  };
+  known();
+  if(mode=="state-exp-preserve" || mode=="state-exp-failure" || mode=="state-exp-lifetime") {
+   fail_stateblock=mode=="state-exp-failure";
+   DWORD token=0xabcdef;
+   SetLastError(71);
+   assert(d->lpVtbl->BeginStateBlock(d)==(fail_stateblock ? -98 : 21));
+   assert(stateblock_input_error==71 && GetLastError()==947); known();
+   SetLastError(72);
+   assert(d->lpVtbl->EndStateBlock(d,&token)==(fail_stateblock ? -98 : 22));
+   assert(stateblock_input_error==72 && GetLastError()==947 && token==(fail_stateblock ? 0xabcdefu : 7u)); known();
+   SetLastError(73);
+   assert(d->lpVtbl->CreateStateBlock(d,0,&token)==(fail_stateblock ? -98 : 26));
+   assert(stateblock_input_error==73 && GetLastError()==947 && token==(fail_stateblock ? 0xabcdefu : 8u)); known();
+   SetLastError(74);
+   assert(d->lpVtbl->CaptureStateBlock(d,token)==(fail_stateblock ? -98 : 24));
+   assert(stateblock_input_error==74 && GetLastError()==947); known();
+   SetLastError(75);
+   assert(d->lpVtbl->ApplyStateBlock(d,token)==(fail_stateblock ? -98 : 23));
+   assert(stateblock_input_error==75 && GetLastError()==947); known();
+   SetLastError(76);
+   assert(d->lpVtbl->DeleteStateBlock(d,token)==(fail_stateblock ? -98 : 25));
+   assert(stateblock_input_error==76 && GetLastError()==947); known();
+   got_vertex=nullptr; got_index=nullptr;
+   assert(d->lpVtbl->GetStreamSource(d,0,&got_vertex,&stride)==S_OK && got_vertex==vertex && stride==20);
+   assert(d->lpVtbl->GetIndices(d,&got_index,&base)==S_OK && got_index==index && base==1);
+   got_vertex->Release(); got_index->Release(); known();
+   if(mode=="state-exp-lifetime") {
+    // Native device bindings outlive both wrappers. Reacquisition is a raw
+    // fallback: it must never be advertised as known shadow evidence.
+    vertex->Release(); index->Release(); vertex=nullptr; index=nullptr;
+    assert(!native_vertex->destroyed && !native_index->destroyed);
+    got_vertex=nullptr; got_index=nullptr;
+    assert(d->lpVtbl->GetStreamSource(d,0,&got_vertex,&stride)==S_OK && got_vertex==native_vertex.get());
+    assert(d->lpVtbl->GetIndices(d,&got_index,&base)==S_OK && got_index==native_index.get());
+    unavailable(); got_vertex->Release(); got_index->Release();
+    assert(d->lpVtbl->SetStreamSource(d,0,nullptr,0)==S_OK);
+    assert(d->lpVtbl->SetIndices(d,nullptr,0)==S_OK);
+    assert(native_vertex->destroyed && native_index->destroyed);
+    assert(d->lpVtbl->Release(d)==0); assert(f->lpVtbl->Release(f)==0);
+   } else finish();
+  } else if(mode=="state-exp-state-draw" || mode=="state-exp-state-fail-draw") {
+   fail_stateblock=mode=="state-exp-state-fail-draw";
+   block_stateblock=true;
+   std::thread setter([&] { assert(d->lpVtbl->ApplyStateBlock(d,8)==(fail_stateblock ? -98 : 23)); });
+   while(!stateblock_entered) std::this_thread::yield();
+   assert(d->lpVtbl->DrawPrimitive(d,4,0,1)==14);
+   allow_stateblock=true; setter.join(); block_stateblock=false;
+   assert(observed_buffer_observer && !observed_buffer_observer_valid && observed_buffer_result && !observed_buffer_stable);
+   unavailable(); finish();
+  } else if(mode=="state-exp-draw-state" || mode=="state-exp-draw-state-fail") {
+   fail_stateblock=mode=="state-exp-draw-state-fail";
+   block_draw=true;
+   std::thread drawer([&] { assert(d->lpVtbl->DrawPrimitive(d,4,0,1)==14); });
+   while(!draw_entered) std::this_thread::yield();
+   assert(d->lpVtbl->ApplyStateBlock(d,8)==(fail_stateblock ? -98 : 23));
+   allow_draw=true; drawer.join(); block_draw=false;
+   assert(observed_buffer_observer && observed_buffer_observer_valid && observed_buffer_result && !observed_buffer_stable);
+   unavailable(); finish();
+  } else if(mode=="state-exp-state-lock") {
+   block_stateblock=true;
+   std::thread setter([&] { assert(d->lpVtbl->ApplyStateBlock(d,8)==23); });
+   while(!stateblock_entered) std::this_thread::yield();
+   BYTE* mapped=nullptr;
+   assert(vertex->Lock(20,4,&mapped,0)==S_OK && mapped);
+   std::memset(mapped,0x9a,4); assert(vertex->Unlock()==S_OK);
+   allow_stateblock=true; setter.join(); block_stateblock=false;
+   assert(d->lpVtbl->DrawPrimitive(d,4,0,1)==14);
+   assert(observed_buffer_observer && !observed_buffer_observer_valid && observed_buffer_result && !observed_buffer_stable);
+   unavailable(); finish();
+  } else if(mode=="state-exp-lock-state") {
+   // A lock held before the state-block call invalidates the device too.
+   // The native calls and their last-error values must still be forwarded.
+   BYTE* mapped=nullptr;
+   SetLastError(77);
+   assert(vertex->Lock(20,4,&mapped,0)==S_OK && mapped);
+   assert(native_vertex->lock_input_error==77 && GetLastError()==931);
+   SetLastError(78);
+   assert(d->lpVtbl->ApplyStateBlock(d,8)==23);
+   assert(stateblock_input_error==78 && GetLastError()==947);
+   unavailable();
+   SetLastError(79);
+   std::memset(mapped,0x9a,4); assert(vertex->Unlock()==S_OK);
+   assert(native_vertex->unlock_input_error==79 && GetLastError()==932);
+   unavailable();
+   assert(d->lpVtbl->DrawPrimitive(d,4,0,1)==14);
+   assert(observed_buffer_observer && !observed_buffer_observer_valid && observed_buffer_result && !observed_buffer_stable);
+   finish();
+  } else assert(false && "unknown state-block experiment mode");
+  std::cout<<"buffer boundary "<<mode<<": passed\n"; return 0;
+ }
+#endif
 #ifdef T3RENDER_PROXY_TEST
  if(mode=="stop-present" || mode=="stop-error") {
   BYTE sample=0;

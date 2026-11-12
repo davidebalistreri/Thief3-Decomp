@@ -1,0 +1,202 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_stateblock_mutation_window_experiment",
+  "date": "2026-11-12",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "os": "macOS 27.2.1",
+    "architecture": "x86 Wine on arm64"
+  },
+  "fixture_sha256": "a2eccca9e05b03864d46bd2abdf4e4bef0d8d9850c2e4c8f42a61393d5a01aea",
+  "production_proxy_sha256": "c8b4f0f47ffcf565edcebf17813551d10ab96ab3239fa8779e8554117609494d",
+  "test_only_proxy_sha256": "e6d7f38482612d999c85f16b2c382e90f20207c4b9ae7d367e8ddb2db51c7042",
+  "fixture_and_proxy_source_sha256": {
+    "t3render/tests/d3d8_stateblock_cases.cpp": "abc2bc315645c47b6ab026338ca29ba9b3164f65b7e6622cdc2d1ca6876bb191",
+    "t3render/tests/d3d8_stateblock_buffer_fixture.cpp": "7dc64bbf00f7525143acba4cf3aee19a715e40da02f1658efec171dfaa67817e",
+    "t3render/src/proxy.cpp": "6ce8da26dcd3a6a71b82b0f56af11185a7bad157de9aaab8e4191c47e1711fcd",
+    "t3render/src/buffer_proxy.cpp": "07713f49baa4edf25063d238b5e98f7d7e83f88164c3b70c583f0888c9548f14",
+    "t3render/ir/buffer_registry.cpp": "9e24931212d54e0ee58b7be7313a85510e9fc867f3a3b20297eff3e1f6138b84",
+    "t3render/ir/buffer_shadow.cpp": "9cfed54a6fcf4718e80fd1d8301a8afa5f84852ac70b428938b06d1e64cddafe",
+    "t3render/src/capture.cpp": "11b3b05982fe67a56b25f45b4aa3e06a4ec3f0c56836c20d57b738575e571172",
+    "t3render/src/vtable_layout.c": "9e9ed4c1cb481d1117646ab80f0e8f442752a8c91fe71cdae6f33e1f7d151ec1"
+  },
+  "validated_runner_sha256": "e8cd0fcb98744d8789d963fbb270a595b346d21b8bc9ffeffa7b24d20184c0f7",
+  "validator_sha256": "865640a85ce35d102abc454865c00d9f3a11c72ad907461625f82b41c5a13f07",
+  "result_sha256": "b95cd7a4a0d67536bba5f5b5ce7ce13de53bdc3bf130edf4c6e163144208ff16",
+  "rgb_ppm_sha256_all_runs": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679",
+  "cases": {
+    "control": {
+      "baseline": {
+        "log_sha256": "a38cf41d997ebdc99d37e0c6efc6156ab680cbf808f46e020ea5be51c04794d5"
+      },
+      "production": {
+        "log_sha256": "1ed011d6635a3c710a38d43b5fd82904ce3c67c081af2a7095dd015c87824817",
+        "buffer_stable": true,
+        "vertex_status": "captured",
+        "index_status": "captured",
+        "trace_sha256": "d6c5e7fd57686873ca3a1c5d92765ac663fbf5bcaa3b213f1f54315548d5d36c"
+      },
+      "experiment": {
+        "log_sha256": "4e86909b36c16d9824a80516a5e32855a9ef1fd8767d30e360b0af4c0a7872c7",
+        "buffer_stable": true,
+        "vertex_status": "captured",
+        "index_status": "captured",
+        "trace_sha256": "d6c5e7fd57686873ca3a1c5d92765ac663fbf5bcaa3b213f1f54315548d5d36c"
+      }
+    },
+    "create": {
+      "baseline": {
+        "log_sha256": "95245faf234248be6d882348d74cab0c9c9d60aaac4d7a0561227d70d46601ae"
+      },
+      "production": {
+        "log_sha256": "950687df1ba5b48f4cf633ba1f4b0cd64aa7d2e49a01e24f81dff464a288873d",
+        "buffer_stable": false,
+        "vertex_status": "window_unavailable",
+        "index_status": "window_unavailable",
+        "trace_sha256": "7de77f1130c8a86d633473189a280f455fab85e9f7e4f7fdf4498d99fc1d3bc7"
+      },
+      "experiment": {
+        "log_sha256": "8ce194a15e17be0213699bceb575d4b0fde4a64394e992615ebb688157589b73",
+        "buffer_stable": true,
+        "vertex_status": "captured",
+        "index_status": "captured",
+        "trace_sha256": "7aeb04f6e4c200c8c8eecf527a5e7005fae149ae7e2b0afacce38eaeb9aa3bde"
+      }
+    },
+    "record": {
+      "baseline": {
+        "log_sha256": "45754b5377e9816f6ae9e2e35ce37ec530d60b498099347d4805fd3b5609d57e"
+      },
+      "production": {
+        "log_sha256": "01df32d87220fb19325e580db9e1ca78a415722b1afd9443922c33381ba6270f",
+        "buffer_stable": false,
+        "vertex_status": "window_unavailable",
+        "index_status": "window_unavailable",
+        "trace_sha256": "7de77f1130c8a86d633473189a280f455fab85e9f7e4f7fdf4498d99fc1d3bc7"
+      },
+      "experiment": {
+        "log_sha256": "544f09c5aa702abfe412a3648d446754239c08f86e73728c45c08990cff64de8",
+        "buffer_stable": true,
+        "vertex_status": "captured",
+        "index_status": "captured",
+        "trace_sha256": "7aeb04f6e4c200c8c8eecf527a5e7005fae149ae7e2b0afacce38eaeb9aa3bde"
+      }
+    },
+    "apply": {
+      "baseline": {
+        "log_sha256": "840c17130460433f57f96e15442eddbd5a23ef440c8969e0a79155f177e1a485"
+      },
+      "production": {
+        "log_sha256": "f34bf107f01abec80d2b42b1acc386f2bfbf6adf3e63d8aab7ae045c2935fef1",
+        "buffer_stable": false,
+        "vertex_status": "window_unavailable",
+        "index_status": "window_unavailable",
+        "trace_sha256": "d5500438722f65357112025a4ed74e976e4204fb2d793a07c6c1b5126cf902b0"
+      },
+      "experiment": {
+        "log_sha256": "f34f2a17684197bff752cf4e1e46f1cc2955849d9b21402bfc66e5ab7b4f6bb3",
+        "buffer_stable": true,
+        "vertex_status": "captured",
+        "index_status": "captured",
+        "trace_sha256": "7827f0e5c512d2bec18e6ceff4ff5052dab848318f50ab8270c768f9b98fe1f0"
+      }
+    },
+    "capture": {
+      "baseline": {
+        "log_sha256": "5780af5c801b7558b30d5940fa1dbe10025271330c8cef45419af168048db903"
+      },
+      "production": {
+        "log_sha256": "60c411ecb45c4fd4d3e689f5b101254017587dc5cc110b4165f06b9d3da06149",
+        "buffer_stable": false,
+        "vertex_status": "window_unavailable",
+        "index_status": "window_unavailable",
+        "trace_sha256": "c8a748c244944354a8ccfa9c585b221e86f1aad916d36d661c6af0b99a69b2ae"
+      },
+      "experiment": {
+        "log_sha256": "904cd75ecc3c477b34a9cc8d235e3426f57a045027a6d0c151013711c509b829",
+        "buffer_stable": true,
+        "vertex_status": "captured",
+        "index_status": "captured",
+        "trace_sha256": "d6c5e7fd57686873ca3a1c5d92765ac663fbf5bcaa3b213f1f54315548d5d36c"
+      }
+    },
+    "delete": {
+      "baseline": {
+        "log_sha256": "668b53db7aba4a4719faa9cb4877762c65d8e25c2e81ffa0045fa1473b4143a9"
+      },
+      "production": {
+        "log_sha256": "667a68a8b5cc593db44003736f26dbccb6a764d0f5cb17846fc809427183e924",
+        "buffer_stable": false,
+        "vertex_status": "window_unavailable",
+        "index_status": "window_unavailable",
+        "trace_sha256": "7de77f1130c8a86d633473189a280f455fab85e9f7e4f7fdf4498d99fc1d3bc7"
+      },
+      "experiment": {
+        "log_sha256": "fcb1ba2a0844cf0915e023ceb1df6fab40f4f6b1d185378091b138b171bcb3e9",
+        "buffer_stable": true,
+        "vertex_status": "captured",
+        "index_status": "captured",
+        "trace_sha256": "7aeb04f6e4c200c8c8eecf527a5e7005fae149ae7e2b0afacce38eaeb9aa3bde"
+      }
+    },
+    "lifetime": {
+      "baseline": {
+        "log_sha256": "a8baff5a05cb634d76286e3566e7d8cc979d3c3b8c1eb87211a00bcaaa40f562"
+      },
+      "production": {
+        "log_sha256": "c69c3dd034e75576bc640e4cce243ce8790401bc7250a10e5d4f449e0a5714d0",
+        "buffer_stable": false,
+        "vertex_status": "window_unavailable",
+        "index_status": "window_unavailable",
+        "trace_sha256": "1285dab6b3b96acd081c4b63cf4143f2d9c1c8134061e750b657e4e43338b293"
+      },
+      "experiment": {
+        "log_sha256": "001c3f871b4f431809141643e02ca1f23d603937e217f05a8ad727b722135848",
+        "buffer_stable": true,
+        "vertex_status": "unknown",
+        "index_status": "unknown",
+        "trace_sha256": "72b9c077b038eb0c8b42573369e1e739e657e40f7999f7669d19156c3339cf28"
+      }
+    },
+    "reacquire": {
+      "baseline": {
+        "log_sha256": "462b67ee43b9fbfb342c9ef62965702fd2e0438a3ba379d3b12cd0ad8543f2d5"
+      },
+      "production": {
+        "log_sha256": "e72a8380e709d4defab924c95d1b77e78b9c06c0d86c2d0e63d533dfb49e2b37",
+        "buffer_stable": false,
+        "vertex_status": "window_unavailable",
+        "index_status": "window_unavailable",
+        "trace_sha256": "c8982163ab0d1c8e998a35fd3565dd86afb3ba92092f1e2df88dfe11824389c4"
+      },
+      "experiment": {
+        "log_sha256": "fd8fd0daa1ee7cf13f561cfa01897b0f145baaf3bedd9c7d7bbbfcdadc1938e1",
+        "buffer_stable": false,
+        "vertex_status": "window_unavailable",
+        "index_status": "window_unavailable",
+        "trace_sha256": "c8982163ab0d1c8e998a35fd3565dd86afb3ba92092f1e2df88dfe11824389c4"
+      }
+    }
+  },
+  "first_attempt": {
+    "status": "FAIL",
+    "failed_stage": "control/production",
+    "reason": "The original loader check compared the requested Z: path literally with Wine's D: alias of the same file.",
+    "result_sha256": "96d1a0c4f949058171c9d05e7e6aecf9f5c4bab9c9dc5e21479f526e7dccbfaa",
+    "baseline_log_sha256": "4f06b0c61cbfa2b5b616628f3048c1aa2b908c25c8009b72d4c18142c2758013",
+    "production_log_sha256": "e6aa5fe1abe4459707bcf89d893189a72185b58b6c7d27ebfd61f37b32d18541"
+  },
+  "validation": "The 24 logs/images, 16 traces and copied binary hashes were revalidated after the drive-mapping and slash checks; the runner was not rerun after the slash restriction.",
+  "limitations": [
+    "Test-only DLL; never deploy it to TDS.",
+    "No game data or wrapped buffer passed through native device aliases.",
+    "State-block mutation windows do not establish general COM or concurrent lock safety.",
+    "RGB PPM equality does not establish alpha or general renderer parity.",
+    "Synthetic serial fixture only; no TDS data, gameplay, Steam launch or native Windows test.",
+    "The test-only state-block policy remains excluded from the production DLL.",
+    "No concurrent native Lock/Unlock or uninstrumented device alias is exercised in Wine.",
+    "Full logs and binaries remain local under build/t3render-captures and are not committed."
+  ]
+}

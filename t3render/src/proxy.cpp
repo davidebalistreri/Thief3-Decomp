@@ -19,6 +19,10 @@
 #include <unordered_map>
 #include <vector>
 
+#if defined(T3RENDER_STATEBLOCK_TEST_FIXTURE) && !defined(T3RENDER_PROXY_TEST) && !defined(T3RENDER_STATEBLOCK_DLL_TEST)
+#error The state-block experiment is restricted to explicitly designated test builds.
+#endif
+
 extern "C" IDirect3D8* WINAPI Proxy_Direct3DCreate8(UINT);
 
 namespace {
@@ -571,17 +575,25 @@ HRESULT STDMETHODCALLTYPE DeviceProcessVertices(IDirect3DDevice8* device, UINT s
 }
 
 // State blocks can retain or restore native bindings without passing through
-// SetStreamSource/SetIndices. Until their resource lifetime is represented,
-// invalidate evidence before the call even if the runtime later rejects it.
+// SetStreamSource/SetIndices. The production proxy invalidates evidence before
+// the call even if the runtime later rejects it. Only a separately built test
+// DLL explores a narrower binding-mutation window; that DLL is not safe for TDS.
 template <typename Method, typename... Args>
 HRESULT ForwardBufferInvalidating(IDirect3DDevice8* device, std::size_t slot, Args... args) {
     ErrorState error;
     auto binding = Find(device, true);
     if (!binding) return D3DERR_INVALIDCALL;
+#ifdef T3RENDER_STATEBLOCK_TEST_FIXTURE
+    const std::uint64_t mutation = binding->buffers ? binding->buffers->BeginBindingMutation(device) : 0;
+#else
     if (binding->buffers) binding->buffers->InvalidateDevice(device);
+#endif
     error.Restore();
     const HRESULT hr = reinterpret_cast<Method>(binding->original[slot])(device, args...);
     error.Capture();
+#ifdef T3RENDER_STATEBLOCK_TEST_FIXTURE
+    if (mutation) binding->buffers->EndBindingMutation(device, mutation);
+#endif
     return hr;
 }
 

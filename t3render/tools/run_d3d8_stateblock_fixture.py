@@ -46,6 +46,18 @@ def inspect_image(path):
     return data
 
 
+def inspect_buffer_range(component, value):
+    # Both state-block fixtures draw the first three 20-byte vertices and
+    # three 16-bit indices from stream zero, even for oversized resources.
+    expected = {
+        "vertex": {"stream": 0, "first_vertex": 0, "vertex_count": 3, "stride": 20, "byte_offset": 0},
+        "index": {"index_count": 3, "index_format": 101, "byte_offset": 0},
+    }.get(component)
+    if (expected is None or not isinstance(value, dict) or
+            any(trace.integer(value.get(key)) != number for key, number in expected.items())):
+        raise RunError(f"unexpected {component} buffer range")
+
+
 def inspect_trace(path):
     try:
         records = trace.validated_records(path)
@@ -91,6 +103,7 @@ def inspect_trace(path):
             raise RunError("proxy did not conservatively mark its state-block window unavailable")
         for component, binding, size in (("vertex", stream, 60), ("index", index, 6)):
             value = data.get(component)
+            inspect_buffer_range(component, value)
             if (not isinstance(value, dict) or value.get("status") != "window_unavailable" or
                     value.get("data") is not None or value.get("encoding") != "hex" or
                     integer(value.get("byte_count")) != size or

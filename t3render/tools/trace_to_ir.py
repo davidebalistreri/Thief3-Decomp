@@ -12,6 +12,7 @@ import json
 import math
 from pathlib import Path
 import re
+import struct
 import sys
 import tempfile
 
@@ -250,6 +251,139 @@ def immediate_index(raw, draw):
             "byte_count": data[1], "encoding": "hex", "data": data[2]}
 
 
+def uint32(value):
+    value = nonnegative(value)
+    return value if value is not None and value <= 0xffffffff else None
+
+
+def buffer_binding(record):
+    """Validate a getter's resource identity and declared byte size."""
+    if not isinstance(record, dict) or hresult_succeeded(record.get("hr")) is not True:
+        return None
+    token = record.get("buffer")
+    desc = record.get("description")
+    if (not isinstance(token, str) or re.fullmatch(r"0x[0-9a-fA-F]{1,16}", token) is None
+            or int(token[2:], 16) == 0 or not isinstance(desc, dict)):
+        return None
+    size = uint32(desc.get("size"))
+    return (token, size) if size is not None else None
+
+
+def buffered_vertex(raw, draw, indexed, limit):
+    unknown = {"status": "unknown", "resource": None, "stream": None, "first_vertex": None,
+               "vertex_count": None, "stride_bytes": None, "byte_offset": None,
+               "byte_count": None, "encoding": None, "data": None}
+    if not isinstance(raw, dict) or not isinstance(draw.get("streams"), list):
+        return unknown
+    streams = [s for s in draw["streams"] if isinstance(s, dict) and uint32(s.get("stream")) == 0]
+    if len(streams) != 1:
+        return unknown
+    stream = streams[0]
+    bound = buffer_binding(stream)
+    data = captured_hex(raw)
+    first, count = uint32(raw.get("first_vertex")), nonnegative(raw.get("vertex_count"))
+    stride, offset = uint32(raw.get("stride")), nonnegative(raw.get("byte_offset"))
+    elements = primitive_elements(draw)
+    primitives = uint32(draw.get("primitive_count"))
+    if bound is None or data is None or first is None or count is None or stride is None or offset is None:
+        return unknown
+    if elements is None or primitives is None or uint32(raw.get("stream")) != 0:
+        return unknown
+    if indexed:
+        ib = draw.get("indices")
+        ib_bound = buffer_binding(ib)
+        base = uint32(ib.get("base_vertex_index")) if isinstance(ib, dict) else None
+        minimum, declared = uint32(draw.get("min_vertex_index")), uint32(draw.get("num_vertices"))
+        if ib_bound is None or base is None or minimum is None or declared is None:
+            return unknown
+        expected_first, expected_count = base + minimum, declared if primitives else 0
+    else:
+        expected_first, expected_count = uint32(draw.get("start_vertex")), elements
+    if (expected_first is None or expected_first > 0xffffffff or count != expected_count or first != expected_first
+            or first + count > 0x100000000 or uint32(stream.get("stride")) != stride
+            or raw.get("resource") != bound[0] or (count and not stride) or offset != first * stride
+            or data[1] != count * stride or data[1] > limit or offset > bound[1] or data[1] > bound[1] - offset):
+        return unknown
+    return {"status": data[0], "resource": capture_id(bound[0]), "stream": 0, "first_vertex": first,
+            "vertex_count": count, "stride_bytes": stride, "byte_offset": offset,
+            "byte_count": data[1], "encoding": "hex", "data": data[2]}
+
+
+def buffered_index(raw, draw, limit):
+    unknown = {"status": "unknown", "resource": None, "index_count": None, "index_format": None,
+               "byte_offset": None, "byte_count": None, "encoding": None, "data": None}
+    if not isinstance(raw, dict):
+        return unknown
+    binding_record = draw.get("indices")
+    bound = buffer_binding(binding_record)
+    desc = object_or_empty(object_or_empty(binding_record).get("description"))
+    data = captured_hex(raw)
+    count, fmt, offset = nonnegative(raw.get("index_count")), uint32(raw.get("index_format")), nonnegative(raw.get("byte_offset"))
+    start, primitives = uint32(draw.get("start_index")), uint32(draw.get("primitive_count"))
+    minimum, vertices = uint32(draw.get("min_vertex_index")), uint32(draw.get("num_vertices"))
+    elements = primitive_elements(draw)
+    width = {101: 2, 102: 4}.get(fmt)
+    if (bound is None or data is None or count is None or offset is None or start is None or
+            primitives is None or minimum is None or vertices is None or elements is None or width is None):
+        return unknown
+    if (raw.get("resource") != bound[0] or uint32(desc.get("format")) != fmt or count != elements or
+            minimum + vertices > 0x100000000 or offset != start * width or data[1] != count * width or
+            data[1] > limit or offset > bound[1] or data[1] > bound[1] - offset):
+        return unknown
+    # An indexed draw can reference only the vertex range declared by the
+    # application. This check does not decode vertices or make the frame replayable.
+    values = struct.iter_unpack("<H" if width == 2 else "<I", bytes.fromhex(data[2]))
+    if any(not minimum <= value[0] < minimum + vertices for value in values):
+        return unknown
+    return {"status": data[0], "resource": capture_id(bound[0]), "index_count": count,
+            "index_format": INDEX_FORMATS[fmt], "byte_offset": offset, "byte_count": data[1],
+            "encoding": "hex", "data": data[2]}
+
+
+def buffered_data(draw, result, header, indexed, within_frame_budget):
+    unknown_vertex = buffered_vertex(None, draw, indexed, 0)
+    unknown_index = buffered_index(None, draw, 0) if indexed else None
+    raw = object_or_empty(draw.get("buffer_data"))
+    capability = object_or_empty(header.get("buffer_capture"))
+    limit = uint32(capability.get("component_limit_bytes"))
+    frame_limit = uint32(capability.get("frame_limit_bytes"))
+    stable = result.get("buffer_stable") if isinstance(result.get("buffer_stable"), bool) else None
+    hr = integer(result.get("hr"))
+    output = {"source": raw.get("source") if raw.get("source") == "application_lock_shadow" else None,
+              "buffer_stable": stable, "draw_hresult": hr, "vertex": unknown_vertex, "index": unknown_index}
+    if (raw.get("source") != "application_lock_shadow" or capability.get("requested") is not True or
+            capability.get("encoding") != "hex" or limit is None or not 0 < limit <= 256 * 1024 or
+            frame_limit is None or not limit <= frame_limit <= 8 * 1024 * 1024 or
+            not within_frame_budget or stable is not True or hresult_succeeded(hr) is not True or
+            (not indexed and ("index" not in raw or raw["index"] is not None))):
+        return output
+    output["vertex"] = buffered_vertex(raw.get("vertex"), draw, indexed, limit)
+    if indexed:
+        output["index"] = buffered_index(raw.get("index"), draw, limit)
+    return output
+
+
+def buffered_frame_bytes(draw):
+    """Conservatively account for encoded snapshots even if a later draw fails.
+
+    An impossible captured record still contributes its larger claimed or
+    encoded size; if either cannot be measured, the frame budget is unknown.
+    Other statuses contain no successfully emitted buffer bytes.
+    """
+    raw = object_or_empty(draw.get("buffer_data"))
+    total = 0
+    for name in ("vertex", "index"):
+        part = raw.get(name)
+        if not isinstance(part, dict) or part.get("status") not in ("captured", "empty"):
+            continue
+        claimed = nonnegative(part.get("byte_count"))
+        encoded = part.get("data")
+        if claimed is None or not isinstance(encoded, str):
+            return None
+        total += max(claimed, (len(encoded) + 1) // 2)
+    return total
+
+
 def mesh(draw, identifier, source, indexed):
     # UP data is supplied directly to the call; bound streams/indices are NOT
     # that data. Captured bytes are opaque snapshots, not decoded geometry.
@@ -331,6 +465,9 @@ def convert(path):
         "compatibility": {"d3d8": {"header": records[0], "unmapped_events": [], "capture_end": None}},
     }
     current = None
+    buffered_pending = {}
+    buffered_results = []
+    frame_buffer_bytes = 0
     draw_index = 0
     for line_number, event in enumerate(records, 1):
         kind = event["event"]
@@ -339,17 +476,31 @@ def convert(path):
         if kind == "capture_end":
             ir["compatibility"]["d3d8"]["capture_end"] = event
         elif kind == "frame_begin":
+            buffered_pending = {}
+            buffered_results = []
+            frame_buffer_bytes = 0
             current = {"frame": event["frame"], "commands": [],
                        "compatibility": {"d3d8": {"frame_begin": event, "events": [], "frame_end": None}}}
             ir["frames"].append(current)
         elif kind == "frame_end":
+            limit = uint32(object_or_empty(records[0].get("buffer_capture")).get("frame_limit_bytes"))
+            within_budget = frame_buffer_bytes is not None and limit is not None and frame_buffer_bytes <= limit
+            for mesh_record, draw, result, indexed in buffered_results:
+                mesh_record["buffered_data_observed"] = buffered_data(draw, result, records[0], indexed, within_budget)
             current["compatibility"]["d3d8"]["frame_end"] = event
             current = None
         elif kind == "draw":
+            if "buffer_data" in event:
+                used = buffered_frame_bytes(event)
+                frame_buffer_bytes = (frame_buffer_bytes + used
+                                      if frame_buffer_bytes is not None and used is not None else None)
             source, indexed = CALLS.get(event["call"], (None, None))
             camera_id, mesh_id, material_id = f"camera:{draw_index}", f"mesh:{draw_index}", f"material:{draw_index}"
             ir["cameras"].append(camera(event, camera_id))
-            ir["meshes"].append(mesh(event, mesh_id, source, indexed))
+            mesh_record = mesh(event, mesh_id, source, indexed)
+            ir["meshes"].append(mesh_record)
+            if source == "buffered" and "buffer_data" in event:
+                buffered_pending[event["op_id"]] = (mesh_record, event, indexed)
             ir["materials"].append(material(event, material_id))
             transforms = object_or_empty(event.get("transforms"))
             current["commands"].append({
@@ -364,6 +515,9 @@ def convert(path):
             })
             draw_index += 1
         else:
+            if kind == "draw_result" and event.get("op_id") in buffered_pending:
+                mesh_record, draw, indexed = buffered_pending.pop(event["op_id"])
+                buffered_results.append((mesh_record, draw, event, indexed))
             target = (current["compatibility"]["d3d8"]["events"] if current is not None
                       else ir["compatibility"]["d3d8"]["unmapped_events"])
             target.append({"source_line": line_number, "event": event})

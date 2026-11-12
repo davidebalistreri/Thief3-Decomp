@@ -3,9 +3,9 @@
 `trace_to_ir.py` converts a **complete diagnostic v1 JSONL trace** into a
 versioned, API-independent JSON representation for inspection. This is an
 offline prototype, not a runtime renderer interface or a replay: decoded
-geometry, buffered resource contents and shader programs are not captured.
-Newer diagnostic traces can contain opaque UP bytes and paired operation
-results; older traces may lack them.
+geometry, complete resource contents and shader programs are not captured.
+Newer diagnostic traces can contain opaque UP or bounded buffer-shadow bytes
+and paired operation results; older traces may lack them.
 Neither visual parity nor gameplay behavior can be established from this IR.
 
 ```sh
@@ -49,6 +49,24 @@ data is removed after validation. No third-party modules are needed.
   bound buffers. For buffered indexed draws, the
   index format comes only from the captured index buffer description; base
   vertex, minimum vertex, vertex count and start index remain separate.
+- When a buffered draw includes `buffer_data`, the mesh gains
+  `buffered_data_observed` only after its corresponding `draw_result` has been
+  matched by operation ID within the same frame. It records the source,
+  `buffer_stable`, and exact `draw_hresult`, plus independent vertex and index
+  snapshots. The IR exposes bytes only when the header advertises the expected
+  bounded shadow capture, the draw succeeded and the intercepted draw window
+  was stable. It validates binding identity, getter success, stream, descriptor
+  size, offsets, stride, topology-derived counts, index format and index values
+  against the draw's declared vertex range. Inconsistent or unknown components
+  stay `unknown` with null data; failed or unstable draws make both components
+  unknown. It also checks the frame-wide budget against all emitted vertex and
+  index snapshots, including later failed or unstable draws. If the frame
+  exceeds that budget or a captured payload's size cannot be determined, no
+  buffered bytes are exposed for that frame. A non-indexed draw has a null index
+  component. Legacy draws and UP
+  draws do not gain this field, and raw source data remains in the compatibility
+  extension. These are pre-draw observations from application write locks:
+  concurrent CPU writes can still differ from what the GPU consumes.
 - Material values are captured legacy parameters and texture slots, not PBR
   values or texture roles. Lights are reported only when observed: the list is
   explicitly incomplete even when empty, since capture samples a limited range
@@ -62,6 +80,6 @@ data is removed after validation. No third-party modules are needed.
   reconstructed. The raw extension also retains unrecognized values.
 
 The IR can help design and test a future runtime representation, but the
-capture lacks the resource bytes, identity, pipeline state and execution data
-required for a compatibility renderer. The schema does not imply those missing
-pieces exist.
+capture still lacks complete resource contents, persistent asset identity,
+pipeline state and execution data required for a compatibility renderer. The
+schema does not imply those missing pieces exist.

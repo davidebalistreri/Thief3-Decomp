@@ -11,6 +11,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_trace_to_up_packet import fixture, VERTICES
 from test_trace_to_camera_packet import fixture as camera_fixture
+from test_trace_buffer_to_up_packet import fixture as proxy_buffer_fixture
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,7 +24,8 @@ print(json.dumps({{"kind": kind, "cwd": os.getcwd(), "args": args,
  "prefix": os.environ.get("WINEPREFIX"), "server": os.environ.get("WINESERVER"),
  "overrides": os.environ.get("WINEDLLOVERRIDES"), "dllpath": os.environ.get("WINEDLLPATH_PREPEND"),
  "inherited": [os.environ.get(x) for x in ("WINEDLLPATH", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH")],
- "capture_key": os.environ.get("T3RENDER_CAPTURE_KEY"), "frame": os.environ.get("T3RENDER_CAPTURE_FRAME")}}), flush=True)
+ "capture_key": os.environ.get("T3RENDER_CAPTURE_KEY"), "frame": os.environ.get("T3RENDER_CAPTURE_FRAME"),
+ "buffers": os.environ.get("T3RENDER_CAPTURE_BUFFERS")}}), flush=True)
 if os.environ.get("FAKE_TIMEOUT") == kind:
     time.sleep(30)
 if os.environ.get("FAKE_FAIL") == kind:
@@ -59,7 +61,8 @@ out.write_bytes(data)
 if kind == "capture":
     trace = host(os.environ["T3RENDER_CAPTURE_PATH"])
     assert not trace.exists()
-    name = ("FAKE_TRACE_BUFFERED_WRAPPED" if "--wrapped-buffers" in args else
+    name = ("FAKE_TRACE_BUFFERED_PROXY" if "--writeonly-buffers" in args else
+            "FAKE_TRACE_BUFFERED_WRAPPED" if "--wrapped-buffers" in args else
             "FAKE_TRACE_BUFFERED" if "--buffered" in args else ("FAKE_TRACE_CAMERA" if "--camera" in args else "FAKE_TRACE"))
     shutil.copyfile(os.environ[name], trace)
     if "--buffer-snapshot" in args and not os.environ.get("FAKE_SNAPSHOT_MISSING"):
@@ -128,6 +131,11 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
         self.buffered_trace.write_text("".join(json.dumps(event) + "\n" for event in buffered_fixture()), encoding="utf-8")
         self.wrapped_trace = self.root / "wrapped.jsonl"
         self.wrapped_trace.write_text("".join(json.dumps(event) + "\n" for event in buffered_fixture(wrapped=True)), encoding="utf-8")
+        self.proxy_trace = self.root / "proxy-buffer.jsonl"
+        events = proxy_buffer_fixture()
+        events[4]["streams"][0]["description"].update(usage=8, pool=1)
+        events[4]["indices"]["description"].update(usage=8, pool=1)
+        self.proxy_trace.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
         self.buffer_snapshot = self.root / "buffer-snapshot.txt"
         vertices = [VERTICES[0], *VERTICES]
         vb = b"".join(struct.pack("<4fI", *vertex) for vertex in vertices)
@@ -138,15 +146,17 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
 
     def run_runner(self, *, output=None, extra_env=None, timeout="5", engine=None, bottle=None, build=None,
                    camera=False, buffered=False, verify_buffer_readback=False, replay_buffer_snapshot=False,
-                   wrapped_buffers=False):
+                   wrapped_buffers=False, proxy_buffer_replay=False):
         env = os.environ.copy()
         env.update({"FAKE_TRACE": str(self.trace), "FAKE_TRACE_CAMERA": str(self.camera_trace),
                     "FAKE_TRACE_BUFFERED": str(self.buffered_trace), "FAKE_TRACE_BUFFERED_WRAPPED": str(self.wrapped_trace),
+                    "FAKE_TRACE_BUFFERED_PROXY": str(self.proxy_trace),
                     "FAKE_SNAPSHOT": str(self.buffer_snapshot),
                     "WINEDLLPATH": "poison/dxmt",
                     "WINEDLLPATH_PREPEND": "poison/dxmt", "DYLD_LIBRARY_PATH": "poison",
                     "DYLD_FRAMEWORK_PATH": "poison", "T3RENDER_CAPTURE_KEY": "F11",
-                    "T3RENDER_CAPTURE_FRAME": "12", "T3RENDER_CAPTURE_PATH": "poison"})
+                    "T3RENDER_CAPTURE_FRAME": "12", "T3RENDER_CAPTURE_PATH": "poison",
+                    "T3RENDER_CAPTURE_BUFFERS": "poison"})
         env.update(extra_env or {})
         args = [sys.executable, "-B", str(RUNNER), "--engine", str(engine or self.engine),
                                "--bottle", str(bottle or self.bottle), "--build-dir", str(build or self.build),
@@ -161,6 +171,8 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
             args.append("--wrapped-buffers")
         if replay_buffer_snapshot:
             args.append("--replay-buffer-snapshot")
+        if proxy_buffer_replay:
+            args.append("--proxy-buffer-replay")
         return subprocess.run(args, env=env, text=True, capture_output=True, timeout=20)
 
     def manifest(self):
@@ -192,11 +204,78 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
             self.assertNotIn("dxmt", log["dllpath"].lower())
             self.assertIsNone(log["capture_key"])
             self.assertEqual(log["frame"], "0" if name == "capture" else None)
+            self.assertIsNone(log["buffers"])
             self.assertTrue(log["overrides"].startswith("d3d8=n,b;" if name == "capture" else "d3d8=b;"))
             self.assertTrue(log["args"][-1].startswith("Z:\\"))
         self.assertEqual(self.log("baseline")["cwd"], str((self.output / "baseline").resolve()))
         self.assertEqual(self.log("capture")["cwd"], str((self.output / "captured").resolve()))
         self.assertIn("Synthetic fixture only", (self.output / "convert.log").read_text())
+
+    def test_proxy_buffer_replay_uses_capture_trace_and_isolates_opt_in(self):
+        result = self.run_runner(buffered=True, proxy_buffer_replay=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        manifest = self.manifest()
+        self.assertEqual(manifest["status"], "PASS")
+        self.assertEqual(manifest["test"], "synthetic_d3d8_proxy_buffer_dx12_replay")
+        self.assertEqual(manifest["dx12_replay"], "completed")
+        self.assertEqual(manifest["buffer_capture"],
+                         {"producer": "proxy_application_lock_shadow", "conversion": "PASS"})
+        self.assertEqual(manifest["stages"],
+                         ["baseline", "capture", "trace_validation", "convert", "replay", "compare"])
+        self.assertEqual(manifest["sha256"]["baseline_ppm"], manifest["sha256"]["captured_ppm"])
+        self.assertEqual(manifest["sha256"]["baseline_ppm"], manifest["sha256"]["replay_ppm"])
+        self.assertNotIn("buffer_snapshot", manifest["sha256"])
+        self.assertFalse((self.output / "buffer-snapshot.txt").exists())
+        for name in ("baseline", "capture"):
+            self.assertIn("--writeonly-buffers", self.log(name)["args"])
+        self.assertIsNone(self.log("baseline")["buffers"])
+        self.assertEqual(self.log("capture")["buffers"], "1")
+        self.assertIsNone(self.log("replay")["buffers"])
+        self.assertIn("trace_buffer_to_up_packet.py", (self.output / "convert.log").read_text())
+        self.assertTrue((self.output / "packet.txt").read_text().startswith("T3R_UP_V1\n"))
+        self.assertTrue(any("does not validate TDS" in item for item in manifest["limitations"]))
+
+    def test_proxy_buffer_replay_rejects_unavailable_or_unstable_observations(self):
+        cases = ("missing_vertex", "missing_index", "unstable", "missing_capability", "malformed")
+        for case in cases:
+            with self.subTest(case=case):
+                events = proxy_buffer_fixture()
+                events[4]["streams"][0]["description"].update(usage=8, pool=1)
+                events[4]["indices"]["description"].update(usage=8, pool=1)
+                if case == "missing_vertex": events[4]["buffer_data"]["vertex"]["status"] = "unknown"
+                if case == "missing_index": events[4]["buffer_data"]["index"].pop("data")
+                if case == "unstable": events[5]["buffer_stable"] = False
+                if case == "missing_capability": events[0]["buffer_capture"]["requested"] = False
+                trace = self.root / (case + ".jsonl")
+                trace.write_text("{}\n" if case == "malformed" else
+                                 "".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+                output = self.root / ("output-" + case)
+                result = self.run_runner(buffered=True, proxy_buffer_replay=True, output=output,
+                                         extra_env={"FAKE_TRACE_BUFFERED_PROXY": str(trace)})
+                self.assertNotEqual(result.returncode, 0)
+                manifest = json.loads((output / "result.json").read_text())
+                self.assertIn(manifest["failed_stage"], ("trace_validation", "convert"))
+                self.assertEqual(manifest["dx12_replay"], "not_run")
+                self.assertFalse((output / "replay.log").exists())
+
+    def test_proxy_buffer_replay_detects_image_mismatch(self):
+        result = self.run_runner(buffered=True, proxy_buffer_replay=True, extra_env={"FAKE_DIFFER": "replay"})
+        self.assertNotEqual(result.returncode, 0)
+        manifest = self.manifest()
+        self.assertEqual(manifest["failed_stage"], "compare")
+        self.assertEqual(manifest["dx12_replay"], "completed")
+        self.assertNotEqual(manifest["sha256"]["baseline_ppm"], manifest["sha256"]["replay_ppm"])
+
+    def test_proxy_buffer_replay_option_exclusions_precede_output(self):
+        cases = ({}, {"buffered": True, "verify_buffer_readback": True},
+                 {"buffered": True, "wrapped_buffers": True},
+                 {"buffered": True, "verify_buffer_readback": True, "replay_buffer_snapshot": True})
+        for options in cases:
+            with self.subTest(options=options):
+                result = self.run_runner(proxy_buffer_replay=True, **options)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("requires", result.stderr)
+                self.assertFalse(self.output.exists())
 
     def test_camera_mode_passes_fixture_flag_and_replays_xyz_packet(self):
         result = self.run_runner(camera=True)

@@ -38,10 +38,9 @@ A separate `--buffered` fixture draws the same screen-space triangle with
 nonzero base vertex, minimum vertex and start index. Its D3D8 reference and
 proxy images matched on the tested runtime; see the
 [buffered fixture result](../benchmarks/d3d8/2026-11-12-buffered/result.json).
-The proxy trace does not yet contain buffered bytes or support buffered DX12
-replay. The host runner's `--buffered` mode compares the two D3D8 images and
-validates the indexed draw, buffer bindings and offsets in the trace. An additional
-fixture snapshot experiment, described below, can replay its read-back bytes.
+The host runner's `--buffered` mode compares the two D3D8 images and validates
+the indexed draw, buffer bindings and offsets in the trace. Separate opt-in
+experiments can replay fixture-owned snapshots or a bounded proxy observation.
 
 The screen-space and camera UP replays do not exercise indexed draws. None of
 these fixture replays tests depth, textures, game shader programs, lighting,
@@ -93,9 +92,25 @@ result manifest and logs along with the images. On a different runtime,
 compare results and image differences before inferring any parity failure.
 Add `--camera` and use another new output directory to exercise the second mode.
 For the indexed buffer capture test, use a new output directory and pass
-`--buffered` instead. The manifest records `dx12_replay: not_run` and the
-observed draw parameters; no replay executable is required in this mode.
+`--buffered` instead. Without an additional replay option, the manifest records
+`dx12_replay: not_run` and no replay executable is required.
 `--camera` and `--buffered` are mutually exclusive.
+
+With a new output directory, add `--buffered --proxy-buffer-replay` to replay
+the proxy's observed WRITEONLY application writes. The runner passes
+`--writeonly-buffers` to both fixture processes, enables
+`T3RENDER_CAPTURE_BUFFERS=1` only for the capture process, validates the trace,
+converts its stable indexed draw to an UP packet and compares three images.
+Its manifest records `proxy_application_lock_shadow`; no fixture snapshot is
+used. This test requires an isolated fixture attestation and is not a TDS frame
+or a general replay. `--proxy-buffer-replay` excludes fixture readback, fixture
+wrappers and fixture snapshot replay. See the [proxy capture benchmark](../benchmarks/d3d12/2026-11-12-proxy-writeonly-replay/result.json).
+
+**Do not enable experimental buffer capture in TDS yet.** Unobserved device
+aliases obtained through other resources may bypass unwrapping and pass a
+wrapper to Wine, causing an assertion or crash. COM identity, state-block
+lifetime and all alias paths are not yet covered. See the main README's
+experimental buffered capture section for limits.
 
 For the buffered fixture only, add `--verify-buffer-readback` to have both
 fixture runs use read locks and compare the known written vertex/index ranges

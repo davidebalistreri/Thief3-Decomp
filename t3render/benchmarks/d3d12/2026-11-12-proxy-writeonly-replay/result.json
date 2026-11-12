@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_proxy_writeonly_to_dx12_replay",
+  "date": "2026-11-12",
+  "host": {
+    "os": "macOS 27.2.1",
+    "architecture": "arm64",
+    "gpu": "Apple M5 Pro"
+  },
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "d3d12_chain": "Wine D3D12/vkd3d -> Vulkan -> MoltenVK -> Metal"
+  },
+  "sources": {
+    "buffer_manager_commit": "f599824",
+    "proxy_capture_commit": "27bd455",
+    "converter_commit": "558fb38",
+    "render_ir_commit": "86fdfc3",
+    "buffer_manager_sha256": "90d21693dcc1ccd21f72a6d81a2ceb51e7ad88c864fee3fb7a47a84e5ff110af",
+    "proxy_sha256": "f0739edcc45f245429aac7773a1f1d6422bfa9b49af06d00c017b358ab3d8b1f",
+    "capture_sha256": "14c7e6879ef7c840ca2d2c6ad6177f877ebea8368897574c0a3a254fade1849f",
+    "fixture_sha256": "f05011260ee19f25d59090a51980ee313dcce57f3caea882b3351f2bbfb8afea",
+    "converter_sha256": "d1b04a9dfd7b02b59fb47ac20359c3b788ddabced07d7021f4369ae1ceed285a"
+  },
+  "fixture": {
+    "mode": "--buffered --writeonly-buffers",
+    "proxy_capture_option": "T3RENDER_CAPTURE_BUFFERS=1",
+    "fixture_executable_sha256": "fc54274102183e9d3aaf2e5c9668c873793de7521247c6ba574c39803cff8024",
+    "proxy_dll_sha256": "1b09cd3935ee0159cab840489f701564cd813d0952e7ecc1122d51394564e918",
+    "replay_executable_sha256": "69624e092ded55b743a77bfe7b80832be83980d7699bf13c83f4baf7e895a5e0",
+    "usage": "D3DUSAGE_WRITEONLY for VB and IB",
+    "producer": "proxy application-lock shadow; no fixture-side resource wrapper or READONLY buffer lock",
+    "vertex_offset": 40,
+    "vertex_bytes": 60,
+    "index_offset": 4,
+    "index_bytes": 6,
+    "base_vertex_index": 1,
+    "min_vertex_index": 1,
+    "num_vertices": 3,
+    "start_index": 2,
+    "trace_sha256": "bcddd6b109d233c36919452b6f42a6ac81333efd044eea9c58500e98343a8ff5",
+    "trace_note": "Not included: transient process addresses.",
+    "packet": "packet.txt",
+    "packet_sha256": "e1db18a81787457bd1197227484a5aa635551f222b88fef0c43d3ef0b9d946e5"
+  },
+  "result": {
+    "baseline_d3d8": "PASS",
+    "captured_d3d8": "PASS",
+    "d3d12_replay": "PASS",
+    "buffer_stable": true,
+    "width": 256,
+    "height": 256,
+    "red_pixels": 19648,
+    "rgba_fnv1a64": "10b6d7ca2fd8394d",
+    "ppm_sha256_all_three": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679",
+    "image": "../2026-11-12-up-replay/triangle.png",
+    "comparison": "Reference D3D8, captured D3D8 and synthetic DX12 replay PPM byte streams matched."
+  },
+  "limitations": [
+    "One isolated synthetic fixture, not a TDS frame or native Windows validation.",
+    "The trace observes bounded pre-draw resource shadows; CPU writes, unknown aliases and missing operations can make observations incomplete.",
+    "The converter requires an explicit fixture attestation and expands one indexed draw into a single UP triangle.",
+    "An uninstrumented device alias can bypass unwrap and crash Wine; the experimental buffer option must not yet be enabled in TDS.",
+    "No PBR, lighting, gameplay or stealth behavior was tested."
+  ]
+}

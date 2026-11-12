@@ -84,6 +84,8 @@ void VertexDeclarationRegistry::FinishClosingLocked(Device& device) noexcept {
         entry.available = false;
         entry.handle = 0;
         entry.generation = 0;
+        entry.reason = ShaderUnavailableReason::None;
+        entry.scan_status = DeclarationStatus::Unreadable;
     }
     device.id = 0;
     device.closing = false;
@@ -259,7 +261,11 @@ ShaderTicket VertexDeclarationRegistry::Begin(std::uint64_t id, ShaderOperation 
                     Entry* entry = FindHandleLocked(*device, handle);
                     if (entry) { entry->available = false; EnqueueLocked(*entry); drain = true; }
                 } else if (kind == ShaderOperation::Reset) {
-                    for (auto& entry : device->handles) { entry.available = false; EnqueueLocked(entry); }
+                    for (auto& entry : device->handles) {
+                        if (entry.occupied) entry.reason = ShaderUnavailableReason::ResetAttempt;
+                        entry.available = false;
+                        EnqueueLocked(entry);
+                    }
                     drain = true;
                 }
                 result = device->pending;
@@ -302,6 +308,8 @@ bool VertexDeclarationRegistry::EndCreate(ShaderTicket ticket, bool native_succe
                 // A repeated successful handle is ambiguous, including after
                 // Reset or a failed Delete. Keep a tombstone, never replace.
                 old->available = false;
+                old->reason = ShaderUnavailableReason::HandleCollision;
+                old->scan_status = snapshot.status;
                 EnqueueLocked(*old);
                 old->generation = device->next_generation;
                 device->next_generation = Advance(device->next_generation);
@@ -318,6 +326,9 @@ bool VertexDeclarationRegistry::EndCreate(ShaderTicket ticket, bool native_succe
                 entry->available = false;
                 entry->handle = handle;
                 entry->generation = device->next_generation;
+                entry->scan_status = snapshot.status;
+                entry->reason = snapshot.status == DeclarationStatus::Complete
+                    ? ShaderUnavailableReason::InvalidSnapshot : ShaderUnavailableReason::ScanIncomplete;
                 device->next_generation = Advance(device->next_generation);
                 device->pending = {};
                 return true;
@@ -361,6 +372,8 @@ bool VertexDeclarationRegistry::EndCreate(ShaderTicket ticket, bool native_succe
                 entry->available = true;
                 entry->handle = handle;
                 entry->generation = device->next_generation;
+                entry->scan_status = snapshot.status;
+                entry->reason = ShaderUnavailableReason::None;
                 entry->payload = std::move(payload); // free slot has no owned payload
                 --device->preparing; // reservation now belongs to the entry
                 device->next_generation = Advance(device->next_generation);
@@ -392,8 +405,12 @@ bool VertexDeclarationRegistry::EndDelete(ShaderTicket ticket, bool native_succe
                     entry->occupied = false;
                     entry->available = false;
                     entry->generation = 0;
+                    entry->reason = ShaderUnavailableReason::None;
+                    entry->scan_status = DeclarationStatus::Unreadable;
                     EnqueueLocked(*entry);
                     drain = true;
+                } else if (entry) {
+                    entry->reason = ShaderUnavailableReason::DeleteFailed;
                 }
                 device->pending = {};
                 device->pending_handle = 0;
@@ -434,7 +451,14 @@ ShaderObservation VertexDeclarationRegistry::Observe(ShaderTicket ticket, std::u
             Entry* entry = FindHandleLocked(*device, value);
             if (!entry) return result;
             result.generation = entry->generation;
-            if (!entry->available || !entry->payload) { result.status = ShaderObservationStatus::Unavailable; return result; }
+            result.has_scan_status = true;
+            result.scan_status = entry->scan_status;
+            if (!entry->available || !entry->payload) {
+                result.status = ShaderObservationStatus::Unavailable;
+                result.reason = entry->reason == ShaderUnavailableReason::None
+                    ? ShaderUnavailableReason::Unknown : entry->reason;
+                return result;
+            }
             pin = entry->payload; // strong pin, no allocation
         }
         // Copy and allocator callbacks happen outside mutex_. The source pin
@@ -456,6 +480,7 @@ ShaderObservation VertexDeclarationRegistry::Observe(ShaderTicket ticket, std::u
     } catch (...) {
         std::vector<std::uint32_t>().swap(result.words);
         result.status = ShaderObservationStatus::Unavailable;
+        result.reason = ShaderUnavailableReason::ObservationError;
     }
     if (pin) {
         pin.reset();

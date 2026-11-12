@@ -122,10 +122,11 @@ void DeviceLifetimeReuseAndFailures() {
     Register(registry, a, 0x44); // duplicate success is ambiguous, not a replacement
     auto collision = Observe(registry, a, 0x44);
     assert(collision.status == ShaderObservationStatus::Unavailable && collision.words.empty() &&
-           collision.generation != first.generation);
+           collision.generation != first.generation && collision.reason == ShaderUnavailableReason::HandleCollision &&
+           collision.has_scan_status && collision.scan_status == DeclarationStatus::Complete);
     auto deletion = registry.BeginDelete(a, 0x44);
     assert(deletion && registry.EndDelete(deletion, false));
-    assert(Observe(registry, a, 0x44).status == ShaderObservationStatus::Unavailable);
+    assert(Observe(registry, a, 0x44).reason == ShaderUnavailableReason::DeleteFailed);
     Register(registry, a, 0x44); // a failed Delete cannot resolve the collision
     assert(Observe(registry, a, 0x44).status == ShaderObservationStatus::Unavailable);
     deletion = registry.BeginDelete(a, 0x44);
@@ -137,9 +138,12 @@ void DeviceLifetimeReuseAndFailures() {
 
     auto reset = registry.BeginReset(a);
     assert(reset && registry.End(reset)); // even a failed native Reset invalidates
-    assert(Observe(registry, a, 0x44).status == ShaderObservationStatus::Unavailable);
+    auto reset_observation = Observe(registry, a, 0x44);
+    assert(reset_observation.status == ShaderObservationStatus::Unavailable &&
+           reset_observation.reason == ShaderUnavailableReason::ResetAttempt &&
+           reset_observation.has_scan_status && reset_observation.scan_status == DeclarationStatus::Complete);
     Register(registry, a, 0x44);
-    assert(Observe(registry, a, 0x44).status == ShaderObservationStatus::Unavailable);
+    assert(Observe(registry, a, 0x44).reason == ShaderUnavailableReason::HandleCollision);
     deletion = registry.BeginDelete(a, 0x44);
     assert(deletion && registry.EndDelete(deletion, true));
     Register(registry, a, 0x44);
@@ -161,7 +165,9 @@ void UnavailableAndCapacityFailClosed() {
     assert(a && b && !registry.OpenDevice());
     Register(registry, a, 5, {DeclarationStatus::Unreadable, {0x11111111}});
     auto unavailable = Observe(registry, a, 5);
-    assert(unavailable.status == ShaderObservationStatus::Unavailable && unavailable.words.empty());
+    assert(unavailable.status == ShaderObservationStatus::Unavailable && unavailable.words.empty() &&
+           unavailable.reason == ShaderUnavailableReason::ScanIncomplete && unavailable.has_scan_status &&
+           unavailable.scan_status == DeclarationStatus::Unreadable);
     auto deletion = registry.BeginDelete(a, 5);
     assert(deletion && registry.EndDelete(deletion, true));
     Register(registry, a, 5);
@@ -179,6 +185,31 @@ void UnavailableAndCapacityFailClosed() {
     create = registry.BeginCreate(c);
     assert(!registry.EndCreate(create, true, true, 3, Complete({1, 2, 3, 4, kEnd})));
     assert(!registry.BeginDraw(c));
+}
+
+void UnavailableReasonsPreserveScannerStatus() {
+    VertexDeclarationRegistry registry({1, 2, 8, 32});
+    const auto device = registry.OpenDevice();
+    const DeclarationStatus failures[] = {DeclarationStatus::InvalidConfiguration, DeclarationStatus::NullAddress,
+        DeclarationStatus::AddressOverflow, DeclarationStatus::Unreadable, DeclarationStatus::WordLimit,
+        DeclarationStatus::UnsupportedToken, DeclarationStatus::AllocationFailure};
+    for (auto status : failures) {
+        Register(registry, device, 10, {status, {0x12345678}});
+        const auto observed = Observe(registry, device, 10);
+        assert(observed.status == ShaderObservationStatus::Unavailable && observed.words.empty() &&
+               observed.generation && observed.has_scan_status && observed.scan_status == status &&
+               observed.reason == ShaderUnavailableReason::ScanIncomplete);
+        const auto reset = registry.BeginReset(device);
+        assert(reset && registry.End(reset));
+        const auto after_reset = Observe(registry, device, 10);
+        assert(after_reset.reason == ShaderUnavailableReason::ResetAttempt && after_reset.scan_status == status);
+        const auto deletion = registry.BeginDelete(device, 10);
+        assert(deletion && registry.EndDelete(deletion, true));
+    }
+    Register(registry, device, 10, {DeclarationStatus::Complete, {kStream0}}); // missing END
+    const auto invalid = Observe(registry, device, 10);
+    assert(invalid.reason == ShaderUnavailableReason::InvalidSnapshot && invalid.scan_status == DeclarationStatus::Complete &&
+           invalid.words.empty());
 }
 
 void TombstonesReleaseBoundedStorage() {
@@ -249,6 +280,7 @@ int main() {
     ScannerFramesPayloadAndLimits();
     DeviceLifetimeReuseAndFailures();
     UnavailableAndCapacityFailClosed();
+    UnavailableReasonsPreserveScannerStatus();
     TombstonesReleaseBoundedStorage();
     OverlapInvalidatesOnlyAffectedDevice();
     InvalidProtocolAndEscapeAreConservative();

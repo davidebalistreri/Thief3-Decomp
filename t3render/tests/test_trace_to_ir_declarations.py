@@ -50,6 +50,55 @@ class DeclarationTraceTests(unittest.TestCase):
         self.assertEqual(command["compatibility"]["d3d8"]["draw"], records[2])
         self.assertFalse(output["replayable"])
 
+    def test_unavailable_metadata_requires_a_stable_paired_draw(self):
+        records = events()
+        records[2]["vertex_declaration"] = {"status": "unavailable", "generation": 5, "words": None,
+                                              "reason": "scan_incomplete", "scan_status": "unreadable"}
+        observed = self.observation(records)
+        self.assertEqual((observed["status"], observed["reason"], observed["scan_status"]),
+                         ("unavailable", "scan_incomplete", "unreadable"))
+        self.assertIsNone(observed["words"])
+        # A later reset can invalidate a generation whose scan was incomplete.
+        records[2]["vertex_declaration"]["reason"] = "reset_attempt"
+        self.assertEqual(self.observation(records)["reason"], "reset_attempt")
+        for result in ({"hr": -1, "shader_stable": True}, {"hr": 0, "shader_stable": False},
+                       {"hr": 0}):
+            changed = copy.deepcopy(records); changed[3].update(result)
+            if "shader_stable" not in result: changed[3].pop("shader_stable", None)
+            with self.subTest(result=result):
+                value = self.observation(changed)
+                self.assertEqual(value["status"], "unknown")
+                self.assertNotIn("reason", value)
+                self.assertNotIn("scan_status", value)
+        malformed = copy.deepcopy(records); malformed[3]["shader_stable"] = "true"
+        with self.assertRaises(trace_summary.TraceError): self.observation(malformed)
+
+    def test_unavailable_metadata_rejects_invalid_or_inconsistent_fields(self):
+        record = {"status": "unavailable", "generation": 5, "words": None,
+                  "reason": "scan_incomplete", "scan_status": "unreadable"}
+        cases = (("reason", "bogus"), ("reason", ["scan_incomplete"]), ("scan_status", "bogus"),
+                 ("scan_status", ["unreadable"]), ("scan_status", "complete"), ("generation", None),
+                 ("reason", None), ("scan_status", None))
+        for field, value in cases:
+            records = events(); records[2]["vertex_declaration"] = copy.deepcopy(record)
+            records[2]["vertex_declaration"][field] = value
+            with self.subTest(field=field, value=value):
+                observed = self.observation(records)
+                self.assertNotIn("reason", observed)
+                self.assertNotIn("scan_status", observed)
+                self.assertIsNone(observed["words"])
+        for reason in ("invalid_snapshot", "observation_error"):
+            records = events(); records[2]["vertex_declaration"] = dict(record, reason=reason, scan_status="unreadable")
+            self.assertNotIn("reason", self.observation(records))
+            records[2]["vertex_declaration"]["scan_status"] = "complete"
+            self.assertEqual(self.observation(records)["reason"], reason)
+        # Optional metadata on old traces remains absent and candidates cannot
+        # smuggle unavailable reasons into the validated IR.
+        records = events(); records[2]["vertex_declaration"].update(reason="reset_attempt", scan_status="complete")
+        self.assertNotIn("reason", self.observation(records))
+        records = events(); records[2]["vertex_declaration"] = {"status": "unavailable", "generation": 5, "words": None}
+        self.assertNotIn("reason", self.observation(records))
+
     def test_framing_skips_constant_and_extension_payload_end_words(self):
         words = [0x20000000, (4 << 29) | (2 << 25) | 3,
                  0xffffffff, 2, 3, 4, 5, 6, 0xffffffff, 8,

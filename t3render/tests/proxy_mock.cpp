@@ -573,7 +573,14 @@ static int DeclarationBoundaryTest(const std::string& mode) {
    assert(observed_shader.declaration.status==ShaderObservationStatus::Candidate);
    assert(observed_shader.declaration.words==std::vector<std::uint32_t>(std::begin(words),std::end(words)));
   } else if (mode=="decl-incomplete" || mode=="decl-collision" || mode=="decl-reset") {
-   assert(observed_shader.declaration.status==ShaderObservationStatus::Unavailable);
+   assert(observed_shader.declaration.status==ShaderObservationStatus::Unavailable &&
+          observed_shader.declaration.has_scan_status && observed_shader.declaration.words.empty());
+   const auto expected = mode=="decl-incomplete" ? t3render::ir::ShaderUnavailableReason::ScanIncomplete :
+      mode=="decl-collision" ? t3render::ir::ShaderUnavailableReason::HandleCollision :
+                               t3render::ir::ShaderUnavailableReason::ResetAttempt;
+   assert(observed_shader.declaration.reason == expected);
+   assert(observed_shader.declaration.scan_status == (mode=="decl-incomplete" ?
+          t3render::ir::DeclarationStatus::NullAddress : t3render::ir::DeclarationStatus::Complete));
   } else if (mode=="decl-get-set" || mode=="decl-get-draw" || mode=="decl-get-recursive") {
    assert(observed_shader.declaration.status==ShaderObservationStatus::Unsafe && observed_shader.declaration.words.empty());
   } else if (mode=="decl-null-output" || mode=="decl-bad-output" || mode=="decl-alias" || mode=="decl-stateblock") {

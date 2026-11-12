@@ -324,6 +324,30 @@ int main(int argc, char** argv) {
         t3render::CaptureAbandonDevice(scenario == "shader_abandon_all" ? nullptr : &device);
         t3render::CaptureDrawResult(&device, token, S_OK);
         t3render::CapturePresent(&device, S_OK);
+    } else if (scenario == "shader_reason") {
+        t3render::CapturePresent(&device, S_OK);
+        t3render::ShaderSnapshot snapshot;
+        snapshot.getter_result = S_OK;
+        snapshot.value = 0xf0000001u;
+        snapshot.declaration.status = t3render::ir::ShaderObservationStatus::Unavailable;
+        snapshot.declaration.generation = 9;
+        snapshot.declaration.has_scan_status = true;
+        snapshot.declaration.scan_status = t3render::ir::DeclarationStatus::NullAddress;
+        snapshot.declaration.reason = t3render::ir::ShaderUnavailableReason::ScanIncomplete;
+        auto candidate = draw;
+        candidate.shader_snapshot = &snapshot;
+        for (unsigned i=0; i<4; ++i) {
+            if (i == 1) snapshot.declaration.reason = t3render::ir::ShaderUnavailableReason::ResetAttempt;
+            if (i == 2) {
+                snapshot.declaration.reason = t3render::ir::ShaderUnavailableReason::ObservationError;
+                snapshot.declaration.scan_status = t3render::ir::DeclarationStatus::Complete;
+            }
+            if (i == 3) { snapshot.declaration.generation = 0; snapshot.declaration.has_scan_status = false; }
+            const auto token = t3render::CaptureDraw(&device, candidate);
+            if (!token) return 8;
+            t3render::CaptureShaderDrawResult(&device, token, S_OK, -1, i!=2);
+        }
+        t3render::CapturePresent(&device, S_OK);
     } else if (scenario == "shader") {
         if (t3render::CaptureWantsDraw(&device)) return 8;
         t3render::CapturePresent(&device, S_OK);

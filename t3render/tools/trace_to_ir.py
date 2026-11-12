@@ -287,6 +287,14 @@ def framed_declaration(words):
     return False
 
 
+# Metadata describes the latest conservative invalidation and the pre-create
+# scanner result, not the driver's actual declaration or shader semantics.
+DECLARATION_SCAN_STATUSES = frozenset(("complete", "invalid_configuration", "null_address", "address_overflow",
+                                      "unreadable", "word_limit", "unsupported_token", "allocation_failure"))
+DECLARATION_UNAVAILABLE_REASONS = frozenset(("scan_incomplete", "invalid_snapshot", "handle_collision",
+                                             "reset_attempt", "delete_failed", "observation_error", "unknown"))
+
+
 def observed_declaration(draw, result, header):
     """Publish only a paired, stable and structurally valid candidate."""
     stable = result.get("shader_stable") if isinstance(result.get("shader_stable"), bool) else None
@@ -313,6 +321,13 @@ def observed_declaration(draw, result, header):
         observed.update(status=status, shader_value=shader, generation=generation, words=words[:])
     elif status in ("unknown", "unavailable", "unsafe") and words is None:
         observed.update(status=status, shader_value=shader, generation=generation)
+        if status == "unavailable" and generation is not None:
+            reason, scan_status = raw.get("reason"), raw.get("scan_status")
+            if (isinstance(reason, str) and isinstance(scan_status, str) and
+                    reason in DECLARATION_UNAVAILABLE_REASONS and scan_status in DECLARATION_SCAN_STATUSES and
+                    (reason != "scan_incomplete" or scan_status != "complete") and
+                    (reason not in ("invalid_snapshot", "observation_error") or scan_status == "complete")):
+                observed.update(reason=reason, scan_status=scan_status)
     return observed
 
 

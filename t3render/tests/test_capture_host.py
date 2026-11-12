@@ -104,6 +104,22 @@ class CaptureHostTests(unittest.TestCase):
                 self.assertEqual([item["event"] for item in self.records()], ["header", "frame_begin", "draw"])
                 self.path.unlink()
 
+    def test_shader_unavailable_reason_contains_no_partial_words(self):
+        self.run_capture("shader_reason", frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1"})
+        records = self.records()
+        draws = [item for item in records if item["event"] == "draw"]
+        self.assertEqual(len(draws), 4)
+        for draw in draws:
+            self.assertEqual(draw["vertex_declaration"]["status"], "unavailable")
+            self.assertIsNone(draw["vertex_declaration"]["words"])
+        self.assertEqual((draws[0]["vertex_declaration"]["reason"], draws[0]["vertex_declaration"]["scan_status"]),
+                         ("scan_incomplete", "null_address"))
+        self.assertEqual((draws[1]["vertex_declaration"]["reason"], draws[1]["vertex_declaration"]["scan_status"]),
+                         ("reset_attempt", "null_address"))
+        self.assertEqual((draws[2]["vertex_declaration"]["reason"], draws[2]["vertex_declaration"]["scan_status"]),
+                         ("observation_error", "complete"))
+        self.assertNotIn("reason", draws[3]["vertex_declaration"])
+
     def test_shader_candidate_is_paired_with_result_and_reuses_sampled_getter(self):
         self.run_capture("shader", frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1"})
         records = self.records()

@@ -78,8 +78,13 @@ data is removed after validation. No third-party modules are needed.
   final END token. This checks framing, not declaration or shader semantics.
   Missing, unstable, failed or malformed observations produce `unknown` and
   no words; a stable observation may also report `unknown`, `unavailable` or
-  `unsafe`. A result can contain `shader_stable` without a declaration, and
-  old traces retain their previous shape. Raw source fields remain in the
+  `unsafe`. A stable unavailable generation may also carry an allowlisted
+  `reason` and `scan_status`, describing the current observation's
+  unavailability and pre-create scan rather than driver behavior. A copy
+  error affects one observation and does not invalidate its generation. Missing, inconsistent,
+  unstable or malformed metadata is omitted; failed scans expose no partial
+  words. A result can contain `shader_stable` without a declaration, and old
+  traces retain their previous shape. Raw source fields remain in the
   compatibility extension and are not validated observations.
 
   Even a stable declaration is a candidate: a shader handle can resemble an

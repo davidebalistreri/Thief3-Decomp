@@ -752,6 +752,33 @@ void CaptureUp(CaptureState& s, const DrawCall& draw, UpBytes& vertex, UpBytes& 
     else index = ReadUp(s, draw.index_data, 0, size);
 }
 
+const char* DeclarationScanStatus(ir::DeclarationStatus value) noexcept {
+    switch (value) {
+    case ir::DeclarationStatus::Complete: return "complete";
+    case ir::DeclarationStatus::InvalidConfiguration: return "invalid_configuration";
+    case ir::DeclarationStatus::NullAddress: return "null_address";
+    case ir::DeclarationStatus::AddressOverflow: return "address_overflow";
+    case ir::DeclarationStatus::Unreadable: return "unreadable";
+    case ir::DeclarationStatus::WordLimit: return "word_limit";
+    case ir::DeclarationStatus::UnsupportedToken: return "unsupported_token";
+    case ir::DeclarationStatus::AllocationFailure: return "allocation_failure";
+    }
+    return "unknown";
+}
+
+const char* DeclarationUnavailableReason(ir::ShaderUnavailableReason value) noexcept {
+    switch (value) {
+    case ir::ShaderUnavailableReason::ScanIncomplete: return "scan_incomplete";
+    case ir::ShaderUnavailableReason::InvalidSnapshot: return "invalid_snapshot";
+    case ir::ShaderUnavailableReason::HandleCollision: return "handle_collision";
+    case ir::ShaderUnavailableReason::ResetAttempt: return "reset_attempt";
+    case ir::ShaderUnavailableReason::DeleteFailed: return "delete_failed";
+    case ir::ShaderUnavailableReason::ObservationError: return "observation_error";
+    case ir::ShaderUnavailableReason::None: case ir::ShaderUnavailableReason::Unknown: return "unknown";
+    }
+    return "unknown";
+}
+
 bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint64_t operation) {
     const bool up = draw.kind == DrawKind::PrimitiveUP || draw.kind == DrawKind::IndexedPrimitiveUP;
     UpBytes vertex, index;
@@ -856,6 +883,11 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
             }
             out << ']';
         } else out << "null";
+        if (declaration.status == ir::ShaderObservationStatus::Unavailable && declaration.generation &&
+            declaration.has_scan_status) {
+            out << ",\"reason\":\"" << DeclarationUnavailableReason(declaration.reason)
+                << "\",\"scan_status\":\"" << DeclarationScanStatus(declaration.scan_status) << '\"';
+        }
         out << '}';
     }
     out << ",\"pixel_shader\":";

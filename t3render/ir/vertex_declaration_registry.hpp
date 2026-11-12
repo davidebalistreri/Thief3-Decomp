@@ -26,9 +26,16 @@ struct ShaderTicket {
     explicit operator bool() const noexcept { return device && sequence && kind != ShaderOperation::None; }
 };
 enum class ShaderObservationStatus { Candidate, Unknown, Unavailable, Unsafe };
+// The last conservative invalidation of a recorded generation; this is
+// diagnostic metadata, never proof of what the driver consumed.
+enum class ShaderUnavailableReason { None, ScanIncomplete, InvalidSnapshot, HandleCollision,
+                                     ResetAttempt, DeleteFailed, ObservationError, Unknown };
 struct ShaderObservation {
     ShaderObservationStatus status = ShaderObservationStatus::Unknown;
     std::uint64_t generation = 0;
+    ShaderUnavailableReason reason = ShaderUnavailableReason::None;
+    bool has_scan_status = false;
+    DeclarationStatus scan_status = DeclarationStatus::Unreadable;
     std::vector<std::uint32_t> words;
 };
 struct ShaderRegistryLimits {
@@ -89,6 +96,8 @@ private:
         bool occupied = false, available = false, queued = false;
         std::uint32_t handle = 0;
         std::uint64_t generation = 0;
+        ShaderUnavailableReason reason = ShaderUnavailableReason::None;
+        DeclarationStatus scan_status = DeclarationStatus::Unreadable;
         Device* owner = nullptr;
         Entry* retired_next = nullptr;
         std::shared_ptr<const Payload> payload;

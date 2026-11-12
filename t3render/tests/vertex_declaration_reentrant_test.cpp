@@ -111,6 +111,22 @@ void ReentrantInvalidationDiscardsCopiedObservation() {
     assert(!registry.End(draw) && !registry.BeginDraw(active_device));
 }
 
+void ObservationAllocationFailureHasGenerationReason() {
+    VertexDeclarationRegistry registry({1, 4, 8, 32});
+    const auto device = registry.OpenDevice();
+    Register(registry, device, 98);
+    const auto draw = registry.BeginDraw(device);
+    assert(draw);
+    fail_allocation = true;
+    const auto observation = registry.Observe(draw, 98);
+    assert(!fail_allocation.load() && observation.status == ShaderObservationStatus::Unavailable &&
+           observation.reason == ShaderUnavailableReason::ObservationError && observation.has_scan_status &&
+           observation.scan_status == DeclarationStatus::Complete && observation.generation && observation.words.empty());
+    assert(registry.End(draw));
+    const auto next = registry.BeginDraw(device);
+    assert(next && registry.Observe(next, 98).status == ShaderObservationStatus::Candidate && registry.End(next));
+}
+
 void MarkUnsafeDefersDeallocation() {
     VertexDeclarationRegistry registry({2, 4, 8, 32});
     active_registry = &registry;
@@ -363,6 +379,7 @@ void CrossRegistryRecursiveFreeIsBounded() {
 int main() {
     AllocationCanReenterWithoutDeadlock();
     ReentrantInvalidationDiscardsCopiedObservation();
+    ObservationAllocationFailureHasGenerationReason();
     MarkUnsafeDefersDeallocation();
     DeallocationCanReenterWithoutDeadlock();
     ReentrantCloseDuringResetKeepsOldTicketInvalid();

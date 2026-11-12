@@ -24,7 +24,16 @@ retains tombstones because shader survival across Reset has not been verified.
 If a successful Create returns an already-observed handle, its declaration is
 unavailable rather than silently replacing the earlier one. A successful Create
 with an unreadable output handle poisons the device. Failed declaration scans
-are stored as unavailable rather than exposing guessed bytes.
+are stored as unavailable rather than exposing guessed bytes. An unavailable
+generation keeps the pre-create scan status and the most recent invalidation
+(`scan_incomplete`, `invalid_snapshot`, `handle_collision`, `reset_attempt` or
+`delete_failed`). Reset is recorded before forwarding, even if it fails; the
+scan status survives that invalidation. `observation_error` instead describes a
+single failed observation copy: it is not stored on the generation, and the
+next draw may still produce a candidate. These fields are diagnostic
+observations, not proof that the driver consumed the snapshot.
+Allocation/capacity exhaustion can instead poison the device, leaving no
+stable generation-level reason; no cause is fabricated for that case.
 
 Device and handle metadata are preallocated before the registry is published
 (at most 64 devices, 4096 handles per device and 65536 slots total). If those

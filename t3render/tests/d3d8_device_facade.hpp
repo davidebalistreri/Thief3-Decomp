@@ -30,6 +30,31 @@ inline std::atomic<unsigned> resource_facade_close_successes{0};
 inline std::atomic<unsigned> resource_facade_close_failures{0};
 #endif
 
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+// Guard the complete native Create/Get plus adoption, so a reset cannot finish
+// between the native call and publication of a supposedly fresh buffer.
+class FixtureBufferOperation final {
+public:
+    FixtureBufferOperation(t3render::buffers::BufferProxy* buffers, IDirect3DDevice8* device) noexcept
+        : buffers_(buffers), device_(device) {
+        const DWORD error = GetLastError();
+        ticket_ = buffers_->BeginBindingMutation(device_);
+        SetLastError(error);
+    }
+    ~FixtureBufferOperation() {
+        const DWORD error = GetLastError();
+        if (ticket_) buffers_->EndBindingMutation(device_, ticket_);
+        SetLastError(error);
+    }
+    FixtureBufferOperation(const FixtureBufferOperation&) = delete;
+    FixtureBufferOperation& operator=(const FixtureBufferOperation&) = delete;
+private:
+    t3render::buffers::BufferProxy* const buffers_;
+    IDirect3DDevice8* const device_;
+    std::uint64_t ticket_ = 0;
+};
+#endif
+
 class FixtureReferenceCount final {
 public:
     struct Decrement { ULONG count; bool final; };
@@ -169,13 +194,29 @@ public:
     }
     HRESULT STDMETHODCALLTYPE Reset(D3DPRESENT_PARAMETERS * pPresentationParameters) override {
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
-        InvalidateBuffers();
-        if (buffers_) buffers_->RetireFacadeDormantForReset(native_, this);
+        const DWORD before = GetLastError();
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        const auto ticket = buffers_ ? buffers_->BeginFacadeReset(native_, this) : 0;
+#else
+        // Native resources in the buffer-only fixture can expose the device;
+        // that boundary cannot justify a new observation epoch.
+        const std::uint64_t ticket = 0;
+#endif
+        if (buffers_ && !ticket) buffers_->RetireFacadeDormantForReset(native_, this);
 #endif
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
         if (resources_) resources_->RetireDormantForReset();
 #endif
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+        SetLastError(before);
+        const HRESULT hr = native_->Reset(pPresentationParameters);
+        const DWORD after = GetLastError();
+        if (buffers_ && ticket) (void)buffers_->EndFacadeReset(native_, ticket, SUCCEEDED(hr));
+        SetLastError(after);
+        return hr;
+#else
         return native_->Reset(pPresentationParameters);
+#endif
     }
     HRESULT STDMETHODCALLTYPE Present(const RECT *src_rect, const RECT *dst_rect, HWND dst_window_override, const RGNDATA *dirty_region) override {
         return native_->Present(src_rect, dst_rect, dst_window_override, dirty_region);
@@ -243,6 +284,7 @@ public:
     HRESULT STDMETHODCALLTYPE CreateVertexBuffer(UINT Length,DWORD Usage,DWORD FVF,D3DPOOL Pool,IDirect3DVertexBuffer8 ** ppVertexBuffer) override {
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
         if (buffers_) {
+            FixtureBufferOperation operation(buffers_.get(), native_);
             const HRESULT hr = native_->CreateVertexBuffer(Length, Usage, FVF, Pool, ppVertexBuffer);
             const DWORD error = GetLastError();
             if (SUCCEEDED(hr) && ppVertexBuffer && *ppVertexBuffer) {
@@ -258,6 +300,7 @@ public:
     HRESULT STDMETHODCALLTYPE CreateIndexBuffer(UINT Length,DWORD Usage,D3DFORMAT Format,D3DPOOL Pool,IDirect3DIndexBuffer8 ** ppIndexBuffer) override {
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
         if (buffers_) {
+            FixtureBufferOperation operation(buffers_.get(), native_);
             const HRESULT hr = native_->CreateIndexBuffer(Length, Usage, Format, Pool, ppIndexBuffer);
             const DWORD error = GetLastError();
             if (SUCCEEDED(hr) && ppIndexBuffer && *ppIndexBuffer) {
@@ -578,6 +621,7 @@ public:
     HRESULT STDMETHODCALLTYPE GetStreamSource(UINT StreamNumber,IDirect3DVertexBuffer8 ** ppStreamData,UINT * pStride) override {
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
         if (buffers_) {
+            FixtureBufferOperation operation(buffers_.get(), native_);
             const HRESULT hr = native_->GetStreamSource(StreamNumber, ppStreamData, pStride);
             const DWORD error = GetLastError();
             if (SUCCEEDED(hr) && ppStreamData && *ppStreamData) {
@@ -610,6 +654,7 @@ public:
     HRESULT STDMETHODCALLTYPE GetIndices(IDirect3DIndexBuffer8 ** ppIndexData,UINT * pBaseVertexIndex) override {
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
         if (buffers_) {
+            FixtureBufferOperation operation(buffers_.get(), native_);
             const HRESULT hr = native_->GetIndices(ppIndexData, pBaseVertexIndex);
             const DWORD error = GetLastError();
             if (SUCCEEDED(hr) && ppIndexData && *ppIndexData) {

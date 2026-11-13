@@ -43,7 +43,8 @@ protected:
 struct DeviceState {
     bool unsafe = false;
     bool closing = false;
-    std::uint64_t draw = 0, mutation = 0;
+    bool reset_recovery = false;
+    std::uint64_t draw = 0, mutation = 0, reset = 0;
     std::size_t active_locks = 0;
 };
 }  // namespace
@@ -63,7 +64,7 @@ struct BufferProxy::State {
     std::unordered_map<void*, Control*> identities;
     std::unordered_map<void*, Control*> native;
     std::unordered_map<IDirect3DDevice8*, DeviceState> devices;
-    std::uint64_t next_operation = 1, next_draw = 1;
+    std::uint64_t next_operation = 1, next_draw = 1, next_reset = 1;
     bool global_unsafe = false;
 
     void ClearLockLocked(Control* item) noexcept {
@@ -93,7 +94,8 @@ struct BufferProxy::State {
         for (auto& entry : wrappers) AbandonLocked(entry.second);
         for (auto& entry : devices) {
             entry.second.unsafe = true; entry.second.draw = 0;
-            entry.second.mutation = 0; entry.second.active_locks = 0;
+            entry.second.mutation = 0; entry.second.reset = 0;
+            entry.second.reset_recovery = false; entry.second.active_locks = 0;
         }
     }
     DeviceState* DeviceLocked(IDirect3DDevice8* owner) noexcept {
@@ -109,6 +111,7 @@ struct BufferProxy::State {
         auto* device = DeviceLocked(owner);
         if (!device || device->unsafe) return;
         device->unsafe = true; device->draw = 0; device->mutation = 0;
+        device->reset = 0; device->reset_recovery = false;
         for (auto& entry : wrappers)
             if (entry.second->owner == owner) AbandonLocked(entry.second);
     }
@@ -305,6 +308,8 @@ private:
             }
             result = count - 1;
             final = count == 1;
+            const auto device = state_->devices.find(owner);
+            if (final && device != state_->devices.end() && device->second.reset) state_->PoisonLocked(owner);
             if (final && counted_lock) state_->PoisonLocked(owner);
             if (final) parent = facade;
         }
@@ -344,7 +349,9 @@ private:
         std::lock_guard<std::mutex> lock(state_->mutex);
         auto* device = state_->DeviceLocked(owner);
         if (!device || device->unsafe || state_->global_unsafe) return 0;
-        if (device->draw || device->mutation) { state_->PoisonLocked(owner); return 0; }
+        if (device->draw || device->mutation || device->reset || device->reset_recovery) {
+            state_->PoisonLocked(owner); return 0;
+        }
         constexpr DWORD allowed = D3DLOCK_READONLY | D3DLOCK_NOSYSLOCK | D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD;
         if ((flags & ~allowed) || ((flags & D3DLOCK_READONLY) && (flags & (D3DLOCK_DISCARD | D3DLOCK_NOOVERWRITE))) ||
             ((flags & D3DLOCK_DISCARD) && (flags & D3DLOCK_NOOVERWRITE)) ||
@@ -357,7 +364,8 @@ private:
         const std::size_t length_ = bytes ? bytes : (offset == 0 ? size_ : 0);
         const auto kind = flags & D3DLOCK_READONLY ? ir::BufferLock::ReadOnly :
                           flags & D3DLOCK_DISCARD ? ir::BufferLock::Discard : ir::BufferLock::Write;
-        if (state_->shadows.BeginLock(token, offset, length_, kind) != ir::RegistryResult::Ok) {
+        if (token.identity && token.generation &&
+            state_->shadows.BeginLock(token, offset, length_, kind) != ir::RegistryResult::Ok) {
             state_->PoisonLocked(owner); return 0;
         }
         operation = state_->next_operation++;
@@ -379,13 +387,15 @@ private:
         std::lock_guard<std::mutex> lock(state_->mutex);
         auto* device = state_->DeviceLocked(owner);
         if (!device || device->unsafe || state_->global_unsafe) return 0;
-        if (device->draw || device->mutation) { state_->PoisonLocked(owner); return 0; }
+        if (device->draw || device->mutation || device->reset || device->reset_recovery) {
+            state_->PoisonLocked(owner); return 0;
+        }
         if (pending_lock || !locked || pending_unlock || !state_->next_operation) {
             state_->PoisonLocked(owner); return 0;
         }
         operation = state_->next_operation++;
         pending_unlock = true;
-        if (!read_only && length <= kSnapshotLimit) {
+        if (token.identity && token.generation && !read_only && length <= kSnapshotLimit) {
             ReadContext read{state_->reader, state_->context, data};
             state_->shadows.StageUnlockFromReader(token, Read, &read);
         }
@@ -396,7 +406,7 @@ private:
         std::lock_guard<std::mutex> lock(state_->mutex);
         if (operation != id || !pending_unlock) return;
         if (FAILED(hr)) { state_->PoisonLocked(owner); return; }
-        state_->shadows.EndUnlock(token, true);
+        if (token.identity && token.generation) state_->shadows.EndUnlock(token, true);
         state_->ClearLockLocked(this);
     }
 
@@ -444,6 +454,7 @@ Buffer* Adopt(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         auto* device = state->DeviceLocked(owner);
+        if (device && (device->reset || device->reset_recovery)) state->PoisonLocked(owner);
         const auto recorded_device = state->devices.find(owner);
         const bool closing = recorded_device != state->devices.end() && recorded_device->second.closing;
         auto existing = state->identities.find(identity);
@@ -466,7 +477,11 @@ Buffer* Adopt(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8
                 registered = state->shadows.Register(reinterpret_cast<std::uintptr_t>(identity), size,
                                                       candidate->token, availability) == ir::RegistryResult::Ok;
             }
-            if (!registered) state->PoisonLocked(owner);
+            // In a closed facade a getter may return a previously retired
+            // resource. Keep its identity and lock windows, but never infer
+            // its contents. Allocation or registration failures still poison.
+            if (!registered && !(closed && !fresh && device && !device->unsafe && !state->global_unsafe))
+                state->PoisonLocked(owner);
             if (registered || closed) {
                 try {
                     const bool wrapper_added = state->wrappers.emplace(candidate->exposed, candidate).second;
@@ -578,6 +593,56 @@ void BufferProxy::RetireFacadeDormantForReset(IDirect3DDevice8* owner, IDirect3D
     }
 }
 
+std::uint64_t BufferProxy::BeginFacadeReset(IDirect3DDevice8* owner, IDirect3DDevice8* facade) noexcept {
+    LastError error;
+    if (!state_ || !owner || !facade) return 0;
+    Control* retired = nullptr;
+    std::uint64_t ticket = 0;
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        auto* device = state_->DeviceLocked(owner);
+        if (!device || device->unsafe || device->closing || state_->global_unsafe) return 0;
+        if (device->draw || device->mutation || device->reset || device->active_locks || !state_->next_reset) {
+            state_->PoisonLocked(owner); return 0;
+        }
+        for (const auto& entry : state_->wrappers) {
+            const Control* item = entry.second;
+            if (item->owner == owner && item->facade != facade) { state_->PoisonLocked(owner); return 0; }
+        }
+        ticket = state_->next_reset++;
+        device->reset = ticket;
+        for (auto it = state_->wrappers.begin(); it != state_->wrappers.end();) {
+            Control* item = (it++)->second;
+            if (item->owner != owner) continue;
+            state_->shadows.Release(item->token);
+            item->token = {};
+            if (item->Dormant()) {
+                state_->DetachLocked(item);
+                item->retirement_next = retired;
+                retired = item;
+            }
+        }
+    }
+    while (retired) {
+        Control* next = retired->retirement_next;
+        retired->DestroyDormant();
+        retired = next;
+    }
+    return ticket;
+}
+
+bool BufferProxy::EndFacadeReset(IDirect3DDevice8* owner, std::uint64_t ticket, bool succeeded) noexcept {
+    LastError error;
+    if (!state_ || !owner || !ticket) return false;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    const auto device = state_->devices.find(owner);
+    if (state_->global_unsafe || device == state_->devices.end() || device->second.unsafe) return false;
+    if (device->second.reset != ticket) { state_->PoisonLocked(owner); return false; }
+    device->second.reset = 0;
+    device->second.reset_recovery = !succeeded;
+    return true;
+}
+
 namespace {
 template<class Buffer>
 IUnknown* Unwrap(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8* owner,
@@ -614,11 +679,13 @@ ir::RegistryResult Read(const std::shared_ptr<BufferProxy::State>& state, IDirec
     if (!state || !owner || !native) return ir::RegistryResult::UnknownResource;
     std::lock_guard<std::mutex> lock(state->mutex);
     const auto device = state->devices.find(owner);
-    if (state->global_unsafe || device == state->devices.end() || device->second.unsafe)
+    if (state->global_unsafe || device == state->devices.end() || device->second.unsafe ||
+        device->second.reset || device->second.reset_recovery)
         return ir::RegistryResult::Unavailable;
     const auto found = state->native.find(native);
     if (found == state->native.end() || found->second->owner != owner ||
         found->second->vertex != Traits<Buffer>::kVertex) return ir::RegistryResult::UnknownResource;
+    if (!found->second->token.identity || !found->second->token.generation) return ir::RegistryResult::UnknownResource;
     return state->shadows.Read(found->second->token, offset, destination, length);
 }
 
@@ -692,7 +759,8 @@ void BufferProxy::InvalidateVertex(IDirect3DDevice8* owner, IDirect3DVertexBuffe
         return;
     }
     const auto device = state_->devices.find(owner);
-    if (device != state_->devices.end() && (device->second.draw || device->second.active_locks))
+    if (device != state_->devices.end() && (device->second.draw || device->second.active_locks ||
+                                             device->second.reset || device->second.reset_recovery))
         state_->PoisonLocked(owner);
     else state_->AbandonLocked(item);
 }
@@ -702,7 +770,8 @@ std::uint64_t BufferProxy::BeginDraw(IDirect3DDevice8* owner) noexcept {
     std::lock_guard<std::mutex> lock(state_->mutex);
     auto* device = state_->DeviceLocked(owner);
     if (!device || device->unsafe || state_->global_unsafe) return 0;
-    if (device->draw || device->mutation || device->active_locks || !state_->next_draw) {
+    if (device->draw || device->mutation || device->reset || device->reset_recovery ||
+        device->active_locks || !state_->next_draw) {
         state_->PoisonLocked(owner); return 0;
     }
     device->draw = state_->next_draw++;
@@ -724,7 +793,8 @@ std::uint64_t BufferProxy::BeginBindingMutation(IDirect3DDevice8* owner) noexcep
     std::lock_guard<std::mutex> lock(state_->mutex);
     auto* device = state_->DeviceLocked(owner);
     if (!device || device->unsafe || state_->global_unsafe) return 0;
-    if (device->draw || device->mutation || device->active_locks || !state_->next_operation) {
+    if (device->draw || device->mutation || device->reset || device->reset_recovery ||
+        device->active_locks || !state_->next_operation) {
         state_->PoisonLocked(owner); return 0;
     }
     device->mutation = state_->next_operation++;

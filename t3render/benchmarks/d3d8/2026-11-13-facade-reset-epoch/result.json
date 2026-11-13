@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_facade_reset_epoch",
+  "date": "2026-11-13",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "steam_running": true,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "c9b34ac9769c8b6756885c5b7dba85656bd97378d435e305509c1c93c8ed5c21",
+    "t3render/src/buffer_proxy.cpp": "d3db833b4b235c6a341930a55a06dbfad86a1a126e9fec227691c68cb867ba88",
+    "t3render/src/buffer_proxy.hpp": "917dc90b948db83808f2eab49af050c979b6653954bec1ddbbdeb19dc5aed9c3",
+    "t3render/ir/buffer_registry.cpp": "9e24931212d54e0ee58b7be7313a85510e9fc867f3a3b20297eff3e1f6138b84",
+    "t3render/ir/buffer_shadow.cpp": "9cfed54a6fcf4718e80fd1d8301a8afa5f84852ac70b428938b06d1e64cddafe",
+    "t3render/tests/buffer_proxy_test.cpp": "d1b2f6c11fe2e32e6e159a28df2acd26d5228e3d2969b28729abe313717a1930",
+    "t3render/tests/d3d8_resource_facade.hpp": "bf7b017db2664996326e93eece1b24b72cea075ee78d8899322f96e8da0f241d",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "21bdd67358220b05c452d35c84f105ef2a599328490784fe9eeba56d71ce9b54",
+    "t3render/tests/d3d8_device_facade.hpp": "99494b582980e0334eb6de36c9dca0f1306b9579c27acc032ce0b047f704c42e",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "b97a23dc79f983c1ab33641c8282ff41a10615b852d33f55bf34da8737901d25",
+    "t3render/tests/test_d3d8_device_facade_runner.py": "7a9f3b832e3a96cacdb099065d00552973324df099477b8fe896dcadcb3df860",
+    "t3render/tools/run_d3d8_device_facade.py": "0fee85a82591f5f9324ed6995a29b5d696686e514b0cc0752781c621c0227bed"
+  },
+  "fixture_sha256": "eb6f7b4dbf8d8ef06dd48a982fcfe22e9f92e772fe0aad5e1177456af2aebac0",
+  "result": {
+    "parity_records_each": 87,
+    "rgb_ppm_sha256_both": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+    "baseline_log_sha256": "ef375916b6ffd4857dc0c6826b62c1fa8a0f2a83759a98e8af449617abe25c71",
+    "facade_log_sha256": "609b5aacaae90d157990350f19df3acdfc9241014b069d43da2166749f430669",
+    "released_resources_reset_hr": "0x00000000",
+    "post_reset_indexed_draw_pixel_rgb": "0xe43b3b",
+    "live_resources_reset_hr": "0x88760868",
+    "after_release_recovery_reset_hr": "0x00000000",
+    "managed_surface_parent_reacquired": true,
+    "surviving_buffer_bytes_unknown": true,
+    "fresh_writeonly_vb_ib_bytes_match_after_reset": true,
+    "fresh_writeonly_vb_bytes_match_after_recovery": true,
+    "final_facade_close": true
+  },
+  "limitations": [
+    "Fixture only: not integrated with the proxy or TDS.",
+    "Only selected 2D, cube, volume, surface, swapchain and buffer paths were exercised; other interfaces remain unverified.",
+    "Private data and unknown resource interfaces fail closed; this differs from native behavior.",
+    "Two reset scenarios were exercised; runtime concurrency and comprehensive state-block behavior remain untested.",
+    "Six synthetic triangles and selected fixed-function states only; no gameplay parity.",
+    "PPM comparison covers RGB only, not alpha.",
+    "Post-reset pixel was checked at one point, not compared as a full frame."
+  ]
+}

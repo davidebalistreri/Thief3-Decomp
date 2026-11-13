@@ -19,12 +19,15 @@ native objects while dormant so a state block can restore the same wrapper.
 They do not retain the facade while dormant, and the facade closes the router
 at final release. Private-data methods return `E_NOTIMPL`, unsupported IIDs
 return `E_NOINTERFACE`, and failures can differ from native COM behavior.
-Before `Reset`, the fixture invalidates buffer observations and retires dormant
-resource and buffer wrappers, releasing their native references. Getters can
-reconstruct a known parent or an untracked buffer wrapper afterwards. Buffer
-observation stays unavailable for that device, including after a failed reset;
-this is not yet sufficient for capturing the bedroom after a game reset. An
-explicit resource limit can also cause allocation failure.
+Before `Reset`, the fixture discards existing buffer shadows and retires dormant
+resource and buffer wrappers, releasing their native references. After a
+stable successful reset, newly created buffers can be tracked again. Surviving
+or reacquired buffers retain unknown contents, and their lock windows still
+prevent a supposedly stable draw or reset. A failed reset leaves observation
+unavailable until another stable reset succeeds; a detected overlap or escape
+permanently invalidates observation. The fixture guards native buffer Create/Get
+calls through adoption to detect overlap with reset. An explicit resource limit
+can also cause allocation failure.
 
 The boundary remains incomplete: only selected paths are exercised and unknown
 interfaces are rejected, not transparently forwarded. Complete reset and
@@ -56,14 +59,18 @@ In a separate device test, a reset after releasing default-pool resources
 succeeded in both runs and a post-reset indexed draw produced the same checked
 pixel. With live default-pool resources, both runs returned `0x88760868`; after
 release, both recovered with a successful reset. A managed surface reacquired
-its parent after reset. These observations do not establish complete reset parity.
+its parent after reset. New managed WRITEONLY buffers produced the expected
+shadow bytes after both a successful reset and recovery from a failed reset; a
+surviving buffer's old bytes remained unknown. These observations do not
+establish complete reset parity.
 VB/IB `WRITEONLY` shadows matched expected
 bytes during the selected draw window. Alpha, other resource types and the
 complete game are not tested. Steam remained open; TDS was not run.
 
-The [reset manifest](../benchmarks/d3d8/2026-11-13-facade-reset/result.json)
+The [reset epoch manifest](../benchmarks/d3d8/2026-11-13-facade-reset-epoch/result.json)
 records the latest hashes and limitations. Full local logs and PPMs are under
-`build/t3render-captures/2026-11-13-facade-reset-final/`. The earlier
+`build/t3render-captures/2026-11-13-facade-reset-epoch-final/`. The earlier
+[reset manifest](../benchmarks/d3d8/2026-11-13-facade-reset/result.json),
 [swapchain manifest](../benchmarks/d3d8/2026-11-13-swapchain-facade/result.json),
 [volume manifest](../benchmarks/d3d8/2026-11-13-volume-facade/result.json) and
 [resource manifest](../benchmarks/d3d8/2026-11-13-resource-facade/result.json)

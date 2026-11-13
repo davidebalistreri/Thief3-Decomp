@@ -732,6 +732,175 @@ void ClosedFacadeResetRetiresDormantBuffers() {
     assert(raw.Release() == 0 && facade.Release() == 0 && native_device.Release() == 0);
 }
 
+void ClosedFacadeResetEpochs() {
+    Reader reader;
+    const BYTE bytes[]{7, 8, 9}; BYTE observed[3]{};
+    {
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 512, 8);
+        FakeDevice native_device, facade;
+        Vertex old, fresh;
+        old.device = &native_device; fresh.device = &native_device;
+        auto* old_wrapper = proxy->AdoptVertexForFacade(&native_device, &facade, &old, 8, true);
+        Fill(old_wrapper, 0, bytes, 3);
+        const auto reset = proxy->BeginFacadeReset(&native_device, &facade);
+        assert(reset && proxy->ReadVertex(&native_device, &old, 0, observed, 3) == RegistryResult::Unavailable);
+        assert(proxy->EndFacadeReset(&native_device, reset, true));
+        assert(proxy->ReadVertex(&native_device, &old, 0, observed, 3) == RegistryResult::UnknownResource);
+        Fill(old_wrapper, 0, bytes, 3); // known wrapper, but pre-reset bytes remain unknown
+        auto* new_wrapper = proxy->AdoptVertexForFacade(&native_device, &facade, &fresh, 8, true);
+        Fill(new_wrapper, 0, bytes, 3);
+        const auto draw = proxy->BeginDraw(&native_device);
+        assert(draw && proxy->ReadVertex(&native_device, &fresh, 0, observed, 3) == RegistryResult::Ok);
+        assert(std::memcmp(observed, bytes, 3) == 0 && proxy->EndDraw(&native_device, draw));
+        assert(old_wrapper->Release() == 0 && new_wrapper->Release() == 0);
+        assert(proxy->CloseFacadeDevice(&native_device, &facade) && old.destroyed && fresh.destroyed);
+        assert(facade.Release() == 0 && native_device.Release() == 0);
+    }
+    {
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        FakeDevice native_device, facade;
+        Vertex raw; raw.device = &native_device;
+        const auto failed = proxy->BeginFacadeReset(&native_device, &facade);
+        assert(failed && proxy->EndFacadeReset(&native_device, failed, false));
+        assert(proxy->ReadVertex(&native_device, &raw, 0, observed, 1) == RegistryResult::Unavailable);
+        const auto recovery = proxy->BeginFacadeReset(&native_device, &facade);
+        assert(recovery && recovery != failed && proxy->EndFacadeReset(&native_device, recovery, true));
+        auto* buffer = proxy->AdoptVertexForFacade(&native_device, &facade, &raw, 8, true);
+        Fill(buffer, 0, bytes, 3);
+        assert(proxy->ReadVertex(&native_device, &raw, 0, observed, 3) == RegistryResult::Ok);
+        assert(buffer->Release() == 0 && proxy->CloseFacadeDevice(&native_device, &facade) && raw.destroyed);
+        assert(facade.Release() == 0 && native_device.Release() == 0);
+    }
+    for (bool overlap_reset : {false, true}) {
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 512, 8);
+        FakeDevice native_device, facade;
+        Vertex old, fresh; old.device = &native_device; fresh.device = &native_device;
+        auto* buffer = proxy->AdoptVertexForFacade(&native_device, &facade, &old, 8, true);
+        Fill(buffer, 0, bytes, 3);
+        old.AddRef(); // retained outside the dormant wrapper by the native device
+        assert(buffer->Release() == 0);
+        const auto reset = proxy->BeginFacadeReset(&native_device, &facade);
+        assert(reset && proxy->EndFacadeReset(&native_device, reset, true));
+        old.AddRef(); // native getter returns a new reference
+        auto* recovered = proxy->AdoptVertexForFacade(&native_device, &facade, &old, 0, false);
+        assert(recovered && recovered != &old);
+        assert(proxy->ReadVertex(&native_device, &old, 0, observed, 1) == RegistryResult::UnknownResource);
+        auto* created = proxy->AdoptVertexForFacade(&native_device, &facade, &fresh, 8, true);
+        Fill(created, 0, bytes, 3);
+        BYTE* mapped = nullptr;
+        assert(recovered->Lock(0, 1, &mapped, 0) == S_OK && mapped);
+        if (overlap_reset) assert(!proxy->BeginFacadeReset(&native_device, &facade));
+        assert(recovered->Unlock() == S_OK);
+        if (overlap_reset) {
+            assert(proxy->ReadVertex(&native_device, &fresh, 0, observed, 3) == RegistryResult::Unavailable);
+        } else {
+            const auto draw = proxy->BeginDraw(&native_device);
+            assert(draw && proxy->ReadVertex(&native_device, &fresh, 0, observed, 3) == RegistryResult::Ok);
+            assert(proxy->ReadVertex(&native_device, &old, 0, observed, 1) == RegistryResult::UnknownResource);
+            assert(proxy->EndDraw(&native_device, draw));
+        }
+        assert(recovered->Release() == 0 && created->Release() == 0);
+        assert(old.Release() == 1 && proxy->CloseFacadeDevice(&native_device, &facade));
+        assert(old.destroyed && fresh.destroyed && facade.Release() == 0 && native_device.Release() == 0);
+    }
+    {
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        FakeDevice native_device, facade;
+        Vertex raw;
+        // Represents a native Create/Get call still in flight, before adoption.
+        const auto operation = proxy->BeginBindingMutation(&native_device);
+        assert(operation && !proxy->BeginFacadeReset(&native_device, &facade));
+        proxy->EndBindingMutation(&native_device, operation);
+        auto* created = proxy->AdoptVertexForFacade(&native_device, &facade, &raw, 8, true);
+        Fill(created, 0, bytes, 3);
+        assert(proxy->ReadVertex(&native_device, &raw, 0, observed, 3) == RegistryResult::Unavailable);
+        assert(created->Release() == 0 && proxy->CloseFacadeDevice(&native_device, &facade) && raw.destroyed);
+        assert(facade.Release() == 0 && native_device.Release() == 0);
+    }
+    for (int overlap = 0; overlap != 6; ++overlap) {
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 512, 8);
+        FakeDevice native_device, facade;
+        Vertex old, fresh, extra; old.device = &native_device; fresh.device = &native_device; extra.device = &native_device;
+        auto* buffer = proxy->AdoptVertexForFacade(&native_device, &facade, &old, 8, true);
+        Fill(buffer, 0, bytes, 3);
+        const auto reset = proxy->BeginFacadeReset(&native_device, &facade);
+        assert(reset);
+        if (overlap == 0) assert(!proxy->BeginDraw(&native_device));
+        if (overlap == 1) {
+            BYTE* mapped = nullptr;
+            assert(buffer->Lock(0, 1, &mapped, 0) == S_OK && buffer->Unlock() == S_OK);
+        }
+        if (overlap == 2) assert(!proxy->BeginBindingMutation(&native_device));
+        if (overlap == 3) assert(!proxy->BeginFacadeReset(&native_device, &facade));
+        if (overlap == 4) { assert(buffer->Release() == 0); buffer = nullptr; }
+        if (overlap == 5) {
+            auto* concurrent = proxy->AdoptVertexForFacade(&native_device, &facade, &extra, 8, true);
+            assert(concurrent && concurrent != &extra && concurrent->Release() == 0);
+        }
+        assert(!proxy->EndFacadeReset(&native_device, reset, true));
+        auto* created = proxy->AdoptVertexForFacade(&native_device, &facade, &fresh, 8, true);
+        Fill(created, 0, bytes, 3);
+        assert(proxy->ReadVertex(&native_device, &fresh, 0, observed, 3) == RegistryResult::Unavailable);
+        if (buffer) assert(buffer->Release() == 0);
+        assert(created->Release() == 0 && proxy->CloseFacadeDevice(&native_device, &facade));
+        if (overlap == 5) assert(extra.destroyed);
+        else assert(extra.Release() == 0);
+        assert(old.destroyed && fresh.destroyed && facade.Release() == 0 && native_device.Release() == 0);
+    }
+    {
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        FakeDevice native_device, facade;
+        Vertex raw; raw.device = &native_device;
+        const auto failed = proxy->BeginFacadeReset(&native_device, &facade);
+        assert(failed && proxy->EndFacadeReset(&native_device, failed, false));
+        assert(!proxy->BeginDraw(&native_device)); // illegal work during recovery poisons the device
+        assert(!proxy->BeginFacadeReset(&native_device, &facade));
+        auto* created = proxy->AdoptVertexForFacade(&native_device, &facade, &raw, 8, true);
+        Fill(created, 0, bytes, 3);
+        assert(proxy->ReadVertex(&native_device, &raw, 0, observed, 3) == RegistryResult::Unavailable);
+        assert(created->Release() == 0 && proxy->CloseFacadeDevice(&native_device, &facade) && raw.destroyed);
+        assert(facade.Release() == 0 && native_device.Release() == 0);
+    }
+    {
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        FakeDevice native_device, facade, wrong_facade;
+        Vertex raw, fresh;
+        auto* buffer = proxy->AdoptVertexForFacade(&native_device, &facade, &raw, 8, true);
+        assert(!proxy->BeginFacadeReset(&native_device, &wrong_facade));
+        auto* created = proxy->AdoptVertexForFacade(&native_device, &facade, &fresh, 8, true);
+        Fill(created, 0, bytes, 3);
+        assert(proxy->ReadVertex(&native_device, &fresh, 0, observed, 3) == RegistryResult::Unavailable);
+        assert(buffer->Release() == 0 && created->Release() == 0 && proxy->CloseFacadeDevice(&native_device, &facade));
+        assert(raw.destroyed && fresh.destroyed && wrong_facade.Release() == 0 && facade.Release() == 0 && native_device.Release() == 0);
+    }
+    {
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        FakeDevice native_device, facade;
+        Vertex raw;
+        proxy->StopObservation();
+        assert(!proxy->BeginFacadeReset(&native_device, &facade));
+        auto* created = proxy->AdoptVertexForFacade(&native_device, &facade, &raw, 8, true);
+        Fill(created, 0, bytes, 3);
+        assert(proxy->ReadVertex(&native_device, &raw, 0, observed, 3) == RegistryResult::Unavailable);
+        assert(created->Release() == 0 && proxy->CloseFacadeDevice(&native_device, &facade) && raw.destroyed);
+        assert(facade.Release() == 0 && native_device.Release() == 0);
+    }
+    {
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        FakeDevice native_device, facade;
+        Vertex raw; raw.device = &native_device;
+        auto* buffer = proxy->AdoptVertexForFacade(&native_device, &facade, &raw, 8, true);
+        raw.AddRef(); // keep the native object alive when the dormant wrapper is retired
+        assert(buffer->Release() == 0);
+        raw.on_release = [&] { assert(!proxy->BeginDraw(&native_device)); };
+        const auto reset = proxy->BeginFacadeReset(&native_device, &facade);
+        assert(reset && !proxy->EndFacadeReset(&native_device, reset, true));
+        raw.on_release = {};
+        assert(raw.Release() == 0 && proxy->CloseFacadeDevice(&native_device, &facade));
+        assert(facade.Release() == 0 && native_device.Release() == 0);
+    }
+}
+
 void ClosedFacadeFailuresDoNotExposeNative() {
     Reader reader;
     const BYTE bytes[]{5, 6}; BYTE observed[2]{};
@@ -961,6 +1130,7 @@ int main() {
     ClosedFacadeReacquiresDormantBuffers();
     ClosedFacadeRetirement();
     ClosedFacadeResetRetiresDormantBuffers();
+    ClosedFacadeResetEpochs();
     ClosedFacadeFailuresDoNotExposeNative();
     UnlockFailureAndCopyFailures();
     CapacityAndUnknownBuffersForward();

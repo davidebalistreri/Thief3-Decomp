@@ -565,8 +565,15 @@ bool CheckReset(HWND window, bool facade_mode) {
                                      D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, device.put())) || !device.value) return false;
     ComPtr<IDirect3DTexture8> managed;
     ComPtr<IDirect3DSurface8> managed_level;
+    ComPtr<IDirect3DVertexBuffer8> surviving_vb;
     if (FAILED(device->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, managed.put())) || !managed.value ||
-        FAILED(managed->GetSurfaceLevel(0, managed_level.put())) || !managed_level.value) return false;
+        FAILED(managed->GetSurfaceLevel(0, managed_level.put())) || !managed_level.value ||
+        FAILED(device->CreateVertexBuffer(sizeof(Vertex), D3DUSAGE_WRITEONLY, kFvf, D3DPOOL_MANAGED, surviving_vb.put())) ||
+        !surviving_vb.value) return false;
+    BYTE* surviving_data = nullptr;
+    if (FAILED(surviving_vb->Lock(0, sizeof(Vertex), &surviving_data, 0)) || !surviving_data) return false;
+    std::memset(surviving_data, 0x45, sizeof(Vertex));
+    if (FAILED(surviving_vb->Unlock())) return false;
     managed->Release(); managed.value = nullptr; // the level retains its native parent
     ComPtr<IDirect3DVertexBuffer8> old_vb;
     ComPtr<IDirect3DIndexBuffer8> old_ib;
@@ -597,6 +604,17 @@ bool CheckReset(HWND window, bool facade_mode) {
     if (FAILED(managed_level->GetContainer(IID_IDirect3DTexture8, reinterpret_cast<void**>(recovered_parent.put()))) ||
         !recovered_parent.value || FAILED(recovered_parent->GetDevice(recovered_device.put())) ||
         !recovered_device.value || !EqualIdentity(recovered_device.value, device.value)) return false;
+    if (facade_mode) {
+        auto* native = static_cast<t3render::fixture::DeviceFixture*>(device.value)->NativeForFixture();
+        auto pin = buffers->UnwrapVertex(native, surviving_vb.value);
+        BYTE byte = 0;
+        if (!pin.wrapped() || buffers->ReadVertex(native, pin.native(), 0, &byte, 1) !=
+                              t3render::ir::RegistryResult::UnknownResource) return false;
+    }
+    surviving_data = nullptr;
+    if (FAILED(surviving_vb->Lock(0, sizeof(Vertex), &surviving_data, 0)) || !surviving_data) return false;
+    std::memset(surviving_data, 0x67, sizeof(Vertex));
+    if (FAILED(surviving_vb->Unlock())) return false;
     const Vertex vertices[] = {{12, 12, 0.5f, 1, 0xffe43b3b}, {116, 12, 0.5f, 1, 0xffe43b3b},
                                {12, 116, 0.5f, 1, 0xffe43b3b}};
     const WORD indices[] = {0, 1, 2};
@@ -617,12 +635,17 @@ bool CheckReset(HWND window, bool facade_mode) {
     if (FAILED(device->SetStreamSource(0, vb.value, sizeof(Vertex))) || FAILED(device->SetIndices(ib.value, 0)) ||
         FAILED(device->GetStreamSource(0, read_vb.put(), &stride)) || read_vb.value != vb.value || stride != sizeof(Vertex) ||
         FAILED(device->GetIndices(read_ib.put(), &base)) || read_ib.value != ib.value || base != 0) return false;
+    std::uint64_t draw_ticket = 0;
     if (facade_mode) {
         auto* native = static_cast<t3render::fixture::DeviceFixture*>(device.value)->NativeForFixture();
-        auto pin = buffers->UnwrapVertex(native, vb.value);
-        BYTE byte = 0;
-        if (!pin.wrapped() || buffers->ReadVertex(native, pin.native(), 0, &byte, 1) !=
-                              t3render::ir::RegistryResult::Unavailable) return false;
+        auto vertex = buffers->UnwrapVertex(native, vb.value);
+        auto index = buffers->UnwrapIndex(native, ib.value);
+        Vertex vertex_copy[3]{}; WORD index_copy[3]{};
+        draw_ticket = buffers->BeginDraw(native);
+        if (!vertex.wrapped() || !index.wrapped() || !draw_ticket ||
+            buffers->ReadVertex(native, vertex.native(), 0, vertex_copy, sizeof(vertex_copy)) != t3render::ir::RegistryResult::Ok ||
+            buffers->ReadIndex(native, index.native(), 0, index_copy, sizeof(index_copy)) != t3render::ir::RegistryResult::Ok ||
+            std::memcmp(vertex_copy, vertices, sizeof(vertices)) || std::memcmp(index_copy, indices, sizeof(indices))) return false;
     }
     if (FAILED(device->SetVertexShader(kFvf)) || FAILED(device->SetPixelShader(0)) ||
         FAILED(device->SetRenderState(D3DRS_LIGHTING, FALSE)) || FAILED(device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE)) ||
@@ -632,6 +655,11 @@ bool CheckReset(HWND window, bool facade_mode) {
         FAILED(device->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE)) ||
         FAILED(device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xff111318, 1, 0)) || FAILED(device->BeginScene()) ||
         FAILED(device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 3, 0, 1)) || FAILED(device->EndScene())) return false;
+    if (facade_mode) {
+        auto* native = static_cast<t3render::fixture::DeviceFixture*>(device.value)->NativeForFixture();
+        if (!buffers->EndDraw(native, draw_ticket)) return false;
+        std::printf("resource_facade_post_reset_buffer_epoch=PASS\n");
+    }
     ComPtr<IDirect3DSurface8> back;
     D3DLOCKED_RECT locked{};
     if (FAILED(device->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, back.put())) || !back.value ||
@@ -682,6 +710,22 @@ bool CheckResetWithLiveResources(HWND window, bool facade_mode) {
     std::printf("resource_facade_live_reset_hr=0x%08lx\n", static_cast<unsigned long>(static_cast<std::uint32_t>(held_hr)));
     std::printf("resource_facade_recovery_reset_hr=0x%08lx\n", static_cast<unsigned long>(static_cast<std::uint32_t>(recovery_hr)));
     if (FAILED(recovery_hr)) return false;
+    ComPtr<IDirect3DVertexBuffer8> fresh;
+    if (FAILED(device->CreateVertexBuffer(sizeof(Vertex), D3DUSAGE_WRITEONLY, kFvf, D3DPOOL_MANAGED, fresh.put())) || !fresh.value)
+        return false;
+    BYTE* data = nullptr;
+    if (FAILED(fresh->Lock(0, sizeof(Vertex), &data, 0)) || !data) return false;
+    std::memset(data, 0x38, sizeof(Vertex));
+    if (FAILED(fresh->Unlock())) return false;
+    if (facade_mode) {
+        auto* native = static_cast<t3render::fixture::DeviceFixture*>(device.value)->NativeForFixture();
+        auto pin = buffers->UnwrapVertex(native, fresh.value);
+        BYTE copied[sizeof(Vertex)]{};
+        if (!pin.wrapped() || buffers->ReadVertex(native, pin.native(), 0, copied, sizeof(copied)) !=
+                              t3render::ir::RegistryResult::Ok) return false;
+        for (BYTE value : copied) if (value != 0x38) return false;
+        std::printf("resource_facade_recovery_buffer_epoch=PASS\n");
+    }
     std::printf("resource_facade_live_reset_roundtrips=PASS\n");
     return true;
 }

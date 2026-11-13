@@ -96,6 +96,13 @@ public:
     // the registry lock. Later getter/create wrappers remain untracked.
     void RetireFacadeDormantForReset(IDirect3DDevice8* owner, IDirect3DDevice8* facade) noexcept;
 
+    // Fixture-only reset epoch. The caller must have a closed resource/device
+    // boundary. A nonzero ticket excludes overlapping buffer operations; only
+    // a stable successful reset permits tracking newly created buffers again.
+    // Surviving or re-adopted buffers have unknown bytes until replaced.
+    std::uint64_t BeginFacadeReset(IDirect3DDevice8* owner, IDirect3DDevice8* facade) noexcept;
+    bool EndFacadeReset(IDirect3DDevice8* owner, std::uint64_t ticket, bool succeeded) noexcept;
+
     // Input is identified by pointer lookup only, never dereferenced. A pin
     // retains an issued wrapper while its native resource is passed to D3D.
     // Raw non-null inputs forward unchanged but invalidate owner evidence.
@@ -117,7 +124,9 @@ public:
     bool EndDraw(IDirect3DDevice8* owner, std::uint64_t token) noexcept;
 
     // Cover the entire native SetStreamSource/SetIndices/ProcessVertices call.
-    // Any overlap with a draw or another binding mutation poisons the device.
+    // Facade Create/Get calls must also cover their native call and adoption,
+    // otherwise a reset could complete while a returned buffer is in flight.
+    // Any overlap with a draw, reset or another mutation poisons the device.
     std::uint64_t BeginBindingMutation(IDirect3DDevice8* owner) noexcept;
     void EndBindingMutation(IDirect3DDevice8* owner, std::uint64_t token) noexcept;
 

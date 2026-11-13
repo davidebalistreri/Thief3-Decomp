@@ -263,6 +263,9 @@ pixel programs and buffers are still required for a replay. See the
 In a [TDS test](benchmarks/d3d8/2026-11-13-tds-vertex-program/result.json),
 a prior Reset invalidated the declarations and no program was emitted. This
 does not establish which shader versions the game uses.
+A [follow-up](benchmarks/d3d8/2026-11-13-tds-program-history/result.json)
+retained 495 declaration and 94 program hypotheses across successful Reset
+and rebind observations; they remain unverified pre-reset data.
 
 ### Experimental buffered capture — isolated fixture only
 

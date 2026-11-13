@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "test": "tds_bedroom_pre_reset_program_hypotheses",
+  "date": "2026-11-13",
+  "status": "PARTIAL",
+  "environment": {"os": "macOS arm64", "runtime": "Highball CrossOver 26.3 r30 / Wine x86"},
+  "scenario": {
+    "map": "SouthQuarter1_int1.gmp",
+    "save_slot": "Garrett’s Building",
+    "camera": "User oriented toward bed; no matched screenshot or exact pose attestation.",
+    "presentation": {"width": 1024, "height": 768, "windowed": false},
+    "trigger": "external marker after load, game in foreground",
+    "requested_frames": 1,
+    "declaration_observation": true,
+    "declaration_history": true,
+    "vertex_program_observation": true,
+    "buffer_observation": false
+  },
+  "proxy": {
+    "source_commit": "14b8efc",
+    "sha256": "10618aab6a43e5c48ec6de8787f1612744bb49da7057a91c7a4667e71da2c022",
+    "temporary_install_removed": true,
+    "native_proxy_loaded": true,
+    "game_d3d8_forwarded_to": "Wine system32 builtin"
+  },
+  "result": {
+    "frame": 1638,
+    "draw_count": 518,
+    "calls": {"DrawIndexedPrimitive": 509, "DrawPrimitiveUP": 9},
+    "clear_count": 11,
+    "present_hresult": 0,
+    "concurrent_operations": false,
+    "stable_successful_draw_results": 518,
+    "declaration_status": {"unavailable": 495, "unknown": 23},
+    "unavailable_reason": {"reason": "reset_attempt", "scan_status": "complete", "draws": 495},
+    "pre_reset_declaration_hypotheses": 495,
+    "pre_reset_program_hypotheses": 94,
+    "distinct_pre_reset_program_word_sequences": 2,
+    "program_hypotheses_by_word_count": {"73": 58, "85": 36},
+    "post_reset_program_candidates": 0,
+    "successful_reset_hresult_in_hypotheses": 0,
+    "trace_sha256": "5a0735de29b1c910f47180a3aac5ce40d1ee5a5136d0f755523580887aa0e391",
+    "partial_ir_sha256": "b9c53f7fcc7e2c73e361e606e8187d9695518e045fa077a323287639a383bfe3",
+    "local_details": "build/t3render-captures/bedroom-program-history-20261113-1650"
+  },
+  "limitations": [
+    "Pre-reset data is an application-memory hypothesis matched by numeric handle, successful Reset and observed rebind; it is not proof of post-reset GPU input or shader identity.",
+    "Missing program hypotheses do not establish whether other shaders use unsupported versions, exceeded limits or were otherwise unavailable.",
+    "No VB/IB bytes, texture bytes, shader constants or pixel programs were captured.",
+    "No matched screenshot, real-room DX12 replay, native Windows test or gameplay/stealth parity claim.",
+    "The test process was forcibly closed after a normal close message did not terminate it."
+  ]
+}

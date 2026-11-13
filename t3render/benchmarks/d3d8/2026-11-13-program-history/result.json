@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_pre_reset_program_hypothesis",
+  "date": "2026-11-13",
+  "status": "PASS",
+  "environment": {
+    "os": "macOS arm64",
+    "runtime": "Highball CrossOver 26.3 r30 / Wine x86",
+    "bottle": "Games; Steam was running, TDS was closed"
+  },
+  "source_commit": "14b8efc",
+  "fixture_sha256": "95b3ac9415f4c5bb3123e985d090d76a27da4b7428ec5f21c06a1735a95aedea",
+  "proxy_sha256": "10618aab6a43e5c48ec6de8787f1612744bb49da7057a91c7a4667e71da2c022",
+  "source_sha256": {
+    "t3render/src/proxy.cpp": "00e93705473795bc43e972397422b03b5cb3ab2784da33c2b274808ee87948ec",
+    "t3render/src/capture.cpp": "bd5a6c0b7c8dd5334755c8354bf04d5e96a876788c034af09436747e006a784a",
+    "t3render/ir/shader_program.cpp": "0a03fec1356722a092ffa2d48117b034fd4565cc2011697b8084881266465fbe",
+    "t3render/ir/vertex_declaration_registry.cpp": "a38dbdfeb5a5337cf461dae0abd08da7fc72c6c4562b2f06fee49cd5412fd35a",
+    "t3render/ir/vertex_declaration_registry.hpp": "96640418cebb135ca11d64894d6c65d84b6cd51055427edfc1915a2455ceb84b",
+    "t3render/tools/trace_to_ir.py": "21e1aab3de58ef6d8c4b65d4aab2d218257e283225516566b830b9830d256810",
+    "t3render/tools/run_d3d8_shader_reset_history_fixture.py": "9cd871a33a443f12c2bb9febb96918150396686e5f18d87615a43b49a79138d0"
+  },
+  "result": {
+    "valid_only": {"declaration_hypotheses": 2, "program_hypotheses": 2, "post_reset_program_candidates": 0},
+    "failed_reset_then_recovery": {"declaration_hypotheses": 0, "program_hypotheses": 0},
+    "hresult_and_rgb_parity": true,
+    "rgb_ppm_sha256": "5c13a1848569e78c8d35c4aeab416aa738892bc9a9e4cba59ac9f72db43b11c2",
+    "valid_only_trace_sha256": "ced50e9435428b8204da4ff1bc7f77b19bafc697e63d2c90f5191579f955f4f3",
+    "recovery_trace_sha256": "ba2f51e5ff3b0803d65e9b4035ae3d2647fa20b10dcf34de07651f59be52606b",
+    "local_details": "build/t3render-diagnostics/2026-11-13-program-history"
+  },
+  "limitations": [
+    "Synthetic x86 fixture only; no TDS process, game assets or real-room DX12 replay.",
+    "Pre-Reset bytes are application-memory hypotheses, not proof of driver state or shader identity.",
+    "The fixture does not query or draw between a failed Reset and successful recovery; it does not isolate the failed Reset.",
+    "No buffer wrappers, pixel programs, shader constants, alias completeness or native Windows validation."
+  ]
+}

@@ -50,3 +50,5 @@ partial logs if a fixture process fails.
 Append `--vertex-programs` to additionally check a separate pre-reset VS 1.1
 program hypothesis against the fixture input. A failed Reset/recovery must
 still suppress it; it is never promoted to a post-reset program candidate.
+The [2026-11-13 Highball run](../benchmarks/d3d8/2026-11-13-program-history/result.json)
+passed with Steam running and TDS closed.

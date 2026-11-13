@@ -16,6 +16,7 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
     lines.append(f"factory_and_device_QI_roundtrip=PASS factory_initial_release={suffix}")
     if resource_facade:
         lines.extend(("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
+                      "resource_facade_volume_roundtrips=PASS",
                       "resource_facade_surface_copy_and_target=PASS"))
     if mode == "facade":
         names = (() if resource_facade else ("surface", "texture") if buffer_facade else
@@ -65,6 +66,7 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
         wrapped = fixture_log("facade", resource_facade=True)
         self.assertEqual(baseline, self.inspect(wrapped, resource_facade=True))
         for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
+                       "resource_facade_volume_roundtrips=PASS",
                        "resource_facade_surface_copy_and_target=PASS", "resource_facade_rejects_unknown_inputs=PASS",
                        "resource_facade_2d_cube_surface_roundtrips=PASS", "resource_facade_cube_binding=PASS",
                        "resource_facade_device_unwraps_buffers=PASS", "resource_facade_final_close=PASS"):

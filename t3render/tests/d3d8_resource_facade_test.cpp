@@ -136,13 +136,90 @@ struct Cube final : TextureBase<IDirect3DCubeTexture8, Kind::Cube> {
     HRESULT UnlockRect(D3DCUBEMAP_FACES, UINT) override { return S_OK; }
     HRESULT AddDirtyRect(D3DCUBEMAP_FACES, const RECT*) override { return S_OK; }
 };
+struct Volume final : IDirect3DVolume8 {
+    std::atomic<ULONG> refs{1};
+    std::atomic<bool> destroyed{false};
+    Device* device = nullptr;
+    IUnknown* container = nullptr;
+    HRESULT QueryInterface(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        if (!IsEqualIID(iid, IID_IUnknown) && !IsEqualIID(iid, IID_IDirect3DVolume8)) return E_NOINTERFACE;
+        AddRef(); *out = static_cast<IDirect3DVolume8*>(this); SetLastError(61); return S_OK;
+    }
+    ULONG AddRef() override { assert(refs && !destroyed); return ++refs; }
+    ULONG Release() override {
+        const ULONG old = refs.fetch_sub(1); assert(old);
+        if (old == 1) destroyed = true;
+        SetLastError(62); return old - 1;
+    }
+    HRESULT GetDevice(IDirect3DDevice8** out) override {
+        if (!out) return E_POINTER;
+        *out = device; if (device) device->AddRef(); SetLastError(63); return S_OK;
+    }
+    HRESULT SetPrivateData(REFGUID, const void*, DWORD, DWORD) override { return S_OK; }
+    HRESULT GetPrivateData(REFGUID, void*, DWORD*) override { return S_OK; }
+    HRESULT FreePrivateData(REFGUID) override { return S_OK; }
+    HRESULT GetContainer(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        if (!container) { *out = nullptr; return E_NOINTERFACE; }
+        const HRESULT hr = container->QueryInterface(iid, out); SetLastError(64); return hr;
+    }
+    HRESULT GetDesc(D3DVOLUME_DESC* out) override { if (!out) return E_POINTER; *out = {4, 4, 4}; return S_OK; }
+    HRESULT LockBox(D3DLOCKED_BOX* out, const D3DBOX*, DWORD) override {
+        if (!out) return E_POINTER; *out = {16, 64, this}; return S_OK;
+    }
+    HRESULT UnlockBox() override { return S_OK; }
+};
+struct VolumeTexture final : IDirect3DVolumeTexture8 {
+    std::atomic<ULONG> refs{1};
+    std::atomic<bool> destroyed{false};
+    Device* device = nullptr;
+    Volume* volume = nullptr;
+    HRESULT QueryInterface(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        if (!Supported(Kind::VolumeTexture, iid)) return E_NOINTERFACE;
+        AddRef(); *out = static_cast<IDirect3DVolumeTexture8*>(this); SetLastError(71); return S_OK;
+    }
+    ULONG AddRef() override { assert(refs && !destroyed); return ++refs; }
+    ULONG Release() override {
+        const ULONG old = refs.fetch_sub(1); assert(old);
+        if (old == 1) { destroyed = true; if (volume) volume->Release(); }
+        SetLastError(72); return old - 1;
+    }
+    HRESULT GetDevice(IDirect3DDevice8** out) override {
+        if (!out) return E_POINTER;
+        *out = device; if (device) device->AddRef(); SetLastError(73); return S_OK;
+    }
+    HRESULT SetPrivateData(REFGUID, const void*, DWORD, DWORD) override { return S_OK; }
+    HRESULT GetPrivateData(REFGUID, void*, DWORD*) override { return S_OK; }
+    HRESULT FreePrivateData(REFGUID) override { return S_OK; }
+    DWORD SetPriority(DWORD value) override { return value; }
+    DWORD GetPriority() override { return 9; }
+    void PreLoad() override {}
+    D3DRESOURCETYPE GetType() override { return D3DRTYPE_VOLUMETEXTURE; }
+    DWORD SetLOD(DWORD value) override { return value; }
+    DWORD GetLOD() override { return 0; }
+    DWORD GetLevelCount() override { return 1; }
+    HRESULT GetLevelDesc(UINT, D3DVOLUME_DESC* out) override { if (!out) return E_POINTER; *out = {4, 4, 4}; return S_OK; }
+    HRESULT GetVolumeLevel(UINT, IDirect3DVolume8** out) override {
+        if (!out) return E_POINTER;
+        *out = volume; if (!volume) return E_FAIL;
+        volume->AddRef(); SetLastError(74); return S_OK;
+    }
+    HRESULT LockBox(UINT, D3DLOCKED_BOX*, const D3DBOX*, DWORD) override { return S_OK; }
+    HRESULT UnlockBox(UINT) override { return S_OK; }
+    HRESULT AddDirtyBox(const D3DBOX*) override { return S_OK; }
+};
 
 void CheckIdentity(IUnknown* item, REFIID iid, void* expected) {
     void* output = nullptr;
     assert(item->QueryInterface(iid, &output) == S_OK && output == expected);
     reinterpret_cast<IUnknown*>(output)->Release();
 }
-void CheckParent(IDirect3DSurface8* surface, REFIID iid, void* expected) {
+template<class Resource>
+void CheckParent(Resource* surface, REFIID iid, void* expected) {
     void* output = nullptr;
     SetLastError(80);
     assert(surface->GetContainer(iid, &output) == S_OK && output == expected && GetLastError() == 64);
@@ -155,15 +232,22 @@ void ResourceGraph() {
     texture.device = &native; texture.surface = &level; level.device = &native; level.container = &texture;
     Cube cube; Surface face;
     cube.device = &native; cube.surface = &face; face.device = &native; face.container = &cube;
+    VolumeTexture volume_texture; Volume volume;
+    volume_texture.device = &native; volume_texture.volume = &volume; volume.device = &native; volume.container = &volume_texture;
     Surface back; back.device = &native; back.container = &native;
     auto router = Router::Create(&native, &facade);
     auto* wrapped = router->AdoptTexture(&texture);
     auto* wrapped_cube = router->AdoptCube(&cube);
+    auto* wrapped_volume = router->AdoptVolumeTexture(&volume_texture);
     auto* wrapped_back = router->AdoptSurface(&back);
-    assert(wrapped && wrapped_cube && wrapped_back && facade.refs == 4);
+    assert(wrapped && wrapped_cube && wrapped_volume && wrapped_back && facade.refs == 5);
     texture.AddRef();
     auto* from_base = router->AdoptBase(&texture);
     assert(from_base == wrapped && texture.refs == 1);
+    assert(from_base->Release() == 1);
+    volume_texture.AddRef();
+    from_base = router->AdoptBase(&volume_texture);
+    assert(from_base == wrapped_volume && volume_texture.refs == 1);
     assert(from_base->Release() == 1);
     cube.AddRef();
     from_base = router->AdoptBase(&cube);
@@ -183,6 +267,7 @@ void ResourceGraph() {
     CheckIdentity(wrapped, IID_IDirect3DResource8, wrapped);
     CheckIdentity(wrapped, IID_IDirect3DBaseTexture8, wrapped);
     CheckIdentity(wrapped_cube, IID_IDirect3DCubeTexture8, wrapped_cube);
+    CheckIdentity(wrapped_volume, IID_IDirect3DVolumeTexture8, wrapped_volume);
     CheckIdentity(wrapped_back, IID_IDirect3DSurface8, wrapped_back);
     void* extra = reinterpret_cast<void*>(1);
     assert(wrapped->QueryInterface(kExtra, &extra) == E_NOINTERFACE && !extra);
@@ -195,18 +280,28 @@ void ResourceGraph() {
     assert(wrapped->GetDevice(&parent) == S_OK && parent == &facade && GetLastError() == 73);
     parent->Release();
     IDirect3DSurface8 *first = nullptr, *again = nullptr, *cube_face = nullptr;
+    IDirect3DVolume8 *volume_level = nullptr, *volume_again = nullptr;
     assert(wrapped->GetSurfaceLevel(0, &first) == S_OK && first && GetLastError() == 74);
     assert(wrapped->GetSurfaceLevel(0, &again) == S_OK && again == first);
     assert(wrapped_cube->GetCubeMapSurface(D3DCUBEMAP_FACE_POSITIVE_X, 0, &cube_face) == S_OK && cube_face);
+    assert(wrapped_volume->GetVolumeLevel(0, &volume_level) == S_OK && volume_level);
+    assert(wrapped_volume->GetVolumeLevel(0, &volume_again) == S_OK && volume_again == volume_level);
     CheckParent(first, IID_IDirect3DTexture8, wrapped);
     CheckParent(first, IID_IDirect3DResource8, wrapped);
     CheckParent(first, IID_IDirect3DBaseTexture8, wrapped);
     CheckParent(first, IID_IUnknown, wrapped);
     CheckParent(cube_face, IID_IDirect3DCubeTexture8, wrapped_cube);
     CheckParent(cube_face, IID_IUnknown, wrapped_cube);
+    CheckParent(volume_level, IID_IDirect3DVolumeTexture8, wrapped_volume);
+    CheckParent(volume_level, IID_IUnknown, wrapped_volume);
+    assert(!router->UnwrapTexture(reinterpret_cast<IDirect3DBaseTexture8*>(volume_level)).wrapped());
     CheckParent(wrapped_back, IID_IDirect3DDevice8, &facade);
     CheckParent(wrapped_back, IID_IUnknown, &facade);
-    assert(again->Release() == 1 && first->Release() == 0 && cube_face->Release() == 0);
+    assert(again->Release() == 1 && first->Release() == 0 && cube_face->Release() == 0 &&
+           volume_again->Release() == 1 && wrapped_volume->Release() == 0);
+    // A volume level may reacquire its dormant parent identity.
+    CheckParent(volume_level, IID_IUnknown, wrapped_volume);
+    assert(volume_level->Release() == 0);
     // Surface and texture wrappers can both be reacquired after reaching zero.
     assert(wrapped->Release() == 0);
     texture.AddRef();
@@ -217,7 +312,8 @@ void ResourceGraph() {
     first->Release(); recovered->Release();
     assert(wrapped_cube->Release() == 0 && wrapped_back->Release() == 0 && facade.refs == 1);
     assert(router->Close());
-    assert(texture.destroyed && cube.destroyed && level.destroyed && face.destroyed && back.destroyed);
+    assert(texture.destroyed && cube.destroyed && volume_texture.destroyed && volume.destroyed &&
+           level.destroyed && face.destroyed && back.destroyed);
     assert(native.Release() == 0 && facade.Release() == 0);
 }
 
@@ -275,7 +371,7 @@ void FailClosedAndLifetime() {
     for (bool fail_query : {false, true}) {
         Device native, facade;
         Texture raw;
-        raw.reported_type = fail_query ? D3DRTYPE_TEXTURE : static_cast<D3DRESOURCETYPE>(4);
+        raw.reported_type = fail_query ? D3DRTYPE_TEXTURE : D3DRTYPE_INDEXBUFFER;
         raw.fail_typed_query = fail_query;
         auto router = Router::Create(&native, &facade);
         SetLastError(83);
@@ -326,6 +422,8 @@ int main() {
     static_assert(!std::is_abstract_v<Wrapper<IDirect3DSurface8>>);
     static_assert(!std::is_abstract_v<Wrapper<IDirect3DTexture8>>);
     static_assert(!std::is_abstract_v<Wrapper<IDirect3DCubeTexture8>>);
+    static_assert(!std::is_abstract_v<Wrapper<IDirect3DVolume8>>);
+    static_assert(!std::is_abstract_v<Wrapper<IDirect3DVolumeTexture8>>);
     ResourceGraph();
     FailClosedAndLifetime();
     ConcurrentReacquisition();

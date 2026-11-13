@@ -5,12 +5,29 @@ inline constexpr IID IID_IDirect3DSurface8{6};
 inline constexpr IID IID_IDirect3DBaseTexture8{7};
 inline constexpr IID IID_IDirect3DTexture8{8};
 inline constexpr IID IID_IDirect3DCubeTexture8{9};
+inline constexpr IID IID_IDirect3DVolumeTexture8{10};
+inline constexpr IID IID_IDirect3DVolume8{11};
 
 struct D3DSURFACE_DESC { UINT Width, Height; };
 struct D3DLOCKED_RECT { int Pitch; void* pBits; };
+struct D3DVOLUME_DESC { UINT Width, Height, Depth; };
+struct D3DLOCKED_BOX { int RowPitch, SlicePitch; void* pBits; };
+struct D3DBOX { UINT Left, Top, Right, Bottom, Front, Back; };
 enum D3DCUBEMAP_FACES { D3DCUBEMAP_FACE_POSITIVE_X = 0, D3DCUBEMAP_FACE_NEGATIVE_X = 1 };
 inline constexpr D3DRESOURCETYPE D3DRTYPE_TEXTURE = static_cast<D3DRESOURCETYPE>(3);
 inline constexpr D3DRESOURCETYPE D3DRTYPE_CUBETEXTURE = static_cast<D3DRESOURCETYPE>(5);
+inline constexpr D3DRESOURCETYPE D3DRTYPE_VOLUMETEXTURE = static_cast<D3DRESOURCETYPE>(4);
+
+struct IDirect3DVolume8 : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice8**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, const void*, DWORD, DWORD) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, void*, DWORD*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE FreePrivateData(REFGUID) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetContainer(REFIID, void**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetDesc(D3DVOLUME_DESC*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE LockBox(D3DLOCKED_BOX*, const D3DBOX*, DWORD) = 0;
+    virtual HRESULT STDMETHODCALLTYPE UnlockBox() = 0;
+};
 
 struct IDirect3DSurface8 : IUnknown {
     virtual HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice8**) = 0;
@@ -40,4 +57,11 @@ struct IDirect3DCubeTexture8 : IDirect3DBaseTexture8 {
     virtual HRESULT STDMETHODCALLTYPE LockRect(D3DCUBEMAP_FACES, UINT, D3DLOCKED_RECT*, const RECT*, DWORD) = 0;
     virtual HRESULT STDMETHODCALLTYPE UnlockRect(D3DCUBEMAP_FACES, UINT) = 0;
     virtual HRESULT STDMETHODCALLTYPE AddDirtyRect(D3DCUBEMAP_FACES, const RECT*) = 0;
+};
+struct IDirect3DVolumeTexture8 : IDirect3DBaseTexture8 {
+    virtual HRESULT STDMETHODCALLTYPE GetLevelDesc(UINT, D3DVOLUME_DESC*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetVolumeLevel(UINT, IDirect3DVolume8**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE LockBox(UINT, D3DLOCKED_BOX*, const D3DBOX*, DWORD) = 0;
+    virtual HRESULT STDMETHODCALLTYPE UnlockBox(UINT) = 0;
+    virtual HRESULT STDMETHODCALLTYPE AddDirtyBox(const D3DBOX*) = 0;
 };

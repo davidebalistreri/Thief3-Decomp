@@ -49,14 +49,16 @@ inline void* Identity(IUnknown* value) {
     return result;
 }
 
-enum class Kind { Surface, Texture, Cube };
+enum class Kind { Surface, Texture, Cube, VolumeTexture, Volume };
 
 inline bool Supported(Kind kind, REFIID iid) {
     if (IsEqualIID(iid, IID_IUnknown)) return true;
     if (kind == Kind::Surface) return IsEqualIID(iid, IID_IDirect3DSurface8);
+    if (kind == Kind::Volume) return IsEqualIID(iid, IID_IDirect3DVolume8);
     if (IsEqualIID(iid, IID_IDirect3DResource8) || IsEqualIID(iid, IID_IDirect3DBaseTexture8)) return true;
-    return kind == Kind::Texture ? IsEqualIID(iid, IID_IDirect3DTexture8)
-                                 : IsEqualIID(iid, IID_IDirect3DCubeTexture8);
+    if (kind == Kind::Texture) return IsEqualIID(iid, IID_IDirect3DTexture8);
+    if (kind == Kind::Cube) return IsEqualIID(iid, IID_IDirect3DCubeTexture8);
+    return kind == Kind::VolumeTexture && IsEqualIID(iid, IID_IDirect3DVolumeTexture8);
 }
 
 struct Entry {
@@ -196,9 +198,6 @@ public:
     DWORD STDMETHODCALLTYPE SetLOD(DWORD value) override { return this->real_->SetLOD(value); }
     DWORD STDMETHODCALLTYPE GetLOD() override { return this->real_->GetLOD(); }
     DWORD STDMETHODCALLTYPE GetLevelCount() override { return this->real_->GetLevelCount(); }
-    HRESULT STDMETHODCALLTYPE GetLevelDesc(UINT level, D3DSURFACE_DESC* output) override {
-        return this->real_->GetLevelDesc(level, output);
-    }
 };
 
 HRESULT MapContainer(const std::shared_ptr<State>& state, REFIID iid, IUnknown* native, void** output) noexcept;
@@ -232,6 +231,9 @@ template<>
 class Wrapper<IDirect3DTexture8> final : public CommonTexture<IDirect3DTexture8> {
 public:
     using CommonTexture::CommonTexture;
+    HRESULT STDMETHODCALLTYPE GetLevelDesc(UINT level, D3DSURFACE_DESC* output) override {
+        return real_->GetLevelDesc(level, output);
+    }
     HRESULT STDMETHODCALLTYPE GetSurfaceLevel(UINT level, IDirect3DSurface8** output) override {
         LastError error; error.restore();
         const HRESULT hr = real_->GetSurfaceLevel(level, output); error.capture();
@@ -252,6 +254,9 @@ template<>
 class Wrapper<IDirect3DCubeTexture8> final : public CommonTexture<IDirect3DCubeTexture8> {
 public:
     using CommonTexture::CommonTexture;
+    HRESULT STDMETHODCALLTYPE GetLevelDesc(UINT level, D3DSURFACE_DESC* output) override {
+        return real_->GetLevelDesc(level, output);
+    }
     HRESULT STDMETHODCALLTYPE GetCubeMapSurface(D3DCUBEMAP_FACES face, UINT level, IDirect3DSurface8** output) override {
         LastError error; error.restore();
         const HRESULT hr = real_->GetCubeMapSurface(face, level, output); error.capture();
@@ -271,6 +276,54 @@ public:
     HRESULT STDMETHODCALLTYPE AddDirtyRect(D3DCUBEMAP_FACES face, const RECT* rect) override {
         return real_->AddDirtyRect(face, rect);
     }
+};
+
+template<>
+class Wrapper<IDirect3DVolume8> final : public Common<IDirect3DVolume8> {
+public:
+    using Common::Common;
+    IDirect3DSurface8* NativeSurface() noexcept override { return nullptr; }
+    IDirect3DBaseTexture8* NativeTexture() noexcept override { return nullptr; }
+    HRESULT STDMETHODCALLTYPE GetContainer(REFIID iid, void** output) override {
+        LastError error;
+        void* native = nullptr;
+        error.restore();
+        const HRESULT hr = real_->GetContainer(iid, output ? &native : nullptr);
+        error.capture();
+        if (FAILED(hr)) return hr;
+        if (!output || !native) { if (output) *output = nullptr; return E_FAIL; }
+        *output = nullptr;
+        const HRESULT mapped = MapContainer(state_, iid, reinterpret_cast<IUnknown*>(native), output);
+        return FAILED(mapped) ? mapped : hr;
+    }
+    HRESULT STDMETHODCALLTYPE GetDesc(D3DVOLUME_DESC* output) override { return real_->GetDesc(output); }
+    HRESULT STDMETHODCALLTYPE LockBox(D3DLOCKED_BOX* output, const D3DBOX* box, DWORD flags) override {
+        return real_->LockBox(output, box, flags);
+    }
+    HRESULT STDMETHODCALLTYPE UnlockBox() override { return real_->UnlockBox(); }
+};
+
+template<>
+class Wrapper<IDirect3DVolumeTexture8> final : public CommonTexture<IDirect3DVolumeTexture8> {
+public:
+    using CommonTexture::CommonTexture;
+    HRESULT STDMETHODCALLTYPE GetLevelDesc(UINT level, D3DVOLUME_DESC* output) override {
+        return real_->GetLevelDesc(level, output);
+    }
+    HRESULT STDMETHODCALLTYPE GetVolumeLevel(UINT level, IDirect3DVolume8** output) override {
+        LastError error; error.restore();
+        const HRESULT hr = real_->GetVolumeLevel(level, output); error.capture();
+        if (SUCCEEDED(hr) && output && *output) {
+            *output = Adopt(state_, *output, Kind::Volume);
+            if (!*output) return E_FAIL;
+        }
+        return hr;
+    }
+    HRESULT STDMETHODCALLTYPE LockBox(UINT level, D3DLOCKED_BOX* output, const D3DBOX* box, DWORD flags) override {
+        return real_->LockBox(level, output, box, flags);
+    }
+    HRESULT STDMETHODCALLTYPE UnlockBox(UINT level) override { return real_->UnlockBox(level); }
+    HRESULT STDMETHODCALLTYPE AddDirtyBox(const D3DBOX* box) override { return real_->AddDirtyBox(box); }
 };
 
 template<class Interface>
@@ -395,6 +448,9 @@ public:
     IDirect3DSurface8* AdoptSurface(IDirect3DSurface8* native) noexcept { return Adopt(state_, native, Kind::Surface); }
     IDirect3DTexture8* AdoptTexture(IDirect3DTexture8* native) noexcept { return Adopt(state_, native, Kind::Texture); }
     IDirect3DCubeTexture8* AdoptCube(IDirect3DCubeTexture8* native) noexcept { return Adopt(state_, native, Kind::Cube); }
+    IDirect3DVolumeTexture8* AdoptVolumeTexture(IDirect3DVolumeTexture8* native) noexcept {
+        return Adopt(state_, native, Kind::VolumeTexture);
+    }
 
     // Adopts the native getter's +1. Unknown base texture types fail closed.
     IDirect3DBaseTexture8* AdoptBase(IDirect3DBaseTexture8* native) noexcept {
@@ -405,10 +461,12 @@ public:
         HRESULT hr = E_NOINTERFACE;
         if (type == D3DRTYPE_TEXTURE) hr = native->QueryInterface(IID_IDirect3DTexture8, &typed);
         else if (type == D3DRTYPE_CUBETEXTURE) hr = native->QueryInterface(IID_IDirect3DCubeTexture8, &typed);
+        else if (type == D3DRTYPE_VOLUMETEXTURE) hr = native->QueryInterface(IID_IDirect3DVolumeTexture8, &typed);
         native->Release();
         if (FAILED(hr) || !typed) return nullptr;
         if (type == D3DRTYPE_TEXTURE) return AdoptTexture(static_cast<IDirect3DTexture8*>(typed));
-        return AdoptCube(static_cast<IDirect3DCubeTexture8*>(typed));
+        if (type == D3DRTYPE_CUBETEXTURE) return AdoptCube(static_cast<IDirect3DCubeTexture8*>(typed));
+        return AdoptVolumeTexture(static_cast<IDirect3DVolumeTexture8*>(typed));
     }
 
     // Only known live wrappers are accepted. Never dereference unknown inputs.
@@ -426,7 +484,8 @@ public:
         if (!value) return {};
         std::lock_guard<std::mutex> lock(state_->mutex);
         const auto it = state_->wrappers.find(value);
-        if (state_->closing || it == state_->wrappers.end() || it->second->kind == Kind::Surface ||
+        if (state_->closing || it == state_->wrappers.end() ||
+            (it->second->kind != Kind::Texture && it->second->kind != Kind::Cube && it->second->kind != Kind::VolumeTexture) ||
             !it->second->TryAddRef()) return {};
         return TexturePin(it->second->NativeTexture(), it->second->Unknown());
     }

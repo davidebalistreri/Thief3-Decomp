@@ -246,32 +246,77 @@ bool DrawTexturedSamples(IDirect3DDevice8* device) {
 bool CheckTextureStateBlock(IDirect3DDevice8* device) {
     ComPtr<IDirect3DTexture8> texture;
     ComPtr<IDirect3DCubeTexture8> cube;
+    ComPtr<IDirect3DVolumeTexture8> volume;
     if (FAILED(device->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, texture.put())) || !texture.value ||
         FAILED(device->CreateCubeTexture(2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, cube.put())) || !cube.value ||
-        FAILED(device->SetTexture(0, texture.value)) || FAILED(device->SetTexture(1, cube.value))) return false;
-    ComPtr<IUnknown> texture_identity, cube_identity;
-    if (!Identity(texture.value, texture_identity) || !Identity(cube.value, cube_identity)) return false;
+        FAILED(device->CreateVolumeTexture(2, 2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, volume.put())) || !volume.value ||
+        FAILED(device->SetTexture(0, texture.value)) || FAILED(device->SetTexture(1, cube.value)) ||
+        FAILED(device->SetTexture(2, volume.value))) return false;
+    ComPtr<IUnknown> texture_identity, cube_identity, volume_identity;
+    if (!Identity(texture.value, texture_identity) || !Identity(cube.value, cube_identity) ||
+        !Identity(volume.value, volume_identity)) return false;
     const auto original_texture = reinterpret_cast<std::uintptr_t>(texture_identity.value);
     const auto original_cube = reinterpret_cast<std::uintptr_t>(cube_identity.value);
+    const auto original_volume = reinterpret_cast<std::uintptr_t>(volume_identity.value);
     texture_identity->Release(); texture_identity.value = nullptr;
     cube_identity->Release(); cube_identity.value = nullptr;
+    volume_identity->Release(); volume_identity.value = nullptr;
     DWORD token = 0;
     if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &token)) ||
-        FAILED(device->SetTexture(0, nullptr)) || FAILED(device->SetTexture(1, nullptr))) return false;
+        FAILED(device->SetTexture(0, nullptr)) || FAILED(device->SetTexture(1, nullptr)) ||
+        FAILED(device->SetTexture(2, nullptr))) return false;
     texture->Release(); texture.value = nullptr;
     cube->Release(); cube.value = nullptr;
+    volume->Release(); volume.value = nullptr;
     if (FAILED(device->ApplyStateBlock(token))) return false;
-    ComPtr<IDirect3DBaseTexture8> recovered_texture, recovered_cube;
-    ComPtr<IUnknown> recovered_texture_identity, recovered_cube_identity;
+    ComPtr<IDirect3DBaseTexture8> recovered_texture, recovered_cube, recovered_volume;
+    ComPtr<IUnknown> recovered_texture_identity, recovered_cube_identity, recovered_volume_identity;
     if (FAILED(device->GetTexture(0, recovered_texture.put())) || !recovered_texture.value ||
         FAILED(device->GetTexture(1, recovered_cube.put())) || !recovered_cube.value ||
+        FAILED(device->GetTexture(2, recovered_volume.put())) || !recovered_volume.value ||
         !Identity(recovered_texture.value, recovered_texture_identity) ||
         !Identity(recovered_cube.value, recovered_cube_identity) ||
+        !Identity(recovered_volume.value, recovered_volume_identity) ||
         reinterpret_cast<std::uintptr_t>(recovered_texture_identity.value) != original_texture ||
         reinterpret_cast<std::uintptr_t>(recovered_cube_identity.value) != original_cube ||
+        reinterpret_cast<std::uintptr_t>(recovered_volume_identity.value) != original_volume ||
         FAILED(device->DeleteStateBlock(token)) || FAILED(device->SetTexture(0, nullptr)) ||
-        FAILED(device->SetTexture(1, nullptr))) return false;
+        FAILED(device->SetTexture(1, nullptr)) || FAILED(device->SetTexture(2, nullptr))) return false;
     std::printf("resource_facade_stateblock_texture_identities=PASS\n");
+    return true;
+}
+
+bool CheckVolumeResource(IDirect3DDevice8* device, IDirect3DVertexBuffer8* vb, IDirect3DIndexBuffer8* ib) {
+    ComPtr<IDirect3DVolumeTexture8> texture;
+    ComPtr<IDirect3DVolume8> level, again;
+    ComPtr<IDirect3DDevice8> parent;
+    if (FAILED(device->CreateVolumeTexture(2, 2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, texture.put())) ||
+        !texture.value || FAILED(texture->GetVolumeLevel(0, level.put())) || !level.value ||
+        FAILED(texture->GetVolumeLevel(0, again.put())) || again.value != level.value ||
+        FAILED(level->GetDevice(parent.put())) || !parent.value || !EqualIdentity(parent.value, device)) return false;
+    ComPtr<IUnknown> container, texture_container;
+    if (FAILED(level->GetContainer(IID_IUnknown, reinterpret_cast<void**>(container.put()))) ||
+        !container.value || !EqualIdentity(container.value, texture.value) ||
+        FAILED(level->GetContainer(IID_IDirect3DVolumeTexture8, reinterpret_cast<void**>(texture_container.put()))) ||
+        !texture_container.value || !EqualIdentity(texture_container.value, texture.value)) return false;
+    const DWORD colors[8] = {0xff112233u, 0xff223344u, 0xff334455u, 0xff445566u,
+                             0xff556677u, 0xff667788u, 0xff778899u, 0xff8899aau};
+    D3DLOCKED_BOX box{};
+    if (FAILED(texture->LockBox(0, &box, nullptr, 0))) return false;
+    bool valid = box.pBits && box.RowPitch >= 8 && box.SlicePitch >= 0 && box.RowPitch <= box.SlicePitch / 2;
+    if (valid) for (unsigned z = 0; z < 2; ++z) for (unsigned y = 0; y < 2; ++y)
+        std::memcpy(static_cast<BYTE*>(box.pBits) + z * box.SlicePitch + y * box.RowPitch, colors + z * 4 + y * 2, 8);
+    if (FAILED(texture->UnlockBox(0)) || !valid || FAILED(level->LockBox(&box, nullptr, D3DLOCK_READONLY))) return false;
+    valid = box.pBits && box.RowPitch >= 8 && box.SlicePitch >= 0 && box.RowPitch <= box.SlicePitch / 2;
+    if (valid) for (unsigned z = 0; z < 2; ++z) for (unsigned y = 0; y < 2; ++y)
+        valid = valid && std::memcmp(static_cast<BYTE*>(box.pBits) + z * box.SlicePitch + y * box.RowPitch,
+                                     colors + z * 4 + y * 2, 8) == 0;
+    if (FAILED(level->UnlockBox()) || !valid ||
+        FAILED(parent->SetStreamSource(0, vb, sizeof(Vertex))) || FAILED(parent->SetIndices(ib, 0))) return false;
+    ComPtr<IDirect3DBaseTexture8> recovered;
+    if (FAILED(device->SetTexture(0, texture.value)) || FAILED(device->GetTexture(0, recovered.put())) ||
+        !recovered.value || !EqualIdentity(recovered.value, texture.value) || FAILED(device->SetTexture(0, nullptr))) return false;
+    std::printf("resource_facade_volume_roundtrips=PASS\n");
     return true;
 }
 
@@ -591,6 +636,9 @@ bool Render(HWND window, bool facade_mode, const wchar_t* output) {
     if (!ReadBack(back.value, pixels) || !Call("Present", device->Present(nullptr, nullptr, nullptr, nullptr)) ||
         !WriteNew(output, pixels)) return false;
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+    if (!CheckVolumeResource(draw_device, vb.value, ib.value)) return false;
+#endif
     if (facade_mode && !CheckRetainedBuffer(draw_device, native_owner, buffers)) return false;
 #endif
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE

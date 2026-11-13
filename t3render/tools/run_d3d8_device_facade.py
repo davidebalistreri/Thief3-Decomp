@@ -85,6 +85,7 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
         raise RunError("COM identity or fixture completion marker is missing")
     if resource_facade:
         for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
+                       "resource_facade_volume_roundtrips=PASS",
                        "resource_facade_surface_copy_and_target=PASS"):
             prefix = marker.partition("=")[0] + "="
             if [line for line in lines if line.startswith(prefix)] != [marker]:
@@ -176,7 +177,7 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
                                  "Four synthetic triangles and selected fixed-function states only; no gameplay parity."]
     if resource_facade:
         result["limitations"] = ["Fixture only: not integrated with the proxy or TDS.",
-                                 "Only selected 2D, cube, surface and buffer paths were exercised; other resource aliases remain open.",
+                                 "Only selected 2D, cube, volume, surface and buffer paths were exercised; other resource aliases remain open.",
                                  "Private data and unknown resource interfaces fail closed; this differs from native behavior.",
                                  "Reset, runtime concurrency and comprehensive state-block behavior were not exercised.",
                                  "Six synthetic triangles and selected fixed-function states only; no gameplay parity."]

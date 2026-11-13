@@ -2,11 +2,13 @@
 
 This is a standalone synthetic experiment, not part of the game proxy.
 **Do not install it in TDS.** It combines the existing buffer facade with
-wrappers for 2D textures, cube textures and surfaces. These resource wrappers
+wrappers for 2D textures, cube textures, volume textures and their levels, and
+surfaces. These resource wrappers
 route `GetDevice` to the facade after verifying the native parent's canonical
 identity, preserve known `IUnknown`/resource/texture identities, and map
 `GetContainer` only to a known resource or device facade. Surface-level and
-cube-face getters adopt the returned surface. Unknown interfaces, unknown
+cube-face getters adopt the returned surface; volume-level getters adopt the
+returned volume. Unknown interfaces, unknown
 containers and unrecognized wrapper inputs fail closed.
 
 The experimental device facade unwraps known resources for texture binding,
@@ -19,8 +21,8 @@ return `E_NOINTERFACE`, and failures can differ from native COM behavior.
 Keeping resources until facade teardown can change memory usage and reset
 behavior. An explicit resource limit can also cause allocation failure.
 
-The boundary remains incomplete: volume textures, volume levels, swapchains
-and other native resources can still expose native interfaces. Reset,
+The boundary remains incomplete: swapchains and other native resources can
+still expose native interfaces. Reset,
 state-block coverage, private-data semantics, native Windows, runtime
 concurrency and T3SDK coexistence need more work. The raw device accessor in
 the fixture is only for verifying buffer shadow bytes; it is not exposed to an
@@ -36,13 +38,18 @@ from a 2D texture uploaded with `UpdateTexture` and a cube map. It also checked
 texture/cube/surface parent and container round trips, buffer bindings through
 a device obtained from a texture surface, texture and cube identity after a
 state-block restore, surface copying, target identity, rejection of unknown
-inputs, and final facade cleanup. VB/IB `WRITEONLY` shadows matched expected
+inputs, and final facade cleanup. A later run also checked volume texture and
+level identity, parent/container queries, binding and state-block restore,
+plus bytes written through the texture and read through its volume level.
+VB/IB `WRITEONLY` shadows matched expected
 bytes during the selected draw window. Alpha, other resource types and the
 complete game are not tested. Steam remained open; TDS was not run.
 
-The [manifest](../benchmarks/d3d8/2026-11-13-resource-facade/result.json)
-records hashes and limitations. Full local logs and PPMs are under
-`build/t3render-captures/2026-11-13-resource-facade-final/`.
+The [volume manifest](../benchmarks/d3d8/2026-11-13-volume-facade/result.json)
+records the later run's hashes and limitations. Full local logs and PPMs are
+under `build/t3render-captures/2026-11-13-volume-facade-final/`. The earlier
+[resource manifest](../benchmarks/d3d8/2026-11-13-resource-facade/result.json)
+records the run before volume support was added.
 
 With an existing i686 MinGW build and Highball engine, from `t3sdk`:
 

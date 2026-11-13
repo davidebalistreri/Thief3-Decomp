@@ -34,7 +34,9 @@ class ResourceFacadeTests(unittest.TestCase):
                               '#include "d3d8_resource_facade.hpp"\n#include <type_traits>\n'
                               'static_assert(!std::is_abstract_v<t3render::resource_fixture::Wrapper<IDirect3DSurface8>>);\n'
                               'static_assert(!std::is_abstract_v<t3render::resource_fixture::Wrapper<IDirect3DTexture8>>);\n'
-                              'static_assert(!std::is_abstract_v<t3render::resource_fixture::Wrapper<IDirect3DCubeTexture8>>);\n',
+                              'static_assert(!std::is_abstract_v<t3render::resource_fixture::Wrapper<IDirect3DCubeTexture8>>);\n'
+                              'static_assert(!std::is_abstract_v<t3render::resource_fixture::Wrapper<IDirect3DVolume8>>);\n'
+                              'static_assert(!std::is_abstract_v<t3render::resource_fixture::Wrapper<IDirect3DVolumeTexture8>>);\n',
                               encoding="ascii")
             result = subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-I", str(TESTS),
                                      "-c", str(source), "-o", str(Path(directory) / "signature.o")],

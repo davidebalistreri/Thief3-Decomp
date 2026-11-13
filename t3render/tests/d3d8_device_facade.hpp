@@ -195,6 +195,18 @@ public:
         return native_->CreateTexture(Width, Height, Levels, Usage, Format, Pool, ppTexture);
     }
     HRESULT STDMETHODCALLTYPE CreateVolumeTexture(UINT Width,UINT Height,UINT Depth,UINT Levels,DWORD Usage,D3DFORMAT Format,D3DPOOL Pool,IDirect3DVolumeTexture8 ** ppVolumeTexture) override {
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (resources_) {
+            const HRESULT hr = native_->CreateVolumeTexture(Width, Height, Depth, Levels, Usage, Format, Pool, ppVolumeTexture);
+            const DWORD error = GetLastError();
+            if (SUCCEEDED(hr) && ppVolumeTexture && *ppVolumeTexture) {
+                *ppVolumeTexture = resources_->AdoptVolumeTexture(*ppVolumeTexture);
+                SetLastError(error);
+                if (!*ppVolumeTexture) return E_FAIL;
+            }
+            return hr;
+        }
+#endif
         return native_->CreateVolumeTexture(Width, Height, Depth, Levels, Usage, Format, Pool, ppVolumeTexture);
     }
     HRESULT STDMETHODCALLTYPE CreateCubeTexture(UINT EdgeLength,UINT Levels,DWORD Usage,D3DFORMAT Format,D3DPOOL Pool,IDirect3DCubeTexture8 ** ppCubeTexture) override {

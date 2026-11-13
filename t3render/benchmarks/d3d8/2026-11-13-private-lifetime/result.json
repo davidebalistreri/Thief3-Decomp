@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_private_resource_lifetime",
+  "date": "2026-11-13",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "steam_running": true,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "c9b34ac9769c8b6756885c5b7dba85656bd97378d435e305509c1c93c8ed5c21",
+    "t3render/src/buffer_proxy.cpp": "ba1e96eeb39b4bc27afe53c22f4f5808eb60f14a1f47e28e28ad3b71e265c884",
+    "t3render/src/buffer_proxy.hpp": "ffe836c34128c995d90be42e58e8a148bd3f0a76c563c79865d1db99d30b170d",
+    "t3render/src/private_blob.hpp": "e54b5b767393ce81959f7ad042f71c8baa24df9b97e27e5ef57745378b309627",
+    "t3render/ir/buffer_registry.cpp": "9e24931212d54e0ee58b7be7313a85510e9fc867f3a3b20297eff3e1f6138b84",
+    "t3render/ir/buffer_shadow.cpp": "9cfed54a6fcf4718e80fd1d8301a8afa5f84852ac70b428938b06d1e64cddafe",
+    "t3render/tests/d3d8_resource_facade.hpp": "6223ae5fcf20842e562c2c6db558a8375551fd31277c36461f6c65bf9bc7ed4d",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "21bdd67358220b05c452d35c84f105ef2a599328490784fe9eeba56d71ce9b54",
+    "t3render/tests/d3d8_device_facade.hpp": "c4ef8b488b0c48b9046c99fb7cd7f53ddfed752b2692044b5f883b5abcd42ed9",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "477f5040f59efd90c69053fbaa424c13d5e9c7bb8a8d07f4e48ac573eca9f904",
+    "t3render/tests/test_d3d8_device_facade_runner.py": "081567332c5e1b8cd23897adf283aaeb2d990cbddc344d0b8d75fd075db38a64",
+    "t3render/tools/run_d3d8_device_facade.py": "5613e433da94bb6a857faf1abac1b2e2c23aa7342fb789697c76f97634f74e9e"
+  },
+  "fixture_sha256": "522b5058414dd45dc1011204d7aa73d78fd2138220638bafe5c7dec5455ac290",
+  "result": {
+    "native_texture_release_releases_dependent_vertex_buffer": true,
+    "naive_wrapped_iunknown_holds_facade_device_after_external_release": true,
+    "cycle_broken_and_facade_registries_closed": true,
+    "parity_records_each": 159,
+    "rgb_ppm_sha256_both": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+    "baseline_log_sha256": "a406596466a9169a20f7e24e0ad3b38fdc769719ad10beecdbf709d9c7e699c9",
+    "facade_log_sha256": "cdabcb5d8a30112f0834137a9017e2116c0dbb7a7df2479f340d4af1b975f8cd"
+  },
+  "limitations": [
+    "Fixture only: not integrated with the proxy or TDS.",
+    "A borrowed native texture is used only to simulate unsafe forwarding and the cycle is explicitly broken.",
+    "IUnknown private data remain unsupported in the actual facade.",
+    "Only one native runtime and one cross-resource lifetime graph were exercised.",
+    "RGB comparison covers synthetic images only, not alpha or gameplay."
+  ]
+}

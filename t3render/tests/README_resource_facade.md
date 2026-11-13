@@ -97,6 +97,15 @@ size queries, short buffers and reads after free. The `IUnknown` and unknown
 GUID cases still differ, and are checked separately. Its full local logs and
 PPMs are under `build/t3render-captures/2026-11-13-private-blobs-verified/`.
 
+The [private-resource lifetime observation](../benchmarks/d3d8/2026-11-13-private-lifetime/result.json)
+shows why `IUnknown` cannot simply be forwarded: a native texture retains a
+vertex buffer until the texture is released, while deliberately storing a
+wrapped vertex buffer in the fixture's native texture keeps the facade device
+alive after external releases. The test breaks that cycle and confirms final
+cleanup. It uses a test-only borrowed native resource and is not an application
+path. A solution must retain native COM identity and lifetime without creating
+that facade ownership cycle.
+
 The later [state-block observation](../benchmarks/d3d8/2026-11-13-stateblock-facade/result.json)
 exercised Create, Capture, Begin/End, Apply and Delete on the combined facade.
 After VB/IB wrappers became dormant and were reacquired, their `WRITEONLY`

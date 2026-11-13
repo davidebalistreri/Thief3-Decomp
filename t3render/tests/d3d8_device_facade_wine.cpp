@@ -381,6 +381,85 @@ bool ObservePrivateDataResources(IDirect3DDevice8* device, IDirect3DVertexBuffer
     return SUCCEEDED(set) && SUCCEEDED(get) && SUCCEEDED(freed) && same && parent;
 }
 
+bool ObservePrivateResourceLifetime(HWND window, bool facade_mode) {
+    ComPtr<IDirect3D8> native_factory;
+    native_factory.value = Direct3DCreate8(D3D_SDK_VERSION);
+    if (!native_factory.value) return false;
+    D3DDISPLAYMODE display{};
+    if (FAILED(native_factory->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &display))) return false;
+    ComPtr<IDirect3D8> facade_factory;
+    auto buffers = t3render::buffers::BufferProxy::Create(ReadFixtureMemory, nullptr);
+    if (!buffers) return false;
+    IDirect3D8* selected = native_factory.value;
+    if (facade_mode) {
+        native_factory->AddRef();
+        facade_factory.value = t3render::fixture::CreateBufferDeviceFacadeFactory(native_factory.value, buffers);
+        if (!facade_factory.value) { native_factory->Release(); return false; }
+        selected = facade_factory.value;
+    }
+    D3DPRESENT_PARAMETERS pp{};
+    pp.BackBufferWidth = kWidth; pp.BackBufferHeight = kHeight; pp.BackBufferFormat = display.Format;
+    pp.BackBufferCount = 1; pp.SwapEffect = D3DSWAPEFFECT_DISCARD; pp.hDeviceWindow = window; pp.Windowed = TRUE;
+    ComPtr<IDirect3DDevice8> device;
+    if (FAILED(selected->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, window,
+        D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, device.put())) || !device.value) return false;
+    ComPtr<IDirect3DTexture8> texture;
+    ComPtr<IDirect3DVertexBuffer8> vertex;
+    if (FAILED(device->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, texture.put())) || !texture.value ||
+        FAILED(device->CreateVertexBuffer(sizeof(Vertex), D3DUSAGE_WRITEONLY, kFvf, D3DPOOL_MANAGED, vertex.put())) ||
+        !vertex.value) return false;
+    const GUID alias_guid{0x3ee22a94, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
+    if (!facade_mode) {
+        const GUID witness_guid{0x3ee22a95, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
+        auto* witness = new (std::nothrow) PrivateUnknown;
+        if (!witness) return false;
+        const bool stored = SUCCEEDED(vertex->SetPrivateData(witness_guid, witness, sizeof(IUnknown*), D3DSPD_IUNKNOWN)) &&
+                            witness->refs == 2 &&
+                            SUCCEEDED(texture->SetPrivateData(alias_guid, static_cast<IUnknown*>(vertex.value),
+                                                               sizeof(IUnknown*), D3DSPD_IUNKNOWN));
+        if (!stored) { witness->Release(); return false; }
+        vertex->Release(); vertex.value = nullptr;
+        texture->Release(); texture.value = nullptr;
+        const bool released = witness->refs == 1;
+        witness->Release();
+        if (!released) return false;
+        std::printf("private_lifetime_native_dependent_release=PASS\n");
+        return true;
+    }
+
+    // Diagnostic only: deliberately simulate naive IUnknown forwarding through
+    // the borrowed native texture, never expose this path to an application.
+    if (FAILED(device->SetTexture(0, texture.value))) return false;
+    auto* native = static_cast<t3render::fixture::DeviceFixture*>(device.value)->NativeForFixture();
+    ComPtr<IDirect3DBaseTexture8> native_texture;
+    if (!native || FAILED(native->GetTexture(0, native_texture.put())) || !native_texture.value ||
+        FAILED(device->SetTexture(0, nullptr)) ||
+        FAILED(native_texture->SetPrivateData(alias_guid, static_cast<IUnknown*>(vertex.value),
+                                              sizeof(IUnknown*), D3DSPD_IUNKNOWN))) return false;
+    const ULONG vertex_remaining = vertex->Release();
+    vertex.value = nullptr;
+    if (vertex_remaining != 1) return false;
+    const ULONG texture_remaining = texture->Release();
+    texture.value = nullptr;
+    if (texture_remaining != 0) return false;
+    // Drop the diagnostic reference. The dormant facade wrapper retains the
+    // native texture, and the texture's private data retains the vertex facade.
+    auto* borrowed = native_texture.value;
+    native_texture->Release(); native_texture.value = nullptr;
+    const ULONG device_remaining = device->Release();
+    device.value = nullptr;
+    if (device_remaining != 1) return false;
+    const unsigned resource_closes = t3render::fixture::resource_facade_close_successes.load();
+    const unsigned buffer_closes = t3render::fixture::buffer_facade_close_successes.load();
+    borrowed->AddRef(); // keep the native texture alive while breaking the cycle
+    const HRESULT freed = borrowed->FreePrivateData(alias_guid);
+    borrowed->Release();
+    if (FAILED(freed) || t3render::fixture::resource_facade_close_successes != resource_closes + 1 ||
+        t3render::fixture::buffer_facade_close_successes != buffer_closes + 1) return false;
+    std::printf("private_lifetime_naive_cycle_and_cleanup=PASS\n");
+    return true;
+}
+
 bool DrawTexturedSamples(IDirect3DDevice8* device) {
     struct Vertex2 { float x, y, z, rhw, u, v; };
     struct Vertex3 { float x, y, z, rhw, xcoord, ycoord, zcoord; };
@@ -1104,12 +1183,13 @@ int wmain(int argc, wchar_t** argv) {
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
     if (ok) ok = CheckReset(window, facade_mode);
     if (ok) ok = CheckResetWithLiveResources(window, facade_mode);
+    if (ok) ok = ObservePrivateResourceLifetime(window, facade_mode);
 #endif
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
     if (facade_mode) {
         ok = ok && t3render::fixture::buffer_facade_close_successes ==
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
-             3 &&
+             4 &&
 #else
              1 &&
 #endif
@@ -1118,7 +1198,7 @@ int wmain(int argc, wchar_t** argv) {
     }
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
     if (facade_mode) {
-        ok = ok && t3render::fixture::resource_facade_close_successes == 3 &&
+        ok = ok && t3render::fixture::resource_facade_close_successes == 4 &&
              t3render::fixture::resource_facade_close_failures == 0;
         if (ok) std::printf("resource_facade_final_close=PASS\n");
     }

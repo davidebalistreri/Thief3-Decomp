@@ -126,6 +126,10 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
         # Compare observed blob operations; unknown/COM results intentionally
         # differ and are validated separately as a compatibility gap.
         actual.extend(inspect_private_data(lines, mode))
+        lifetime = ("private_lifetime_naive_cycle_and_cleanup=PASS" if mode == "facade" else
+                    "private_lifetime_native_dependent_release=PASS")
+        if [line for line in lines if line.startswith("private_lifetime_")] != [lifetime]:
+            raise RunError("private-data resource lifetime observation is missing or conflicting")
         for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                        "resource_facade_volume_roundtrips=PASS",
                        "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
@@ -244,6 +248,7 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
         result["limitations"] = ["Fixture only: not integrated with the proxy or TDS.",
                                  "Only selected 2D, cube, volume, surface, swapchain and buffer paths were exercised; other interfaces remain unverified.",
                                  "Unknown private-data provenance, IUnknown data and unknown resource interfaces fail closed; this differs from native behavior.",
+                                 "One diagnostic intentionally stores a wrapped IUnknown on a borrowed native texture, then breaks the cycle; this is not an application path.",
                                  "Two reset scenarios were exercised; runtime concurrency and comprehensive state-block behavior remain untested.",
                                  "Six synthetic triangles and selected fixed-function states only; no gameplay parity."]
     stage = "setup"

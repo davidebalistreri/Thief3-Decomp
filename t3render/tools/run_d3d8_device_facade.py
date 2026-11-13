@@ -21,6 +21,16 @@ from run_synthetic_up_replay import RunError, check_pe32, run_stage, sha256, val
 HEADER = b"P6\n256 256\n255\n"
 PPM_SIZE = len(HEADER) + 256 * 256 * 3
 HEX_HRESULT = re.compile(r"0x[0-9a-fA-F]{8}\Z")
+PRIVATE_KINDS = ("vertex", "index", "texture", "backbuffer", "surface_level", "cube", "volume_texture", "volume")
+PRIVATE_RECORD = re.compile(
+    r"private_data kind=(?P<kind>[a-z_]+) "
+    r"missing=(?P<missing>0x[0-9a-fA-F]{8}) set=(?P<set>0x[0-9a-fA-F]{8}) "
+    r"query=(?P<query>0x[0-9a-fA-F]{8}) query_size=(?P<query_size>\d+) "
+    r"small=(?P<small>0x[0-9a-fA-F]{8}) small_size=(?P<small_size>\d+) "
+    r"get=(?P<get>0x[0-9a-fA-F]{8}) match=(?P<match>[01]) free=(?P<free>0x[0-9a-fA-F]{8}) "
+    r"object_set=(?P<object_set>0x[0-9a-fA-F]{8}) object_get=(?P<object_get>0x[0-9a-fA-F]{8}) "
+    r"object_same=(?P<object_same>[01]) object_free=(?P<object_free>0x[0-9a-fA-F]{8}) "
+    r"refs=(?P<refs>\d+,\d+,\d+,\d+)\Z")
 
 
 def expected_parity():
@@ -56,6 +66,29 @@ def successful_hresult(value):
     return isinstance(value, str) and HEX_HRESULT.fullmatch(value) is not None and int(value, 16) < 0x80000000
 
 
+def inspect_private_data(lines, mode):
+    records = [PRIVATE_RECORD.fullmatch(line) for line in lines if line.startswith("private_data ")]
+    if any(record is None for record in records) or tuple(record['kind'] for record in records) != PRIVATE_KINDS:
+        raise RunError("private-data resource observations are missing, duplicated or malformed")
+    hresults = ("missing", "set", "query", "small", "get", "free", "object_set", "object_get", "object_free")
+    for record in records:
+        if mode == "facade":
+            if (any(record[key].lower() != "0x80004001" for key in hresults) or
+                    (record['query_size'], record['small_size'], record['match'], record['object_same'], record['refs']) !=
+                    ("0", "1", "0", "0", "1,1,1,1")):
+                raise RunError(f"unexpected private-data facade behavior for {record['kind']}")
+        elif (successful_hresult(record['missing']) or successful_hresult(record['small']) or
+              any(not successful_hresult(record[key]) for key in ("set", "query", "get", "free", "object_set", "object_get", "object_free")) or
+              (record['query_size'], record['small_size'], record['match'], record['object_same'], record['refs']) !=
+              ("4", "4", "1", "1", "2,3,2,1")):
+            raise RunError(f"unexpected native private-data behavior for {record['kind']}")
+    aliases = [line for line in lines if line.startswith("private_data_alias ")]
+    expected = ("private_data_alias set=0x80004001 get=0x80004001 same=0 parent=0 free=0x80004001" if mode == "facade" else
+                "private_data_alias set=0x00000000 get=0x00000000 same=1 parent=1 free=0x00000000")
+    if aliases != [expected]:
+        raise RunError("private-data resource-alias observation is missing or unexpected")
+
+
 def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
     lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
     actual = []
@@ -84,6 +117,9 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
             [f"device_facade_fixture=PASS mode={mode}"]):
         raise RunError("COM identity or fixture completion marker is missing")
     if resource_facade:
+        # These native/facade results intentionally differ. Validate them as
+        # a documented compatibility gap, not as image/state parity records.
+        inspect_private_data(lines, mode)
         for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                        "resource_facade_volume_roundtrips=PASS",
                        "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",

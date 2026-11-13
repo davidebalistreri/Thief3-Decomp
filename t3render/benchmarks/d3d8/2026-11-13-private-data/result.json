@@ -1,0 +1,64 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_private_data_observation",
+  "date": "2026-11-13",
+  "status": "PASS",
+  "interpretation": "PASS means the expected native/facade difference was observed; private-data parity is not implemented.",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "steam_running": true,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "c9b34ac9769c8b6756885c5b7dba85656bd97378d435e305509c1c93c8ed5c21",
+    "t3render/src/buffer_proxy.cpp": "d3db833b4b235c6a341930a55a06dbfad86a1a126e9fec227691c68cb867ba88",
+    "t3render/src/buffer_proxy.hpp": "917dc90b948db83808f2eab49af050c979b6653954bec1ddbbdeb19dc5aed9c3",
+    "t3render/ir/buffer_registry.cpp": "9e24931212d54e0ee58b7be7313a85510e9fc867f3a3b20297eff3e1f6138b84",
+    "t3render/ir/buffer_shadow.cpp": "9cfed54a6fcf4718e80fd1d8301a8afa5f84852ac70b428938b06d1e64cddafe",
+    "t3render/tests/d3d8_resource_facade.hpp": "bf7b017db2664996326e93eece1b24b72cea075ee78d8899322f96e8da0f241d",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "21bdd67358220b05c452d35c84f105ef2a599328490784fe9eeba56d71ce9b54",
+    "t3render/tests/d3d8_device_facade.hpp": "99494b582980e0334eb6de36c9dca0f1306b9579c27acc032ce0b047f704c42e",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "3e8153097df17fc3c0745a79de5efc83353746ae7260b933574ff2dd5f29978a",
+    "t3render/tests/test_d3d8_device_facade_runner.py": "f0bd12254a507bc0debf7e0b6fc2e17b092c4fe4b6e4960fa6a3fe68d99bd224",
+    "t3render/tools/run_d3d8_device_facade.py": "2cc77378027544b1dcdfc436a13a64f266a2ae0882c25f8234e1ffa3a247dffa"
+  },
+  "fixture_sha256": "3e6477915e2c14cde0e8118681e54c332730538fb3ab9afde408a59738b1ebc7",
+  "result": {
+    "resource_kinds": [
+      "vertex",
+      "index",
+      "texture",
+      "backbuffer",
+      "surface_level",
+      "cube",
+      "volume_texture",
+      "volume"
+    ],
+    "native_missing_hresult": "0x88760866",
+    "native_short_buffer_hresult": "0x88760867",
+    "native_blob_roundtrip": true,
+    "native_object_identity_roundtrip": true,
+    "native_object_refcounts_set_get_free_release": [
+      2,
+      3,
+      2,
+      1
+    ],
+    "native_resource_identity_and_device_roundtrip": true,
+    "facade_all_private_data_methods_hresult": "0x80004001",
+    "other_state_parity_records_each": 87,
+    "rgb_ppm_sha256_both": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+    "baseline_log_sha256": "f6d820db8443214e0b677aa4a0fedf8499b50cfacddf8089af702ab4e84cd469",
+    "facade_log_sha256": "4149bf654131456b3f40d0e4139d824759d7dc5869ce2e3d6fc7c53b875d9cad"
+  },
+  "limitations": [
+    "Fixture only: not integrated with the proxy or TDS.",
+    "Private data are not implemented by the facade; this is a measured difference.",
+    "Cross-resource lifetime cycles, concurrent private-data operations and unknown external interfaces were not fully tested.",
+    "A single native Wine runtime was observed; native Windows behavior was not tested.",
+    "PPM comparison covers RGB only, not alpha."
+  ]
+}

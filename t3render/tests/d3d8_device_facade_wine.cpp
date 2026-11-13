@@ -191,6 +191,111 @@ bool CheckRetainedBuffer(IDirect3DDevice8* device, IDirect3DDevice8* native,
 #endif
 
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+// Characterize native private-data semantics separately from the image parity
+// assertions. The current facade intentionally returns E_NOTIMPL for all three
+// methods; neither path exchanges native resource interfaces as private data.
+class PrivateUnknown final : public IUnknown {
+public:
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        if (!IsEqualIID(iid, IID_IUnknown)) return E_NOINTERFACE;
+        AddRef(); *out = this; return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG remaining = --refs;
+        if (!remaining) delete this;
+        return remaining;
+    }
+    ULONG refs = 1;
+};
+
+template<class Resource>
+bool ObservePrivateData(const char* kind, Resource* resource, bool facade_mode) {
+    const GUID blob_guid{0x3ee22a91, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
+    const GUID object_guid{0x3ee22a92, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
+    const BYTE bytes[]{0x17, 0x63, 0xa2, 0x04};
+    BYTE output[sizeof(bytes)]{};
+    DWORD missing_size = sizeof(output), query_size = 0, small_size = 1, output_size = sizeof(output);
+    const HRESULT missing = resource->GetPrivateData(blob_guid, output, &missing_size);
+    const HRESULT set = resource->SetPrivateData(blob_guid, bytes, sizeof(bytes), 0);
+    const HRESULT query = resource->GetPrivateData(blob_guid, nullptr, &query_size);
+    const HRESULT small = resource->GetPrivateData(blob_guid, output, &small_size);
+    const HRESULT get = resource->GetPrivateData(blob_guid, output, &output_size);
+    const bool matches = SUCCEEDED(get) && output_size == sizeof(bytes) && !std::memcmp(output, bytes, sizeof(bytes));
+    const HRESULT freed = resource->FreePrivateData(blob_guid);
+
+    auto* unknown = new (std::nothrow) PrivateUnknown;
+    if (!unknown) return false;
+    const HRESULT object_set = resource->SetPrivateData(object_guid, unknown, sizeof(IUnknown*), D3DSPD_IUNKNOWN);
+    const ULONG refs_after_set = unknown->refs;
+    IUnknown* returned = nullptr;
+    DWORD object_size = sizeof(returned);
+    const HRESULT object_get = resource->GetPrivateData(object_guid, &returned, &object_size);
+    const ULONG refs_after_get = unknown->refs;
+    const bool same = SUCCEEDED(object_get) && returned == unknown && object_size == sizeof(returned);
+    const HRESULT object_free = resource->FreePrivateData(object_guid);
+    const ULONG refs_after_free = unknown->refs;
+    // Keep our own reference even if a nonconforming runtime failed to AddRef.
+    if (SUCCEEDED(object_get) && returned && (returned != unknown || refs_after_free > 1)) returned->Release();
+    const ULONG refs_after_returned_release = unknown->refs;
+    unknown->Release();
+
+    const auto code = [](HRESULT hr) { return static_cast<unsigned long>(static_cast<std::uint32_t>(hr)); };
+    std::printf("private_data kind=%s missing=0x%08lx set=0x%08lx query=0x%08lx query_size=%lu "
+                "small=0x%08lx small_size=%lu get=0x%08lx match=%u free=0x%08lx "
+                "object_set=0x%08lx object_get=0x%08lx object_same=%u object_free=0x%08lx refs=%lu,%lu,%lu,%lu\n",
+                kind, code(missing), code(set), code(query), static_cast<unsigned long>(query_size), code(small),
+                static_cast<unsigned long>(small_size), code(get), matches ? 1u : 0u, code(freed), code(object_set),
+                code(object_get), same ? 1u : 0u, code(object_free), static_cast<unsigned long>(refs_after_set),
+                static_cast<unsigned long>(refs_after_get), static_cast<unsigned long>(refs_after_free),
+                static_cast<unsigned long>(refs_after_returned_release));
+    if (facade_mode) return missing == E_NOTIMPL && set == E_NOTIMPL && query == E_NOTIMPL && small == E_NOTIMPL &&
+                            get == E_NOTIMPL && freed == E_NOTIMPL && object_set == E_NOTIMPL &&
+                            object_get == E_NOTIMPL && object_free == E_NOTIMPL;
+    return SUCCEEDED(set) && matches && SUCCEEDED(freed) && SUCCEEDED(object_set) && same && SUCCEEDED(object_free) &&
+           refs_after_set == 2 && refs_after_get == 3 && refs_after_free == 2 && refs_after_returned_release == 1;
+}
+
+bool ObservePrivateDataResources(IDirect3DDevice8* device, IDirect3DVertexBuffer8* vb, IDirect3DIndexBuffer8* ib,
+                                 IDirect3DTexture8* texture, IDirect3DSurface8* back, bool facade_mode) {
+    ComPtr<IDirect3DCubeTexture8> cube;
+    ComPtr<IDirect3DVolumeTexture8> volume_texture;
+    ComPtr<IDirect3DVolume8> volume;
+    ComPtr<IDirect3DSurface8> level;
+    if (FAILED(device->CreateCubeTexture(2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, cube.put())) || !cube.value ||
+        FAILED(device->CreateVolumeTexture(2, 2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, volume_texture.put())) ||
+        !volume_texture.value || FAILED(volume_texture->GetVolumeLevel(0, volume.put())) || !volume.value ||
+        FAILED(texture->GetSurfaceLevel(0, level.put())) || !level.value) return false;
+    if (!ObservePrivateData("vertex", vb, facade_mode) || !ObservePrivateData("index", ib, facade_mode) ||
+        !ObservePrivateData("texture", texture, facade_mode) || !ObservePrivateData("backbuffer", back, facade_mode) ||
+        !ObservePrivateData("surface_level", level.value, facade_mode) || !ObservePrivateData("cube", cube.value, facade_mode) ||
+        !ObservePrivateData("volume_texture", volume_texture.value, facade_mode) ||
+        !ObservePrivateData("volume", volume.value, facade_mode)) return false;
+
+    // An application can store a resource interface, not just its own object.
+    // Its identity and GetDevice must never become a path to the native device.
+    const GUID alias_guid{0x3ee22a93, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
+    const HRESULT set = texture->SetPrivateData(alias_guid, static_cast<IUnknown*>(vb), sizeof(IUnknown*), D3DSPD_IUNKNOWN);
+    ComPtr<IUnknown> value;
+    DWORD size = sizeof(value.value);
+    const HRESULT get = texture->GetPrivateData(alias_guid, value.put(), &size);
+    ComPtr<IDirect3DVertexBuffer8> returned_buffer;
+    ComPtr<IDirect3DDevice8> returned_device;
+    const bool same = SUCCEEDED(get) && value.value && size == sizeof(value.value) && EqualIdentity(value.value, vb);
+    const bool parent = same && SUCCEEDED(value->QueryInterface(IID_IDirect3DVertexBuffer8,
+        reinterpret_cast<void**>(returned_buffer.put()))) && returned_buffer.value &&
+        SUCCEEDED(returned_buffer->GetDevice(returned_device.put())) && returned_device.value &&
+        EqualIdentity(returned_device.value, device);
+    const HRESULT freed = texture->FreePrivateData(alias_guid);
+    const auto code = [](HRESULT hr) { return static_cast<unsigned long>(static_cast<std::uint32_t>(hr)); };
+    std::printf("private_data_alias set=0x%08lx get=0x%08lx same=%u parent=%u free=0x%08lx\n",
+                code(set), code(get), same ? 1u : 0u, parent ? 1u : 0u, code(freed));
+    if (facade_mode) return set == E_NOTIMPL && get == E_NOTIMPL && freed == E_NOTIMPL && !same && !parent;
+    return SUCCEEDED(set) && SUCCEEDED(get) && SUCCEEDED(freed) && same && parent;
+}
+
 bool DrawTexturedSamples(IDirect3DDevice8* device) {
     struct Vertex2 { float x, y, z, rhw, u, v; };
     struct Vertex3 { float x, y, z, rhw, xcoord, ycoord, zcoord; };
@@ -804,6 +909,9 @@ bool Render(HWND window, bool facade_mode, const wchar_t* output) {
                                                        texture.put())) || !texture.value ||
         !Call("GetBackBuffer", device->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, back.put())) || !back.value) return false;
     if (facade_mode && !CheckNativeEscape(device.value, native_factory.value, back.value, texture.value, vb.value, ib.value)) return false;
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+    if (!ObservePrivateDataResources(device.value, vb.value, ib.value, texture.value, back.value, facade_mode)) return false;
+#endif
     BYTE* data = nullptr;
     if (!Call("VertexLock", vb->Lock(0, sizeof(buffered), &data, 0)) || !data) return false;
     std::memcpy(data, buffered, sizeof(buffered));

@@ -67,6 +67,19 @@ VB/IB `WRITEONLY` shadows matched expected
 bytes during the selected draw window. Alpha, other resource types and the
 complete game are not tested. Steam remained open; TDS was not run.
 
+A subsequent [private-data observation](../benchmarks/d3d8/2026-11-13-private-data/result.json)
+compared vertex and index buffers, textures, backbuffers, texture levels,
+cube textures, volume textures and volume levels. On this Highball runtime,
+native private data round-tripped bytes and an application `IUnknown`; storing
+a vertex buffer in a texture also preserved its identity and device. The
+facade returned `E_NOTIMPL` in all those cases, so this is a measured
+compatibility gap, not private-data parity. Forwarding resource interfaces
+must also address facade/native identity and lifetime cycles; neither
+cross-resource lifetime nor unknown external interfaces were fully tested.
+The runner validates those intentionally different observations separately
+from image and state parity. Full local logs and PPMs are under
+`build/t3render-captures/2026-11-13-private-data-alias-final/`.
+
 The [reset epoch manifest](../benchmarks/d3d8/2026-11-13-facade-reset-epoch/result.json)
 records the latest hashes and limitations. Full local logs and PPMs are under
 `build/t3render-captures/2026-11-13-facade-reset-epoch-final/`. The earlier

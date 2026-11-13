@@ -15,6 +15,18 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
     suffix = "PASS" if mode == "facade" else "not_applicable"
     lines.append(f"factory_and_device_QI_roundtrip=PASS factory_initial_release={suffix}")
     if resource_facade:
+        native_private = ("missing=0x88760866 set=0x00000000 query=0x00000000 query_size=4 "
+                          "small=0x88760867 small_size=4 get=0x00000000 match=1 free=0x00000000 "
+                          "object_set=0x00000000 object_get=0x00000000 object_same=1 "
+                          "object_free=0x00000000 refs=2,3,2,1")
+        facade_private = ("missing=0x80004001 set=0x80004001 query=0x80004001 query_size=0 "
+                          "small=0x80004001 small_size=1 get=0x80004001 match=0 free=0x80004001 "
+                          "object_set=0x80004001 object_get=0x80004001 object_same=0 "
+                          "object_free=0x80004001 refs=1,1,1,1")
+        private = native_private if mode == "baseline" else facade_private
+        lines.extend(f"private_data kind={kind} {private}" for kind in probe.PRIVATE_KINDS)
+        lines.append("private_data_alias set=0x00000000 get=0x00000000 same=1 parent=1 free=0x00000000" if mode == "baseline" else
+                     "private_data_alias set=0x80004001 get=0x80004001 same=0 parent=0 free=0x80004001")
         lines.extend(("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                       "resource_facade_volume_roundtrips=PASS",
                       "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
@@ -67,6 +79,25 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
     def inspect(self, lines, mode="facade", buffer_facade=False, resource_facade=False):
         self.log.write_text("noise from Wine\n" + "\n".join(lines) + "\n", encoding="utf-8")
         return probe.inspect_log(self.log, mode, buffer_facade, resource_facade)
+
+    def test_private_data_gap_requires_ordered_native_and_facade_evidence(self):
+        for mode in ("baseline", "facade"):
+            original = fixture_log(mode, resource_facade=True)
+            self.inspect(original, mode, resource_facade=True)
+            marker = next(line for line in original if line.startswith("private_data kind=vertex "))
+            alterations = ([line for line in original if line != marker], original + [marker],
+                           [line.replace(marker, marker.replace("refs=", "refs=9,")) for line in original],
+                           [line.replace(marker, marker.replace(
+                               "object_same=1" if mode == "baseline" else "object_same=0",
+                               "object_same=0" if mode == "baseline" else "object_same=1")) for line in original])
+            for changed in alterations:
+                with self.subTest(mode=mode), self.assertRaises(probe.RunError):
+                    self.inspect(changed, mode, resource_facade=True)
+            alias = next(line for line in original if line.startswith("private_data_alias "))
+            for changed in ([line for line in original if line != alias], original + [alias],
+                            [line.replace(alias, alias.replace("parent=", "parent=9")) for line in original]):
+                with self.subTest(mode=mode), self.assertRaises(probe.RunError):
+                    self.inspect(changed, mode, resource_facade=True)
 
     def test_resource_facade_requires_each_roundtrip_and_final_close(self):
         baseline = self.inspect(fixture_log("baseline", resource_facade=True), "baseline", resource_facade=True)

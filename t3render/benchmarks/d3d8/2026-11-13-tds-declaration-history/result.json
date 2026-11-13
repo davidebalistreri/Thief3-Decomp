@@ -36,6 +36,12 @@
     "stable_successful_candidates": 305,
     "distinct_candidate_word_sequences": 2,
     "distinct_candidate_generations": 15,
+    "candidate_layouts": [
+      {"stream": 0, "register_types": ["FLOAT3", "D3DCOLOR", "FLOAT2", "D3DCOLOR", "D3DCOLOR"], "packed_bytes": 32, "draws": 259},
+      {"stream": 0, "register_types": ["FLOAT3", "D3DCOLOR"], "packed_bytes": 16, "draws": 46}
+    ],
+    "candidate_draws_with_matching_observed_stride": 305,
+    "pixel_shader_binding": {"nonzero": 228, "zero": 93},
     "pre_reset_hypotheses": 0,
     "indexed_draw_buffer_descriptors": {
       "vertex_writeonly_managed": 271,
@@ -53,6 +59,7 @@
     "Candidates are application-memory snapshots, not proof of shader identity or the data consumed by the driver; aliases and concurrent memory writes can be missed.",
     "No pre-reset hypothesis was emitted; this does not prove whether a Reset occurred before capture or why this run differs from earlier runs.",
     "The stable flag covers observed shader-operation overlap, not declaration accuracy, all alias paths or Present/Reset concurrency.",
+    "Layout lengths match observed stream or UP strides, but register types alone do not establish shader input semantics.",
     "WRITEONLY flags describe bound buffers at draw time; no resource bytes or prior lock history were captured.",
     "Texture bytes, shader programs and constants are absent; no matched screenshot or real-room DX12 replay was produced.",
     "No native Windows test or gameplay/stealth parity claim."

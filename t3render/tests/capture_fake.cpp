@@ -324,7 +324,7 @@ int main(int argc, char** argv) {
         t3render::CaptureAbandonDevice(scenario == "shader_abandon_all" ? nullptr : &device);
         t3render::CaptureDrawResult(&device, token, S_OK);
         t3render::CapturePresent(&device, S_OK);
-    } else if (scenario == "shader_history" || scenario == "shader_history_budget") {
+    } else if (scenario == "shader_history" || scenario == "shader_history_budget" || scenario == "shader_history_program") {
         t3render::CapturePresent(&device, S_OK);
         t3render::ShaderSnapshot snapshot;
         snapshot.getter_result = S_OK;
@@ -339,6 +339,8 @@ int main(int argc, char** argv) {
         declaration.reset_hr = 0;
         declaration.rebind_epoch = 4;
         declaration.pre_reset_words = {0x20000000u, 0xffffffffu};
+        if (scenario == "shader_history_program")
+            declaration.pre_reset_program_words = {0xfffe0101u, 1u, 0xc00f0000u, 0x90e40000u, 0x0000ffffu};
         if (scenario == "shader_history_budget") {
             declaration.pre_reset_words.assign(1024, 0);
             declaration.pre_reset_words.back() = 0xffffffffu;
@@ -346,7 +348,7 @@ int main(int argc, char** argv) {
         auto call = draw; call.shader_snapshot = &snapshot;
         const unsigned count = scenario == "shader_history_budget" ? 257 : 5;
         for (unsigned i=0; i<count; ++i) {
-            if (scenario == "shader_history") {
+            if (scenario != "shader_history_budget") {
                 if (i == 2) declaration.rebind_epoch = declaration.reset_epoch; // no post-reset rebind
                 if (i == 3) { declaration.rebind_epoch = 4; declaration.reason = t3render::ir::ShaderUnavailableReason::HandleCollision; }
                 if (i == 4) { declaration.reason = t3render::ir::ShaderUnavailableReason::ResetAttempt;

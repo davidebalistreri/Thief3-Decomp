@@ -585,6 +585,8 @@ ShaderObservation VertexDeclarationRegistry::Observe(ShaderTicket ticket, std::u
             result.program_status = pin->program_status;
             if (pin->program_status == ShaderProgramStatus::Complete)
                 result.program_words.assign(pin->words.get() + pin->declaration_size, pin->words.get() + pin->size);
+        } else if (pin->program_status == ShaderProgramStatus::Complete) {
+            result.pre_reset_program_words.assign(pin->words.get() + pin->declaration_size, pin->words.get() + pin->size);
         }
         bool still_valid = false;
         {
@@ -604,6 +606,7 @@ ShaderObservation VertexDeclarationRegistry::Observe(ShaderTicket ticket, std::u
         if (!still_valid) {
             std::vector<std::uint32_t>().swap(destination);
             std::vector<std::uint32_t>().swap(result.program_words);
+            std::vector<std::uint32_t>().swap(result.pre_reset_program_words);
             result.program_status = ShaderProgramStatus::NotRequested;
             result.status = ShaderObservationStatus::Unsafe;
         } else if (!history) result.status = ShaderObservationStatus::Candidate;
@@ -611,6 +614,7 @@ ShaderObservation VertexDeclarationRegistry::Observe(ShaderTicket ticket, std::u
         std::vector<std::uint32_t>().swap(result.words);
         std::vector<std::uint32_t>().swap(result.pre_reset_words);
         std::vector<std::uint32_t>().swap(result.program_words);
+        std::vector<std::uint32_t>().swap(result.pre_reset_program_words);
         result.program_status = ShaderProgramStatus::NotRequested;
         if (!history) {
             result.status = ShaderObservationStatus::Unavailable;

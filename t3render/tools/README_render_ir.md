@@ -126,9 +126,11 @@ data is removed after validation. No third-party modules are needed.
   program and declaration share a generation, the draw result is successful
   and stable, the opt-in header and frame budget are valid, and the complete
   program is framed. COMMENT and DEF payloads are skipped when framing. This
-  does not validate instruction semantics, shader identity or GPU input, and
-  is never recovered from pre-reset history. Pixel programs and constants are
-  not captured. An unavailable program can report its allowlisted scan or
+  does not validate instruction semantics, shader identity or GPU input. A
+  separate `vertex_program_pre_reset` hypothesis may be exposed only when the
+  declaration hypothesis matches its generation, Reset and rebind epochs, and
+  both frame budgets allow it. It is not a post-reset program candidate.
+  Pixel programs and constants are not captured. An unavailable program can report its allowlisted scan or
   budget reason with null words; a malformed program payload suppresses all
   program observations in its frame.
 - Material values are captured legacy parameters and texture slots, not PBR

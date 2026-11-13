@@ -249,11 +249,14 @@ samples bounded `vs_1_1` application-memory programs at `CreateVertexShader`.
 It does not query shader handles through the driver and remains suppressed
 when buffer observation is active. Other versions, malformed data, null
 functions and exceeded budgets expose no program words. Programs share the
-per-device declaration budget and are not exposed after Reset. The trace is
+per-device declaration budget and are not exposed as candidates after Reset. The trace is
 limited to 1024 words per observation and 262144 per frame; the offline IR
 requires a matching declaration generation and successful, stable draw.
 When a declaration is available but program sampling fails, the trace records
 an explicit unavailable reason without partial words.
+With declaration history enabled, an eligible pre-reset program can instead
+appear as a separate hypothesis paired to the declaration's Reset and rebind.
+It is not a program candidate or evidence of post-reset driver state.
 These are candidates, not proof of shader identity or GPU input. Constants,
 pixel programs and buffers are still required for a replay. See the
 [program reader](ir/README_shader_program.md).

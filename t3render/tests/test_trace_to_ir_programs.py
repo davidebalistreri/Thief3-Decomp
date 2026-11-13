@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests"))
 import trace_to_ir
-from test_trace_to_ir_declarations import events
+from test_trace_to_ir_declarations import events, history_events
 
 WORDS = [0xfffe0101, 0x0002fffe, 0x0000ffff, 0xfffe0101, 81, 0xa00f0000,
          0x0000ffff, 0, 0xffffffff, 0x3f800000, 1, 0xc00f0000, 0x90e40000, 0xffff]
@@ -22,6 +22,15 @@ def program_events():
                                             "words_per_frame": 262144}
     records[2]["vertex_program"] = {"status": "candidate", "version": "vs_1_1", "generation": 5,
                                      "words": WORDS[:]}
+    return records
+
+
+def program_history_events():
+    records = history_events()
+    records[0]["vertex_program_capture"] = {"requested": True, "words_per_observation": 1024,
+                                            "words_per_frame": 262144}
+    records[2]["vertex_program_pre_reset"] = {"status": "hypothesis", "source": "application_memory_before_reset",
+        "generation": 5, "reset_epoch": 1, "reset_hr": 0, "rebind_epoch": 2, "words": WORDS[:]}
     return records
 
 
@@ -102,6 +111,41 @@ class ProgramTraceTests(unittest.TestCase):
             changed = copy.deepcopy(records); changed[3]["vertex_program"]["reason"] = bad
             with self.subTest(reason=bad):
                 self.assertTrue(all("vertex_program_observed" not in c for c in self.commands(changed)))
+
+    def test_pre_reset_program_is_only_a_matching_hypothesis(self):
+        command = self.commands(program_history_events())[0]
+        self.assertNotIn("vertex_program_observed", command)
+        self.assertEqual(command["vertex_program_pre_reset"]["status"], "hypothesis")
+        self.assertEqual(command["vertex_program_pre_reset"]["words"], WORDS)
+        for mode in ("no_decl_history", "decl_mismatch", "generation", "reset_epoch", "reset_hr", "rebind_epoch",
+                     "source", "status", "bad_words", "unstable", "failed", "no_program_capability"):
+            records = program_history_events()
+            raw = records[2]["vertex_program_pre_reset"]
+            if mode == "no_decl_history": del records[2]["vertex_declaration_pre_reset"]
+            if mode == "decl_mismatch": records[2]["vertex_declaration_pre_reset"]["generation"] = 6
+            if mode == "generation": raw["generation"] = 6
+            if mode == "reset_epoch": raw["reset_epoch"] = 2
+            if mode == "reset_hr": raw["reset_hr"] = 1
+            if mode == "rebind_epoch": raw["rebind_epoch"] = 3
+            if mode == "source": raw["source"] = "driver"
+            if mode == "status": raw["status"] = "candidate"
+            if mode == "bad_words": raw["words"] = [0xfffe0101, 1, 0xffff]
+            if mode == "unstable": records[3]["shader_stable"] = False
+            if mode == "failed": records[3]["hr"] = -1
+            if mode == "no_program_capability": del records[0]["vertex_program_capture"]
+            with self.subTest(mode=mode):
+                command = self.commands(records)[0]
+                self.assertNotIn("vertex_program_pre_reset", command)
+                self.assertNotIn("vertex_program_observed", command)
+
+    def test_pre_reset_program_words_share_frame_budget(self):
+        records = program_history_events()
+        records[0]["vertex_program_capture"].update(words_per_observation=len(WORDS), words_per_frame=2 * len(WORDS) - 1)
+        second = copy.deepcopy(records[2]); second["op_id"] = 2
+        result = copy.deepcopy(records[3]); result.update(op_id=2, shader_stable=False)
+        records[2:4] = [records[2], second, result, records[3]]
+        records[-2]["concurrent_operations"] = True
+        self.assertTrue(all("vertex_program_pre_reset" not in command for command in self.commands(records)))
 
 
 if __name__ == "__main__":

@@ -417,18 +417,22 @@ PROGRAM_UNAVAILABLE_REASONS = frozenset(("null_address", "invalid_configuration"
 
 
 def vertex_program_frame_words(draw, header):
-    if "vertex_program" not in draw:
-        return 0
-    raw = draw["vertex_program"]
-    if (isinstance(raw, dict) and raw.get("status") == "unavailable" and raw.get("words", "missing") is None and
-            isinstance(raw.get("reason"), str) and raw["reason"] in PROGRAM_UNAVAILABLE_REASONS):
-        return 0
-    if not isinstance(raw, dict) or not framed_vertex_program(raw.get("words")):
-        return None
-    limit = uint32(object_or_empty(header.get("vertex_program_capture")).get("words_per_observation"))
-    if limit is None or len(raw["words"]) > limit:
-        return None
-    return len(raw["words"])
+    total = 0
+    for field in ("vertex_program", "vertex_program_pre_reset"):
+        if field not in draw:
+            continue
+        raw = draw[field]
+        if (field == "vertex_program" and isinstance(raw, dict) and raw.get("status") == "unavailable" and
+                raw.get("words", "missing") is None and isinstance(raw.get("reason"), str) and
+                raw["reason"] in PROGRAM_UNAVAILABLE_REASONS):
+            continue
+        if not isinstance(raw, dict) or not framed_vertex_program(raw.get("words")):
+            return None
+        limit = uint32(object_or_empty(header.get("vertex_program_capture")).get("words_per_observation"))
+        if limit is None or len(raw["words"]) > limit:
+            return None
+        total += len(raw["words"])
+    return total
 
 
 def observed_vertex_program(draw, result, header, within_frame_budget):
@@ -459,6 +463,31 @@ def observed_vertex_program(draw, result, header, within_frame_budget):
     return {"status": "candidate", "version": "vs_1_1", "shader_value": declaration["shader_value"],
             "generation": generation, "words": raw["words"][:],
             "shader_stable": declaration["shader_stable"], "draw_hresult": declaration["draw_hresult"]}
+
+
+def pre_reset_vertex_program(draw, result, header, program_budget, history_budget):
+    capability = object_or_empty(header.get("vertex_program_capture"))
+    per_observation = uint32(capability.get("words_per_observation"))
+    per_frame = uint32(capability.get("words_per_frame"))
+    if (capability.get("requested") is not True or per_observation is None or
+            not 1 <= per_observation <= 1024 or per_frame is None or
+            not per_observation <= per_frame <= 262144 or not program_budget):
+        return None
+    raw = draw.get("vertex_program_pre_reset")
+    if (not isinstance(raw, dict) or raw.get("status") != "hypothesis" or
+            raw.get("source") != "application_memory_before_reset" or
+            not framed_vertex_program(raw.get("words")) or len(raw["words"]) > per_observation):
+        return None
+    history = pre_reset_declaration(draw, result, header, history_budget)
+    if history is None:
+        return None
+    for field in ("generation", "reset_epoch", "reset_hr", "rebind_epoch"):
+        if integer(raw.get(field)) is None or raw[field] != history[field]:
+            return None
+    return {"status": "hypothesis", "source": raw["source"], "shader_value": history["shader_value"],
+            "generation": history["generation"], "reset_epoch": history["reset_epoch"],
+            "reset_hr": history["reset_hr"], "rebind_epoch": history["rebind_epoch"], "words": raw["words"][:],
+            "shader_stable": history["shader_stable"], "draw_hresult": history["draw_hresult"]}
 
 
 def buffer_binding(record):
@@ -703,9 +732,9 @@ def convert(path):
             for mesh_record, draw, result, indexed in buffered_results:
                 mesh_record["buffered_data_observed"] = buffered_data(draw, result, records[0], indexed, within_budget)
             limit = uint32(object_or_empty(records[0].get("declaration_history")).get("words_per_frame"))
-            within_budget = frame_history_words is not None and limit is not None and frame_history_words <= limit
+            within_history_budget = frame_history_words is not None and limit is not None and frame_history_words <= limit
             for command, draw, result in pre_reset_results:
-                history = pre_reset_declaration(draw, result, records[0], within_budget)
+                history = pre_reset_declaration(draw, result, records[0], within_history_budget)
                 if history is not None:
                     command["vertex_declaration_pre_reset"] = history
             limit = uint32(object_or_empty(records[0].get("vertex_program_capture")).get("words_per_frame"))
@@ -714,6 +743,9 @@ def convert(path):
                 program = observed_vertex_program(draw, result, records[0], within_budget)
                 if program is not None:
                     command["vertex_program_observed"] = program
+                program_history = pre_reset_vertex_program(draw, result, records[0], within_budget, within_history_budget)
+                if program_history is not None:
+                    command["vertex_program_pre_reset"] = program_history
             current["compatibility"]["d3d8"]["frame_end"] = event
             current = None
         elif kind == "draw":
@@ -757,7 +789,7 @@ def convert(path):
                     command["vertex_declaration_observed"] = observed_declaration(draw, event, records[0])
                 if "vertex_declaration_pre_reset" in draw:
                     pre_reset_results.append((command, draw, event))
-                if "vertex_program" in draw:
+                if "vertex_program" in draw or "vertex_program_pre_reset" in draw:
                     program_results.append((command, draw, event))
             if kind == "draw_result" and event.get("op_id") in buffered_pending:
                 mesh_record, draw, indexed = buffered_pending.pop(event["op_id"])

@@ -387,7 +387,19 @@ void ProgramSharesDeclarationLifetimeAndBudget() {
     assert(set && registry.EndSet(set, 0, 0x44));
     observed = Observe(registry, device, 0x44);
     assert(observed.status == ShaderObservationStatus::Unavailable && !observed.pre_reset_words.empty() &&
-           observed.program_status == ShaderProgramStatus::NotRequested && observed.program_words.empty());
+           observed.program_status == ShaderProgramStatus::NotRequested && observed.program_words.empty() &&
+           observed.pre_reset_program_words == words);
+    auto other_set = registry.BeginSet(device);
+    assert(other_set && registry.EndSet(other_set, 0, 0x55));
+    assert(Observe(registry, device, 0x44).pre_reset_program_words.empty());
+    auto original_set = registry.BeginSet(device);
+    assert(original_set && registry.EndSet(original_set, 0, 0x44));
+    assert(Observe(registry, device, 0x44).pre_reset_program_words == words);
+    auto failed_reset = registry.BeginReset(device);
+    assert(failed_reset && registry.EndReset(failed_reset, 0x80004005u));
+    original_set = registry.BeginSet(device);
+    assert(original_set && registry.EndSet(original_set, 0, 0x44));
+    assert(Observe(registry, device, 0x44).pre_reset_program_words.empty());
     auto deletion = registry.BeginDelete(device, 0x44);
     assert(deletion && registry.EndDelete(deletion, true));
 

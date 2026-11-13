@@ -29,6 +29,21 @@ def history_trace(scenario="valid-only", *, fallback=False, bad_reset_succeeded=
     return records
 
 
+def program_history_trace(scenario="valid-only"):
+    records = history_trace(scenario)
+    records[0]["vertex_program_capture"] = {"requested": True, "words_per_observation": 1024, "words_per_frame": 262144}
+    for record in records:
+        if record.get("event") != "draw":
+            continue
+        if record["frame"] == 0:
+            record["vertex_program"] = {"status": "candidate", "version": "vs_1_1", "generation": 1,
+                                        "words": runner.base.PROGRAM[:]}
+        if "vertex_declaration_pre_reset" in record:
+            record["vertex_program_pre_reset"] = {**record["vertex_declaration_pre_reset"],
+                                                   "words": runner.base.PROGRAM[:]}
+    return records
+
+
 FAKE_WINE = r'''import os, pathlib, shutil, sys
 args=sys.argv[1:]
 def host(value):
@@ -66,9 +81,9 @@ class ShaderResetHistoryFixtureTests(unittest.TestCase):
         self.path.write_text(fixture.log_text(fixture.events(scenario, fallback=fallback, bad_hr=bad_hr)), encoding="utf-8")
         return runner.base.inspect_log(self.path, scenario)
 
-    def validate(self, records, observation, scenario):
+    def validate(self, records, observation, scenario, program_capture=False):
         self.path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
-        return runner.inspect_history(self.path, observation, scenario)
+        return runner.inspect_history(self.path, observation, scenario, program_capture)
 
     def test_hypotheses_after_success_remain_separate_from_standard_observation(self):
         observation = self.observation()
@@ -83,6 +98,22 @@ class ShaderResetHistoryFixtureTests(unittest.TestCase):
         target = next(item for item in records if item.get("event") == "draw" and item.get("frame") == 1)
         target["vertex_declaration_pre_reset"] = draw["vertex_declaration_pre_reset"]
         with self.assertRaises(runner.RunError): self.validate(records, observation, "recovery")
+
+    def test_program_history_is_paired_and_does_not_become_a_candidate(self):
+        observation = self.observation()
+        records = program_history_trace()
+        self.assertEqual(self.validate(records, observation, "valid-only", True)["hypotheses"], 2)
+        for mode in ("missing", "bad_words", "bad_epoch", "candidate"):
+            changed = copy.deepcopy(records)
+            draw = next(x for x in changed if x.get("event") == "draw" and x["frame"] == 1)
+            if mode == "missing": del draw["vertex_program_pre_reset"]
+            if mode == "bad_words": draw["vertex_program_pre_reset"]["words"][1] = 0
+            if mode == "bad_epoch": draw["vertex_program_pre_reset"]["reset_epoch"] += 1
+            if mode == "candidate": draw["vertex_program"] = copy.deepcopy(records[4]["vertex_program"])
+            with self.subTest(mode=mode), self.assertRaises(runner.RunError):
+                self.validate(changed, observation, "valid-only", True)
+        recovery = program_history_trace("recovery")
+        self.assertEqual(self.validate(recovery, self.observation("recovery"), "recovery", True)["hypotheses"], 0)
 
     def test_no_hypothesis_when_original_shader_not_rebound(self):
         observation = self.observation(fallback=True)

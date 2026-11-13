@@ -46,3 +46,7 @@ python3 -B -m unittest t3render.tests.test_d3d8_shader_reset_history_fixture -v
 The paths must be absolute and the output directory new and outside the
 binaries, bottle and engine. Wine may update its bottle state; the runner keeps
 partial logs if a fixture process fails.
+
+Append `--vertex-programs` to additionally check a separate pre-reset VS 1.1
+program hypothesis against the fixture input. A failed Reset/recovery must
+still suppress it; it is never promoted to a post-reset program candidate.

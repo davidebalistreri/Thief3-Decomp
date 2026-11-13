@@ -15,7 +15,7 @@ import run_d3d8_shader_reset_fixture as base
 import trace_to_ir
 
 
-def inspect_history(path, observation, scenario):
+def inspect_history(path, observation, scenario, program_capture=False):
     # Both the standard validator and the IR parser see the same private bytes.
     data = Path(path).read_bytes()
     with tempfile.TemporaryDirectory(prefix="t3-reset-history-") as directory:
@@ -28,6 +28,11 @@ def inspect_history(path, observation, scenario):
     if (not isinstance(capability, dict) or capability.get("requested") is not True or
             any(type(capability.get(k)) is not int or capability[k] != v for k, v in expected.items() if k != "requested")):
         raise RunError("history capability differs")
+    program_cap = ir["compatibility"]["d3d8"]["header"].get("vertex_program_capture")
+    if program_capture and program_cap != {"requested": True, "words_per_observation": 1024, "words_per_frame": 262144}:
+        raise RunError("vertex-program capability differs")
+    if not program_capture and program_cap is not None:
+        raise RunError("unexpected vertex-program capability")
     epochs = []
     for phase, frame in enumerate(ir["frames"]):
         if len(frame["commands"]) != 1: raise RunError("history fixture has an unexpected draw count")
@@ -39,6 +44,29 @@ def inspect_history(path, observation, scenario):
         # retained data as a failed Reset would.
         had_failed_reset = scenario == "recovery" and base.failed(base.hresult(observation["resets"][0]))
         should_exist = phase > 0 and not had_failed_reset and observation["phases"][phase]["original"]
+        if program_capture:
+            program = raw.get("vertex_program")
+            prior_program = raw.get("vertex_program_pre_reset")
+            ir_program = command.get("vertex_program_observed")
+            ir_prior_program = command.get("vertex_program_pre_reset")
+            if phase == 0 and observation["phases"][phase]["original"]:
+                if program != {"status": "candidate", "version": "vs_1_1", "generation": 1, "words": base.PROGRAM}:
+                    raise RunError("pre-Reset vertex program differs")
+                if not isinstance(ir_program, dict) or ir_program.get("status") != "candidate" or ir_program.get("words") != base.PROGRAM:
+                    raise RunError("pre-Reset vertex program was not paired")
+            elif program is not None or ir_program is not None:
+                raise RunError("program candidate appeared after Reset or fallback")
+            if should_exist:
+                if not isinstance(prior_program, dict) or not isinstance(history, dict):
+                    raise RunError("missing pre-Reset program hypothesis")
+                expected_program = {**history, "words": base.PROGRAM}
+                if prior_program != expected_program:
+                    raise RunError("pre-Reset program hypothesis differs")
+                if ir_prior_program != {**expected_program, "shader_value": observation["handle"],
+                                        "shader_stable": True, "draw_hresult": 0}:
+                    raise RunError("pre-Reset program hypothesis was not paired")
+            elif prior_program is not None or ir_prior_program is not None:
+                raise RunError("pre-Reset program appeared without eligible history")
         if not should_exist:
             if "vertex_declaration_pre_reset" in raw or "vertex_declaration_pre_reset" in command:
                 raise RunError("history appeared before Reset or after failed Reset/recovery")
@@ -66,7 +94,7 @@ def inspect_history(path, observation, scenario):
     return {"hypotheses": len(epochs), "epochs": epochs}
 
 
-def execute(engine, bottle, fixture, proxy, output, timeout):
+def execute(engine, bottle, fixture, proxy, output, timeout, program_capture=False):
     engine, bottle, fixture, proxy, output = map(valid_path, (engine, bottle, fixture, proxy, output))
     if any(not str(p).isascii() or '"' in str(p) for p in (fixture, proxy, output)):
         raise RunError("fixture, proxy and output paths must be ASCII without double quotes")
@@ -89,6 +117,7 @@ def execute(engine, bottle, fixture, proxy, output, timeout):
                 "DYLD_FALLBACK_LIBRARY_PATH": f"{frameworks}:{frameworks}/GStreamer.framework/Versions/1.0/lib",
                 "DYLD_FALLBACK_FRAMEWORK_PATH": str(frameworks), "WINEDEBUG": "-all,+loaddll"})
     manifest = {"schema": 1, "test": "synthetic_d3d8_pre_reset_hypothesis", "status": "FAIL",
+                "vertex_program_capture": program_capture,
                 "fixture_sha256": sha256(fixture), "proxy_sha256": sha256(proxy), "scenarios": {},
                 "limitations": ["Synthetic x86 fixture only; no TDS process or game data.",
                                 "Pre-Reset bytes are a hypothesis, not proof of driver state or shader identity.",
@@ -112,13 +141,15 @@ def execute(engine, bottle, fixture, proxy, output, timeout):
                           "T3RENDER_CAPTURE_FRAME": "0", "T3RENDER_CAPTURE_FRAMES": "3",
                           "T3RENDER_CAPTURE_DECLARATIONS": "1", "T3RENDER_CAPTURE_DECLARATION_HISTORY": "1",
                           "T3RENDER_CAPTURE_PATH": windows_path(trace)})
+            if program_capture:
+                child["T3RENDER_CAPTURE_VERTEX_PROGRAMS"] = "1"
             args = [wine, executable]
             for phase, path in enumerate(outputs): args += [f"--out{phase}", windows_path(path)]
             args += ["--scenario", scenario]
             run_stage(stage, args, directory, child, log, timeout)
             observed = base.inspect_log(log, scenario)
             check_stage_loader(log, bottle, dll)
-            history = inspect_history(trace, observed, scenario)
+            history = inspect_history(trace, observed, scenario, program_capture)
             ref_dir = output / "reference" / scenario
             baseline = base.inspect_log(ref_dir / "baseline.log", scenario)
             if observed["events"] != baseline["events"] or observed["parity"] != baseline["parity"]:
@@ -145,8 +176,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for option in ("engine", "bottle", "fixture", "proxy", "output-dir"): parser.add_argument("--" + option, required=True)
     parser.add_argument("--timeout", type=float, default=45)
+    parser.add_argument("--vertex-programs", action="store_true", help="check separate pre-Reset program hypotheses")
     args = parser.parse_args(argv)
-    try: result = execute(args.engine, args.bottle, args.fixture, args.proxy, args.output_dir, args.timeout)
+    try: result = execute(args.engine, args.bottle, args.fixture, args.proxy, args.output_dir, args.timeout,
+                          args.vertex_programs)
     except (RunError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr); return 1
     print(f"{result['status']}: synthetic pre-Reset hypothesis fixture; results: {args.output_dir}")

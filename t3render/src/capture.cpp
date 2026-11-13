@@ -991,6 +991,23 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
             out << "]}";
             history_words_emitted = count;
         }
+        const auto prior_program_count = declaration.pre_reset_program_words.size();
+        if (history_words_emitted && s.vertex_programs_requested &&
+            prior_program_count >= 2 && prior_program_count <= kProgramObservationWords &&
+            declaration.pre_reset_program_words.front() == 0xfffe0101u &&
+            declaration.pre_reset_program_words.back() == 0x0000ffffu &&
+            s.vertex_program_words <= kProgramFrameWords && prior_program_count <= kProgramFrameWords - s.vertex_program_words) {
+            out << ",\"vertex_program_pre_reset\":{\"status\":\"hypothesis\","
+                << "\"source\":\"application_memory_before_reset\",\"generation\":" << declaration.generation
+                << ",\"reset_epoch\":" << declaration.reset_epoch << ",\"reset_hr\":" << declaration.reset_hr
+                << ",\"rebind_epoch\":" << declaration.rebind_epoch << ",\"words\":[";
+            for (size_t i = 0; i < prior_program_count; ++i) {
+                if (i) out << ',';
+                out << declaration.pre_reset_program_words[i];
+            }
+            out << "]}";
+            program_words_emitted = prior_program_count;
+        }
     }
     out << ",\"pixel_shader\":";
     if (SUCCEEDED(ps_hr)) out << ps; else out << "null";

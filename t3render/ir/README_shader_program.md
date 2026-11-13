@@ -9,7 +9,8 @@ shader validator, translator or proof of the program used by a driver.
 
 The declaration registry can optionally retain one program snapshot alongside
 its declaration and return it with a stable candidate. Both share the device's
-word budget and lifecycle; no program is exposed through pre-reset history.
+word budget and lifecycle. Eligible pre-reset programs are kept separately as
+hypotheses, never as candidates for the device after Reset.
 Malformed or oversized programs expose no words. Registry tests exercise quota,
 deletion and reset; the caller still has to check the completed draw ticket.
 

@@ -143,6 +143,21 @@ class CaptureHostTests(unittest.TestCase):
         self.assertNotIn("vertex_declaration_pre_reset", draws[256])
         self.assertIn("vertex_declaration_pre_reset", draws[257])
 
+    def test_pre_reset_program_is_a_separate_paired_hypothesis(self):
+        self.run_capture("shader_history_program", frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1",
+            "T3RENDER_CAPTURE_DECLARATION_HISTORY": "1", "T3RENDER_CAPTURE_VERTEX_PROGRAMS": "1"})
+        records = self.records()
+        draws = [e for e in records if e["event"] == "draw"]
+        self.assertEqual(["vertex_program_pre_reset" in e for e in draws], [True, True, False, False, False])
+        self.assertTrue(all("vertex_program" not in draw for draw in draws))
+        converted = subprocess.run([sys.executable, "-B", str(ROOT / "tools" / "trace_to_ir.py"), str(self.path)],
+                                   text=True, capture_output=True)
+        self.assertEqual(converted.returncode, 0, converted.stderr)
+        commands = json.loads(converted.stdout)["frames"][0]["commands"]
+        self.assertEqual(commands[0]["vertex_program_pre_reset"]["status"], "hypothesis")
+        self.assertTrue(all("vertex_program_pre_reset" not in command for command in commands[1:]))
+        self.assertTrue(all("vertex_program_observed" not in command for command in commands))
+
     def test_shader_unavailable_reason_contains_no_partial_words(self):
         self.run_capture("shader_reason", frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1"})
         records = self.records()

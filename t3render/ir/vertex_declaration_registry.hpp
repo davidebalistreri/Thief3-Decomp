@@ -47,6 +47,9 @@ struct ShaderObservation {
     std::uint64_t reset_epoch = 0, rebind_epoch = 0;
     std::uint32_t reset_hr = 0;
     std::vector<std::uint32_t> pre_reset_words;
+    // Separate pre-reset application-memory hypothesis, never a program
+    // candidate for the current device state.
+    std::vector<std::uint32_t> pre_reset_program_words;
 };
 struct ShaderRegistryLimits {
     std::size_t devices = 8;

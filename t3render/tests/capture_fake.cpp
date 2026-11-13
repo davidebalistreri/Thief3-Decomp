@@ -411,7 +411,7 @@ int main(int argc, char** argv) {
             t3render::CaptureShaderDrawResult(&device, token, S_OK, -1, i!=2);
         }
         t3render::CapturePresent(&device, S_OK);
-    } else if (scenario == "shader" || scenario == "shader_program") {
+    } else if (scenario == "shader" || scenario == "shader_program" || scenario == "shader_program_unavailable") {
         if (t3render::CaptureWantsDraw(&device)) return 8;
         t3render::CapturePresent(&device, S_OK);
         if (!t3render::CaptureWantsDraw(&device) || t3render::CaptureWantsDraw(&unrelated)) return 8;
@@ -423,6 +423,10 @@ int main(int argc, char** argv) {
         snapshot.declaration.words = {0x20000000u, 0xffffffffu};
         snapshot.declaration.program_status = t3render::ir::ShaderProgramStatus::Complete;
         snapshot.declaration.program_words = {0xfffe0101u, 1u, 0xc00f0000u, 0x90e40000u, 0x0000ffffu};
+        if (scenario == "shader_program_unavailable") {
+            snapshot.declaration.program_status = t3render::ir::ShaderProgramStatus::UnsupportedVersion;
+            snapshot.declaration.program_words.clear();
+        }
         auto candidate = draw;
         candidate.shader_snapshot = &snapshot;
         for (unsigned i=0; i<4; ++i) {

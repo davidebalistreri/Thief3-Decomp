@@ -796,6 +796,22 @@ const char* DeclarationUnavailableReason(ir::ShaderUnavailableReason value) noex
     return "unknown";
 }
 
+const char* ProgramUnavailableReason(ir::ShaderProgramStatus value) noexcept {
+    switch (value) {
+    case ir::ShaderProgramStatus::NullAddress: return "null_address";
+    case ir::ShaderProgramStatus::InvalidConfiguration: return "invalid_configuration";
+    case ir::ShaderProgramStatus::AddressOverflow: return "address_overflow";
+    case ir::ShaderProgramStatus::Unreadable: return "unreadable";
+    case ir::ShaderProgramStatus::UnsupportedVersion: return "unsupported_version";
+    case ir::ShaderProgramStatus::UnsupportedInstruction: return "unsupported_instruction";
+    case ir::ShaderProgramStatus::InvalidParameter: return "invalid_parameter";
+    case ir::ShaderProgramStatus::WordLimit: return "word_limit";
+    case ir::ShaderProgramStatus::AllocationFailure: return "allocation_failure";
+    case ir::ShaderProgramStatus::NotRequested: case ir::ShaderProgramStatus::Complete: return "unknown";
+    }
+    return "unknown";
+}
+
 // Validate framing without allocating inside the capture mutex. CONST/EXT
 // payload DWORDs are opaque and can themselves equal the END token.
 bool FramedHistory(const std::vector<std::uint32_t>& words) noexcept {
@@ -934,18 +950,27 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
         const auto program_count = declaration.program_words.size();
         if (s.vertex_programs_requested && s.declaration_requested && SUCCEEDED(vs_hr) &&
             declaration.status == ir::ShaderObservationStatus::Candidate && declaration.generation &&
-            declaration.program_status == ir::ShaderProgramStatus::Complete &&
-            program_count >= 2 && program_count <= kProgramObservationWords &&
-            declaration.program_words.front() == 0xfffe0101u && declaration.program_words.back() == 0x0000ffffu &&
-            s.vertex_program_words <= kProgramFrameWords && program_count <= kProgramFrameWords - s.vertex_program_words) {
-            out << ",\"vertex_program\":{\"status\":\"candidate\",\"version\":\"vs_1_1\",\"generation\":"
-                << declaration.generation << ",\"words\":[";
-            for (size_t i = 0; i < program_count; ++i) {
-                if (i) out << ',';
-                out << declaration.program_words[i];
+            declaration.program_status != ir::ShaderProgramStatus::NotRequested) {
+            const bool framed = declaration.program_status == ir::ShaderProgramStatus::Complete &&
+                program_count >= 2 && program_count <= kProgramObservationWords &&
+                declaration.program_words.front() == 0xfffe0101u && declaration.program_words.back() == 0x0000ffffu;
+            const bool budget = framed && s.vertex_program_words <= kProgramFrameWords &&
+                program_count <= kProgramFrameWords - s.vertex_program_words;
+            if (budget) {
+                out << ",\"vertex_program\":{\"status\":\"candidate\",\"version\":\"vs_1_1\",\"generation\":"
+                    << declaration.generation << ",\"words\":[";
+                for (size_t i = 0; i < program_count; ++i) {
+                    if (i) out << ',';
+                    out << declaration.program_words[i];
+                }
+                out << "]}";
+                program_words_emitted = program_count;
+            } else {
+                const char* reason = declaration.program_status != ir::ShaderProgramStatus::Complete
+                    ? ProgramUnavailableReason(declaration.program_status) : framed ? "frame_word_limit" : "invalid_snapshot";
+                out << ",\"vertex_program\":{\"status\":\"unavailable\",\"generation\":"
+                    << declaration.generation << ",\"reason\":\"" << reason << "\",\"words\":null}";
             }
-            out << "]}";
-            program_words_emitted = program_count;
         }
         const auto count = declaration.pre_reset_words.size();
         if (s.history_requested && s.declaration_requested && SUCCEEDED(vs_hr) &&

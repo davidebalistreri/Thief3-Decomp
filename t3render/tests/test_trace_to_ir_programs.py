@@ -86,6 +86,23 @@ class ProgramTraceTests(unittest.TestCase):
                 self.assertEqual(["vertex_program_observed" in c for c in commands],
                                  [True, True] if mode == "exact" else [False, False])
 
+    def test_unavailable_reason_is_paired_and_does_not_invalidate_other_programs(self):
+        records = program_events()
+        second = copy.deepcopy(records[2]); second["op_id"] = 2
+        second["vertex_program"] = {"status": "unavailable", "generation": 5,
+                                    "reason": "unsupported_version", "words": None}
+        result = copy.deepcopy(records[3]); result["op_id"] = 2
+        records[2:4] = [records[2], second, result, records[3]]
+        records[-2]["concurrent_operations"] = True
+        commands = self.commands(records)
+        self.assertEqual(commands[0]["vertex_program_observed"]["status"], "candidate")
+        self.assertEqual(commands[1]["vertex_program_observed"]["reason"], "unsupported_version")
+        self.assertIsNone(commands[1]["vertex_program_observed"]["words"])
+        for bad in ([], {}, None, "unknown"):
+            changed = copy.deepcopy(records); changed[3]["vertex_program"]["reason"] = bad
+            with self.subTest(reason=bad):
+                self.assertTrue(all("vertex_program_observed" not in c for c in self.commands(changed)))
+
 
 if __name__ == "__main__":
     unittest.main()

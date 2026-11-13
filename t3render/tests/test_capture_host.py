@@ -204,8 +204,16 @@ class CaptureHostTests(unittest.TestCase):
         draws = [e for e in self.records() if e["event"] == "draw"]
         self.assertEqual(len(draws), 258)
         self.assertTrue(all("vertex_program" in draw for draw in draws[:256]))
-        self.assertNotIn("vertex_program", draws[256])
+        self.assertEqual(draws[256]["vertex_program"], {"status": "unavailable", "generation": 9,
+                         "reason": "frame_word_limit", "words": None})
         self.assertIn("vertex_program", draws[257])
+
+    def test_vertex_program_unavailable_reason_contains_no_words(self):
+        self.run_capture("shader_program_unavailable", frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1",
+                                                                         "T3RENDER_CAPTURE_VERTEX_PROGRAMS": "1"})
+        draws = [e for e in self.records() if e["event"] == "draw"]
+        self.assertEqual(draws[0]["vertex_program"], {"status": "unavailable", "generation": 7,
+                         "reason": "unsupported_version", "words": None})
 
     def test_frame_window_defaults_to_one_and_preserves_legacy_events(self):
         self.run_capture("window", frame="1")

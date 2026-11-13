@@ -411,10 +411,18 @@ def framed_vertex_program(words):
     return False
 
 
+PROGRAM_UNAVAILABLE_REASONS = frozenset(("null_address", "invalid_configuration", "address_overflow", "unreadable",
+                                         "unsupported_version", "unsupported_instruction", "invalid_parameter",
+                                         "word_limit", "allocation_failure", "invalid_snapshot", "frame_word_limit"))
+
+
 def vertex_program_frame_words(draw, header):
     if "vertex_program" not in draw:
         return 0
     raw = draw["vertex_program"]
+    if (isinstance(raw, dict) and raw.get("status") == "unavailable" and raw.get("words", "missing") is None and
+            isinstance(raw.get("reason"), str) and raw["reason"] in PROGRAM_UNAVAILABLE_REASONS):
+        return 0
     if not isinstance(raw, dict) or not framed_vertex_program(raw.get("words")):
         return None
     limit = uint32(object_or_empty(header.get("vertex_program_capture")).get("words_per_observation"))
@@ -432,14 +440,21 @@ def observed_vertex_program(draw, result, header, within_frame_budget):
             not per_observation <= per_frame <= 262144 or not within_frame_budget):
         return None
     raw = draw.get("vertex_program")
-    if not isinstance(raw, dict) or raw.get("status") != "candidate" or raw.get("version") != "vs_1_1":
+    if not isinstance(raw, dict):
         return None
     generation = integer(raw.get("generation"))
-    if (generation is None or not 1 <= generation <= 0xffffffffffffffff or
-            not framed_vertex_program(raw.get("words")) or len(raw["words"]) > per_observation):
+    if generation is None or not 1 <= generation <= 0xffffffffffffffff:
         return None
     declaration = observed_declaration(draw, result, header)
     if declaration["status"] != "candidate" or declaration["generation"] != generation:
+        return None
+    if (raw.get("status") == "unavailable" and raw.get("words", "missing") is None and
+            isinstance(raw.get("reason"), str) and raw["reason"] in PROGRAM_UNAVAILABLE_REASONS):
+        return {"status": "unavailable", "reason": raw["reason"], "shader_value": declaration["shader_value"],
+                "generation": generation, "words": None, "shader_stable": declaration["shader_stable"],
+                "draw_hresult": declaration["draw_hresult"]}
+    if (raw.get("status") != "candidate" or raw.get("version") != "vs_1_1" or
+            not framed_vertex_program(raw.get("words")) or len(raw["words"]) > per_observation):
         return None
     return {"status": "candidate", "version": "vs_1_1", "shader_value": declaration["shader_value"],
             "generation": generation, "words": raw["words"][:],

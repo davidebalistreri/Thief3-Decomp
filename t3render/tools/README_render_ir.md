@@ -128,7 +128,9 @@ data is removed after validation. No third-party modules are needed.
   program is framed. COMMENT and DEF payloads are skipped when framing. This
   does not validate instruction semantics, shader identity or GPU input, and
   is never recovered from pre-reset history. Pixel programs and constants are
-  not captured.
+  not captured. An unavailable program can report its allowlisted scan or
+  budget reason with null words; a malformed program payload suppresses all
+  program observations in its frame.
 - Material values are captured legacy parameters and texture slots, not PBR
   values or texture roles. Lights are reported only when observed: the list is
   explicitly incomplete even when empty, since capture samples a limited range

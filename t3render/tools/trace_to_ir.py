@@ -380,6 +380,72 @@ def pre_reset_declaration(draw, result, header, within_frame_budget):
             "shader_stable": observation["shader_stable"], "draw_hresult": observation["draw_hresult"]}
 
 
+def framed_vertex_program(words):
+    """Frame the supported VS 1.1 token subset, without validating semantics."""
+    if not isinstance(words, list) or not 2 <= len(words) <= 1024 or any(uint32(w) is None for w in words):
+        return False
+    if words[0] != 0xfffe0101:
+        return False
+    counts = {0: 0, 1: 2, 2: 3, 3: 3, 4: 4, 5: 3, 6: 2, 7: 2, 8: 3, 9: 3, 10: 3,
+              11: 3, 12: 3, 13: 3, 14: 2, 15: 2, 16: 2, 17: 3, 18: 4, 19: 2,
+              20: 3, 21: 3, 22: 3, 23: 3, 24: 3, 78: 2, 79: 2, 81: 5}
+    pos = 1
+    while pos < len(words):
+        token = words[pos]
+        pos += 1
+        if token == 0xffff:
+            return pos == len(words)
+        if token & 0xffff == 0xfffe and not token & 0x80000000:
+            count = (token >> 16) & 0x7fff
+            if count > len(words) - pos:
+                return False
+            pos += count
+            continue
+        count = counts.get(token)
+        if count is None or count > len(words) - pos:
+            return False
+        for i in range(count):
+            if (token != 81 or i == 0) and not words[pos + i] & 0x80000000:
+                return False
+        pos += count
+    return False
+
+
+def vertex_program_frame_words(draw, header):
+    if "vertex_program" not in draw:
+        return 0
+    raw = draw["vertex_program"]
+    if not isinstance(raw, dict) or not framed_vertex_program(raw.get("words")):
+        return None
+    limit = uint32(object_or_empty(header.get("vertex_program_capture")).get("words_per_observation"))
+    if limit is None or len(raw["words"]) > limit:
+        return None
+    return len(raw["words"])
+
+
+def observed_vertex_program(draw, result, header, within_frame_budget):
+    capability = object_or_empty(header.get("vertex_program_capture"))
+    per_observation = uint32(capability.get("words_per_observation"))
+    per_frame = uint32(capability.get("words_per_frame"))
+    if (capability.get("requested") is not True or per_observation is None or
+            not 1 <= per_observation <= 1024 or per_frame is None or
+            not per_observation <= per_frame <= 262144 or not within_frame_budget):
+        return None
+    raw = draw.get("vertex_program")
+    if not isinstance(raw, dict) or raw.get("status") != "candidate" or raw.get("version") != "vs_1_1":
+        return None
+    generation = integer(raw.get("generation"))
+    if (generation is None or not 1 <= generation <= 0xffffffffffffffff or
+            not framed_vertex_program(raw.get("words")) or len(raw["words"]) > per_observation):
+        return None
+    declaration = observed_declaration(draw, result, header)
+    if declaration["status"] != "candidate" or declaration["generation"] != generation:
+        return None
+    return {"status": "candidate", "version": "vs_1_1", "shader_value": declaration["shader_value"],
+            "generation": generation, "words": raw["words"][:],
+            "shader_stable": declaration["shader_stable"], "draw_hresult": declaration["draw_hresult"]}
+
+
 def buffer_binding(record):
     """Validate a getter's resource identity and declared byte size."""
     if not isinstance(record, dict) or hresult_succeeded(record.get("hr")) is not True:
@@ -595,6 +661,8 @@ def convert(path):
     frame_buffer_bytes = 0
     pre_reset_results = []
     frame_history_words = 0
+    program_results = []
+    frame_program_words = 0
     draw_index = 0
     for line_number, event in enumerate(records, 1):
         kind = event["event"]
@@ -609,6 +677,8 @@ def convert(path):
             frame_buffer_bytes = 0
             pre_reset_results = []
             frame_history_words = 0
+            program_results = []
+            frame_program_words = 0
             current = {"frame": event["frame"], "commands": [],
                        "compatibility": {"d3d8": {"frame_begin": event, "events": [], "frame_end": None}}}
             ir["frames"].append(current)
@@ -623,12 +693,21 @@ def convert(path):
                 history = pre_reset_declaration(draw, result, records[0], within_budget)
                 if history is not None:
                     command["vertex_declaration_pre_reset"] = history
+            limit = uint32(object_or_empty(records[0].get("vertex_program_capture")).get("words_per_frame"))
+            within_budget = frame_program_words is not None and limit is not None and frame_program_words <= limit
+            for command, draw, result in program_results:
+                program = observed_vertex_program(draw, result, records[0], within_budget)
+                if program is not None:
+                    command["vertex_program_observed"] = program
             current["compatibility"]["d3d8"]["frame_end"] = event
             current = None
         elif kind == "draw":
             used_words = pre_reset_frame_words(event, records[0])
             frame_history_words = (frame_history_words + used_words
                                    if frame_history_words is not None and used_words is not None else None)
+            used_words = vertex_program_frame_words(event, records[0])
+            frame_program_words = (frame_program_words + used_words
+                                   if frame_program_words is not None and used_words is not None else None)
             if "buffer_data" in event:
                 used = buffered_frame_bytes(event)
                 frame_buffer_bytes = (frame_buffer_bytes + used
@@ -663,6 +742,8 @@ def convert(path):
                     command["vertex_declaration_observed"] = observed_declaration(draw, event, records[0])
                 if "vertex_declaration_pre_reset" in draw:
                     pre_reset_results.append((command, draw, event))
+                if "vertex_program" in draw:
+                    program_results.append((command, draw, event))
             if kind == "draw_result" and event.get("op_id") in buffered_pending:
                 mesh_record, draw, indexed = buffered_pending.pop(event["op_id"])
                 buffered_results.append((mesh_record, draw, event, indexed))

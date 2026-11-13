@@ -3,7 +3,7 @@
 `trace_to_ir.py` converts a **complete diagnostic v1 JSONL trace** into a
 versioned, API-independent JSON representation for inspection. This is an
 offline prototype, not a runtime renderer interface or a replay: decoded
-geometry, complete resource contents and shader programs are not captured.
+geometry, complete resource contents and complete shader state are not captured.
 Newer diagnostic traces can contain opaque UP or bounded buffer-shadow bytes
 and paired operation results; older traces may lack them.
 Neither visual parity nor gameplay behavior can be established from this IR.
@@ -121,6 +121,14 @@ data is removed after validation. No third-party modules are needed.
   between frames. Raw fields are preserved without validation in the D3D8
   compatibility extension. Old traces retain their previous shape; no history
   makes the frame replayable.
+- Optional `vertex_program_observed` describes a bounded `vs_1_1` program
+  sampled from application memory at shader creation. It appears only when the
+  program and declaration share a generation, the draw result is successful
+  and stable, the opt-in header and frame budget are valid, and the complete
+  program is framed. COMMENT and DEF payloads are skipped when framing. This
+  does not validate instruction semantics, shader identity or GPU input, and
+  is never recovered from pre-reset history. Pixel programs and constants are
+  not captured.
 - Material values are captured legacy parameters and texture slots, not PBR
   values or texture roles. Lights are reported only when observed: the list is
   explicitly incomplete even when empty, since capture samples a limited range

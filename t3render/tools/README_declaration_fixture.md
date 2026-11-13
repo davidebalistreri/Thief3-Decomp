@@ -45,3 +45,7 @@ new directory outside the binary, bottle and engine directories. Wine may
 update its bottle state. The fixture covers no buffer wrappers, state blocks,
 reset, alias escape, concurrency, alpha, native Windows or TDS. The trace is a
 candidate observation, not a replay or proof of driver-consumed bytes.
+
+Append `--vertex-programs` in `program` mode to compare the observed VS 1.1
+words to the fixture input in the proxy run. The other two runs keep that
+observer disabled; HRESULT and RGB comparisons are unchanged.

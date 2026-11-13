@@ -37,9 +37,9 @@ class DeclarationRunnerTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name) / "trace.jsonl"
 
-    def check(self, events, enabled):
+    def check(self, events, enabled, program_capture=False):
         self.path.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
-        runner.inspect_trace(self.path, [0x100, 0x101], enabled)
+        runner.inspect_trace(self.path, [0x100, 0x101], enabled, program_capture)
 
     def test_accepts_each_mode(self):
         self.check(trace(False), False)
@@ -66,6 +66,25 @@ class DeclarationRunnerTests(unittest.TestCase):
         events[4]["vertex_declaration"] = {"status": "unknown", "generation": None, "words": None}
         with self.assertRaises(runner.RunError):
             self.check(events, False)
+
+    def test_program_capture_checks_words_generation_and_capability(self):
+        records = trace(True)
+        records[0]["vertex_program_capture"] = {"requested": True, "words_per_observation": 1024,
+                                                "words_per_frame": 262144}
+        for i, index in enumerate((4, 6), 1):
+            records[index]["vertex_program"] = {"status": "candidate", "version": "vs_1_1", "generation": i,
+                                                 "words": runner.PROGRAM_WORDS[:]}
+        self.check(records, True, True)
+        for case in ("generation", "words", "missing", "capability", "unexpected"):
+            changed = copy.deepcopy(records)
+            if case == "generation": changed[4]["vertex_program"]["generation"] = 2
+            if case == "words": changed[4]["vertex_program"]["words"][1] = 0
+            if case == "missing": del changed[4]["vertex_program"]
+            if case == "capability": del changed[0]["vertex_program_capture"]
+            if case == "unexpected":
+                del changed[0]["vertex_program_capture"]
+            with self.subTest(case=case), self.assertRaises(runner.RunError):
+                self.check(changed, True, case != "unexpected")
 
     def test_requires_complete_successful_ordered_hresult_sequence(self):
         lines = [f"parity {name} hr=00000000" for name in runner.EXPECTED_CALLS]

@@ -13,10 +13,13 @@ word budget and lifecycle; no program is exposed through pre-reset history.
 Malformed or oversized programs expose no words. Registry tests exercise quota,
 deletion and reset; the caller still has to check the completed draw ticket.
 
-This is **not integrated into the proxy or trace**. The caller must supply a
-fault-safe reader; its snapshot may race application writes. Other shader
-versions, pixel shaders, constants and unobserved device aliases remain
-unhandled. No real TDS shader has been captured or replayed by this helper.
+The optional proxy observer samples at `CreateVertexShader` and writes bounded
+program candidates into the diagnostic trace. The offline IR retains them only
+with a matching declaration generation and a successful, stable draw. The
+caller must supply a fault-safe reader; a snapshot may race application writes.
+Other shader versions, pixel shaders, constants and unobserved device aliases
+remain unhandled. No real TDS shader has yet been captured or replayed by this
+observer.
 
 From `t3sdk`, run the host framing checks and the i686 cross-compile check:
 

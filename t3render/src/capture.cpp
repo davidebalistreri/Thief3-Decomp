@@ -34,6 +34,8 @@ constexpr uint64_t kBufferFrameLimit = 8 * 1024 * 1024;
 constexpr uint64_t kHistoryObservationWords = 1024;
 constexpr uint64_t kHistoryFrameWords = 262144;
 constexpr uint64_t kHistoryDeviceWords = 8192;
+constexpr uint64_t kProgramObservationWords = 1024;
+constexpr uint64_t kProgramFrameWords = 262144;
 constexpr DWORD kClearRectLimit = 256;
 constexpr size_t kPendingOperationLimit = 4096;
 enum class OperationKind { Draw, Clear };
@@ -53,6 +55,7 @@ struct CaptureState {
     bool buffer_requested = false;
     bool declaration_requested = false;
     bool history_requested = false;
+    bool vertex_programs_requested = false;
     bool begun = false;
     bool had_reset = false;
     uint64_t frame = 0;
@@ -63,6 +66,7 @@ struct CaptureState {
     uint64_t up_bytes = 0;  // successfully emitted raw bytes, not hex characters
     uint64_t buffer_bytes = 0;
     uint64_t history_words = 0;
+    uint64_t vertex_program_words = 0;
     uint64_t next_operation = 1;
     bool concurrent_operations = false;
     std::unordered_map<uint64_t, OperationKind> pending_operations;
@@ -154,6 +158,7 @@ void Initialize(CaptureState& s) {
     s.buffer_requested = Environment(L"T3RENDER_CAPTURE_BUFFERS") == L"1";
     s.declaration_requested = Environment(L"T3RENDER_CAPTURE_DECLARATIONS") == L"1";
     s.history_requested = Environment(L"T3RENDER_CAPTURE_DECLARATION_HISTORY") == L"1";
+    s.vertex_programs_requested = Environment(L"T3RENDER_CAPTURE_VERTEX_PROGRAMS") == L"1";
     // Missing means the legacy single frame; an explicitly empty, truncated,
     // or malformed value must not silently start a capture.
     wchar_t frames[2]{};
@@ -216,6 +221,8 @@ bool Open(CaptureState& s) {
     if (s.history_requested) out << ",\"declaration_history\":{\"requested\":true,\"words_per_observation\":"
         << kHistoryObservationWords << ",\"words_per_frame\":" << kHistoryFrameWords
         << ",\"words_per_device\":" << kHistoryDeviceWords << '}';
+    if (s.vertex_programs_requested) out << ",\"vertex_program_capture\":{\"requested\":true,\"words_per_observation\":"
+        << kProgramObservationWords << ",\"words_per_frame\":" << kProgramFrameWords << '}';
     out << ",\"limitations\":["
         << "\"texture bytes and T3 asset names are not captured\","
         << "\"optional buffer shadows are bounded observations, not proof of driver input\","
@@ -224,7 +231,7 @@ bool Open(CaptureState& s) {
         << "\"draw and clear events describe attempts; results are paired by op_id\","
         << "\"concurrent device calls may have a different driver submission order\","
         << "\"concurrent_operations only covers draw/clear overlap, not Present or Reset\","
-        << "\"shader programs and constants are not captured; declarations are optional candidates\","
+        << "\"vertex programs and declarations are optional candidates; pixel programs and shader constants are not captured\","
         << "\"light indices 0 through 31 only\","
         << "\"world transform indices 0 through 3 only\","
         << "\"texture stages at most 8 and vertex streams at most 16\","
@@ -896,6 +903,7 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
     const HRESULT ps_hr = device->GetPixelShader(&ps);
     out << "],\"vertex_shader\":";
     uint64_t history_words_emitted = 0;
+    uint64_t program_words_emitted = 0;
     if (SUCCEEDED(vs_hr)) out << vs; else out << "null";
     if (draw.shader_snapshot) {
         const auto& declaration = draw.shader_snapshot->declaration;
@@ -923,6 +931,22 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
                 << "\",\"scan_status\":\"" << DeclarationScanStatus(declaration.scan_status) << '\"';
         }
         out << '}';
+        const auto program_count = declaration.program_words.size();
+        if (s.vertex_programs_requested && s.declaration_requested && SUCCEEDED(vs_hr) &&
+            declaration.status == ir::ShaderObservationStatus::Candidate && declaration.generation &&
+            declaration.program_status == ir::ShaderProgramStatus::Complete &&
+            program_count >= 2 && program_count <= kProgramObservationWords &&
+            declaration.program_words.front() == 0xfffe0101u && declaration.program_words.back() == 0x0000ffffu &&
+            s.vertex_program_words <= kProgramFrameWords && program_count <= kProgramFrameWords - s.vertex_program_words) {
+            out << ",\"vertex_program\":{\"status\":\"candidate\",\"version\":\"vs_1_1\",\"generation\":"
+                << declaration.generation << ",\"words\":[";
+            for (size_t i = 0; i < program_count; ++i) {
+                if (i) out << ',';
+                out << declaration.program_words[i];
+            }
+            out << "]}";
+            program_words_emitted = program_count;
+        }
         const auto count = declaration.pre_reset_words.size();
         if (s.history_requested && s.declaration_requested && SUCCEEDED(vs_hr) &&
             declaration.status == ir::ShaderObservationStatus::Unavailable &&
@@ -970,6 +994,7 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
     out << "}\n";
     if (!Write(s, out.str())) return false;
     s.history_words += history_words_emitted;
+    s.vertex_program_words += program_words_emitted;
     ++s.draws;
     return true;
 }
@@ -1130,6 +1155,7 @@ void CaptureDeviceReleased(IDirect3DDevice8* device) {
         s.up_bytes = 0;
         s.buffer_bytes = 0;
         s.history_words = 0;
+        s.vertex_program_words = 0;
         s.had_reset = false;
         s.next_operation = 1;
         s.pending_operations.clear();
@@ -1264,6 +1290,7 @@ void CapturePresent(IDirect3DDevice8* device, HRESULT result) {
             s.up_bytes = 0;
             s.buffer_bytes = 0;
             s.history_words = 0;
+            s.vertex_program_words = 0;
             s.had_reset = false;
             s.concurrent_operations = false;
             ++s.frame;

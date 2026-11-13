@@ -207,8 +207,8 @@ See the [result](benchmarks/d3d8/2026-11-12-tds-bedroom-declarations/result.json
 In a follow-up [capture](benchmarks/d3d8/2026-11-12-tds-declaration-reset/result.json),
 415 unavailable observations had a complete token scan and were invalidated by
 an earlier Reset attempt. Its HRESULT and shader survival were not recorded.
-This does not validate unobserved aliases or gameplay. The observer does not
-capture shader bytecode or constants and cannot make the frame replayable.
+This does not validate unobserved aliases or gameplay. Declaration observation
+alone does not capture shader bytecode or constants and cannot make the frame replayable.
 
 #### Pre-reset history hypothesis
 
@@ -241,6 +241,20 @@ that the previous reset was avoided or that the candidates match GPU input. All
 312 indexed draws bound WRITEONLY vertex and index buffers; reading them with
 `D3DLOCK_READONLY` is not a supported substitute for safe write observation.
 Buffer bytes and shader programs remain absent, so this frame cannot be replayed.
+
+#### Vertex-program candidates
+
+`T3RENDER_CAPTURE_VERTEX_PROGRAMS=1`, together with declaration observation,
+samples bounded `vs_1_1` application-memory programs at `CreateVertexShader`.
+It does not query shader handles through the driver and remains suppressed
+when buffer observation is active. Other versions, malformed data, null
+functions and exceeded budgets expose no program words. Programs share the
+per-device declaration budget and are not exposed after Reset. The trace is
+limited to 1024 words per observation and 262144 per frame; the offline IR
+requires a matching declaration generation and successful, stable draw.
+These are candidates, not proof of shader identity or GPU input. Constants,
+pixel programs and buffers are still required for a replay. See the
+[program reader](ir/README_shader_program.md).
 
 ### Experimental buffered capture — isolated fixture only
 

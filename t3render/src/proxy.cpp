@@ -144,6 +144,7 @@ struct Binding {
     std::atomic<bool> retired{false}, deferred_buffer_invalidation{false}, deferred_capture_release{false};
     std::shared_ptr<t3render::ir::VertexDeclarationRegistry> declarations;
     std::uint64_t declaration_device = 0;
+    bool capture_vertex_programs = false;
 };
 
 struct Registry {
@@ -152,6 +153,7 @@ struct Registry {
     std::unordered_map<void*, std::shared_ptr<Binding>> devices;
     std::shared_ptr<t3render::buffers::BufferProxy> buffers;
     std::shared_ptr<t3render::ir::VertexDeclarationRegistry> declarations;
+    bool capture_vertex_programs = false;
 };
 
 // Deliberately process-lifetime: COM objects may still be released during
@@ -289,6 +291,7 @@ bool Bind(void* object, bool device, bool track_declarations = true) noexcept {
             // observers until alias propagation is implemented and verified.
             binding->declarations = binding->buffers ? nullptr : declarations;
             binding->declaration_device = binding->declarations ? declaration_token.id : 0;
+            binding->capture_vertex_programs = binding->declarations && registry->capture_vertex_programs;
         }
         auto& v = binding->instrumented;
         if (device) {
@@ -433,6 +436,9 @@ void EnableDeclarationObserver() noexcept {
         wchar_t history[2]{};
         const bool history_requested = GetEnvironmentVariableW(L"T3RENDER_CAPTURE_DECLARATION_HISTORY", history, 2) == 1 &&
                                        history[0] == L'1';
+        wchar_t programs[2]{};
+        const bool programs_requested = GetEnvironmentVariableW(L"T3RENDER_CAPTURE_VERTEX_PROGRAMS", programs, 2) == 1 &&
+                                        programs[0] == L'1';
         t3render::ir::ShaderRegistryLimits limits;
         if (history_requested) {
             limits.preserve_reset_history = true;
@@ -442,7 +448,10 @@ void EnableDeclarationObserver() noexcept {
         }
         auto candidate = std::make_shared<t3render::ir::VertexDeclarationRegistry>(limits);
         std::lock_guard<std::mutex> lock(registry->mutex);
-        if (!registry->declarations) registry->declarations = std::move(candidate);
+        if (!registry->declarations) {
+            registry->declarations = std::move(candidate);
+            registry->capture_vertex_programs = programs_requested;
+        }
     } catch (...) {
         Diagnostic("T3Render: declaration observation could not be enabled\n");
     }
@@ -864,6 +873,9 @@ HRESULT STDMETHODCALLTYPE DeviceCreateVertexShader(IDirect3DDevice8* device, con
     auto snapshot = ticket ? t3render::ir::ScanDeclaration(reinterpret_cast<std::uintptr_t>(declaration),
                                                            ReadDeclarationSnapshot, nullptr)
                            : t3render::ir::DeclarationSnapshot{};
+    auto program = ticket && binding->capture_vertex_programs
+        ? t3render::ir::ScanVertexShader11(reinterpret_cast<std::uintptr_t>(function), ReadDeclarationSnapshot, nullptr, 1024)
+        : t3render::ir::ShaderProgramSnapshot{};
     error.Restore();
     const HRESULT hr = reinterpret_cast<CreateVertexShader>(binding->original[Layout().device_create_vertex_shader])(
         device, declaration, function, handle, usage);
@@ -871,7 +883,7 @@ HRESULT STDMETHODCALLTYPE DeviceCreateVertexShader(IDirect3DDevice8* device, con
     std::uint32_t value = 0;
     const bool known = SUCCEEDED(hr) && ReadDeclarationSnapshot(nullptr, reinterpret_cast<std::uintptr_t>(handle),
                                                                &value, sizeof(value));
-    (void)binding->declarations->EndCreate(ticket, SUCCEEDED(hr), known, value, std::move(snapshot));
+    (void)binding->declarations->EndCreate(ticket, SUCCEEDED(hr), known, value, std::move(snapshot), std::move(program));
     return hr;
 }
 

@@ -363,6 +363,30 @@ int main(int argc, char** argv) {
             t3render::CaptureShaderDrawResult(&device, token, S_OK, -1, true);
             t3render::CapturePresent(&device, S_OK);
         }
+    } else if (scenario == "shader_program_budget") {
+        t3render::CapturePresent(&device, S_OK);
+        t3render::ShaderSnapshot snapshot;
+        snapshot.getter_result = S_OK;
+        snapshot.value = 0xf0000001u;
+        auto& declaration = snapshot.declaration;
+        declaration.status = t3render::ir::ShaderObservationStatus::Candidate;
+        declaration.generation = 9;
+        declaration.words = {0x20000000u, 0xffffffffu};
+        declaration.program_status = t3render::ir::ShaderProgramStatus::Complete;
+        declaration.program_words.assign(1024, 0);
+        declaration.program_words.front() = 0xfffe0101u;
+        declaration.program_words.back() = 0x0000ffffu;
+        auto call = draw; call.shader_snapshot = &snapshot;
+        for (unsigned i=0; i<257; ++i) {
+            const auto token = t3render::CaptureDraw(&device, call);
+            if (!token) return 8;
+            t3render::CaptureShaderDrawResult(&device, token, S_OK, -1, true);
+        }
+        t3render::CapturePresent(&device, S_OK);
+        const auto token = t3render::CaptureDraw(&device, call);
+        if (!token) return 8;
+        t3render::CaptureShaderDrawResult(&device, token, S_OK, -1, true);
+        t3render::CapturePresent(&device, S_OK);
     } else if (scenario == "shader_reason") {
         t3render::CapturePresent(&device, S_OK);
         t3render::ShaderSnapshot snapshot;
@@ -387,7 +411,7 @@ int main(int argc, char** argv) {
             t3render::CaptureShaderDrawResult(&device, token, S_OK, -1, i!=2);
         }
         t3render::CapturePresent(&device, S_OK);
-    } else if (scenario == "shader") {
+    } else if (scenario == "shader" || scenario == "shader_program") {
         if (t3render::CaptureWantsDraw(&device)) return 8;
         t3render::CapturePresent(&device, S_OK);
         if (!t3render::CaptureWantsDraw(&device) || t3render::CaptureWantsDraw(&unrelated)) return 8;
@@ -397,6 +421,8 @@ int main(int argc, char** argv) {
         snapshot.declaration.status = t3render::ir::ShaderObservationStatus::Candidate;
         snapshot.declaration.generation = 7;
         snapshot.declaration.words = {0x20000000u, 0xffffffffu};
+        snapshot.declaration.program_status = t3render::ir::ShaderProgramStatus::Complete;
+        snapshot.declaration.program_words = {0xfffe0101u, 1u, 0xc00f0000u, 0x90e40000u, 0x0000ffffu};
         auto candidate = draw;
         candidate.shader_snapshot = &snapshot;
         for (unsigned i=0; i<4; ++i) {
@@ -407,7 +433,7 @@ int main(int argc, char** argv) {
             const auto token = t3render::CaptureDraw(&device, candidate);
             if (!token) return 8;
             t3render::CaptureShaderDrawResult(&device, token, i==1 ? E_FAIL : S_OK,
-                                              i==2 ? 0 : -1, i!=2);
+                                              scenario == "shader" && i==2 ? 0 : -1, i!=2);
         }
         if (device.vertex_shader_getters != 0) return 8;
         t3render::CapturePresent(&device, S_OK);

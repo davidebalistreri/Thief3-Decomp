@@ -44,6 +44,7 @@ static std::vector<std::string> events;
 static bool enabled = false, writable = true, reject_swap = false, recursive = false;
 static bool buffers_requested = false;
 static bool declarations_requested = false, history_requested = false, invalid_history_option = false;
+static bool vertex_programs_requested = false;
 static bool declaration_testing = false, wants_draw = true;
 static bool declaration_reset_fails = false, declaration_set_fails = false, declaration_delete_fails = false;
 static bool declaration_create_fails = false, declaration_output_unreadable = false;
@@ -201,7 +202,9 @@ extern "C" DWORD GetEnvironmentVariableW(const wchar_t* name, wchar_t* value, DW
  const bool buffers = !std::wcscmp(name,L"T3RENDER_CAPTURE_BUFFERS");
  const bool declarations = !std::wcscmp(name,L"T3RENDER_CAPTURE_DECLARATIONS");
  const bool history = !std::wcscmp(name,L"T3RENDER_CAPTURE_DECLARATION_HISTORY");
- if ((!buffers || !buffers_requested) && (!declarations || !declarations_requested) && (!history || !history_requested)) return 0;
+ const bool programs = !std::wcscmp(name,L"T3RENDER_CAPTURE_VERTEX_PROGRAMS");
+ if ((!buffers || !buffers_requested) && (!declarations || !declarations_requested) && (!history || !history_requested) &&
+     (!programs || !vertex_programs_requested)) return 0;
  if (size < 2) return 2;
  value[0]=((buffers && invalid_buffer_option) || (history && invalid_history_option)) ? L'0' : L'1'; value[1]=0; return 1;
 }
@@ -503,7 +506,9 @@ static int DeclarationHistoryBoundaryTest(const std::string& mode) {
 static int DeclarationBoundaryTest(const std::string& mode) {
  using t3render::ir::ShaderObservationStatus;
  events.reserve(1024);
- enabled=true; declaration_testing=true; declarations_requested=mode!="decl-opt-out";
+ enabled=true; declaration_testing=true; declarations_requested=mode!="decl-opt-out" && mode!="decl-program-without-decl";
+ vertex_programs_requested=mode=="decl-program-in" || mode=="decl-program-null" ||
+  mode=="decl-program-unsupported" || mode=="decl-program-without-decl";
  buffers_requested=mode=="decl-combined" || mode=="decl-cross-combined-draw";
  capture_device_reentry=mode=="decl-create-callback";
  factory={&factory_vt,1}; devices[0]={&device_vt,1}; devices[1]={&device_vt,1};
@@ -569,9 +574,13 @@ static int DeclarationBoundaryTest(const std::string& mode) {
  declaration_create_fails=mode=="decl-create-fail";
  declaration_output_unreadable=mode=="decl-bad-output";
  const DWORD* input=mode=="decl-incomplete" ? nullptr : words;
+ const DWORD program[]={0xfffe0101u,1u,0xc00f0000u,0x90e40000u,0x0000ffffu};
+ const DWORD unsupported_program[]={0xfffe0200u};
+ const DWORD* function=mode=="decl-program-null" ? nullptr : mode=="decl-program-unsupported" ? unsupported_program :
+  mode.find("decl-program-")==0 ? program : nullptr;
  DWORD* output=mode=="decl-null-output" ? nullptr : &handle;
  SetLastError(101);
- auto hr=d->lpVtbl->CreateVertexShader(d,input,nullptr,output,0);
+ auto hr=d->lpVtbl->CreateVertexShader(d,input,function,output,0);
  assert(hr==(declaration_create_fails ? -71 : S_OK) && shader_input_error==101 && GetLastError()==951);
  unreadable_address=nullptr;
  if (declaration_create_fails) handle=shader_handle;
@@ -627,7 +636,7 @@ static int DeclarationBoundaryTest(const std::string& mode) {
  }
  if (mode=="decl-combined") assert(observed_buffer_observer && observed_buffer_result && observed_buffer_stable);
  else assert(!observed_buffer_observer && !observed_buffer_result);
- if (mode=="decl-opt-out" || mode=="decl-inactive" || mode=="decl-combined") {
+ if (mode=="decl-opt-out" || mode=="decl-inactive" || mode=="decl-combined" || mode=="decl-program-without-decl") {
   assert(!observed_shader_present && !observed_shader_result && declaration_getter_count==0);
  } else {
   assert(observed_shader_present && observed_shader_result && observed_shader_buffer_stable==-1);
@@ -638,10 +647,20 @@ static int DeclarationBoundaryTest(const std::string& mode) {
   assert(observed_shader_stable == (!writer_mutation && mode!="decl-get-set" && mode!="decl-get-draw" && mode!="decl-get-recursive" && mode!="decl-draw-set" && mode!="decl-draw-create" && mode!="decl-draw-delete" &&
                                     mode!="decl-get-fail" && mode!="decl-draw-fail" &&
                                     mode!="decl-null-output" && mode!="decl-bad-output" && mode!="decl-alias" && mode!="decl-stateblock"));
-  if (writer_mutation || mode=="decl-in" || mode=="decl-reuse" || mode=="decl-draw-set" || mode=="decl-draw-create" ||
+  if (writer_mutation || mode.find("decl-program-")==0 || mode=="decl-in" || mode=="decl-reuse" || mode=="decl-draw-set" || mode=="decl-draw-create" ||
       mode=="decl-draw-delete" || mode=="decl-draw-fail") {
    assert(observed_shader.declaration.status==ShaderObservationStatus::Candidate);
    assert(observed_shader.declaration.words==std::vector<std::uint32_t>(std::begin(words),std::end(words)));
+   if (mode.find("decl-program-")==0) {
+    using t3render::ir::ShaderProgramStatus;
+    const auto expected=mode=="decl-program-in" ? ShaderProgramStatus::Complete :
+     mode=="decl-program-null" ? ShaderProgramStatus::NullAddress :
+     mode=="decl-program-unsupported" ? ShaderProgramStatus::UnsupportedVersion : ShaderProgramStatus::NotRequested;
+    assert(observed_shader.declaration.program_status==expected);
+    if (expected==ShaderProgramStatus::Complete)
+     assert(observed_shader.declaration.program_words==std::vector<std::uint32_t>(std::begin(program),std::end(program)));
+    else assert(observed_shader.declaration.program_words.empty());
+   }
   } else if (mode=="decl-incomplete" || mode=="decl-collision" || mode=="decl-reset") {
    assert(observed_shader.declaration.status==ShaderObservationStatus::Unavailable &&
           observed_shader.declaration.has_scan_status && observed_shader.declaration.words.empty());

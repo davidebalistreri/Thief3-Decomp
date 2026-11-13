@@ -29,6 +29,7 @@ class ProxyTest(unittest.TestCase):
                             str(root / "src" / "proxy.cpp"), str(root / "src" / "buffer_proxy.cpp"),
                             str(root / "ir" / "buffer_shadow.cpp"), str(root / "ir" / "buffer_registry.cpp"),
                             str(root / "ir" / "vertex_declaration.cpp"), str(root / "ir" / "vertex_declaration_registry.cpp"),
+                            str(root / "ir" / "shader_program.cpp"),
                             str(root / "tests" / "proxy_mock.cpp"), str(obj), "-o", str(cls.binary)],
                            check=True, timeout=60)
         except Exception:
@@ -62,6 +63,11 @@ class ProxyTest(unittest.TestCase):
                      "hist-failed-reset", "hist-failed-rebind", "hist-no-rebind", "hist-other-rebind",
                      "hist-delete-fail", "hist-collision", "hist-stateblock", "hist-alias", "hist-overlap"):
             with self.subTest(mode=mode): self.run_mode(mode, timeout=10)
+
+    def test_vertex_program_observation_requires_both_opt_ins(self):
+        for mode in ("decl-program-in", "decl-program-off", "decl-program-null",
+                     "decl-program-unsupported", "decl-program-without-decl"):
+            with self.subTest(mode=mode): self.run_mode(mode)
 
     def test_forwarding_and_lifecycle(self):
         self.run_mode()

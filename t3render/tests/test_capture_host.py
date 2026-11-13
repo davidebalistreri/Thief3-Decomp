@@ -178,6 +178,35 @@ class CaptureHostTests(unittest.TestCase):
         self.assertEqual(draws[3]["vertex_declaration"], {
             "status": "unknown", "generation": None, "words": None})
 
+    def test_vertex_program_requires_both_opt_ins_and_a_stable_result(self):
+        self.run_capture("shader_program", frame="1", extra={"T3RENDER_CAPTURE_VERTEX_PROGRAMS": "1"})
+        self.assertTrue(all("vertex_program" not in e for e in self.records() if e["event"] == "draw"))
+        self.path.unlink()
+        self.run_capture("shader_program", frame="1", extra={"T3RENDER_CAPTURE_VERTEX_PROGRAMS": "1",
+                                                       "T3RENDER_CAPTURE_DECLARATIONS": "1"})
+        records = self.records()
+        self.assertEqual(records[0]["vertex_program_capture"], {"requested": True,
+                         "words_per_observation": 1024, "words_per_frame": 262144})
+        draws = [item for item in records if item["event"] == "draw"]
+        self.assertEqual(draws[0]["vertex_program"], {"status": "candidate", "version": "vs_1_1",
+                         "generation": 7, "words": [0xfffe0101, 1, 0xc00f0000, 0x90e40000, 0xffff]})
+        self.assertNotIn("vertex_program", draws[3])
+        converted = subprocess.run([sys.executable, "-B", str(ROOT / "tools" / "trace_to_ir.py"), str(self.path)],
+                                   text=True, capture_output=True)
+        self.assertEqual(converted.returncode, 0, converted.stderr)
+        commands = json.loads(converted.stdout)["frames"][0]["commands"]
+        self.assertEqual(commands[0]["vertex_program_observed"]["status"], "candidate")
+        self.assertTrue(all("vertex_program_observed" not in command for command in commands[1:]))
+
+    def test_vertex_program_budget_resets_between_frames(self):
+        self.run_capture("shader_program_budget", frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1",
+            "T3RENDER_CAPTURE_VERTEX_PROGRAMS": "1", "T3RENDER_CAPTURE_FRAMES": "2"})
+        draws = [e for e in self.records() if e["event"] == "draw"]
+        self.assertEqual(len(draws), 258)
+        self.assertTrue(all("vertex_program" in draw for draw in draws[:256]))
+        self.assertNotIn("vertex_program", draws[256])
+        self.assertIn("vertex_program", draws[257])
+
     def test_frame_window_defaults_to_one_and_preserves_legacy_events(self):
         self.run_capture("window", frame="1")
         records = self.records()

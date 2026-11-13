@@ -31,6 +31,7 @@ class StateBlockExperimentalProxyTests(unittest.TestCase):
                             str(root / "src/proxy.cpp"), str(root / "src/buffer_proxy.cpp"),
                             str(root / "ir/buffer_shadow.cpp"), str(root / "ir/buffer_registry.cpp"),
                             str(root / "ir/vertex_declaration.cpp"), str(root / "ir/vertex_declaration_registry.cpp"),
+                            str(root / "ir/shader_program.cpp"),
                             str(root / "tests/proxy_mock.cpp"), str(layout), "-o", str(cls.binary)],
                            check=True, timeout=60)
         except Exception:

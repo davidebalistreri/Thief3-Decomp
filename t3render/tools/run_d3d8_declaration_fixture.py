@@ -14,6 +14,7 @@ import trace_summary
 
 HEADER = b"P6\n256 256\n255\n"
 WORDS = [0x20000000, 0x40020000, 0x40040005, 0xffffffff]
+PROGRAM_WORDS = [0xfffe0101, 1, 0xc00f0000, 0x90e40000, 1, 0xd00f0000, 0x90e40005, 0xffff]
 EXPECTED_CALLS = ["GetAdapterDisplayMode", "CreateDevice", "SetWorld", "SetView", "SetProjection", "Lighting",
                   "Cull", "Depth", "Texture", "ColorOp", "ColorArg", "Stage1", "PixelShader", "Clear",
                   "BeginScene", "Create1", "Set1", "Get1", "Draw1", "Restore1", "Delete1",
@@ -56,7 +57,7 @@ def inspect_image(path):
     return image
 
 
-def inspect_trace(path, handles, enabled):
+def inspect_trace(path, handles, enabled, program_capture=False, mode="program"):
     trace_summary.summarize(path)
     records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     expected_events = ["header", "frame_begin", "clear", "clear_result", "draw", "draw_result",
@@ -68,6 +69,12 @@ def inspect_trace(path, handles, enabled):
     capability = header.get("declaration_capture")
     if not isinstance(capability, dict) or capability.get("requested") is not enabled:
         raise RunError("declaration opt-in header does not match the run")
+    program_capability = header.get("vertex_program_capture")
+    if program_capture:
+        if program_capability != {"requested": True, "words_per_observation": 1024, "words_per_frame": 262144}:
+            raise RunError("vertex-program opt-in header does not match the run")
+    elif program_capability is not None:
+        raise RunError("unexpected vertex-program capability")
     if (clear_result.get("hr") != 0 or end.get("present_hr") != 0 or end.get("draws") != 2 or
             end.get("had_reset") is not False or end.get("concurrent_operations") is not False):
         raise RunError("capture did not complete a clean two-draw frame")
@@ -85,9 +92,16 @@ def inspect_trace(path, handles, enabled):
                 raise RunError("declaration observation was not paired and stable")
         elif "vertex_declaration" in draw or "shader_stable" in result:
             raise RunError("opt-out unexpectedly produced declaration observations")
+        expected_program = {"status": "candidate", "version": "vs_1_1", "generation": generation,
+                            "words": PROGRAM_WORDS}
+        if enabled and program_capture and mode == "program":
+            if draw.get("vertex_program") != expected_program:
+                raise RunError("vertex program did not match the fixture input")
+        elif "vertex_program" in draw:
+            raise RunError("unexpected vertex-program observation")
 
 
-def execute(engine, bottle, fixture, proxy, output, timeout, mode):
+def execute(engine, bottle, fixture, proxy, output, timeout, mode, program_capture=False):
     engine, bottle, fixture, proxy, output = map(valid_path, (engine, bottle, fixture, proxy, output))
     wine, server, frameworks = engine / "engine/bin/wine", engine / "engine/bin/wineserver", engine / "frameworks"
     if not all(p.is_file() and os.access(p, os.X_OK) for p in (wine, server)) or not frameworks.is_dir():
@@ -114,6 +128,7 @@ def execute(engine, bottle, fixture, proxy, output, timeout, mode):
                 "DYLD_FALLBACK_LIBRARY_PATH": f"{frameworks}:{frameworks}/GStreamer.framework/Versions/1.0/lib",
                 "DYLD_FALLBACK_FRAMEWORK_PATH": str(frameworks), "WINEDEBUG": "-all,+loaddll"})
     manifest = {"schema": 1, "test": "synthetic_d3d8_vertex_declaration", "mode": mode, "status": "FAIL",
+                "vertex_program_capture": program_capture,
                 "fixture_sha256": sha256(fixture), "proxy_sha256": sha256(proxy), "runs": {},
                 "limitations": ["Synthetic x86 D3D8 fixture; no TDS process, assets or game frame.",
                                 "Two UP draws, one declaration layout, no buffer wrappers or state blocks.",
@@ -136,13 +151,15 @@ def execute(engine, bottle, fixture, proxy, output, timeout, mode):
                                   "T3RENDER_CAPTURE_FRAME": "0", "T3RENDER_CAPTURE_PATH": windows_path(trace)})
                 if stage == "proxy_on":
                     stage_env["T3RENDER_CAPTURE_DECLARATIONS"] = "1"
+                    if program_capture:
+                        stage_env["T3RENDER_CAPTURE_VERTEX_PROGRAMS"] = "1"
             log, ppm = output / f"{stage}.log", output / f"{stage}.ppm"
             run_stage(stage, [wine, exe, "--output", windows_path(ppm), "--mode", mode], directory, stage_env, log, timeout)
             current_parity, handles = inspect_log(log)
             images.append(inspect_image(ppm))
             parity.append(current_parity)
             if stage != "baseline":
-                inspect_trace(trace, handles, stage == "proxy_on")
+                inspect_trace(trace, handles, stage == "proxy_on", program_capture and stage == "proxy_on", mode)
             manifest["runs"][stage] = {"log_sha256": sha256(log), "ppm_sha256": sha256(ppm),
                                        "trace_sha256": sha256(trace) if stage != "baseline" else None}
         stage = "compare"
@@ -167,10 +184,12 @@ def main(argv=None):
     for option in ("engine", "bottle", "fixture", "proxy", "output-dir"):
         parser.add_argument("--" + option, required=True)
     parser.add_argument("--mode", choices=("program", "declaration-only"), default="program")
+    parser.add_argument("--vertex-programs", action="store_true", help="observe the fixture's VS 1.1 program")
     parser.add_argument("--timeout", type=float, default=45)
     args = parser.parse_args(argv)
     try:
-        result = execute(args.engine, args.bottle, args.fixture, args.proxy, args.output_dir, args.timeout, args.mode)
+        result = execute(args.engine, args.bottle, args.fixture, args.proxy, args.output_dir, args.timeout, args.mode,
+                         args.vertex_programs)
     except (RunError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

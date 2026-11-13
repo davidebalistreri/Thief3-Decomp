@@ -37,6 +37,7 @@
     "pre_reset_program_hypotheses": 94,
     "distinct_pre_reset_program_word_sequences": 2,
     "program_hypotheses_by_word_count": {"73": 58, "85": 36},
+    "program_hypothesis_constant_sources": {"73": [0, 1, 2, 3, 4, 20, 27], "85": [0, 1, 2, 3, 4, 19, 20, 27]},
     "post_reset_program_candidates": 0,
     "successful_reset_hresult_in_hypotheses": 0,
     "trace_sha256": "5a0735de29b1c910f47180a3aac5ce40d1ee5a5136d0f755523580887aa0e391",
@@ -45,6 +46,7 @@
   },
   "limitations": [
     "Pre-reset data is an application-memory hypothesis matched by numeric handle, successful Reset and observed rebind; it is not proof of post-reset GPU input or shader identity.",
+    "The listed constant registers are decoded from the two hypotheses only; their values and semantics were not captured.",
     "Missing program hypotheses do not establish whether other shaders use unsupported versions, exceeded limits or were otherwise unavailable.",
     "No VB/IB bytes, texture bytes, shader constants or pixel programs were captured.",
     "No matched screenshot, real-room DX12 replay, native Windows test or gameplay/stealth parity claim.",

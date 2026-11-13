@@ -2,13 +2,14 @@
 
 This is a standalone synthetic experiment, not part of the game proxy.
 **Do not install it in TDS.** It combines the existing buffer facade with
-wrappers for 2D textures, cube textures, volume textures and their levels, and
-surfaces. These resource wrappers
+wrappers for 2D textures, cube textures, volume textures and their levels,
+surfaces, and additional swapchains. These resource wrappers
 route `GetDevice` to the facade after verifying the native parent's canonical
 identity, preserve known `IUnknown`/resource/texture identities, and map
 `GetContainer` only to a known resource or device facade. Surface-level and
 cube-face getters adopt the returned surface; volume-level getters adopt the
-returned volume. Unknown interfaces, unknown
+returned volume. Swapchain backbuffer getters adopt the returned surface.
+Unknown interfaces, unknown
 containers and unrecognized wrapper inputs fail closed.
 
 The experimental device facade unwraps known resources for texture binding,
@@ -21,9 +22,9 @@ return `E_NOINTERFACE`, and failures can differ from native COM behavior.
 Keeping resources until facade teardown can change memory usage and reset
 behavior. An explicit resource limit can also cause allocation failure.
 
-The boundary remains incomplete: swapchains and other native resources can
-still expose native interfaces. Reset,
-state-block coverage, private-data semantics, native Windows, runtime
+The boundary remains incomplete: only selected paths are exercised and unknown
+interfaces are rejected, not transparently forwarded. Reset, state-block
+coverage, private-data semantics, native Windows, runtime
 concurrency and T3SDK coexistence need more work. The raw device accessor in
 the fixture is only for verifying buffer shadow bytes; it is not exposed to an
 application or used to submit wrapped inputs. None of this establishes safe
@@ -32,7 +33,7 @@ gameplay or a complete TDS capture.
 ## Highball observation (2026-11-13)
 
 The hidden x86 fixture compared separate native and facade runs on Highball
-CrossOver 26.3 r30. It checked 81 recorded HRESULT/state observations and
+CrossOver 26.3 r30. The latest run checked 84 recorded HRESULT/state observations and
 identical RGB PPMs for six synthetic triangles. Two sample texture pixels came
 from a 2D texture uploaded with `UpdateTexture` and a cube map. It also checked
 texture/cube/surface parent and container round trips, buffer bindings through
@@ -41,15 +42,22 @@ state-block restore, surface copying, target identity, rejection of unknown
 inputs, and final facade cleanup. A later run also checked volume texture and
 level identity, parent/container queries, binding and state-block restore,
 plus bytes written through the texture and read through its volume level.
+It also exercised an additional swapchain, its backbuffer and `Present`, and
+bindings through the device obtained from that backbuffer. On this runtime,
+both native and facade returned `E_NOINTERFACE` for swapchain `QueryInterface`
+to the device and backbuffer `GetContainer` for the swapchain; backbuffer
+`GetContainer` for the device succeeded in both runs. Supported swapchain
+container identity is covered by the host fake, not by that runtime result.
 VB/IB `WRITEONLY` shadows matched expected
 bytes during the selected draw window. Alpha, other resource types and the
 complete game are not tested. Steam remained open; TDS was not run.
 
-The [volume manifest](../benchmarks/d3d8/2026-11-13-volume-facade/result.json)
-records the later run's hashes and limitations. Full local logs and PPMs are
-under `build/t3render-captures/2026-11-13-volume-facade-final/`. The earlier
+The [swapchain manifest](../benchmarks/d3d8/2026-11-13-swapchain-facade/result.json)
+records the latest hashes and limitations. Full local logs and PPMs are under
+`build/t3render-captures/2026-11-13-swapchain-facade-final/`. The earlier
+[volume manifest](../benchmarks/d3d8/2026-11-13-volume-facade/result.json) and
 [resource manifest](../benchmarks/d3d8/2026-11-13-resource-facade/result.json)
-records the run before volume support was added.
+record previous versions of the experiment.
 
 With an existing i686 MinGW build and Highball engine, from `t3sdk`:
 

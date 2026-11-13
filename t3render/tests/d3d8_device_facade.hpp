@@ -153,6 +153,18 @@ public:
         return native_->ShowCursor(bShow);
     }
     HRESULT STDMETHODCALLTYPE CreateAdditionalSwapChain(D3DPRESENT_PARAMETERS * pPresentationParameters, IDirect3DSwapChain8 ** pSwapChain) override {
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (resources_) {
+            const HRESULT hr = native_->CreateAdditionalSwapChain(pPresentationParameters, pSwapChain);
+            const DWORD error = GetLastError();
+            if (SUCCEEDED(hr) && pSwapChain && *pSwapChain) {
+                *pSwapChain = resources_->AdoptSwapChain(*pSwapChain);
+                SetLastError(error);
+                if (!*pSwapChain) return E_FAIL;
+            }
+            return hr;
+        }
+#endif
         return native_->CreateAdditionalSwapChain(pPresentationParameters, pSwapChain);
     }
     HRESULT STDMETHODCALLTYPE Reset(D3DPRESENT_PARAMETERS * pPresentationParameters) override {

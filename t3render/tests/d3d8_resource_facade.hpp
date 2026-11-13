@@ -49,12 +49,13 @@ inline void* Identity(IUnknown* value) {
     return result;
 }
 
-enum class Kind { Surface, Texture, Cube, VolumeTexture, Volume };
+enum class Kind { Surface, Texture, Cube, VolumeTexture, Volume, SwapChain };
 
 inline bool Supported(Kind kind, REFIID iid) {
     if (IsEqualIID(iid, IID_IUnknown)) return true;
     if (kind == Kind::Surface) return IsEqualIID(iid, IID_IDirect3DSurface8);
     if (kind == Kind::Volume) return IsEqualIID(iid, IID_IDirect3DVolume8);
+    if (kind == Kind::SwapChain) return IsEqualIID(iid, IID_IDirect3DSwapChain8);
     if (IsEqualIID(iid, IID_IDirect3DResource8) || IsEqualIID(iid, IID_IDirect3DBaseTexture8)) return true;
     if (kind == Kind::Texture) return IsEqualIID(iid, IID_IDirect3DTexture8);
     if (kind == Kind::Cube) return IsEqualIID(iid, IID_IDirect3DCubeTexture8);
@@ -94,9 +95,9 @@ template<class Interface>
 Interface* Adopt(const std::shared_ptr<State>& state, Interface* native, Kind kind) noexcept;
 
 template<class Interface>
-class Common : public Interface, public Entry {
+class CommonIdentity : public Interface, public Entry {
 public:
-    Common(std::shared_ptr<State> state, Interface* native, Kind kind_, void* identity_) noexcept
+    CommonIdentity(std::shared_ptr<State> state, Interface* native, Kind kind_, void* identity_) noexcept
         : state_(std::move(state)), real_(native) {
         kind = kind_; identity = identity_; exposed = static_cast<Interface*>(this);
     }
@@ -155,11 +156,23 @@ public:
         if (parent) parent->Release();
         return count - 1;
     }
+    void DiscardUnpublished() noexcept { delete static_cast<Wrapper<Interface>*>(this); }
+protected:
+    std::shared_ptr<State> state_;
+    Interface* const real_;
+private:
+    std::atomic<ULONG> refs_{1};
+};
+
+template<class Interface>
+class Common : public CommonIdentity<Interface> {
+public:
+    using CommonIdentity<Interface>::CommonIdentity;
     HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice8** output) override {
         LastError error;
         IDirect3DDevice8* actual = nullptr;
         error.restore();
-        const HRESULT hr = real_->GetDevice(output ? &actual : nullptr);
+        const HRESULT hr = this->real_->GetDevice(output ? &actual : nullptr);
         error.capture();
         if (FAILED(hr)) return hr;
         if (output) *output = nullptr;
@@ -167,22 +180,16 @@ public:
         void* owner_id = nullptr;
         if (actual) {
             actual_id = Identity(actual);
-            owner_id = Identity(state_->owner);
+            owner_id = Identity(this->state_->owner);
             actual->Release();
         }
-        if (!output || !actual_id || actual_id != owner_id || !state_->facade->AddRef()) return E_FAIL;
-        *output = state_->facade;
+        if (!output || !actual_id || actual_id != owner_id || !this->state_->facade->AddRef()) return E_FAIL;
+        *output = this->state_->facade;
         return hr;
     }
     HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, const void*, DWORD, DWORD) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, void*, DWORD*) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE FreePrivateData(REFGUID) override { return E_NOTIMPL; }
-    void DiscardUnpublished() noexcept { delete static_cast<Wrapper<Interface>*>(this); }
-protected:
-    std::shared_ptr<State> state_;
-    Interface* const real_;
-private:
-    std::atomic<ULONG> refs_{1};
 };
 
 template<class Interface>
@@ -326,6 +333,27 @@ public:
     HRESULT STDMETHODCALLTYPE AddDirtyBox(const D3DBOX* box) override { return real_->AddDirtyBox(box); }
 };
 
+template<>
+class Wrapper<IDirect3DSwapChain8> final : public CommonIdentity<IDirect3DSwapChain8> {
+public:
+    using CommonIdentity::CommonIdentity;
+    IDirect3DSurface8* NativeSurface() noexcept override { return nullptr; }
+    IDirect3DBaseTexture8* NativeTexture() noexcept override { return nullptr; }
+    HRESULT STDMETHODCALLTYPE Present(const RECT* source, const RECT* destination, HWND window,
+                                      const RGNDATA* dirty) override {
+        return real_->Present(source, destination, window, dirty);
+    }
+    HRESULT STDMETHODCALLTYPE GetBackBuffer(UINT index, D3DBACKBUFFER_TYPE type, IDirect3DSurface8** output) override {
+        LastError error; error.restore();
+        const HRESULT hr = real_->GetBackBuffer(index, type, output); error.capture();
+        if (SUCCEEDED(hr) && output && *output) {
+            *output = Adopt(state_, *output, Kind::Surface);
+            if (!*output) return E_FAIL;
+        }
+        return hr;
+    }
+};
+
 template<class Interface>
 Interface* Adopt(const std::shared_ptr<State>& state, Interface* native, Kind kind) noexcept {
     if (!native) return nullptr;
@@ -450,6 +478,9 @@ public:
     IDirect3DCubeTexture8* AdoptCube(IDirect3DCubeTexture8* native) noexcept { return Adopt(state_, native, Kind::Cube); }
     IDirect3DVolumeTexture8* AdoptVolumeTexture(IDirect3DVolumeTexture8* native) noexcept {
         return Adopt(state_, native, Kind::VolumeTexture);
+    }
+    IDirect3DSwapChain8* AdoptSwapChain(IDirect3DSwapChain8* native) noexcept {
+        return Adopt(state_, native, Kind::SwapChain);
     }
 
     // Adopts the native getter's +1. Unknown base texture types fail closed.

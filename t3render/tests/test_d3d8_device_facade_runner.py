@@ -17,7 +17,10 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
     if resource_facade:
         lines.extend(("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                       "resource_facade_volume_roundtrips=PASS",
-                      "resource_facade_surface_copy_and_target=PASS"))
+                      "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
+                      "resource_facade_swapchain_container_hr=0x80004002",
+                      "resource_facade_swapchain_device_hr=0x80004002",
+                      "resource_facade_swapchain_container_device_hr=0x00000000"))
     if mode == "facade":
         names = (() if resource_facade else ("surface", "texture") if buffer_facade else
                  ("surface", "texture", "vertex_buffer", "index_buffer"))
@@ -67,6 +70,7 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
         self.assertEqual(baseline, self.inspect(wrapped, resource_facade=True))
         for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                        "resource_facade_volume_roundtrips=PASS",
+                       "resource_facade_swapchain_roundtrips=PASS",
                        "resource_facade_surface_copy_and_target=PASS", "resource_facade_rejects_unknown_inputs=PASS",
                        "resource_facade_2d_cube_surface_roundtrips=PASS", "resource_facade_cube_binding=PASS",
                        "resource_facade_device_unwraps_buffers=PASS", "resource_facade_final_close=PASS"):
@@ -75,6 +79,21 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
                 with self.subTest(marker=marker, changed=changed[-1]):
                     with self.assertRaises(probe.RunError):
                         self.inspect(changed, resource_facade=True)
+
+    def test_swapchain_container_hresult_is_required_and_compared(self):
+        baseline = fixture_log("baseline", resource_facade=True)
+        wrapped = fixture_log("facade", resource_facade=True)
+        for name in ("container", "device", "container_device"):
+            prefix = f"resource_facade_swapchain_{name}_hr="
+            marker = prefix + ("0x00000000" if name == "container_device" else "0x80004002")
+            for changed in ([line for line in wrapped if line != marker], wrapped + [marker],
+                            [line.replace(marker, prefix + "bad") for line in wrapped]):
+                with self.assertRaises(probe.RunError):
+                    self.inspect(changed, resource_facade=True)
+            baseline_values = self.inspect(baseline, "baseline", resource_facade=True)
+            other = "0x80004002" if name == "container_device" else "0x00000000"
+            alternate = [line.replace(marker, prefix + other) for line in wrapped]
+            self.assertNotEqual(baseline_values, self.inspect(alternate, resource_facade=True))
 
     def test_buffer_facade_requires_parent_and_writeonly_evidence(self):
         baseline = self.inspect(fixture_log("baseline"), "baseline", True)

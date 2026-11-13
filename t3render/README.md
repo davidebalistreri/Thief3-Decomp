@@ -315,8 +315,8 @@ The [buffer/device facade experiment](tests/README_buffer_facade.md) closes
 `GetDevice` on wrapped VB/IB in isolation, but other resource aliases still
 escape and the experiment is deliberately not enabled in the game proxy.
 The [resource facade experiment](tests/README_resource_facade.md) additionally
-tests 2D, cube and volume textures and their levels, while other resource paths
-remain open and native gameplay compatibility is unproven.
+tests 2D, cube and volume textures, their levels, and an additional swapchain;
+other paths and native gameplay compatibility remain unproven.
 
 ```sh
 python3 t3render/tools/trace_summary.py /path/to/capture.jsonl

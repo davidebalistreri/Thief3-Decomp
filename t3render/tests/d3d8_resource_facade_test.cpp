@@ -212,6 +212,29 @@ struct VolumeTexture final : IDirect3DVolumeTexture8 {
     HRESULT UnlockBox(UINT) override { return S_OK; }
     HRESULT AddDirtyBox(const D3DBOX*) override { return S_OK; }
 };
+struct SwapChain final : IDirect3DSwapChain8 {
+    std::atomic<ULONG> refs{1};
+    std::atomic<bool> destroyed{false};
+    Surface* back = nullptr;
+    HRESULT QueryInterface(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        if (!Supported(Kind::SwapChain, iid)) return E_NOINTERFACE;
+        AddRef(); *out = static_cast<IDirect3DSwapChain8*>(this); SetLastError(91); return S_OK;
+    }
+    ULONG AddRef() override { assert(refs && !destroyed); return ++refs; }
+    ULONG Release() override {
+        const ULONG old = refs.fetch_sub(1); assert(old);
+        if (old == 1) { destroyed = true; if (back) back->Release(); }
+        SetLastError(92); return old - 1;
+    }
+    HRESULT Present(const RECT*, const RECT*, HWND, const RGNDATA*) override { SetLastError(93); return S_OK; }
+    HRESULT GetBackBuffer(UINT, D3DBACKBUFFER_TYPE, IDirect3DSurface8** out) override {
+        if (!out) return E_POINTER;
+        *out = back; if (!back) return E_FAIL;
+        back->AddRef(); SetLastError(94); return S_OK;
+    }
+};
 
 void CheckIdentity(IUnknown* item, REFIID iid, void* expected) {
     void* output = nullptr;
@@ -234,13 +257,16 @@ void ResourceGraph() {
     cube.device = &native; cube.surface = &face; face.device = &native; face.container = &cube;
     VolumeTexture volume_texture; Volume volume;
     volume_texture.device = &native; volume_texture.volume = &volume; volume.device = &native; volume.container = &volume_texture;
+    SwapChain swap; Surface swap_back;
+    swap.back = &swap_back; swap_back.device = &native; swap_back.container = &swap;
     Surface back; back.device = &native; back.container = &native;
     auto router = Router::Create(&native, &facade);
     auto* wrapped = router->AdoptTexture(&texture);
     auto* wrapped_cube = router->AdoptCube(&cube);
     auto* wrapped_volume = router->AdoptVolumeTexture(&volume_texture);
+    auto* wrapped_swap = router->AdoptSwapChain(&swap);
     auto* wrapped_back = router->AdoptSurface(&back);
-    assert(wrapped && wrapped_cube && wrapped_volume && wrapped_back && facade.refs == 5);
+    assert(wrapped && wrapped_cube && wrapped_volume && wrapped_swap && wrapped_back && facade.refs == 6);
     texture.AddRef();
     auto* from_base = router->AdoptBase(&texture);
     assert(from_base == wrapped && texture.refs == 1);
@@ -268,6 +294,7 @@ void ResourceGraph() {
     CheckIdentity(wrapped, IID_IDirect3DBaseTexture8, wrapped);
     CheckIdentity(wrapped_cube, IID_IDirect3DCubeTexture8, wrapped_cube);
     CheckIdentity(wrapped_volume, IID_IDirect3DVolumeTexture8, wrapped_volume);
+    CheckIdentity(wrapped_swap, IID_IDirect3DSwapChain8, wrapped_swap);
     CheckIdentity(wrapped_back, IID_IDirect3DSurface8, wrapped_back);
     void* extra = reinterpret_cast<void*>(1);
     assert(wrapped->QueryInterface(kExtra, &extra) == E_NOINTERFACE && !extra);
@@ -279,13 +306,17 @@ void ResourceGraph() {
     SetLastError(81);
     assert(wrapped->GetDevice(&parent) == S_OK && parent == &facade && GetLastError() == 73);
     parent->Release();
-    IDirect3DSurface8 *first = nullptr, *again = nullptr, *cube_face = nullptr;
+    IDirect3DSurface8 *first = nullptr, *again = nullptr, *cube_face = nullptr, *swapped = nullptr, *swapped_again = nullptr;
     IDirect3DVolume8 *volume_level = nullptr, *volume_again = nullptr;
     assert(wrapped->GetSurfaceLevel(0, &first) == S_OK && first && GetLastError() == 74);
     assert(wrapped->GetSurfaceLevel(0, &again) == S_OK && again == first);
     assert(wrapped_cube->GetCubeMapSurface(D3DCUBEMAP_FACE_POSITIVE_X, 0, &cube_face) == S_OK && cube_face);
     assert(wrapped_volume->GetVolumeLevel(0, &volume_level) == S_OK && volume_level);
     assert(wrapped_volume->GetVolumeLevel(0, &volume_again) == S_OK && volume_again == volume_level);
+    assert(wrapped_swap->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, &swapped) == S_OK && swapped);
+    assert(wrapped_swap->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, &swapped_again) == S_OK && swapped_again == swapped);
+    SetLastError(84);
+    assert(wrapped_swap->Present(nullptr, nullptr, nullptr, nullptr) == S_OK && GetLastError() == 93);
     CheckParent(first, IID_IDirect3DTexture8, wrapped);
     CheckParent(first, IID_IDirect3DResource8, wrapped);
     CheckParent(first, IID_IDirect3DBaseTexture8, wrapped);
@@ -294,7 +325,16 @@ void ResourceGraph() {
     CheckParent(cube_face, IID_IUnknown, wrapped_cube);
     CheckParent(volume_level, IID_IDirect3DVolumeTexture8, wrapped_volume);
     CheckParent(volume_level, IID_IUnknown, wrapped_volume);
+    CheckParent(swapped, IID_IDirect3DSwapChain8, wrapped_swap);
+    CheckParent(swapped, IID_IUnknown, wrapped_swap);
+    IDirect3DDevice8* swap_device = nullptr;
+    assert(swapped->GetDevice(&swap_device) == S_OK && swap_device == &facade);
+    swap_device->Release();
+    void* unsupported = reinterpret_cast<void*>(1);
+    assert(wrapped_swap->QueryInterface(IID_IDirect3DDevice8, &unsupported) == E_NOINTERFACE && !unsupported);
+    assert(swapped->GetContainer(IID_IDirect3DDevice8, &unsupported) == E_NOINTERFACE && !unsupported);
     assert(!router->UnwrapTexture(reinterpret_cast<IDirect3DBaseTexture8*>(volume_level)).wrapped());
+    assert(!router->UnwrapTexture(reinterpret_cast<IDirect3DBaseTexture8*>(wrapped_swap)).wrapped());
     CheckParent(wrapped_back, IID_IDirect3DDevice8, &facade);
     CheckParent(wrapped_back, IID_IUnknown, &facade);
     assert(again->Release() == 1 && first->Release() == 0 && cube_face->Release() == 0 &&
@@ -302,6 +342,9 @@ void ResourceGraph() {
     // A volume level may reacquire its dormant parent identity.
     CheckParent(volume_level, IID_IUnknown, wrapped_volume);
     assert(volume_level->Release() == 0);
+    assert(swapped_again->Release() == 1 && wrapped_swap->Release() == 0);
+    CheckParent(swapped, IID_IUnknown, wrapped_swap);
+    assert(swapped->Release() == 0);
     // Surface and texture wrappers can both be reacquired after reaching zero.
     assert(wrapped->Release() == 0);
     texture.AddRef();
@@ -312,8 +355,8 @@ void ResourceGraph() {
     first->Release(); recovered->Release();
     assert(wrapped_cube->Release() == 0 && wrapped_back->Release() == 0 && facade.refs == 1);
     assert(router->Close());
-    assert(texture.destroyed && cube.destroyed && volume_texture.destroyed && volume.destroyed &&
-           level.destroyed && face.destroyed && back.destroyed);
+    assert(texture.destroyed && cube.destroyed && volume_texture.destroyed && volume.destroyed && swap.destroyed &&
+           level.destroyed && face.destroyed && back.destroyed && swap_back.destroyed);
     assert(native.Release() == 0 && facade.Release() == 0);
 }
 
@@ -424,6 +467,7 @@ int main() {
     static_assert(!std::is_abstract_v<Wrapper<IDirect3DCubeTexture8>>);
     static_assert(!std::is_abstract_v<Wrapper<IDirect3DVolume8>>);
     static_assert(!std::is_abstract_v<Wrapper<IDirect3DVolumeTexture8>>);
+    static_assert(!std::is_abstract_v<Wrapper<IDirect3DSwapChain8>>);
     ResourceGraph();
     FailClosedAndLifetime();
     ConcurrentReacquisition();

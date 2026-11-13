@@ -7,6 +7,7 @@ inline constexpr IID IID_IDirect3DTexture8{8};
 inline constexpr IID IID_IDirect3DCubeTexture8{9};
 inline constexpr IID IID_IDirect3DVolumeTexture8{10};
 inline constexpr IID IID_IDirect3DVolume8{11};
+inline constexpr IID IID_IDirect3DSwapChain8{12};
 
 struct D3DSURFACE_DESC { UINT Width, Height; };
 struct D3DLOCKED_RECT { int Pitch; void* pBits; };
@@ -14,6 +15,7 @@ struct D3DVOLUME_DESC { UINT Width, Height, Depth; };
 struct D3DLOCKED_BOX { int RowPitch, SlicePitch; void* pBits; };
 struct D3DBOX { UINT Left, Top, Right, Bottom, Front, Back; };
 enum D3DCUBEMAP_FACES { D3DCUBEMAP_FACE_POSITIVE_X = 0, D3DCUBEMAP_FACE_NEGATIVE_X = 1 };
+enum D3DBACKBUFFER_TYPE { D3DBACKBUFFER_TYPE_MONO = 0 };
 inline constexpr D3DRESOURCETYPE D3DRTYPE_TEXTURE = static_cast<D3DRESOURCETYPE>(3);
 inline constexpr D3DRESOURCETYPE D3DRTYPE_CUBETEXTURE = static_cast<D3DRESOURCETYPE>(5);
 inline constexpr D3DRESOURCETYPE D3DRTYPE_VOLUMETEXTURE = static_cast<D3DRESOURCETYPE>(4);
@@ -38,6 +40,10 @@ struct IDirect3DSurface8 : IUnknown {
     virtual HRESULT STDMETHODCALLTYPE GetDesc(D3DSURFACE_DESC*) = 0;
     virtual HRESULT STDMETHODCALLTYPE LockRect(D3DLOCKED_RECT*, const RECT*, DWORD) = 0;
     virtual HRESULT STDMETHODCALLTYPE UnlockRect() = 0;
+};
+struct IDirect3DSwapChain8 : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE Present(const RECT*, const RECT*, HWND, const RGNDATA*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetBackBuffer(UINT, D3DBACKBUFFER_TYPE, IDirect3DSurface8**) = 0;
 };
 struct IDirect3DBaseTexture8 : IDirect3DResource8 {
     virtual DWORD STDMETHODCALLTYPE SetLOD(DWORD) = 0;

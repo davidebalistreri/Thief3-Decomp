@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_swapchain_facade",
+  "date": "2026-11-13",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "steam_running": true,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "c9b34ac9769c8b6756885c5b7dba85656bd97378d435e305509c1c93c8ed5c21",
+    "t3render/src/buffer_proxy.cpp": "d63b68421dfa3ce3fbe81d08daa2c917500d8dc6ad1d12817d959afb43a68204",
+    "t3render/src/buffer_proxy.hpp": "5d019cb0f83158e3eb739e731864862d95cbfb2fc9aa55b127612110b3c873da",
+    "t3render/ir/buffer_registry.cpp": "9e24931212d54e0ee58b7be7313a85510e9fc867f3a3b20297eff3e1f6138b84",
+    "t3render/ir/buffer_shadow.cpp": "9cfed54a6fcf4718e80fd1d8301a8afa5f84852ac70b428938b06d1e64cddafe",
+    "t3render/tests/d3d8_resource_facade.hpp": "6742b24b67910eb9718bcf3f755b457ade8c9c76fd65637b2028b2511243aec4",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "21bdd67358220b05c452d35c84f105ef2a599328490784fe9eeba56d71ce9b54",
+    "t3render/tests/d3d8_device_facade.hpp": "8abf92251e6c2ad5164717e5164caeed2f1cfbfa4d329049bf317ea902be1501",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "6b67e7227835894ad2f5b620f05f3defbbbcf4430df16c2965e53c5ee2593e13",
+    "t3render/tools/run_d3d8_device_facade.py": "d84307edb31ccfcea61ca8fd97ca7afc1b76d0392405644aa90c7ba9596981a2"
+  },
+  "fixture_sha256": "f00becc9743cc9b14c8523a573ef182dcefb96ec43bb19dbed3dfdb3ce9580ee",
+  "result": {
+    "parity_records_each": 84,
+    "rgb_ppm_sha256_both": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+    "baseline_log_sha256": "fd68a26b6b212946718bac07d4d7521d0b2d312235801e08a5a774a90da446ff",
+    "facade_log_sha256": "d1d99248c9f02a9213bb9e1f66d71b41d72516cb633f90d01a429a2d51080f77",
+    "swapchain_device_qi_hr": "0x80004002",
+    "swapchain_backbuffer_swapchain_container_hr": "0x80004002",
+    "swapchain_backbuffer_device_container_hr": "0x00000000",
+    "swapchain_backbuffer_parent_and_bindings": true,
+    "swapchain_present_succeeded": true,
+    "volume_roundtrips_and_stateblock": true,
+    "textured_2d_and_cube_pixels_match": true,
+    "surface_copy_bytes_match": true,
+    "final_facade_close": true
+  },
+  "limitations": [
+    "Fixture only: not integrated with the proxy or TDS.",
+    "Only selected 2D, cube, volume, surface, swapchain and buffer paths were exercised; other interfaces remain unverified.",
+    "Private data and unknown resource interfaces fail closed; this differs from native behavior.",
+    "Reset, runtime concurrency and comprehensive state-block behavior were not exercised.",
+    "Six synthetic triangles and selected fixed-function states only; no gameplay parity.",
+    "PPM comparison covers RGB only, not alpha.",
+    "A successful swapchain GetContainer path was tested only with the host fake."
+  ]
+}

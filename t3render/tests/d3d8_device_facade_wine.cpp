@@ -320,6 +320,56 @@ bool CheckVolumeResource(IDirect3DDevice8* device, IDirect3DVertexBuffer8* vb, I
     return true;
 }
 
+bool CheckSwapChain(IDirect3DDevice8* device, D3DPRESENT_PARAMETERS parameters,
+                    IDirect3DVertexBuffer8* vb, IDirect3DIndexBuffer8* ib) {
+    parameters.EnableAutoDepthStencil = FALSE;
+    ComPtr<IDirect3DSwapChain8> swap;
+    if (FAILED(device->CreateAdditionalSwapChain(&parameters, swap.put())) || !swap.value) return false;
+    ComPtr<IUnknown> unknown;
+    ComPtr<IDirect3DSwapChain8> roundtrip;
+    if (!Identity(swap.value, unknown) ||
+        FAILED(unknown->QueryInterface(IID_IDirect3DSwapChain8, reinterpret_cast<void**>(roundtrip.put()))) ||
+        !roundtrip.value || !EqualIdentity(roundtrip.value, swap.value)) return false;
+    ComPtr<IDirect3DDevice8> queried_device;
+    const HRESULT device_hr = swap->QueryInterface(IID_IDirect3DDevice8,
+                                                    reinterpret_cast<void**>(queried_device.put()));
+    if ((SUCCEEDED(device_hr) && (!queried_device.value || !EqualIdentity(queried_device.value, device))) ||
+        (FAILED(device_hr) && queried_device.value)) return false;
+    ComPtr<IDirect3DSurface8> back, back_again;
+    ComPtr<IDirect3DDevice8> parent;
+    if (FAILED(swap->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, back.put())) || !back.value ||
+        FAILED(swap->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, back_again.put())) || back_again.value != back.value ||
+        FAILED(back->GetDevice(parent.put())) || !parent.value || !EqualIdentity(parent.value, device) ||
+        FAILED(parent->SetStreamSource(0, vb, sizeof(Vertex))) || FAILED(parent->SetIndices(ib, 0))) return false;
+    ComPtr<IDirect3DVertexBuffer8> read_vb;
+    ComPtr<IDirect3DIndexBuffer8> read_ib;
+    UINT stride = 0, base = 0;
+    if (FAILED(parent->GetStreamSource(0, read_vb.put(), &stride)) || read_vb.value != vb || stride != sizeof(Vertex) ||
+        FAILED(parent->GetIndices(read_ib.put(), &base)) || read_ib.value != ib || base != 0) return false;
+    ComPtr<IUnknown> container;
+    if (FAILED(back->GetContainer(IID_IUnknown, reinterpret_cast<void**>(container.put()))) || !container.value ||
+        (!EqualIdentity(container.value, device) && !EqualIdentity(container.value, swap.value))) return false;
+    ComPtr<IUnknown> swap_container;
+    const HRESULT container_hr = back->GetContainer(IID_IDirect3DSwapChain8,
+                                                     reinterpret_cast<void**>(swap_container.put()));
+    if ((SUCCEEDED(container_hr) && (!swap_container.value || !EqualIdentity(swap_container.value, swap.value))) ||
+        (FAILED(container_hr) && swap_container.value)) return false;
+    ComPtr<IDirect3DDevice8> device_container;
+    const HRESULT container_device_hr = back->GetContainer(IID_IDirect3DDevice8,
+                                                            reinterpret_cast<void**>(device_container.put()));
+    if ((SUCCEEDED(container_device_hr) && (!device_container.value || !EqualIdentity(device_container.value, device))) ||
+        (FAILED(container_device_hr) && device_container.value)) return false;
+    if (FAILED(swap->Present(nullptr, nullptr, nullptr, nullptr))) return false;
+    std::printf("resource_facade_swapchain_container_hr=0x%08lx\n",
+                static_cast<unsigned long>(static_cast<std::uint32_t>(container_hr)));
+    std::printf("resource_facade_swapchain_device_hr=0x%08lx\n",
+                static_cast<unsigned long>(static_cast<std::uint32_t>(device_hr)));
+    std::printf("resource_facade_swapchain_container_device_hr=0x%08lx\n",
+                static_cast<unsigned long>(static_cast<std::uint32_t>(container_device_hr)));
+    std::printf("resource_facade_swapchain_roundtrips=PASS\n");
+    return true;
+}
+
 bool CheckSurfaceTransfers(IDirect3DDevice8* device, bool facade_mode) {
     ComPtr<IDirect3DSurface8> target, back, source, destination;
     if (FAILED(device->GetRenderTarget(target.put())) || !target.value ||
@@ -638,6 +688,7 @@ bool Render(HWND window, bool facade_mode, const wchar_t* output) {
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
     if (!CheckVolumeResource(draw_device, vb.value, ib.value)) return false;
+    if (!CheckSwapChain(draw_device, pp, vb.value, ib.value)) return false;
 #endif
     if (facade_mode && !CheckRetainedBuffer(draw_device, native_owner, buffers)) return false;
 #endif

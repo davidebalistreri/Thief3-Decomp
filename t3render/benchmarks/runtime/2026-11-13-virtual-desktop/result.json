@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "test": "highball_virtual_desktop_switch",
+  "date": "2026-11-13",
+  "status": "PARTIAL",
+  "environment": {"os": "macOS arm64", "runtime": "Highball CrossOver 26.3 r30 / Wine", "bottle": "Games"},
+  "scenario": {"desktop": "T3RenderTest", "dimensions": [800, 600], "application": "Wine Notepad"},
+  "result": {"user_report": "Switching to another macOS app and back worked."},
+  "limitations": [
+    "No TDS, Direct3D, Steam launch inside the desktop, focus-loss or background Present test.",
+    "This is a user-reported switch observation, not evidence that the game or capture will work in the same way.",
+    "No persistent virtual desktop preference was set by this command; Wine may update its own bottle state."
+  ]
+}

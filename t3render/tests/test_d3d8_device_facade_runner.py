@@ -9,28 +9,41 @@ sys.path.insert(0, str(ROOT / "tools"))
 import run_d3d8_device_facade as probe
 
 
-def fixture_log(mode, buffer_facade=False):
+def fixture_log(mode, buffer_facade=False, resource_facade=False):
     lines = [f"parity {key}={'0x00000000' if value is None else '22' if value == 'format' else value}"
              for key, value in probe.expected_parity()]
     suffix = "PASS" if mode == "facade" else "not_applicable"
     lines.append(f"factory_and_device_QI_roundtrip=PASS factory_initial_release={suffix}")
+    if resource_facade:
+        lines.extend(("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
+                      "resource_facade_surface_copy_and_target=PASS"))
     if mode == "facade":
-        names = ("surface", "texture") if buffer_facade else ("surface", "texture", "vertex_buffer", "index_buffer")
+        names = (() if resource_facade else ("surface", "texture") if buffer_facade else
+                 ("surface", "texture", "vertex_buffer", "index_buffer"))
         lines.extend(f"resource_{name}_native_device_alias=PASS hr=0x00000000" for name in names)
-        if buffer_facade:
-            lines.extend(("resource_get_device_boundary=native_nonbuffer; wrapped_buffers=facade",
-                          "buffer_parent_facade_roundtrip=PASS", "buffer_shadow_writeonly_and_draw_window=PASS",
+        if buffer_facade or resource_facade:
+            lines.extend(("buffer_parent_facade_roundtrip=PASS", "buffer_shadow_writeonly_and_draw_window=PASS",
                           "buffer_stateblock_retained_identity=PASS", "buffer_facade_final_close=PASS"))
+            if resource_facade:
+                lines.extend(("resource_get_device_boundary=facade_for_tested_types; other_types=unverified",
+                              "resource_facade_2d_cube_surface_roundtrips=PASS", "resource_facade_cube_binding=PASS",
+                              "resource_facade_device_unwraps_buffers=PASS", "resource_facade_rejects_unknown_inputs=PASS",
+                              "resource_facade_final_close=PASS"))
+            else:
+                lines.append("resource_get_device_boundary=native_nonbuffer; wrapped_buffers=facade")
         else:
             lines.append("resource_get_device_boundary=native_device; wrapped_buffers=not_tested")
     lines.append(f"device_facade_fixture=PASS mode={mode}")
     return lines
 
 
-def fixture_ppm():
+def fixture_ppm(resource_facade=False):
     data = bytearray(probe.HEADER + bytes(256 * 256 * 3))
-    for x, y, value in ((30, 30, (228, 59, 59)), (225, 30, (53, 198, 101)),
-                        (30, 225, (67, 138, 240)), (225, 160, (230, 201, 72))):
+    samples = [(30, 30, (228, 59, 59)), (225, 30, (53, 198, 101)),
+               (30, 225, (67, 138, 240)), (225, 160, (230, 201, 72))]
+    if resource_facade:
+        samples.extend(((230, 210, (18, 52, 208)), (160, 210, (36, 228, 206))))
+    for x, y, value in samples:
         index = len(probe.HEADER) + (y * 256 + x) * 3
         data[index:index + 3] = bytes(value)
     return bytes(data)
@@ -43,9 +56,23 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
         self.log = Path(self.directory.name) / "fixture.log"
         self.ppm = Path(self.directory.name) / "fixture.ppm"
 
-    def inspect(self, lines, mode="facade", buffer_facade=False):
+    def inspect(self, lines, mode="facade", buffer_facade=False, resource_facade=False):
         self.log.write_text("noise from Wine\n" + "\n".join(lines) + "\n", encoding="utf-8")
-        return probe.inspect_log(self.log, mode, buffer_facade)
+        return probe.inspect_log(self.log, mode, buffer_facade, resource_facade)
+
+    def test_resource_facade_requires_each_roundtrip_and_final_close(self):
+        baseline = self.inspect(fixture_log("baseline", resource_facade=True), "baseline", resource_facade=True)
+        wrapped = fixture_log("facade", resource_facade=True)
+        self.assertEqual(baseline, self.inspect(wrapped, resource_facade=True))
+        for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
+                       "resource_facade_surface_copy_and_target=PASS", "resource_facade_rejects_unknown_inputs=PASS",
+                       "resource_facade_2d_cube_surface_roundtrips=PASS", "resource_facade_cube_binding=PASS",
+                       "resource_facade_device_unwraps_buffers=PASS", "resource_facade_final_close=PASS"):
+            for changed in ([line for line in wrapped if line != marker], wrapped + [marker],
+                            wrapped + [marker.replace("=PASS", "=FAIL")]):
+                with self.subTest(marker=marker, changed=changed[-1]):
+                    with self.assertRaises(probe.RunError):
+                        self.inspect(changed, resource_facade=True)
 
     def test_buffer_facade_requires_parent_and_writeonly_evidence(self):
         baseline = self.inspect(fixture_log("baseline"), "baseline", True)
@@ -93,6 +120,18 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
             self.ppm.write_bytes(data)
             with self.assertRaises(probe.RunError):
                 probe.read_ppm(self.ppm)
+
+    def test_resource_ppm_requires_2d_and_cube_texture_samples(self):
+        valid = fixture_ppm(True)
+        self.ppm.write_bytes(valid)
+        self.assertEqual(probe.read_ppm(self.ppm, True), valid)
+        for x, y in ((230, 210), (160, 210)):
+            modified = bytearray(valid)
+            offset = len(probe.HEADER) + (y * 256 + x) * 3
+            modified[offset:offset + 3] = b"\0\0\0"
+            self.ppm.write_bytes(modified)
+            with self.assertRaises(probe.RunError):
+                probe.read_ppm(self.ppm, True)
 
 
 if __name__ == "__main__":

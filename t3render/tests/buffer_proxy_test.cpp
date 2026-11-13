@@ -772,6 +772,24 @@ void ClosedFacadeFailuresDoNotExposeNative() {
         assert(proxy->CloseFacadeDevice(&native_device, &facade) && raw.destroyed);
         assert(facade.Release() == 0 && native_device.Release() == 0);
     }
+    for (unsigned iteration = 0; iteration < 200; ++iteration) {
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        FakeDevice native_device, facade;
+        Vertex raw;
+        auto* buffer = proxy->AdoptVertexForFacade(&native_device, &facade, &raw, 8, true);
+        std::atomic<bool> go{false};
+        bool closed = false;
+        std::thread closer([&] {
+            while (!go.load()) std::this_thread::yield();
+            closed = proxy->CloseFacadeDevice(&native_device, &facade);
+        });
+        go = true;
+        buffer->Release();
+        closer.join();
+        if (!closed) assert(proxy->CloseFacadeDevice(&native_device, &facade));
+        assert(raw.destroyed && facade.refs == 1);
+        assert(facade.Release() == 0 && native_device.Release() == 0);
+    }
 }
 void UnlockFailureAndCopyFailures() {
     Reader reader;

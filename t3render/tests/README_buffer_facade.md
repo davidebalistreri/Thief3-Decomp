@@ -5,6 +5,8 @@ device facade. **It is not integrated into the proxy and must not be used in
 TDS.** Texture, surface and other native resources still expose the native
 device through `GetDevice`/`GetContainer`; sending a wrapped buffer through
 such an alias may crash the runtime.
+The separate [resource facade fixture](README_resource_facade.md) experiments
+with 2D textures, cube textures and surfaces; it still has open native paths.
 
 The experimental `Adopt*ForFacade` path retains the facade for each buffer.
 Buffer `GetDevice` calls the native method, verifies the returned device's

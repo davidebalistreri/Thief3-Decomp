@@ -294,6 +294,7 @@ private:
         LastError error;
         bool final = false;
         ULONG result = 0;
+        IDirect3DDevice8* parent = nullptr;
         {
             std::lock_guard<std::mutex> lock(state_->mutex);
             ULONG count = refs_.load(std::memory_order_relaxed);
@@ -305,9 +306,10 @@ private:
             result = count - 1;
             final = count == 1;
             if (final && counted_lock) state_->PoisonLocked(owner);
+            if (final) parent = facade;
         }
         // Parent final Release may call CloseFacadeDevice and delete this.
-        if (final) { IDirect3DDevice8* parent = facade; parent->Release(); }
+        if (parent) parent->Release();
         return result;
     }
     HRESULT GetFacadeDevice(IDirect3DDevice8** output) {

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Compare isolated native and device-facade D3D8 fixture processes in Highball.
 
-The original fixture uses native resources. The optional buffer facade fixture
-wraps VB/IB but other resources still expose the native device. Neither
-fixture launches TDS or passes wrapped buffers to an escaped native device.
+The optional fixtures add buffer and selected texture/surface facades. Other
+resource paths remain incomplete. No fixture launches TDS or passes wrappers
+to an escaped native device.
 """
 import argparse
 import json
@@ -56,7 +56,7 @@ def successful_hresult(value):
     return isinstance(value, str) and HEX_HRESULT.fullmatch(value) is not None and int(value, 16) < 0x80000000
 
 
-def inspect_log(path, mode, buffer_facade=False):
+def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
     lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
     actual = []
     for line in lines:
@@ -83,8 +83,15 @@ def inspect_log(path, mode, buffer_facade=False):
             [line for line in lines if line.startswith("device_facade_fixture=")] !=
             [f"device_facade_fixture=PASS mode={mode}"]):
         raise RunError("COM identity or fixture completion marker is missing")
+    if resource_facade:
+        for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
+                       "resource_facade_surface_copy_and_target=PASS"):
+            prefix = marker.partition("=")[0] + "="
+            if [line for line in lines if line.startswith(prefix)] != [marker]:
+                raise RunError(f"resource facade marker missing or conflicting: {marker}")
     if mode == "facade":
-        names = ("surface", "texture") if buffer_facade else ("surface", "texture", "vertex_buffer", "index_buffer")
+        names = (() if resource_facade else ("surface", "texture") if buffer_facade else
+                 ("surface", "texture", "vertex_buffer", "index_buffer"))
         for name in names:
             prefix = f"resource_{name}_native_device_alias="
             matching = [line for line in lines if line.startswith(prefix)]
@@ -92,31 +99,42 @@ def inspect_log(path, mode, buffer_facade=False):
             if (len(matching) != 1 or not matching[0].startswith(expected_prefix) or
                     not successful_hresult(matching[0][len(expected_prefix):])):
                 raise RunError(f"native device escape was not verified for {name}")
-        if buffer_facade:
-            for marker in ("resource_get_device_boundary=native_nonbuffer; wrapped_buffers=facade",
-                           "buffer_parent_facade_roundtrip=PASS", "buffer_shadow_writeonly_and_draw_window=PASS",
-                           "buffer_stateblock_retained_identity=PASS", "buffer_facade_final_close=PASS"):
-                if lines.count(marker) != 1:
-                    raise RunError(f"buffer facade marker missing: {marker}")
+        if buffer_facade or resource_facade:
+            markers = ["buffer_parent_facade_roundtrip=PASS", "buffer_shadow_writeonly_and_draw_window=PASS",
+                       "buffer_stateblock_retained_identity=PASS", "buffer_facade_final_close=PASS"]
+            if resource_facade:
+                markers.extend(("resource_get_device_boundary=facade_for_tested_types; other_types=unverified",
+                                "resource_facade_2d_cube_surface_roundtrips=PASS", "resource_facade_cube_binding=PASS",
+                                "resource_facade_device_unwraps_buffers=PASS", "resource_facade_rejects_unknown_inputs=PASS",
+                                "resource_facade_final_close=PASS"))
+            else:
+                markers.append("resource_get_device_boundary=native_nonbuffer; wrapped_buffers=facade")
+            for marker in markers:
+                prefix = marker.partition("=")[0] + "="
+                if [line for line in lines if line.startswith(prefix)] != [marker]:
+                    raise RunError(f"facade marker missing or conflicting: {marker}")
         elif lines.count("resource_get_device_boundary=native_device; wrapped_buffers=not_tested") != 1:
             raise RunError("native resource boundary marker is missing")
     return actual
 
 
-def read_ppm(path):
+def read_ppm(path, resource_facade=False):
     with Path(path).open("rb") as image:
         data = image.read(PPM_SIZE + 1)
     if len(data) != PPM_SIZE or not data.startswith(HEADER):
         raise RunError("fixture PPM does not match the expected dimensions or encoding")
-    for x, y, expected in ((30, 30, (228, 59, 59)), (225, 30, (53, 198, 101)),
-                           (30, 225, (67, 138, 240)), (225, 160, (230, 201, 72))):
+    samples = [(30, 30, (228, 59, 59)), (225, 30, (53, 198, 101)),
+               (30, 225, (67, 138, 240)), (225, 160, (230, 201, 72))]
+    if resource_facade:
+        samples.extend(((230, 210, (18, 52, 208)), (160, 210, (36, 228, 206))))
+    for x, y, expected in samples:
         offset = len(HEADER) + (y * 256 + x) * 3
         if tuple(data[offset:offset + 3]) != expected:
             raise RunError(f"fixture PPM triangle sample differs at {x},{y}")
     return data
 
 
-def execute(engine, bottle, fixture, output, timeout, buffer_facade=False):
+def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resource_facade=False):
     engine, bottle, fixture, output = map(valid_path, (engine, bottle, fixture, output))
     wine, server, frameworks = engine / "engine/bin/wine", engine / "engine/bin/wineserver", engine / "frameworks"
     if not all(path.is_file() and os.access(path, os.X_OK) for path in (wine, server)) or not frameworks.is_dir():
@@ -142,7 +160,9 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False):
                 "DYLD_FALLBACK_LIBRARY_PATH": f"{frameworks}:{frameworks}/GStreamer.framework/Versions/1.0/lib",
                 "DYLD_FALLBACK_FRAMEWORK_PATH": str(frameworks), "WINEDEBUG": "-all",
                 "WINEDLLOVERRIDES": "d3d8=b;nvapi64,nvngx=n,b;winemenubuilder.exe=d"})
-    result = {"schema": 1, "test": "synthetic_d3d8_buffer_facade" if buffer_facade else "synthetic_d3d8_device_facade", "status": "FAIL",
+    test = "synthetic_d3d8_resource_facade" if resource_facade else (
+        "synthetic_d3d8_buffer_facade" if buffer_facade else "synthetic_d3d8_device_facade")
+    result = {"schema": 1, "test": test, "status": "FAIL",
               "engine": str(engine), "bottle": str(bottle), "fixture_sha256": sha256(fixture), "runs": {},
               "limitations": ["Fixture only: not integrated with the proxy or TDS.",
                               "Resources are native and GetDevice exposes the native device, bypassing the facade.",
@@ -154,6 +174,12 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False):
                                  "Private data and unknown VB/IB interfaces fail closed; this differs from native behavior.",
                                  "One retained-vertex state-block path preserves identity but invalidates bytes; reset and runtime concurrency are not exercised.",
                                  "Four synthetic triangles and selected fixed-function states only; no gameplay parity."]
+    if resource_facade:
+        result["limitations"] = ["Fixture only: not integrated with the proxy or TDS.",
+                                 "Only selected 2D, cube, surface and buffer paths were exercised; other resource aliases remain open.",
+                                 "Private data and unknown resource interfaces fail closed; this differs from native behavior.",
+                                 "Reset, runtime concurrency and comprehensive state-block behavior were not exercised.",
+                                 "Six synthetic triangles and selected fixed-function states only; no gameplay parity."]
     stage = "setup"
     try:
         executable = output / fixture.name
@@ -162,8 +188,8 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False):
         for stage in ("baseline", "facade"):
             log, ppm = output / (stage + ".log"), output / (stage + ".ppm")
             run_stage(stage, [wine, executable, "--" + stage, windows_path(ppm)], output, env, log, timeout)
-            observations[stage] = inspect_log(log, stage, buffer_facade)
-            images[stage] = read_ppm(ppm)
+            observations[stage] = inspect_log(log, stage, buffer_facade, resource_facade)
+            images[stage] = read_ppm(ppm, resource_facade)
             result["runs"][stage] = {"log": log.name, "log_sha256": sha256(log), "ppm": ppm.name,
                                      "ppm_sha256": sha256(ppm), "parity_records": len(observations[stage])}
         stage = "compare"
@@ -193,10 +219,13 @@ def main(argv=None):
     parser.add_argument("--fixture", required=True)
     parser.add_argument("--output-dir", required=True, help="new absolute output directory")
     parser.add_argument("--timeout", type=float, default=45)
-    parser.add_argument("--buffer-facade", action="store_true", help="validate the separate buffer facade fixture")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--buffer-facade", action="store_true", help="validate the separate buffer facade fixture")
+    group.add_argument("--resource-facade", action="store_true", help="validate the separate combined resource fixture")
     args = parser.parse_args(argv)
     try:
-        result = execute(args.engine, args.bottle, args.fixture, args.output_dir, args.timeout, args.buffer_facade)
+        result = execute(args.engine, args.bottle, args.fixture, args.output_dir, args.timeout,
+                         args.buffer_facade, args.resource_facade)
     except RunError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

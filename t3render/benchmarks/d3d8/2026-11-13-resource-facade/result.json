@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_resource_facade",
+  "date": "2026-11-13",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "steam_running": true,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "c9b34ac9769c8b6756885c5b7dba85656bd97378d435e305509c1c93c8ed5c21",
+    "t3render/src/buffer_proxy.cpp": "d63b68421dfa3ce3fbe81d08daa2c917500d8dc6ad1d12817d959afb43a68204",
+    "t3render/src/buffer_proxy.hpp": "5d019cb0f83158e3eb739e731864862d95cbfb2fc9aa55b127612110b3c873da",
+    "t3render/ir/buffer_registry.cpp": "9e24931212d54e0ee58b7be7313a85510e9fc867f3a3b20297eff3e1f6138b84",
+    "t3render/ir/buffer_shadow.cpp": "9cfed54a6fcf4718e80fd1d8301a8afa5f84852ac70b428938b06d1e64cddafe",
+    "t3render/tests/d3d8_resource_facade.hpp": "7a1f5a9516de80d20ecfb886b7331311b2bee33a095a5d4e83354cfece958e92",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "21bdd67358220b05c452d35c84f105ef2a599328490784fe9eeba56d71ce9b54",
+    "t3render/tests/d3d8_device_facade.hpp": "29b633a06db189abe470b8c162e16be88102158c4f55a3179e0c9fcf820d3e0b",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "a5b82fef2e8034b2758d730bc46b8957da777b5d86e718e48018e5423d1619c4",
+    "t3render/tools/run_d3d8_device_facade.py": "4de4109588fa1bc243ac4d6f41a528f305a12cb1ffdf68b763eaf4ba92f0a693"
+  },
+  "fixture_sha256": "b4fc8b04d86191c2a39a5c93d34aaed914c3ecaa294d096357cad30526d75b98",
+  "result": {
+    "parity_records_each": 81,
+    "rgb_ppm_sha256_both": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+    "baseline_log_sha256": "595af97a24d89b1db271b557d485589bd3958f14fee4a41b7cae5eb85384f6b9",
+    "facade_log_sha256": "adcd2cc75db01a7439ec837a65a22f5bb78fa9bde3ab46bfd7269733b6a0b542",
+    "two_dimensional_and_cube_sample_pixels_match": true,
+    "texture_update_pixel_verified": true,
+    "surface_copy_bytes_match": true,
+    "resource_device_container_roundtrips": true,
+    "texture_and_cube_stateblock_identity_restored": true,
+    "resource_device_unwraps_vb_ib": true,
+    "unknown_inputs_rejected": true,
+    "final_facade_close": true
+  },
+  "limitations": [
+    "Fixture only: not integrated with the proxy or TDS.",
+    "Only selected 2D, cube, surface and buffer paths were exercised; other resource aliases remain open.",
+    "Private data and unknown resource interfaces fail closed; this differs from native behavior.",
+    "Reset, runtime concurrency and comprehensive state-block behavior were not exercised.",
+    "Six synthetic triangles and selected fixed-function states only; no gameplay parity.",
+    "PPM comparison covers RGB only, not alpha."
+  ]
+}

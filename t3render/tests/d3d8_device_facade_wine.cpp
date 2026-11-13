@@ -63,6 +63,55 @@ template<class Resource> bool CheckEscape(const char* label, Resource* resource,
 
 bool CheckNativeEscape(IDirect3DDevice8* facade, IDirect3D8* native_factory, IDirect3DSurface8* surface,
                        IDirect3DTexture8* texture, IDirect3DVertexBuffer8* vb, IDirect3DIndexBuffer8* ib) {
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+    (void)native_factory;
+    auto parent_is_facade = [facade](auto* resource) {
+        ComPtr<IDirect3DDevice8> parent;
+        ComPtr<IUnknown> unknown;
+        ComPtr<IDirect3DDevice8> roundtrip;
+        return SUCCEEDED(resource->GetDevice(parent.put())) && parent.value == facade &&
+               Identity(parent.value, unknown) &&
+               SUCCEEDED(unknown->QueryInterface(IID_IDirect3DDevice8, reinterpret_cast<void**>(roundtrip.put()))) &&
+               roundtrip.value == facade;
+    };
+    auto container_is = [](IDirect3DSurface8* item, REFIID iid, IUnknown* expected) {
+        ComPtr<IUnknown> container;
+        return SUCCEEDED(item->GetContainer(iid, reinterpret_cast<void**>(container.put()))) &&
+               container.value && EqualIdentity(container.value, expected);
+    };
+    ComPtr<IDirect3DSurface8> level, level_again, face, face_again;
+    ComPtr<IDirect3DCubeTexture8> cube;
+    if (!parent_is_facade(surface) || !parent_is_facade(texture) || !parent_is_facade(vb) || !parent_is_facade(ib) ||
+        !container_is(surface, IID_IUnknown, facade) || !container_is(surface, IID_IDirect3DDevice8, facade) ||
+        FAILED(texture->GetSurfaceLevel(0, level.put())) || !level.value ||
+        FAILED(texture->GetSurfaceLevel(0, level_again.put())) || level_again.value != level.value ||
+        !parent_is_facade(level.value) || !container_is(level.value, IID_IUnknown, texture) ||
+        !container_is(level.value, IID_IDirect3DTexture8, texture) ||
+        FAILED(facade->CreateCubeTexture(16, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, cube.put())) || !cube.value ||
+        !parent_is_facade(cube.value) ||
+        FAILED(cube->GetCubeMapSurface(D3DCUBEMAP_FACE_POSITIVE_X, 0, face.put())) || !face.value ||
+        FAILED(cube->GetCubeMapSurface(D3DCUBEMAP_FACE_POSITIVE_X, 0, face_again.put())) || face_again.value != face.value ||
+        !parent_is_facade(face.value) || !container_is(face.value, IID_IUnknown, cube.value) ||
+        !container_is(face.value, IID_IDirect3DCubeTexture8, cube.value)) return false;
+    ComPtr<IDirect3DBaseTexture8> bound_cube;
+    if (FAILED(facade->SetTexture(0, cube.value)) || FAILED(facade->GetTexture(0, bound_cube.put())) ||
+        !bound_cube.value || !EqualIdentity(bound_cube.value, cube.value) || FAILED(facade->SetTexture(0, nullptr))) return false;
+    // The facade obtained from a resource must unwrap both buffer types.
+    ComPtr<IDirect3DDevice8> parent;
+    ComPtr<IDirect3DVertexBuffer8> read_vb;
+    ComPtr<IDirect3DIndexBuffer8> read_ib;
+    UINT stride = 0, base = 0;
+    if (FAILED(level->GetDevice(parent.put())) || parent.value != facade ||
+        FAILED(parent->SetStreamSource(0, vb, sizeof(Vertex))) || FAILED(parent->SetIndices(ib, 0)) ||
+        FAILED(parent->GetStreamSource(0, read_vb.put(), &stride)) || read_vb.value != vb || stride != sizeof(Vertex) ||
+        FAILED(parent->GetIndices(read_ib.put(), &base)) || read_ib.value != ib || base != 0) return false;
+    std::printf("resource_facade_2d_cube_surface_roundtrips=PASS\n");
+    std::printf("resource_facade_cube_binding=PASS\n");
+    std::printf("resource_facade_device_unwraps_buffers=PASS\n");
+    std::printf("resource_get_device_boundary=facade_for_tested_types; other_types=unverified\n");
+    std::printf("buffer_parent_facade_roundtrip=PASS\n");
+    return true;
+#else
     ComPtr<IDirect3DDevice8> escaped;
     if (FAILED(surface->GetDevice(escaped.put())) || !escaped.value || escaped.value == facade) return false;
     ComPtr<IUnknown> native_identity;
@@ -91,6 +140,7 @@ bool CheckNativeEscape(IDirect3DDevice8* facade, IDirect3D8* native_factory, IDi
     std::printf("resource_get_device_boundary=native_device; wrapped_buffers=not_tested\n");
 #endif
     return true;
+#endif
 }
 
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
@@ -136,6 +186,128 @@ bool CheckRetainedBuffer(IDirect3DDevice8* device, IDirect3DDevice8* native,
                          SUCCEEDED(device->SetStreamSource(0, nullptr, 0));
     if (!same || !cleaned) return false;
     std::printf("buffer_stateblock_retained_identity=PASS\n");
+    return true;
+}
+#endif
+
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+bool DrawTexturedSamples(IDirect3DDevice8* device) {
+    struct Vertex2 { float x, y, z, rhw, u, v; };
+    struct Vertex3 { float x, y, z, rhw, xcoord, ycoord, zcoord; };
+    const Vertex2 texture_vertices[] = {{204, 198, 0.5f, 1, 0.5f, 0.5f},
+                                        {246, 198, 0.5f, 1, 0.5f, 0.5f},
+                                        {246, 240, 0.5f, 1, 0.5f, 0.5f}};
+    const Vertex3 cube_vertices[] = {{150, 200, 0.5f, 1, 1, 0, 0},
+                                     {190, 200, 0.5f, 1, 1, 0, 0},
+                                     {150, 240, 0.5f, 1, 1, 0, 0}};
+    ComPtr<IDirect3DTexture8> texture, upload;
+    ComPtr<IDirect3DCubeTexture8> cube;
+    if (FAILED(device->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, upload.put())) || !upload.value ||
+        FAILED(device->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, texture.put())) || !texture.value ||
+        FAILED(device->CreateCubeTexture(2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, cube.put())) || !cube.value)
+        return false;
+    auto fill = [](const D3DLOCKED_RECT& locked, DWORD color) {
+        if (!locked.pBits || locked.Pitch < 8) return false;
+        for (unsigned y = 0; y < 2; ++y) for (unsigned x = 0; x < 2; ++x)
+            std::memcpy(static_cast<BYTE*>(locked.pBits) + y * locked.Pitch + x * 4, &color, 4);
+        return true;
+    };
+    D3DLOCKED_RECT locked{};
+    if (FAILED(upload->LockRect(0, &locked, nullptr, 0))) return false;
+    const bool texture_filled = fill(locked, 0xff1234d0u);
+    if (FAILED(upload->UnlockRect(0)) || !texture_filled || FAILED(device->UpdateTexture(upload.value, texture.value)))
+        return false;
+    const D3DCUBEMAP_FACES faces[] = {D3DCUBEMAP_FACE_POSITIVE_X, D3DCUBEMAP_FACE_NEGATIVE_X,
+                                     D3DCUBEMAP_FACE_POSITIVE_Y, D3DCUBEMAP_FACE_NEGATIVE_Y,
+                                     D3DCUBEMAP_FACE_POSITIVE_Z, D3DCUBEMAP_FACE_NEGATIVE_Z};
+    for (const auto face : faces) {
+        locked = {};
+        if (FAILED(cube->LockRect(face, 0, &locked, nullptr, 0))) return false;
+        const bool cube_filled = fill(locked, 0xff24e4ceu);
+        if (FAILED(cube->UnlockRect(face, 0)) || !cube_filled) return false;
+    }
+    if (FAILED(device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1)) ||
+        FAILED(device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE)) ||
+        FAILED(device->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0)) ||
+        FAILED(device->SetTextureStageState(0, D3DTSS_MAGFILTER, D3DTEXF_POINT)) ||
+        FAILED(device->SetTextureStageState(0, D3DTSS_MINFILTER, D3DTEXF_POINT)) ||
+        FAILED(device->SetTextureStageState(0, D3DTSS_MIPFILTER, D3DTEXF_NONE)) ||
+        FAILED(device->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE)) ||
+        FAILED(device->SetTexture(0, texture.value)) ||
+        FAILED(device->SetVertexShader(D3DFVF_XYZRHW | D3DFVF_TEX1)) ||
+        FAILED(device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, texture_vertices, sizeof(Vertex2))) ||
+        FAILED(device->SetTexture(0, cube.value)) ||
+        FAILED(device->SetVertexShader(D3DFVF_XYZRHW | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE3(0))) ||
+        FAILED(device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, cube_vertices, sizeof(Vertex3))) ||
+        FAILED(device->SetTexture(0, nullptr))) return false;
+    return true;
+}
+
+bool CheckTextureStateBlock(IDirect3DDevice8* device) {
+    ComPtr<IDirect3DTexture8> texture;
+    ComPtr<IDirect3DCubeTexture8> cube;
+    if (FAILED(device->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, texture.put())) || !texture.value ||
+        FAILED(device->CreateCubeTexture(2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, cube.put())) || !cube.value ||
+        FAILED(device->SetTexture(0, texture.value)) || FAILED(device->SetTexture(1, cube.value))) return false;
+    ComPtr<IUnknown> texture_identity, cube_identity;
+    if (!Identity(texture.value, texture_identity) || !Identity(cube.value, cube_identity)) return false;
+    const auto original_texture = reinterpret_cast<std::uintptr_t>(texture_identity.value);
+    const auto original_cube = reinterpret_cast<std::uintptr_t>(cube_identity.value);
+    texture_identity->Release(); texture_identity.value = nullptr;
+    cube_identity->Release(); cube_identity.value = nullptr;
+    DWORD token = 0;
+    if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &token)) ||
+        FAILED(device->SetTexture(0, nullptr)) || FAILED(device->SetTexture(1, nullptr))) return false;
+    texture->Release(); texture.value = nullptr;
+    cube->Release(); cube.value = nullptr;
+    if (FAILED(device->ApplyStateBlock(token))) return false;
+    ComPtr<IDirect3DBaseTexture8> recovered_texture, recovered_cube;
+    ComPtr<IUnknown> recovered_texture_identity, recovered_cube_identity;
+    if (FAILED(device->GetTexture(0, recovered_texture.put())) || !recovered_texture.value ||
+        FAILED(device->GetTexture(1, recovered_cube.put())) || !recovered_cube.value ||
+        !Identity(recovered_texture.value, recovered_texture_identity) ||
+        !Identity(recovered_cube.value, recovered_cube_identity) ||
+        reinterpret_cast<std::uintptr_t>(recovered_texture_identity.value) != original_texture ||
+        reinterpret_cast<std::uintptr_t>(recovered_cube_identity.value) != original_cube ||
+        FAILED(device->DeleteStateBlock(token)) || FAILED(device->SetTexture(0, nullptr)) ||
+        FAILED(device->SetTexture(1, nullptr))) return false;
+    std::printf("resource_facade_stateblock_texture_identities=PASS\n");
+    return true;
+}
+
+bool CheckSurfaceTransfers(IDirect3DDevice8* device, bool facade_mode) {
+    ComPtr<IDirect3DSurface8> target, back, source, destination;
+    if (FAILED(device->GetRenderTarget(target.put())) || !target.value ||
+        FAILED(device->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, back.put())) || !back.value ||
+        !EqualIdentity(target.value, back.value) || FAILED(device->SetRenderTarget(target.value, nullptr)) ||
+        FAILED(device->CreateImageSurface(2, 2, D3DFMT_A8R8G8B8, source.put())) || !source.value ||
+        FAILED(device->CreateImageSurface(2, 2, D3DFMT_A8R8G8B8, destination.put())) || !destination.value) return false;
+    ComPtr<IDirect3DDevice8> parent;
+    if (FAILED(source->GetDevice(parent.put())) || !parent.value || !EqualIdentity(parent.value, device)) return false;
+    const DWORD colors[4] = {0xff132435u, 0xff465768u, 0xff798a9bu, 0xffacbdceu};
+    D3DLOCKED_RECT locked{};
+    if (FAILED(source->LockRect(&locked, nullptr, 0))) return false;
+    bool valid = locked.pBits && locked.Pitch >= 8;
+    if (valid) for (unsigned y = 0; y < 2; ++y)
+        std::memcpy(static_cast<BYTE*>(locked.pBits) + y * locked.Pitch, colors + y * 2, 8);
+    if (FAILED(source->UnlockRect()) || !valid ||
+        FAILED(device->CopyRects(source.value, nullptr, 0, destination.value, nullptr)) ||
+        FAILED(destination->LockRect(&locked, nullptr, D3DLOCK_READONLY))) return false;
+    valid = locked.pBits && locked.Pitch >= 8;
+    if (valid) for (unsigned y = 0; y < 2; ++y)
+        valid = valid && std::memcmp(static_cast<BYTE*>(locked.pBits) + y * locked.Pitch, colors + y * 2, 8) == 0;
+    if (FAILED(destination->UnlockRect()) || !valid) return false;
+    if (facade_mode) {
+        // The isolated facade must reject unknown pointers without dereferencing
+        // them or forwarding them into the native runtime.
+        SetLastError(1234);
+        if (device->SetTexture(0, reinterpret_cast<IDirect3DBaseTexture8*>(1)) != D3DERR_INVALIDCALL ||
+            GetLastError() != 1234 ||
+            device->CopyRects(nullptr, nullptr, 0, reinterpret_cast<IDirect3DSurface8*>(1), nullptr) != D3DERR_INVALIDCALL ||
+            GetLastError() != 1234) return false;
+        std::printf("resource_facade_rejects_unknown_inputs=PASS\n");
+    }
+    std::printf("resource_facade_surface_copy_and_target=PASS\n");
     return true;
 }
 #endif
@@ -225,29 +397,39 @@ bool ReadBack(IDirect3DSurface8* surface, std::vector<BYTE>& ppm) {
     const char header[] = "P6\n256 256\n255\n";
     ppm.assign(header, header + sizeof(header) - 1);
     ppm.reserve(ppm.size() + kWidth * kHeight * 3);
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+    const UINT sample_x[] = {30, 225, 30, 225, 230, 160};
+    const UINT sample_y[] = {30, 30, 225, 160, 210, 210};
+    const std::uint32_t expected[] = {0xe43b3b, 0x35c665, 0x438af0, 0xe6c948, 0x1234d0, 0x24e4ce};
+#else
     const UINT sample_x[] = {30, 225, 30, 225};
     const UINT sample_y[] = {30, 30, 225, 160};
     const std::uint32_t expected[] = {0xe43b3b, 0x35c665, 0x438af0, 0xe6c948};
-    std::uint32_t samples[4]{};
+#endif
+    constexpr unsigned sample_count = sizeof(sample_x) / sizeof(sample_x[0]);
+    std::uint32_t samples[sample_count]{};
     for (UINT y = 0; y < kHeight; ++y) {
         const auto* row = static_cast<const BYTE*>(lock.pBits) + static_cast<std::ptrdiff_t>(y) * lock.Pitch;
         for (UINT x = 0; x < kWidth; ++x) {
             std::uint32_t pixel = 0;
             std::memcpy(&pixel, row + x * 4, sizeof(pixel));
-            for (unsigned i = 0; i < 4; ++i) if (x == sample_x[i] && y == sample_y[i]) samples[i] = pixel & 0xffffffu;
+            for (unsigned i = 0; i < sample_count; ++i) if (x == sample_x[i] && y == sample_y[i]) samples[i] = pixel & 0xffffffu;
             ppm.push_back(static_cast<BYTE>(pixel >> 16));
             ppm.push_back(static_cast<BYTE>(pixel >> 8));
             ppm.push_back(static_cast<BYTE>(pixel));
         }
     }
     if (!Call("BackBufferUnlock", surface->UnlockRect())) return false;
-    for (unsigned i = 0; i < 4; ++i) {
+    for (unsigned i = 0; i < sample_count; ++i) {
         if (samples[i] != expected[i]) {
             std::fprintf(stderr, "triangle %u: expected 0x%06lx, got 0x%06lx\n", i,
                          static_cast<unsigned long>(expected[i]), static_cast<unsigned long>(samples[i]));
             return false;
         }
     }
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+    std::printf("resource_facade_textured_pixels=PASS\n");
+#endif
     std::printf("parity BackBufferFormat=%lu\n", static_cast<unsigned long>(desc.Format));
     return true;
 }
@@ -351,9 +533,16 @@ bool Render(HWND window, bool facade_mode, const wchar_t* output) {
     IDirect3DDevice8* draw_device = device.value;
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
     ComPtr<IDirect3DDevice8> buffer_device, native_device;
+    IDirect3DDevice8* native_owner = nullptr;
     if (facade_mode) {
-        if (FAILED(vb->GetDevice(buffer_device.put())) || buffer_device.value != device.value ||
-            FAILED(back->GetDevice(native_device.put())) || !native_device.value) return false;
+        if (FAILED(vb->GetDevice(buffer_device.put())) || buffer_device.value != device.value) return false;
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        native_owner = static_cast<t3render::fixture::DeviceFixture*>(device.value)->NativeForFixture();
+#else
+        if (FAILED(back->GetDevice(native_device.put())) || !native_device.value) return false;
+        native_owner = native_device.value;
+#endif
+        if (!native_owner) return false;
         draw_device = buffer_device.value;
     }
 #endif
@@ -372,13 +561,13 @@ bool Render(HWND window, bool facade_mode, const wchar_t* output) {
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
     std::uint64_t window_token = 0;
     if (facade_mode) {
-        auto vertex = buffers->UnwrapVertex(native_device.value, vb.value);
-        auto index = buffers->UnwrapIndex(native_device.value, ib.value);
+        auto vertex = buffers->UnwrapVertex(native_owner, vb.value);
+        auto index = buffers->UnwrapIndex(native_owner, ib.value);
         Vertex vertex_copy[6]{}; WORD index_copy[3]{};
-        window_token = buffers->BeginDraw(native_device.value);
+        window_token = buffers->BeginDraw(native_owner);
         if (!vertex.wrapped() || !index.wrapped() || !window_token ||
-            buffers->ReadVertex(native_device.value, vertex.native(), 0, vertex_copy, sizeof(vertex_copy)) != t3render::ir::RegistryResult::Ok ||
-            buffers->ReadIndex(native_device.value, index.native(), 0, index_copy, sizeof(index_copy)) != t3render::ir::RegistryResult::Ok ||
+            buffers->ReadVertex(native_owner, vertex.native(), 0, vertex_copy, sizeof(vertex_copy)) != t3render::ir::RegistryResult::Ok ||
+            buffers->ReadIndex(native_owner, index.native(), 0, index_copy, sizeof(index_copy)) != t3render::ir::RegistryResult::Ok ||
             std::memcmp(vertex_copy, buffered, sizeof(buffered)) || std::memcmp(index_copy, indices, sizeof(indices))) return false;
     }
 #endif
@@ -389,9 +578,12 @@ bool Render(HWND window, bool facade_mode, const wchar_t* output) {
                                                                        D3DFMT_INDEX16, indexed_up, sizeof(Vertex)));
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
     if (facade_mode) {
-        if (!buffers->EndDraw(native_device.value, window_token)) return false;
+        if (!buffers->EndDraw(native_owner, window_token)) return false;
         std::printf("buffer_shadow_writeonly_and_draw_window=PASS\n");
     }
+#endif
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+    if (drawn && !DrawTexturedSamples(draw_device)) return false;
 #endif
     const bool ended = Call("EndScene", device->EndScene());
     if (!drawn || !ended) return false;
@@ -399,7 +591,10 @@ bool Render(HWND window, bool facade_mode, const wchar_t* output) {
     if (!ReadBack(back.value, pixels) || !Call("Present", device->Present(nullptr, nullptr, nullptr, nullptr)) ||
         !WriteNew(output, pixels)) return false;
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
-    if (facade_mode && !CheckRetainedBuffer(draw_device, native_device.value, buffers)) return false;
+    if (facade_mode && !CheckRetainedBuffer(draw_device, native_owner, buffers)) return false;
+#endif
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+    if (!CheckTextureStateBlock(draw_device) || !CheckSurfaceTransfers(draw_device, facade_mode)) return false;
 #endif
     return true;
 }
@@ -428,6 +623,13 @@ int wmain(int argc, wchar_t** argv) {
              t3render::fixture::buffer_facade_close_failures == 0;
         if (ok) std::printf("buffer_facade_final_close=PASS\n");
     }
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+    if (facade_mode) {
+        ok = ok && t3render::fixture::resource_facade_close_successes == 1 &&
+             t3render::fixture::resource_facade_close_failures == 0;
+        if (ok) std::printf("resource_facade_final_close=PASS\n");
+    }
+#endif
 #endif
     DestroyWindow(window);
     UnregisterClassW(name, instance);

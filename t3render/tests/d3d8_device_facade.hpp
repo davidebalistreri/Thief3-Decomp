@@ -12,12 +12,22 @@
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
 #include "../src/buffer_proxy.hpp"
 #endif
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+#include "d3d8_resource_facade.hpp"
+#ifndef T3RENDER_BUFFER_FACADE_FIXTURE
+#error "The resource experiment requires the isolated buffer facade fixture"
+#endif
+#endif
 
 namespace t3render::fixture {
 
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
 inline std::atomic<unsigned> buffer_facade_close_successes{0};
 inline std::atomic<unsigned> buffer_facade_close_failures{0};
+#endif
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+inline std::atomic<unsigned> resource_facade_close_successes{0};
+inline std::atomic<unsigned> resource_facade_close_failures{0};
 #endif
 
 class FixtureReferenceCount final {
@@ -49,6 +59,11 @@ class DeviceFixtureFactory;
 
 class DeviceFixture final : public IDirect3DDevice8 {
 public:
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+    // Test-only borrowed pointer for checking the buffer shadow registry; it
+    // must never be handed to an application or used with wrapped inputs.
+    IDirect3DDevice8* NativeForFixture() const noexcept { return native_; }
+#endif
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) override {
         if (!output) return E_POINTER;
         *output = nullptr;
@@ -64,6 +79,12 @@ public:
         const DWORD before = GetLastError();
         IDirect3DDevice8* native = native_;
         IDirect3D8* parent = factory_;
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (resources_) {
+            if (resources_->Close()) ++resource_facade_close_successes;
+            else ++resource_facade_close_failures;
+        }
+#endif
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
         if (buffers_) {
             if (buffers_->CloseFacadeDevice(native_, this)) ++buffer_facade_close_successes;
@@ -114,6 +135,15 @@ public:
         return native_->GetCreationParameters(pParameters);
     }
     HRESULT STDMETHODCALLTYPE SetCursorProperties(UINT XHotSpot, UINT YHotSpot, IDirect3DSurface8 * pCursorBitmap) override {
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (resources_) {
+            const DWORD before = GetLastError();
+            auto pin = resources_->UnwrapSurface(pCursorBitmap);
+            if (pCursorBitmap && !pin.wrapped()) { SetLastError(before); return D3DERR_INVALIDCALL; }
+            SetLastError(before);
+            return native_->SetCursorProperties(XHotSpot, YHotSpot, pin.native());
+        }
+#endif
         return native_->SetCursorProperties(XHotSpot, YHotSpot, pCursorBitmap);
     }
     void STDMETHODCALLTYPE SetCursorPosition(UINT XScreenSpace, UINT YScreenSpace,DWORD Flags) override {
@@ -135,6 +165,9 @@ public:
         return native_->Present(src_rect, dst_rect, dst_window_override, dirty_region);
     }
     HRESULT STDMETHODCALLTYPE GetBackBuffer(UINT BackBuffer,D3DBACKBUFFER_TYPE Type,IDirect3DSurface8 ** ppBackBuffer) override {
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (resources_) return WrapSurfaceResult(native_->GetBackBuffer(BackBuffer, Type, ppBackBuffer), ppBackBuffer);
+#endif
         return native_->GetBackBuffer(BackBuffer, Type, ppBackBuffer);
     }
     HRESULT STDMETHODCALLTYPE GetRasterStatus(D3DRASTER_STATUS * pRasterStatus) override {
@@ -147,12 +180,36 @@ public:
         return native_->GetGammaRamp(pRamp);
     }
     HRESULT STDMETHODCALLTYPE CreateTexture(UINT Width,UINT Height,UINT Levels,DWORD Usage,D3DFORMAT Format,D3DPOOL Pool,IDirect3DTexture8 ** ppTexture) override {
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (resources_) {
+            const HRESULT hr = native_->CreateTexture(Width, Height, Levels, Usage, Format, Pool, ppTexture);
+            const DWORD error = GetLastError();
+            if (SUCCEEDED(hr) && ppTexture && *ppTexture) {
+                *ppTexture = resources_->AdoptTexture(*ppTexture);
+                SetLastError(error);
+                if (!*ppTexture) return E_FAIL;
+            }
+            return hr;
+        }
+#endif
         return native_->CreateTexture(Width, Height, Levels, Usage, Format, Pool, ppTexture);
     }
     HRESULT STDMETHODCALLTYPE CreateVolumeTexture(UINT Width,UINT Height,UINT Depth,UINT Levels,DWORD Usage,D3DFORMAT Format,D3DPOOL Pool,IDirect3DVolumeTexture8 ** ppVolumeTexture) override {
         return native_->CreateVolumeTexture(Width, Height, Depth, Levels, Usage, Format, Pool, ppVolumeTexture);
     }
     HRESULT STDMETHODCALLTYPE CreateCubeTexture(UINT EdgeLength,UINT Levels,DWORD Usage,D3DFORMAT Format,D3DPOOL Pool,IDirect3DCubeTexture8 ** ppCubeTexture) override {
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (resources_) {
+            const HRESULT hr = native_->CreateCubeTexture(EdgeLength, Levels, Usage, Format, Pool, ppCubeTexture);
+            const DWORD error = GetLastError();
+            if (SUCCEEDED(hr) && ppCubeTexture && *ppCubeTexture) {
+                *ppCubeTexture = resources_->AdoptCube(*ppCubeTexture);
+                SetLastError(error);
+                if (!*ppCubeTexture) return E_FAIL;
+            }
+            return hr;
+        }
+#endif
         return native_->CreateCubeTexture(EdgeLength, Levels, Usage, Format, Pool, ppCubeTexture);
     }
     HRESULT STDMETHODCALLTYPE CreateVertexBuffer(UINT Length,DWORD Usage,DWORD FVF,D3DPOOL Pool,IDirect3DVertexBuffer8 ** ppVertexBuffer) override {
@@ -186,30 +243,90 @@ public:
         return native_->CreateIndexBuffer(Length, Usage, Format, Pool, ppIndexBuffer);
     }
     HRESULT STDMETHODCALLTYPE CreateRenderTarget(UINT Width,UINT Height,D3DFORMAT Format,D3DMULTISAMPLE_TYPE MultiSample,BOOL Lockable,IDirect3DSurface8 ** ppSurface) override {
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (resources_) return WrapSurfaceResult(native_->CreateRenderTarget(Width, Height, Format, MultiSample, Lockable, ppSurface), ppSurface);
+#endif
         return native_->CreateRenderTarget(Width, Height, Format, MultiSample, Lockable, ppSurface);
     }
     HRESULT STDMETHODCALLTYPE CreateDepthStencilSurface(UINT Width,UINT Height,D3DFORMAT Format,D3DMULTISAMPLE_TYPE MultiSample,IDirect3DSurface8 ** ppSurface) override {
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (resources_) return WrapSurfaceResult(native_->CreateDepthStencilSurface(Width, Height, Format, MultiSample, ppSurface), ppSurface);
+#endif
         return native_->CreateDepthStencilSurface(Width, Height, Format, MultiSample, ppSurface);
     }
     HRESULT STDMETHODCALLTYPE CreateImageSurface(UINT Width,UINT Height,D3DFORMAT Format,IDirect3DSurface8 ** ppSurface) override {
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (resources_) return WrapSurfaceResult(native_->CreateImageSurface(Width, Height, Format, ppSurface), ppSurface);
+#endif
         return native_->CreateImageSurface(Width, Height, Format, ppSurface);
     }
     HRESULT STDMETHODCALLTYPE CopyRects(IDirect3DSurface8 *src_surface, const RECT *src_rects, UINT rect_count, IDirect3DSurface8 *dst_surface, const POINT *dst_points) override {
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (resources_) {
+            const DWORD before = GetLastError();
+            auto source = resources_->UnwrapSurface(src_surface);
+            auto destination = resources_->UnwrapSurface(dst_surface);
+            if ((src_surface && !source.wrapped()) || (dst_surface && !destination.wrapped())) {
+                SetLastError(before); return D3DERR_INVALIDCALL;
+            }
+            SetLastError(before);
+            return native_->CopyRects(source.native(), src_rects, rect_count, destination.native(), dst_points);
+        }
+#endif
         return native_->CopyRects(src_surface, src_rects, rect_count, dst_surface, dst_points);
     }
     HRESULT STDMETHODCALLTYPE UpdateTexture(IDirect3DBaseTexture8 * pSourceTexture,IDirect3DBaseTexture8 * pDestinationTexture) override {
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (resources_) {
+            const DWORD before = GetLastError();
+            auto source = resources_->UnwrapTexture(pSourceTexture);
+            auto destination = resources_->UnwrapTexture(pDestinationTexture);
+            if ((pSourceTexture && !source.wrapped()) || (pDestinationTexture && !destination.wrapped())) {
+                SetLastError(before); return D3DERR_INVALIDCALL;
+            }
+            SetLastError(before);
+            return native_->UpdateTexture(source.native(), destination.native());
+        }
+#endif
         return native_->UpdateTexture(pSourceTexture, pDestinationTexture);
     }
     HRESULT STDMETHODCALLTYPE GetFrontBuffer(IDirect3DSurface8 * pDestSurface) override {
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (resources_) {
+            const DWORD before = GetLastError();
+            auto pin = resources_->UnwrapSurface(pDestSurface);
+            if (pDestSurface && !pin.wrapped()) { SetLastError(before); return D3DERR_INVALIDCALL; }
+            SetLastError(before);
+            return native_->GetFrontBuffer(pin.native());
+        }
+#endif
         return native_->GetFrontBuffer(pDestSurface);
     }
     HRESULT STDMETHODCALLTYPE SetRenderTarget(IDirect3DSurface8 * pRenderTarget,IDirect3DSurface8 * pNewZStencil) override {
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (resources_) {
+            const DWORD before = GetLastError();
+            auto target = resources_->UnwrapSurface(pRenderTarget);
+            auto depth = resources_->UnwrapSurface(pNewZStencil);
+            if ((pRenderTarget && !target.wrapped()) || (pNewZStencil && !depth.wrapped())) {
+                SetLastError(before); return D3DERR_INVALIDCALL;
+            }
+            SetLastError(before);
+            return native_->SetRenderTarget(target.native(), depth.native());
+        }
+#endif
         return native_->SetRenderTarget(pRenderTarget, pNewZStencil);
     }
     HRESULT STDMETHODCALLTYPE GetRenderTarget(IDirect3DSurface8 ** ppRenderTarget) override {
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (resources_) return WrapSurfaceResult(native_->GetRenderTarget(ppRenderTarget), ppRenderTarget);
+#endif
         return native_->GetRenderTarget(ppRenderTarget);
     }
     HRESULT STDMETHODCALLTYPE GetDepthStencilSurface(IDirect3DSurface8 ** ppZStencilSurface) override {
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (resources_) return WrapSurfaceResult(native_->GetDepthStencilSurface(ppZStencilSurface), ppZStencilSurface);
+#endif
         return native_->GetDepthStencilSurface(ppZStencilSurface);
     }
     HRESULT STDMETHODCALLTYPE BeginScene() override {
@@ -309,9 +426,30 @@ public:
         return native_->GetClipStatus(pClipStatus);
     }
     HRESULT STDMETHODCALLTYPE GetTexture(DWORD Stage,IDirect3DBaseTexture8 ** ppTexture) override {
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (resources_) {
+            const HRESULT hr = native_->GetTexture(Stage, ppTexture);
+            const DWORD error = GetLastError();
+            if (SUCCEEDED(hr) && ppTexture && *ppTexture) {
+                *ppTexture = resources_->AdoptBase(*ppTexture);
+                SetLastError(error);
+                if (!*ppTexture) return E_FAIL;
+            }
+            return hr;
+        }
+#endif
         return native_->GetTexture(Stage, ppTexture);
     }
     HRESULT STDMETHODCALLTYPE SetTexture(DWORD Stage,IDirect3DBaseTexture8 * pTexture) override {
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (resources_) {
+            const DWORD before = GetLastError();
+            auto pin = resources_->UnwrapTexture(pTexture);
+            if (pTexture && !pin.wrapped()) { SetLastError(before); return D3DERR_INVALIDCALL; }
+            SetLastError(before);
+            return native_->SetTexture(Stage, pin.native());
+        }
+#endif
         return native_->SetTexture(Stage, pTexture);
     }
     HRESULT STDMETHODCALLTYPE GetTextureStageState(DWORD Stage,D3DTEXTURESTAGESTATETYPE Type,DWORD * pValue) override {
@@ -492,7 +630,12 @@ private:
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
     DeviceFixture(IDirect3DDevice8* native, IDirect3D8* factory,
                   std::shared_ptr<t3render::buffers::BufferProxy> buffers) noexcept
-        : native_(native), factory_(factory), buffers_(std::move(buffers)) { factory_->AddRef(); }
+        : native_(native), factory_(factory), buffers_(std::move(buffers)) {
+        factory_->AddRef();
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        resources_ = t3render::resource_fixture::Router::Create(native_, this);
+#endif
+    }
     void InvalidateBuffers() noexcept {
         if (!buffers_) return;
         const DWORD error = GetLastError();
@@ -504,11 +647,25 @@ private:
         factory_->AddRef();
     }
 #endif
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+    HRESULT WrapSurfaceResult(HRESULT hr, IDirect3DSurface8** output) noexcept {
+        const DWORD error = GetLastError();
+        if (SUCCEEDED(hr) && output && *output) {
+            *output = resources_->AdoptSurface(*output);
+            SetLastError(error);
+            if (!*output) return E_FAIL;
+        }
+        return hr;
+    }
+#endif
     ~DeviceFixture() = default;
     IDirect3DDevice8* const native_;
     IDirect3D8* const factory_;
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
     std::shared_ptr<t3render::buffers::BufferProxy> buffers_;
+#endif
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+    std::shared_ptr<t3render::resource_fixture::Router> resources_;
 #endif
     FixtureReferenceCount refs_;
 };
@@ -572,6 +729,13 @@ public:
             SetLastError(after_native);
             return E_OUTOFMEMORY;
         }
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (!facade->resources_) {
+            facade->Release();
+            SetLastError(after_native);
+            return E_OUTOFMEMORY;
+        }
+#endif
         *output = facade;
         SetLastError(after_native);
         return hr;

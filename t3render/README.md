@@ -314,6 +314,9 @@ need further validation. The current Wine test is an isolated synthetic fixture.
 The [buffer/device facade experiment](tests/README_buffer_facade.md) closes
 `GetDevice` on wrapped VB/IB in isolation, but other resource aliases still
 escape and the experiment is deliberately not enabled in the game proxy.
+The [resource facade experiment](tests/README_resource_facade.md) additionally
+tests 2D textures, cube textures and surfaces, while other resource paths remain
+open and native gameplay compatibility is unproven.
 
 ```sh
 python3 t3render/tools/trace_summary.py /path/to/capture.jsonl

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "vertex_declaration.hpp"
+#include "shader_program.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -37,6 +38,10 @@ struct ShaderObservation {
     bool has_scan_status = false;
     DeclarationStatus scan_status = DeclarationStatus::Unreadable;
     std::vector<std::uint32_t> words;
+    // Optional program sampled at the same Create. It shares this entry's
+    // lifetime and budget and is never exposed after a Reset.
+    ShaderProgramStatus program_status = ShaderProgramStatus::NotRequested;
+    std::vector<std::uint32_t> program_words;
     // Quarantined pre-reset application data. This is a distinct hypothesis,
     // never a candidate or proof of the post-reset driver input.
     std::uint64_t reset_epoch = 0, rebind_epoch = 0;
@@ -49,6 +54,7 @@ struct ShaderRegistryLimits {
     std::size_t words_per_declaration = 1024;
     std::size_t words_per_device = 65536;
     bool preserve_reset_history = false;
+    std::size_t words_per_program = 1024;
 };
 
 class VertexDeclarationRegistry final {
@@ -80,7 +86,8 @@ public:
     // Snapshot is sampled before the native call; invalid/unreadable snapshots
     // register an unavailable handle, never a fabricated declaration.
     bool EndCreate(ShaderTicket ticket, bool native_success, bool handle_known,
-                   std::uint32_t handle, DeclarationSnapshot snapshot) noexcept;
+                   std::uint32_t handle, DeclarationSnapshot snapshot,
+                   ShaderProgramSnapshot program = {}) noexcept;
     // Only a successful native Delete removes the unavailable handle; a failed
     // Delete keeps the tombstone so a later Create cannot silently reuse it.
     bool EndDelete(ShaderTicket ticket, bool native_success) noexcept;
@@ -101,6 +108,8 @@ private:
     struct Payload {
         std::unique_ptr<std::uint32_t[]> words;
         std::size_t size = 0;
+        std::size_t declaration_size = 0;
+        ShaderProgramStatus program_status = ShaderProgramStatus::NotRequested;
     };
     struct Entry {
         bool occupied = false, available = false, queued = false;

@@ -12,6 +12,7 @@ namespace t3render::ir {
 // what the driver used. Only vs_1_1 is recognized; unsupported data fails
 // closed and never exposes a partial program.
 enum class ShaderProgramStatus {
+    NotRequested,
     Complete,
     NullAddress,
     InvalidConfiguration,
@@ -25,7 +26,7 @@ enum class ShaderProgramStatus {
 };
 
 struct ShaderProgramSnapshot {
-    ShaderProgramStatus status = ShaderProgramStatus::Unreadable;
+    ShaderProgramStatus status = ShaderProgramStatus::NotRequested;
     std::vector<std::uint32_t> words;
 };
 

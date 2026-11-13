@@ -308,10 +308,24 @@ ShaderTicket VertexDeclarationRegistry::BeginReset(std::uint64_t id) noexcept { 
 ShaderTicket VertexDeclarationRegistry::BeginDraw(std::uint64_t id) noexcept { return Begin(id, ShaderOperation::Draw, 0); }
 
 bool VertexDeclarationRegistry::EndCreate(ShaderTicket ticket, bool native_success, bool handle_known,
-                                          std::uint32_t handle, DeclarationSnapshot snapshot) noexcept {
+                                          std::uint32_t handle, DeclarationSnapshot snapshot,
+                                          ShaderProgramSnapshot program) noexcept {
     const bool complete = snapshot.status == DeclarationStatus::Complete && !snapshot.words.empty() &&
                           snapshot.words.back() == 0xffffffffu;
-    const std::size_t count = complete ? snapshot.words.size() : 0;
+    const std::size_t declaration_count = complete ? snapshot.words.size() : 0;
+    const bool program_complete = program.status == ShaderProgramStatus::Complete && program.words.size() >= 2 &&
+                                  program.words.front() == 0xfffe0101u && program.words.back() == 0x0000ffffu;
+    if (program.status == ShaderProgramStatus::Complete && !program_complete)
+        program.status = ShaderProgramStatus::UnsupportedInstruction;
+    if (program_complete && program.words.size() > limits_.words_per_program)
+        program.status = ShaderProgramStatus::WordLimit;
+    const std::size_t program_count = complete && program.status == ShaderProgramStatus::Complete
+        ? program.words.size() : 0;
+    if (program_count > (std::numeric_limits<std::size_t>::max)() - declaration_count) {
+        Invalidate(ticket.device);
+        return false;
+    }
+    const std::size_t count = declaration_count + program_count;
     bool drain = false;
     bool finished = false, completed = false;
     try {
@@ -344,7 +358,7 @@ bool VertexDeclarationRegistry::EndCreate(ShaderTicket ticket, bool native_succe
                 device->pending = {};
                 drain = true; finished = true; completed = true;
             } else if (!FreeHandleLocked(*device) ||
-                       (complete && (count > limits_.words_per_declaration ||
+                       (complete && (declaration_count > limits_.words_per_declaration ||
                                      count > limits_.words_per_device ||
                                      device->words > limits_.words_per_device - count))) {
                 PoisonLocked(*device); drain = true; finished = true;
@@ -379,8 +393,12 @@ bool VertexDeclarationRegistry::EndCreate(ShaderTicket ticket, bool native_succe
         try {
             payload = std::make_shared<Payload>();
             payload->size = count;
+            payload->declaration_size = declaration_count;
+            payload->program_status = program.status;
             payload->words.reset(new std::uint32_t[count]);
             std::copy(snapshot.words.begin(), snapshot.words.end(), payload->words.get());
+            if (program_count) std::copy(program.words.begin(), program.words.end(),
+                                         payload->words.get() + declaration_count);
         } catch (...) {
             payload.reset(); // complete deallocation before releasing reservation
             FinishPreparation(ticket.device, count);
@@ -562,7 +580,12 @@ ShaderObservation VertexDeclarationRegistry::Observe(ShaderTicket ticket, std::u
         // Copy and allocator callbacks happen outside mutex_. The source pin
         // keeps the quota charged and the device slot alive until released.
         auto& destination = history ? result.pre_reset_words : result.words;
-        destination.assign(pin->words.get(), pin->words.get() + pin->size);
+        destination.assign(pin->words.get(), pin->words.get() + pin->declaration_size);
+        if (!history) {
+            result.program_status = pin->program_status;
+            if (pin->program_status == ShaderProgramStatus::Complete)
+                result.program_words.assign(pin->words.get() + pin->declaration_size, pin->words.get() + pin->size);
+        }
         bool still_valid = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -580,11 +603,15 @@ ShaderObservation VertexDeclarationRegistry::Observe(ShaderTicket ticket, std::u
         }
         if (!still_valid) {
             std::vector<std::uint32_t>().swap(destination);
+            std::vector<std::uint32_t>().swap(result.program_words);
+            result.program_status = ShaderProgramStatus::NotRequested;
             result.status = ShaderObservationStatus::Unsafe;
         } else if (!history) result.status = ShaderObservationStatus::Candidate;
     } catch (...) {
         std::vector<std::uint32_t>().swap(result.words);
         std::vector<std::uint32_t>().swap(result.pre_reset_words);
+        std::vector<std::uint32_t>().swap(result.program_words);
+        result.program_status = ShaderProgramStatus::NotRequested;
         if (!history) {
             result.status = ShaderObservationStatus::Unavailable;
             result.reason = ShaderUnavailableReason::ObservationError;

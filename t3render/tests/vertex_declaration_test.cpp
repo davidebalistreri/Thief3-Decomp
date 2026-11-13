@@ -370,6 +370,51 @@ void InvalidProtocolAndEscapeAreConservative() {
     registry.Invalidate(b); // e.g. unobserved device alias escaped
     assert(!registry.BeginDraw(b));
 }
+
+void ProgramSharesDeclarationLifetimeAndBudget() {
+    const std::vector<std::uint32_t> words = {0xfffe0101u, 1u, 0xc00f0000u, 0x90e40000u, 0x0000ffffu};
+    VertexDeclarationRegistry registry({1, 4, 8, 32, true, 8});
+    const auto device = registry.OpenDevice();
+    auto create = registry.BeginCreate(device);
+    assert(registry.EndCreate(create, true, true, 0x44, Complete(), {ShaderProgramStatus::Complete, words}));
+    auto observed = Observe(registry, device, 0x44);
+    assert(observed.status == ShaderObservationStatus::Candidate && observed.words == Complete().words &&
+           observed.program_status == ShaderProgramStatus::Complete && observed.program_words == words);
+
+    const auto reset = registry.BeginReset(device);
+    assert(reset && registry.EndReset(reset, 0));
+    const auto set = registry.BeginSet(device);
+    assert(set && registry.EndSet(set, 0, 0x44));
+    observed = Observe(registry, device, 0x44);
+    assert(observed.status == ShaderObservationStatus::Unavailable && !observed.pre_reset_words.empty() &&
+           observed.program_status == ShaderProgramStatus::NotRequested && observed.program_words.empty());
+    auto deletion = registry.BeginDelete(device, 0x44);
+    assert(deletion && registry.EndDelete(deletion, true));
+
+    create = registry.BeginCreate(device);
+    assert(registry.EndCreate(create, true, true, 0x44, Complete(), {ShaderProgramStatus::Complete, {1, 2}}));
+    observed = Observe(registry, device, 0x44);
+    assert(observed.status == ShaderObservationStatus::Candidate && observed.program_words.empty() &&
+           observed.program_status == ShaderProgramStatus::UnsupportedInstruction);
+    deletion = registry.BeginDelete(device, 0x44);
+    assert(deletion && registry.EndDelete(deletion, true));
+
+    // An oversized program is dropped independently; the valid declaration
+    // stays observable. Program and declaration words share the device quota.
+    VertexDeclarationRegistry short_program({1, 2, 8, 32, false, 4});
+    const auto small = short_program.OpenDevice();
+    create = short_program.BeginCreate(small);
+    assert(short_program.EndCreate(create, true, true, 1, Complete(), {ShaderProgramStatus::Complete, words}));
+    observed = Observe(short_program, small, 1);
+    assert(observed.status == ShaderObservationStatus::Candidate && observed.program_words.empty() &&
+           observed.program_status == ShaderProgramStatus::WordLimit);
+
+    VertexDeclarationRegistry quota({1, 2, 8, 7, false, 8}); // declaration 3 + program 5
+    const auto limited = quota.OpenDevice();
+    create = quota.BeginCreate(limited);
+    assert(!quota.EndCreate(create, true, true, 1, Complete(), {ShaderProgramStatus::Complete, words}));
+    assert(!quota.BeginDraw(limited));
+}
 } // namespace
 
 int main() {
@@ -382,4 +427,5 @@ int main() {
     TombstonesReleaseBoundedStorage();
     OverlapInvalidatesOnlyAffectedDevice();
     InvalidProtocolAndEscapeAreConservative();
+    ProgramSharesDeclarationLifetimeAndBudget();
 }

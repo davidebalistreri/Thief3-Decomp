@@ -9,15 +9,20 @@ sys.path.insert(0, str(ROOT / "tools"))
 import run_d3d8_device_facade as probe
 
 
-def fixture_log(mode):
+def fixture_log(mode, buffer_facade=False):
     lines = [f"parity {key}={'0x00000000' if value is None else '22' if value == 'format' else value}"
              for key, value in probe.expected_parity()]
     suffix = "PASS" if mode == "facade" else "not_applicable"
     lines.append(f"factory_and_device_QI_roundtrip=PASS factory_initial_release={suffix}")
     if mode == "facade":
-        lines.extend(f"resource_{name}_native_device_alias=PASS hr=0x00000000"
-                     for name in ("surface", "texture", "vertex_buffer", "index_buffer"))
-        lines.append("resource_get_device_boundary=native_device; wrapped_buffers=not_tested")
+        names = ("surface", "texture") if buffer_facade else ("surface", "texture", "vertex_buffer", "index_buffer")
+        lines.extend(f"resource_{name}_native_device_alias=PASS hr=0x00000000" for name in names)
+        if buffer_facade:
+            lines.extend(("resource_get_device_boundary=native_nonbuffer; wrapped_buffers=facade",
+                          "buffer_parent_facade_roundtrip=PASS", "buffer_shadow_writeonly_and_draw_window=PASS",
+                          "buffer_stateblock_retained_fail_closed=PASS"))
+        else:
+            lines.append("resource_get_device_boundary=native_device; wrapped_buffers=not_tested")
     lines.append(f"device_facade_fixture=PASS mode={mode}")
     return lines
 
@@ -38,9 +43,22 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
         self.log = Path(self.directory.name) / "fixture.log"
         self.ppm = Path(self.directory.name) / "fixture.ppm"
 
-    def inspect(self, lines, mode="facade"):
+    def inspect(self, lines, mode="facade", buffer_facade=False):
         self.log.write_text("noise from Wine\n" + "\n".join(lines) + "\n", encoding="utf-8")
-        return probe.inspect_log(self.log, mode)
+        return probe.inspect_log(self.log, mode, buffer_facade)
+
+    def test_buffer_facade_requires_parent_and_writeonly_evidence(self):
+        baseline = self.inspect(fixture_log("baseline"), "baseline", True)
+        wrapped = fixture_log("facade", True)
+        self.assertEqual(baseline, self.inspect(wrapped, buffer_facade=True))
+        for marker in ("buffer_parent_facade_roundtrip=PASS", "buffer_shadow_writeonly_and_draw_window=PASS",
+                       "buffer_stateblock_retained_fail_closed=PASS",
+                       "resource_get_device_boundary=native_nonbuffer; wrapped_buffers=facade"):
+            for replacement in ([], [marker, marker], [marker + "_INVALID"]):
+                with self.subTest(marker=marker, replacement=replacement):
+                    lines = [line for line in wrapped if line != marker] + replacement
+                    with self.assertRaises(probe.RunError):
+                        self.inspect(lines, buffer_facade=True)
 
     def test_baseline_and_facade_require_the_same_state_and_results(self):
         self.assertEqual(self.inspect(fixture_log("baseline"), "baseline"), self.inspect(fixture_log("facade")))

@@ -311,6 +311,9 @@ application passes a buffer wrapper to that alias, Wine may assert or abort;
 marking bytes unknown cannot prevent that crash. Device and resource alias
 coverage, state-block ownership, COM identity and coexistence with T3SDK hooks
 need further validation. The current Wine test is an isolated synthetic fixture.
+The [buffer/device facade experiment](tests/README_buffer_facade.md) closes
+`GetDevice` on wrapped VB/IB in isolation, but other resource aliases still
+escape and the experiment is deliberately not enabled in the game proxy.
 
 ```sh
 python3 t3render/tools/trace_summary.py /path/to/capture.jsonl

@@ -5,6 +5,8 @@ proxy or TDS and must not be used in TDS. It does not wrap resources: a native
 resource's `GetDevice`, `GetContainer` or `QueryInterface` can expose native
 interfaces. Passing wrapped resources through those aliases is unsafe.
 State blocks retain native bindings and are forwarded without identity tracking.
+The separately built [buffer facade experiment](README_buffer_facade.md)
+tests VB/IB wrappers without closing the remaining native-resource boundary.
 
 `CreateDeviceFacadeFactory(native)` adopts the caller's native factory +1 only
 on success; on null or allocation failure it returns null and leaves ownership

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Compare isolated native and device-facade D3D8 fixture processes in Highball.
 
-The fixture creates native resources whose GetDevice escapes the facade. It
-does not launch TDS and does not pass wrapped buffers to the escaped device.
+The original fixture uses native resources. The optional buffer facade fixture
+wraps VB/IB but other resources still expose the native device. Neither
+fixture launches TDS or passes wrapped buffers to an escaped native device.
 """
 import argparse
 import json
@@ -55,7 +56,7 @@ def successful_hresult(value):
     return isinstance(value, str) and HEX_HRESULT.fullmatch(value) is not None and int(value, 16) < 0x80000000
 
 
-def inspect_log(path, mode):
+def inspect_log(path, mode, buffer_facade=False):
     lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
     actual = []
     for line in lines:
@@ -83,14 +84,21 @@ def inspect_log(path, mode):
             [f"device_facade_fixture=PASS mode={mode}"]):
         raise RunError("COM identity or fixture completion marker is missing")
     if mode == "facade":
-        for name in ("surface", "texture", "vertex_buffer", "index_buffer"):
+        names = ("surface", "texture") if buffer_facade else ("surface", "texture", "vertex_buffer", "index_buffer")
+        for name in names:
             prefix = f"resource_{name}_native_device_alias="
             matching = [line for line in lines if line.startswith(prefix)]
             expected_prefix = prefix + "PASS hr="
             if (len(matching) != 1 or not matching[0].startswith(expected_prefix) or
                     not successful_hresult(matching[0][len(expected_prefix):])):
                 raise RunError(f"native device escape was not verified for {name}")
-        if lines.count("resource_get_device_boundary=native_device; wrapped_buffers=not_tested") != 1:
+        if buffer_facade:
+            for marker in ("resource_get_device_boundary=native_nonbuffer; wrapped_buffers=facade",
+                           "buffer_parent_facade_roundtrip=PASS", "buffer_shadow_writeonly_and_draw_window=PASS",
+                           "buffer_stateblock_retained_fail_closed=PASS"):
+                if lines.count(marker) != 1:
+                    raise RunError(f"buffer facade marker missing: {marker}")
+        elif lines.count("resource_get_device_boundary=native_device; wrapped_buffers=not_tested") != 1:
             raise RunError("native resource boundary marker is missing")
     return actual
 
@@ -108,7 +116,7 @@ def read_ppm(path):
     return data
 
 
-def execute(engine, bottle, fixture, output, timeout):
+def execute(engine, bottle, fixture, output, timeout, buffer_facade=False):
     engine, bottle, fixture, output = map(valid_path, (engine, bottle, fixture, output))
     wine, server, frameworks = engine / "engine/bin/wine", engine / "engine/bin/wineserver", engine / "frameworks"
     if not all(path.is_file() and os.access(path, os.X_OK) for path in (wine, server)) or not frameworks.is_dir():
@@ -134,12 +142,18 @@ def execute(engine, bottle, fixture, output, timeout):
                 "DYLD_FALLBACK_LIBRARY_PATH": f"{frameworks}:{frameworks}/GStreamer.framework/Versions/1.0/lib",
                 "DYLD_FALLBACK_FRAMEWORK_PATH": str(frameworks), "WINEDEBUG": "-all",
                 "WINEDLLOVERRIDES": "d3d8=b;nvapi64,nvngx=n,b;winemenubuilder.exe=d"})
-    result = {"schema": 1, "test": "synthetic_d3d8_device_facade", "status": "FAIL",
+    result = {"schema": 1, "test": "synthetic_d3d8_buffer_facade" if buffer_facade else "synthetic_d3d8_device_facade", "status": "FAIL",
               "engine": str(engine), "bottle": str(bottle), "fixture_sha256": sha256(fixture), "runs": {},
               "limitations": ["Fixture only: not integrated with the proxy or TDS.",
                               "Resources are native and GetDevice exposes the native device, bypassing the facade.",
                               "Wrapped buffers are not passed through the escaped device.",
                               "Four synthetic triangles and selected fixed-function states only; no gameplay parity."]}
+    if buffer_facade:
+        result["limitations"] = ["Fixture only: not integrated with the proxy or TDS.",
+                                 "VB/IB GetDevice returns the facade; other resources expose the native device.",
+                                 "Private data and unknown VB/IB interfaces fail closed; this differs from native behavior.",
+                                 "One retained-vertex state-block path fails closed; reset and runtime concurrency are not exercised.",
+                                 "Four synthetic triangles and selected fixed-function states only; no gameplay parity."]
     stage = "setup"
     try:
         executable = output / fixture.name
@@ -148,7 +162,7 @@ def execute(engine, bottle, fixture, output, timeout):
         for stage in ("baseline", "facade"):
             log, ppm = output / (stage + ".log"), output / (stage + ".ppm")
             run_stage(stage, [wine, executable, "--" + stage, windows_path(ppm)], output, env, log, timeout)
-            observations[stage] = inspect_log(log, stage)
+            observations[stage] = inspect_log(log, stage, buffer_facade)
             images[stage] = read_ppm(ppm)
             result["runs"][stage] = {"log": log.name, "log_sha256": sha256(log), "ppm": ppm.name,
                                      "ppm_sha256": sha256(ppm), "parity_records": len(observations[stage])}
@@ -179,9 +193,10 @@ def main(argv=None):
     parser.add_argument("--fixture", required=True)
     parser.add_argument("--output-dir", required=True, help="new absolute output directory")
     parser.add_argument("--timeout", type=float, default=45)
+    parser.add_argument("--buffer-facade", action="store_true", help="validate the separate buffer facade fixture")
     args = parser.parse_args(argv)
     try:
-        result = execute(args.engine, args.bottle, args.fixture, args.output_dir, args.timeout)
+        result = execute(args.engine, args.bottle, args.fixture, args.output_dir, args.timeout, args.buffer_facade)
     except RunError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -31,6 +31,8 @@ struct FakeBuffer final : Interface {
     std::atomic<ULONG> refs{1};
     std::atomic<bool> destroyed{false};
     HRESULT lock_result = S_OK, unlock_result = S_OK, query_result = S_OK;
+    HRESULT device_result = S_OK;
+    IDirect3DDevice8* device = nullptr;
     bool alias_supported = false, null_map = false;
     std::array<BYTE, 8> bytes{};
     unsigned locks = 0, unlocks = 0, queries = 0;
@@ -55,7 +57,10 @@ struct FakeBuffer final : Interface {
         if (!left) destroyed = true;
         SetLastError(820); return left;
     }
-    HRESULT GetDevice(IDirect3DDevice8** out) override { if (out) *out = nullptr; SetLastError(830); return S_OK; }
+    HRESULT GetDevice(IDirect3DDevice8** out) override {
+        if (out && SUCCEEDED(device_result)) { *out = device; if (device) device->AddRef(); }
+        SetLastError(830); return device_result;
+    }
     HRESULT SetPrivateData(REFGUID, const void*, DWORD, DWORD) override { return S_OK; }
     HRESULT GetPrivateData(REFGUID, void*, DWORD*) override { return S_OK; }
     HRESULT FreePrivateData(REFGUID) override { return S_OK; }
@@ -74,6 +79,29 @@ struct FakeBuffer final : Interface {
 };
 using Vertex = FakeBuffer<IDirect3DVertexBuffer8, D3DVERTEXBUFFER_DESC, D3DRTYPE_VERTEXBUFFER>;
 using Index = FakeBuffer<IDirect3DIndexBuffer8, D3DINDEXBUFFER_DESC, D3DRTYPE_INDEXBUFFER>;
+struct FakeDevice final : IDirect3DDevice8 {
+    std::atomic<ULONG> refs{1};
+    std::atomic<bool> destroyed{false};
+    bool fail_identity = false;
+    HRESULT QueryInterface(REFIID iid, void** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (fail_identity || (!IsEqualIID(iid, IID_IUnknown) && !IsEqualIID(iid, IID_IDirect3DDevice8)))
+            return E_NOINTERFACE;
+        AddRef(); *output = static_cast<IDirect3DDevice8*>(this); SetLastError(831); return S_OK;
+    }
+    ULONG AddRef() override { assert(refs && !destroyed); SetLastError(832); return ++refs; }
+    ULONG Release() override {
+        const auto previous = refs.fetch_sub(1); assert(previous);
+        if (previous == 1) destroyed = true;
+        SetLastError(833); return previous - 1;
+    }
+    HRESULT SetStreamSource(UINT, IDirect3DVertexBuffer8*, UINT) override { return E_NOTIMPL; }
+    HRESULT GetStreamSource(UINT, IDirect3DVertexBuffer8**, UINT*) override { return E_NOTIMPL; }
+    HRESULT SetIndices(IDirect3DIndexBuffer8*, UINT) override { return E_NOTIMPL; }
+    HRESULT GetIndices(IDirect3DIndexBuffer8**, UINT*) override { return E_NOTIMPL; }
+    HRESULT ProcessVertices(UINT, UINT, UINT, IDirect3DVertexBuffer8*, DWORD) override { return E_NOTIMPL; }
+};
 struct VertexAlias final : IDirect3DVertexBuffer8 {
     explicit VertexAlias(Vertex& target) : target(target) {}
     Vertex& target;
@@ -544,6 +572,129 @@ void OwnerIsolationAndFlagModes() {
     assert(proxy->ReadVertex(Owner(2), &second, 0, out, 4) == RegistryResult::Ok);
     assert(a->Release() == 0 && b->Release() == 0);
 }
+
+void ClosedFacadeBufferBoundary() {
+    Reader reader;
+    auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+    FakeDevice native_device, facade;
+    Vertex vb; Index ib;
+    vb.device = &native_device; ib.device = &native_device;
+    auto* vertex = proxy->AdoptVertexForFacade(&native_device, &facade, &vb, 8, true);
+    auto* index = proxy->AdoptIndexForFacade(&native_device, &facade, &ib, 8, true);
+    assert(vertex && vertex != &vb && index && index != &ib && facade.refs == 3);
+    const BYTE bytes[]{1, 4, 9}; BYTE observed[3]{};
+    Fill(vertex, 0, bytes, 3); Fill(index, 0, bytes, 3);
+    assert(proxy->ReadVertex(&native_device, &vb, 0, observed, 3) == RegistryResult::Ok);
+    assert(std::memcmp(observed, bytes, 3) == 0);
+
+    // The children keep the facade alive after its caller drops its reference.
+    assert(facade.Release() == 2);
+    for (IDirect3DResource8* resource : {static_cast<IDirect3DResource8*>(vertex),
+                                         static_cast<IDirect3DResource8*>(index)}) {
+        IDirect3DDevice8* returned = nullptr;
+        SetLastError(17);
+        assert(resource->GetDevice(&returned) == S_OK && returned == &facade && GetLastError() == 830);
+        assert(native_device.refs == 1 && facade.refs == 3);
+        void* identity = nullptr;
+        assert(returned->QueryInterface(IID_IUnknown, &identity) == S_OK && identity == &facade);
+        static_cast<IUnknown*>(identity)->Release();
+        returned->Release();
+        void* unknown = reinterpret_cast<void*>(1);
+        vb.alias_supported = true;
+        assert(resource->QueryInterface(kAlias, &unknown) == E_NOINTERFACE && !unknown);
+        DWORD size = 0;
+        assert(resource->SetPrivateData(kAlias, &facade, sizeof(facade), D3DSPD_IUNKNOWN) == E_NOTIMPL);
+        assert(resource->GetPrivateData(kAlias, nullptr, &size) == E_NOTIMPL);
+        assert(resource->FreePrivateData(kAlias) == E_NOTIMPL);
+    }
+    assert(proxy->ReadIndex(&native_device, &ib, 0, observed, 3) == RegistryResult::Ok);
+    vb.AddRef();
+    auto* same = proxy->AdoptVertexForFacade(&native_device, &facade, &vb, 0, false);
+    assert(same == vertex && vb.refs == 1);
+    assert(same->Release() == 1);
+    { auto pin = proxy->UnwrapVertex(&native_device, vertex); assert(pin.native() == &vb); }
+    { auto pin = proxy->UnwrapIndex(&native_device, index); assert(pin.native() == &ib); }
+    assert(vertex->Release() == 0 && vb.destroyed && facade.refs == 1);
+    assert(index->Release() == 0 && ib.destroyed && facade.destroyed && native_device.refs == 1);
+    assert(native_device.Release() == 0);
+}
+
+void ClosedFacadeFailuresDoNotExposeNative() {
+    Reader reader;
+    const BYTE bytes[]{5, 6}; BYTE observed[2]{};
+    for (int scenario = 0; scenario != 3; ++scenario) {
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        FakeDevice native_device, wrong_device, facade;
+        Vertex raw;
+        raw.device = scenario == 0 ? &wrong_device : scenario == 1 ? nullptr : &native_device;
+        if (scenario == 2) native_device.fail_identity = true;
+        auto* buffer = proxy->AdoptVertexForFacade(&native_device, &facade, &raw, 8, true);
+        Fill(buffer, 0, bytes, 2);
+        IDirect3DDevice8* result = reinterpret_cast<IDirect3DDevice8*>(1);
+        SetLastError(19);
+        assert(buffer->GetDevice(&result) == E_FAIL && !result && GetLastError() == 830);
+        assert(native_device.refs == 1 && wrong_device.refs == 1 && facade.refs == 2);
+        assert(proxy->ReadVertex(&native_device, &raw, 0, observed, 2) == RegistryResult::Unavailable);
+        assert(buffer->Release() == 0 && raw.destroyed);
+        assert(facade.Release() == 0 && native_device.Release() == 0 && wrong_device.Release() == 0);
+    }
+    {
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 1);
+        FakeDevice native_device, facade;
+        Vertex first; Index overflow;
+        auto* buffer = proxy->AdoptVertexForFacade(&native_device, &facade, &first, 8, true);
+        SetLastError(20);
+        assert(!proxy->AdoptIndexForFacade(&native_device, &facade, &overflow, 8, true));
+        assert(overflow.destroyed && GetLastError() == 20 && facade.refs == 2);
+        assert(buffer->Release() == 0 && facade.Release() == 0 && native_device.Release() == 0);
+    }
+    {
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        FakeDevice native_device, facade, other_facade;
+        Vertex raw;
+        auto* buffer = proxy->AdoptVertexForFacade(&native_device, &facade, &raw, 8, true);
+        raw.AddRef();
+        assert(!proxy->AdoptVertexForFacade(&native_device, &other_facade, &raw, 0, false));
+        assert(raw.refs == 1 && proxy->ReadVertex(&native_device, &raw, 0, observed, 2) == RegistryResult::Unavailable);
+        assert(buffer->Release() == 0 && facade.Release() == 0 && other_facade.Release() == 0 && native_device.Release() == 0);
+    }
+    {
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        FakeDevice native_device;
+        Vertex raw;
+        assert(!proxy->AdoptVertexForFacade(&native_device, nullptr, &raw, 8, true));
+        assert(raw.destroyed && native_device.Release() == 0);
+    }
+    {
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        FakeDevice native_device, facade;
+        Vertex raw; raw.device = &native_device; raw.device_result = E_FAIL;
+        auto* buffer = proxy->AdoptVertexForFacade(&native_device, &facade, &raw, 8, true);
+        Fill(buffer, 0, bytes, 2);
+        IDirect3DDevice8* result = reinterpret_cast<IDirect3DDevice8*>(1);
+        assert(buffer->GetDevice(&result) == E_FAIL && result == reinterpret_cast<IDirect3DDevice8*>(1));
+        assert(proxy->ReadVertex(&native_device, &raw, 0, observed, 2) == RegistryResult::Ok);
+        assert(buffer->Release() == 0 && facade.Release() == 0 && native_device.Release() == 0);
+    }
+    for (unsigned iteration = 0; iteration < 200; ++iteration) {
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        FakeDevice native_device, facade;
+        Vertex raw;
+        auto* buffer = proxy->AdoptVertexForFacade(&native_device, &facade, &raw, 8, true);
+        raw.AddRef(); // A device getter owns this native reference during the race.
+        std::atomic<bool> go{false};
+        std::thread getter([&] {
+            while (!go.load()) std::this_thread::yield();
+            if (auto* result = proxy->AdoptVertexForFacade(&native_device, &facade, &raw, 0, false))
+                result->Release();
+        });
+        go = true;
+        buffer->Release();
+        getter.join();
+        assert(raw.destroyed && raw.refs == 0 && facade.refs == 1);
+        assert(facade.Release() == 0 && native_device.Release() == 0);
+    }
+}
 void UnlockFailureAndCopyFailures() {
     Reader reader;
     const BYTE data[]{1, 2, 3}; BYTE out[3]{}, *mapped = nullptr;
@@ -670,6 +821,8 @@ int main() {
     UnknownNativeLocks();
     LockCountsAndInvalidation();
     OwnerIsolationAndFlagModes();
+    ClosedFacadeBufferBoundary();
+    ClosedFacadeFailuresDoNotExposeNative();
     UnlockFailureAndCopyFailures();
     CapacityAndUnknownBuffersForward();
     StopObservationKeepsForwarding();

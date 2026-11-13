@@ -29,6 +29,7 @@ public:
         VertexPin(const VertexPin&) = delete;
         VertexPin& operator=(const VertexPin&) = delete;
         IDirect3DVertexBuffer8* native() const noexcept { return native_; }
+        bool wrapped() const noexcept { return guard_ != nullptr; }
     private:
         friend class BufferProxy;
         VertexPin(IDirect3DVertexBuffer8* native, IUnknown* guard) noexcept : native_(native), guard_(guard) {}
@@ -45,6 +46,7 @@ public:
         IndexPin(const IndexPin&) = delete;
         IndexPin& operator=(const IndexPin&) = delete;
         IDirect3DIndexBuffer8* native() const noexcept { return native_; }
+        bool wrapped() const noexcept { return guard_ != nullptr; }
     private:
         friend class BufferProxy;
         IndexPin(IDirect3DIndexBuffer8* native, IUnknown* guard) noexcept : native_(native), guard_(guard) {}
@@ -66,6 +68,20 @@ public:
                                          UINT size, bool freshly_created) noexcept;
     IDirect3DIndexBuffer8* AdoptIndex(IDirect3DDevice8* owner, IDirect3DIndexBuffer8* native,
                                        UINT size, bool freshly_created) noexcept;
+
+    // Isolated facade experiment only. The caller must own both device
+    // references, facade must retain owner, and the caller must intercept
+    // every path that can accept an emitted wrapper.
+    // A wrapper retains facade until its final Release, and GetDevice returns
+    // it only after verifying the native parent's canonical identity. Unknown
+    // interfaces and private data fail closed. On failure these methods consume
+    // native and return null instead of exposing a raw buffer. They do not
+    // close aliases returned by textures, surfaces, swapchains or state blocks;
+    // this is not safe to enable in TDS.
+    IDirect3DVertexBuffer8* AdoptVertexForFacade(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
+                                                  IDirect3DVertexBuffer8* native, UINT size, bool freshly_created) noexcept;
+    IDirect3DIndexBuffer8* AdoptIndexForFacade(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
+                                                IDirect3DIndexBuffer8* native, UINT size, bool freshly_created) noexcept;
 
     // Input is identified by pointer lookup only, never dereferenced. A pin
     // retains an issued wrapper while its native resource is passed to D3D.

@@ -71,12 +71,67 @@ bool CheckNativeEscape(IDirect3DDevice8* facade, IDirect3D8* native_factory, IDi
     if (FAILED(escaped->GetDirect3D(escaped_factory.put())) || !escaped_factory.value ||
         !EqualIdentity(escaped_factory.value, native_factory)) return false;
     if (!CheckEscape("surface", surface, facade, native_identity.value) ||
-        !CheckEscape("texture", texture, facade, native_identity.value) ||
+        !CheckEscape("texture", texture, facade, native_identity.value)) return false;
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+    for (IDirect3DResource8* resource : {static_cast<IDirect3DResource8*>(vb), static_cast<IDirect3DResource8*>(ib)}) {
+        ComPtr<IDirect3DDevice8> parent;
+        ComPtr<IUnknown> unknown;
+        ComPtr<IDirect3DDevice8> roundtrip;
+        if (FAILED(resource->GetDevice(parent.put())) || parent.value != facade ||
+            !Identity(parent.value, unknown) ||
+            FAILED(unknown->QueryInterface(IID_IDirect3DDevice8, reinterpret_cast<void**>(roundtrip.put()))) ||
+            roundtrip.value != facade) return false;
+    }
+    std::printf("buffer_parent_facade_roundtrip=PASS\n");
+    std::printf("resource_get_device_boundary=native_nonbuffer; wrapped_buffers=facade\n");
+#else
+    if (
         !CheckEscape("vertex_buffer", vb, facade, native_identity.value) ||
         !CheckEscape("index_buffer", ib, facade, native_identity.value)) return false;
     std::printf("resource_get_device_boundary=native_device; wrapped_buffers=not_tested\n");
+#endif
     return true;
 }
+
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+bool ReadFixtureMemory(void*, const void* source, void* destination, std::size_t size) {
+    SIZE_T copied = 0;
+    return ReadProcessMemory(GetCurrentProcess(), source, destination, size, &copied) && copied == size;
+}
+
+bool CheckRetainedBuffer(IDirect3DDevice8* device, IDirect3DDevice8* native,
+                         const std::shared_ptr<t3render::buffers::BufferProxy>& buffers) {
+    ComPtr<IDirect3DVertexBuffer8> held;
+    if (FAILED(device->CreateVertexBuffer(sizeof(Vertex) * 3, D3DUSAGE_WRITEONLY, kFvf,
+                                           D3DPOOL_MANAGED, held.put())) || !held.value ||
+        FAILED(device->SetStreamSource(0, held.value, sizeof(Vertex)))) return false;
+    DWORD token = 0;
+    if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &token))) return false;
+    {
+        auto pin = buffers->UnwrapVertex(native, held.value);
+        BYTE byte = 0;
+        if (!pin.wrapped() || buffers->ReadVertex(native, pin.native(), 0, &byte, 1) !=
+                              t3render::ir::RegistryResult::Unavailable) return false;
+    }
+    ComPtr<IDirect3DVertexBuffer8> existing;
+    UINT stride = 0;
+    if (FAILED(device->GetStreamSource(0, existing.put(), &stride)) || existing.value != held.value ||
+        stride != sizeof(Vertex)) return false;
+    existing->Release(); existing.value = nullptr;
+    // Remove the active device binding so only the state block can retain it.
+    if (FAILED(device->SetStreamSource(0, nullptr, 0))) return false;
+    held->Release(); held.value = nullptr;
+    if (FAILED(device->ApplyStateBlock(token))) return false;
+    ComPtr<IDirect3DVertexBuffer8> reacquired;
+    const HRESULT hr = device->GetStreamSource(0, reacquired.put(), &stride);
+    const bool closed = FAILED(hr) && !reacquired.value;
+    const bool cleaned = SUCCEEDED(device->DeleteStateBlock(token)) &&
+                         SUCCEEDED(device->SetStreamSource(0, nullptr, 0));
+    if (!closed || !cleaned) return false;
+    std::printf("buffer_stateblock_retained_fail_closed=PASS\n");
+    return true;
+}
+#endif
 
 bool SetAndReadState(IDirect3DDevice8* device) {
     D3DMATRIX matrix{};
@@ -209,9 +264,17 @@ bool Render(HWND window, bool facade_mode, const wchar_t* output) {
     if (!Call("GetAdapterDisplayMode", native_factory->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &display))) return false;
     ComPtr<IDirect3D8> facade_factory;
     IDirect3D8* selected = native_factory.value;
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+    auto buffers = t3render::buffers::BufferProxy::Create(ReadFixtureMemory, nullptr);
+    if (!buffers) return false;
+#endif
     if (facade_mode) {
         native_factory->AddRef();
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+        facade_factory.value = t3render::fixture::CreateBufferDeviceFacadeFactory(native_factory.value, buffers);
+#else
         facade_factory.value = t3render::fixture::CreateDeviceFacadeFactory(native_factory.value);
+#endif
         if (!facade_factory.value) { native_factory->Release(); return false; }
         selected = facade_factory.value;
     }
@@ -278,28 +341,59 @@ bool Render(HWND window, bool facade_mode, const wchar_t* output) {
     ComPtr<IDirect3DBaseTexture8> read_texture;
     if (!Call("GetTexture", device->GetTexture(0, read_texture.put())) || !read_texture.value ||
         !EqualIdentity(texture.value, read_texture.value) || !Call("ClearTexture", device->SetTexture(0, nullptr))) return false;
-    if (!Call("SetStreamSource", device->SetStreamSource(0, vb.value, sizeof(Vertex))) ||
-        !Call("SetIndices", device->SetIndices(ib.value, 0))) return false;
+    IDirect3DDevice8* draw_device = device.value;
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+    ComPtr<IDirect3DDevice8> buffer_device, native_device;
+    if (facade_mode) {
+        if (FAILED(vb->GetDevice(buffer_device.put())) || buffer_device.value != device.value ||
+            FAILED(back->GetDevice(native_device.put())) || !native_device.value) return false;
+        draw_device = buffer_device.value;
+    }
+#endif
+    if (!Call("SetStreamSource", draw_device->SetStreamSource(0, vb.value, sizeof(Vertex))) ||
+        !Call("SetIndices", draw_device->SetIndices(ib.value, 0))) return false;
     ComPtr<IDirect3DVertexBuffer8> read_vb;
     ComPtr<IDirect3DIndexBuffer8> read_ib;
     UINT stride = 0, base = 0;
-    if (!Call("GetStreamSource", device->GetStreamSource(0, read_vb.put(), &stride)) || !read_vb.value ||
+    if (!Call("GetStreamSource", draw_device->GetStreamSource(0, read_vb.put(), &stride)) || !read_vb.value ||
         !EqualIdentity(vb.value, read_vb.value) || stride != sizeof(Vertex) ||
-        !Call("GetIndices", device->GetIndices(read_ib.put(), &base)) || !read_ib.value ||
+        !Call("GetIndices", draw_device->GetIndices(read_ib.put(), &base)) || !read_ib.value ||
         !EqualIdentity(ib.value, read_ib.value) || base != 0) return false;
     std::printf("parity Bindings stride=%u base=%u\n", stride, base);
     if (!Call("Clear", device->Clear(0, nullptr, D3DCLEAR_TARGET, kClear, 1, 0)) ||
         !Call("BeginScene", device->BeginScene())) return false;
-    const bool drawn = Call("DrawPrimitive", device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1)) &&
-        Call("DrawIndexedPrimitive", device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 3, 3, 0, 1)) &&
-        Call("DrawPrimitiveUP", device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, up, sizeof(Vertex))) &&
-        Call("DrawIndexedPrimitiveUP", device->DrawIndexedPrimitiveUP(D3DPT_TRIANGLELIST, 0, 3, 1, up_indices,
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+    std::uint64_t window_token = 0;
+    if (facade_mode) {
+        auto vertex = buffers->UnwrapVertex(native_device.value, vb.value);
+        auto index = buffers->UnwrapIndex(native_device.value, ib.value);
+        Vertex vertex_copy[6]{}; WORD index_copy[3]{};
+        window_token = buffers->BeginDraw(native_device.value);
+        if (!vertex.wrapped() || !index.wrapped() || !window_token ||
+            buffers->ReadVertex(native_device.value, vertex.native(), 0, vertex_copy, sizeof(vertex_copy)) != t3render::ir::RegistryResult::Ok ||
+            buffers->ReadIndex(native_device.value, index.native(), 0, index_copy, sizeof(index_copy)) != t3render::ir::RegistryResult::Ok ||
+            std::memcmp(vertex_copy, buffered, sizeof(buffered)) || std::memcmp(index_copy, indices, sizeof(indices))) return false;
+    }
+#endif
+    const bool drawn = Call("DrawPrimitive", draw_device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1)) &&
+        Call("DrawIndexedPrimitive", draw_device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 3, 3, 0, 1)) &&
+        Call("DrawPrimitiveUP", draw_device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, up, sizeof(Vertex))) &&
+        Call("DrawIndexedPrimitiveUP", draw_device->DrawIndexedPrimitiveUP(D3DPT_TRIANGLELIST, 0, 3, 1, up_indices,
                                                                        D3DFMT_INDEX16, indexed_up, sizeof(Vertex)));
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+    if (facade_mode) {
+        if (!buffers->EndDraw(native_device.value, window_token)) return false;
+        std::printf("buffer_shadow_writeonly_and_draw_window=PASS\n");
+    }
+#endif
     const bool ended = Call("EndScene", device->EndScene());
     if (!drawn || !ended) return false;
     std::vector<BYTE> pixels;
     if (!ReadBack(back.value, pixels) || !Call("Present", device->Present(nullptr, nullptr, nullptr, nullptr)) ||
         !WriteNew(output, pixels)) return false;
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+    if (facade_mode && !CheckRetainedBuffer(draw_device, native_device.value, buffers)) return false;
+#endif
     return true;
 }
 } // namespace
@@ -316,8 +410,10 @@ int wmain(int argc, wchar_t** argv) {
     HWND window = CreateWindowW(name, L"T3Render D3D8 device facade", WS_OVERLAPPEDWINDOW,
                                 CW_USEDEFAULT, CW_USEDEFAULT, 300, 300, nullptr, nullptr, instance, nullptr);
     if (!window) { UnregisterClassW(name, instance); return 1; }
+#ifndef T3RENDER_BUFFER_FACADE_FIXTURE
     ShowWindow(window, SW_SHOWNOACTIVATE);
     UpdateWindow(window);
+#endif
     const bool ok = Render(window, facade_mode, argv[2]);
     DestroyWindow(window);
     UnregisterClassW(name, instance);

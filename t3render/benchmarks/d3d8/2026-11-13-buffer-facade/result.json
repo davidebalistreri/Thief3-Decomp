@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_buffer_facade",
+  "date": "2026-11-13",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "steam_running": true,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/src/buffer_proxy.cpp": "8e541661f857414897ccb4d703dae1b23064ffd482221b4199333898713a5f14",
+    "t3render/src/buffer_proxy.hpp": "d917e78cb880a8d5b6c1be431725711bc7fbaa56011fd297c5d811424ac7d0f4",
+    "t3render/tests/d3d8_device_facade.hpp": "d4bd690a1b8de25121c0c08a90862b7ccd6c5f7956728ff481839bc4b7977906",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "23e8f9dbb95e2174a5cb6dfd8d5f207475ee06b2f1ad241e280d318ab9c62707",
+    "t3render/tests/d3d8_buffer_facade_wine.cpp": "b0bcf03030e288f35aa11ab62a201a9de09cb00f587d8db6962547c6f4af5640",
+    "t3render/tools/run_d3d8_device_facade.py": "ed9f8264c412ea49b34c7269e25b06d8a75096190b937419f8acf22dc74781e5"
+  },
+  "fixture_sha256": "539e32e0c3df3761a6602053f2ac0e44885b4e4496470d2a433752618a14aa03",
+  "result": {
+    "parity_records_each": 81,
+    "rgb_ppm_sha256_both": "6c1c61fd0434bf500fd9b7e0a206b92461fc12e46efc117b3d5cc93749713bb4",
+    "baseline_log_sha256": "3a08f4805e67008b8e2dd80ae4fd1ce45f7366a1109c0967c0f787bff815a8bf",
+    "facade_log_sha256": "838fcdc72afb8f437f3846d8773b545b5d6cfa627a0977cc491aad05ecf61f0a",
+    "vb_ib_get_device_facade_roundtrip": true,
+    "writeonly_buffer_bytes_match": true,
+    "draw_window_stable": true,
+    "stateblock_restored_reacquisition_fails_closed": true,
+    "native_device_escapes": ["surface", "texture"]
+  },
+  "limitations": [
+    "Synthetic fixture only: not integrated with the proxy or TDS.",
+    "Resources other than VB/IB still expose the native device.",
+    "Private data and unknown VB/IB interfaces fail closed; native behavior differs.",
+    "Only one retained-vertex state-block path was exercised; reset and runtime concurrency were not tested.",
+    "Four synthetic triangles and selected fixed-function states only; no gameplay parity.",
+    "PPM comparison covers RGB only, not alpha."
+  ]
+}

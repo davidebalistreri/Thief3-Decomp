@@ -9,6 +9,10 @@
 #include <atomic>
 #include <new>
 
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+#include "../src/buffer_proxy.hpp"
+#endif
+
 namespace t3render::fixture {
 
 class FixtureReferenceCount final {
@@ -111,6 +115,9 @@ public:
         return native_->CreateAdditionalSwapChain(pPresentationParameters, pSwapChain);
     }
     HRESULT STDMETHODCALLTYPE Reset(D3DPRESENT_PARAMETERS * pPresentationParameters) override {
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+        InvalidateBuffers();
+#endif
         return native_->Reset(pPresentationParameters);
     }
     HRESULT STDMETHODCALLTYPE Present(const RECT *src_rect, const RECT *dst_rect, HWND dst_window_override, const RGNDATA *dirty_region) override {
@@ -138,9 +145,33 @@ public:
         return native_->CreateCubeTexture(EdgeLength, Levels, Usage, Format, Pool, ppCubeTexture);
     }
     HRESULT STDMETHODCALLTYPE CreateVertexBuffer(UINT Length,DWORD Usage,DWORD FVF,D3DPOOL Pool,IDirect3DVertexBuffer8 ** ppVertexBuffer) override {
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+        if (buffers_) {
+            const HRESULT hr = native_->CreateVertexBuffer(Length, Usage, FVF, Pool, ppVertexBuffer);
+            const DWORD error = GetLastError();
+            if (SUCCEEDED(hr) && ppVertexBuffer && *ppVertexBuffer) {
+                *ppVertexBuffer = buffers_->AdoptVertexForFacade(native_, this, *ppVertexBuffer, Length, true);
+                SetLastError(error);
+                if (!*ppVertexBuffer) return E_FAIL;
+            }
+            return hr;
+        }
+#endif
         return native_->CreateVertexBuffer(Length, Usage, FVF, Pool, ppVertexBuffer);
     }
     HRESULT STDMETHODCALLTYPE CreateIndexBuffer(UINT Length,DWORD Usage,D3DFORMAT Format,D3DPOOL Pool,IDirect3DIndexBuffer8 ** ppIndexBuffer) override {
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+        if (buffers_) {
+            const HRESULT hr = native_->CreateIndexBuffer(Length, Usage, Format, Pool, ppIndexBuffer);
+            const DWORD error = GetLastError();
+            if (SUCCEEDED(hr) && ppIndexBuffer && *ppIndexBuffer) {
+                *ppIndexBuffer = buffers_->AdoptIndexForFacade(native_, this, *ppIndexBuffer, Length, true);
+                SetLastError(error);
+                if (!*ppIndexBuffer) return E_FAIL;
+            }
+            return hr;
+        }
+#endif
         return native_->CreateIndexBuffer(Length, Usage, Format, Pool, ppIndexBuffer);
     }
     HRESULT STDMETHODCALLTYPE CreateRenderTarget(UINT Width,UINT Height,D3DFORMAT Format,D3DMULTISAMPLE_TYPE MultiSample,BOOL Lockable,IDirect3DSurface8 ** ppSurface) override {
@@ -225,21 +256,39 @@ public:
         return native_->GetRenderState(State, pValue);
     }
     HRESULT STDMETHODCALLTYPE BeginStateBlock() override {
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+        InvalidateBuffers();
+#endif
         return native_->BeginStateBlock();
     }
     HRESULT STDMETHODCALLTYPE EndStateBlock(DWORD * pToken) override {
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+        InvalidateBuffers();
+#endif
         return native_->EndStateBlock(pToken);
     }
     HRESULT STDMETHODCALLTYPE ApplyStateBlock(DWORD Token) override {
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+        InvalidateBuffers();
+#endif
         return native_->ApplyStateBlock(Token);
     }
     HRESULT STDMETHODCALLTYPE CaptureStateBlock(DWORD Token) override {
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+        InvalidateBuffers();
+#endif
         return native_->CaptureStateBlock(Token);
     }
     HRESULT STDMETHODCALLTYPE DeleteStateBlock(DWORD Token) override {
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+        InvalidateBuffers();
+#endif
         return native_->DeleteStateBlock(Token);
     }
     HRESULT STDMETHODCALLTYPE CreateStateBlock(D3DSTATEBLOCKTYPE Type,DWORD * pToken) override {
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+        InvalidateBuffers();
+#endif
         return native_->CreateStateBlock(Type, pToken);
     }
     HRESULT STDMETHODCALLTYPE SetClipStatus(const D3DCLIPSTATUS8 *clip_status) override {
@@ -291,6 +340,21 @@ public:
         return native_->DrawIndexedPrimitiveUP(primitive_type, min_vertex_idx, vertex_count, primitive_count, index_data, index_format, data, stride);
     }
     HRESULT STDMETHODCALLTYPE ProcessVertices(UINT SrcStartIndex,UINT DestIndex,UINT VertexCount,IDirect3DVertexBuffer8 * pDestBuffer,DWORD Flags) override {
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+        if (buffers_) {
+            const DWORD before = GetLastError();
+            auto pin = buffers_->UnwrapVertex(native_, pDestBuffer);
+            if (pDestBuffer && !pin.wrapped()) { SetLastError(before); return D3DERR_INVALIDCALL; }
+            const auto token = buffers_->BeginBindingMutation(native_);
+            buffers_->InvalidateVertex(native_, pDestBuffer);
+            SetLastError(before);
+            const HRESULT hr = native_->ProcessVertices(SrcStartIndex, DestIndex, VertexCount, pin.native(), Flags);
+            const DWORD after = GetLastError();
+            if (token) buffers_->EndBindingMutation(native_, token);
+            SetLastError(after);
+            return hr;
+        }
+#endif
         return native_->ProcessVertices(SrcStartIndex, DestIndex, VertexCount, pDestBuffer, Flags);
     }
     HRESULT STDMETHODCALLTYPE CreateVertexShader(const DWORD *declaration, const DWORD *byte_code, DWORD *shader, DWORD usage) override {
@@ -318,15 +382,67 @@ public:
         return native_->GetVertexShaderFunction(Handle, pData, pSizeOfData);
     }
     HRESULT STDMETHODCALLTYPE SetStreamSource(UINT StreamNumber,IDirect3DVertexBuffer8 * pStreamData,UINT Stride) override {
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+        if (buffers_) {
+            const DWORD before = GetLastError();
+            auto pin = buffers_->UnwrapVertex(native_, pStreamData);
+            if (pStreamData && !pin.wrapped()) { SetLastError(before); return D3DERR_INVALIDCALL; }
+            const auto token = buffers_->BeginBindingMutation(native_);
+            SetLastError(before);
+            const HRESULT hr = native_->SetStreamSource(StreamNumber, pin.native(), Stride);
+            const DWORD after = GetLastError();
+            if (token) buffers_->EndBindingMutation(native_, token);
+            SetLastError(after);
+            return hr;
+        }
+#endif
         return native_->SetStreamSource(StreamNumber, pStreamData, Stride);
     }
     HRESULT STDMETHODCALLTYPE GetStreamSource(UINT StreamNumber,IDirect3DVertexBuffer8 ** ppStreamData,UINT * pStride) override {
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+        if (buffers_) {
+            const HRESULT hr = native_->GetStreamSource(StreamNumber, ppStreamData, pStride);
+            const DWORD error = GetLastError();
+            if (SUCCEEDED(hr) && ppStreamData && *ppStreamData) {
+                *ppStreamData = buffers_->AdoptVertexForFacade(native_, this, *ppStreamData, 0, false);
+                SetLastError(error);
+                if (!*ppStreamData) return E_FAIL;
+            }
+            return hr;
+        }
+#endif
         return native_->GetStreamSource(StreamNumber, ppStreamData, pStride);
     }
     HRESULT STDMETHODCALLTYPE SetIndices(IDirect3DIndexBuffer8 * pIndexData,UINT BaseVertexIndex) override {
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+        if (buffers_) {
+            const DWORD before = GetLastError();
+            auto pin = buffers_->UnwrapIndex(native_, pIndexData);
+            if (pIndexData && !pin.wrapped()) { SetLastError(before); return D3DERR_INVALIDCALL; }
+            const auto token = buffers_->BeginBindingMutation(native_);
+            SetLastError(before);
+            const HRESULT hr = native_->SetIndices(pin.native(), BaseVertexIndex);
+            const DWORD after = GetLastError();
+            if (token) buffers_->EndBindingMutation(native_, token);
+            SetLastError(after);
+            return hr;
+        }
+#endif
         return native_->SetIndices(pIndexData, BaseVertexIndex);
     }
     HRESULT STDMETHODCALLTYPE GetIndices(IDirect3DIndexBuffer8 ** ppIndexData,UINT * pBaseVertexIndex) override {
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+        if (buffers_) {
+            const HRESULT hr = native_->GetIndices(ppIndexData, pBaseVertexIndex);
+            const DWORD error = GetLastError();
+            if (SUCCEEDED(hr) && ppIndexData && *ppIndexData) {
+                *ppIndexData = buffers_->AdoptIndexForFacade(native_, this, *ppIndexData, 0, false);
+                SetLastError(error);
+                if (!*ppIndexData) return E_FAIL;
+            }
+            return hr;
+        }
+#endif
         return native_->GetIndices(ppIndexData, pBaseVertexIndex);
     }
     HRESULT STDMETHODCALLTYPE CreatePixelShader(const DWORD *byte_code, DWORD *shader) override {
@@ -362,12 +478,27 @@ public:
 
 private:
     friend class DeviceFixtureFactory;
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+    DeviceFixture(IDirect3DDevice8* native, IDirect3D8* factory,
+                  std::shared_ptr<t3render::buffers::BufferProxy> buffers) noexcept
+        : native_(native), factory_(factory), buffers_(std::move(buffers)) { factory_->AddRef(); }
+    void InvalidateBuffers() noexcept {
+        if (!buffers_) return;
+        const DWORD error = GetLastError();
+        buffers_->InvalidateDevice(native_);
+        SetLastError(error);
+    }
+#else
     DeviceFixture(IDirect3DDevice8* native, IDirect3D8* factory) noexcept : native_(native), factory_(factory) {
         factory_->AddRef();
     }
+#endif
     ~DeviceFixture() = default;
     IDirect3DDevice8* const native_;
     IDirect3D8* const factory_;
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+    std::shared_ptr<t3render::buffers::BufferProxy> buffers_;
+#endif
     FixtureReferenceCount refs_;
 };
 
@@ -379,6 +510,16 @@ public:
         SetLastError(before);
         return facade;
     }
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+    static IDirect3D8* AdoptBuffers(IDirect3D8* native,
+                                    std::shared_ptr<t3render::buffers::BufferProxy> buffers) noexcept {
+        const DWORD before = GetLastError();
+        auto* facade = native && buffers ? new (std::nothrow) DeviceFixtureFactory(native) : nullptr;
+        if (facade) facade->buffers_ = std::move(buffers);
+        SetLastError(before);
+        return facade;
+    }
+#endif
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) override {
         if (!output) return E_POINTER;
         *output = nullptr;
@@ -410,7 +551,11 @@ public:
             SetLastError(after_native);
             return FAILED(hr) ? hr : E_FAIL;
         }
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+        auto* facade = new (std::nothrow) DeviceFixture(native_device, this, buffers_);
+#else
         auto* facade = new (std::nothrow) DeviceFixture(native_device, this);
+#endif
         if (!facade) {
             native_device->Release();
             SetLastError(after_native);
@@ -461,6 +606,9 @@ private:
     explicit DeviceFixtureFactory(IDirect3D8* native) noexcept : native_(native) {}
     ~DeviceFixtureFactory() = default;
     IDirect3D8* const native_;
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+    std::shared_ptr<t3render::buffers::BufferProxy> buffers_;
+#endif
     FixtureReferenceCount refs_;
 };
 
@@ -470,5 +618,12 @@ private:
 inline IDirect3D8* CreateDeviceFacadeFactory(IDirect3D8* native) noexcept {
     return DeviceFixtureFactory::Adopt(native);
 }
+
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+inline IDirect3D8* CreateBufferDeviceFacadeFactory(IDirect3D8* native,
+                                                   std::shared_ptr<t3render::buffers::BufferProxy> buffers) noexcept {
+    return DeviceFixtureFactory::AdoptBuffers(native, std::move(buffers));
+}
+#endif
 
 }  // namespace t3render::fixture

@@ -19,6 +19,7 @@ struct LastError final {
 
 struct Control {
     IDirect3DDevice8* owner = nullptr; // address only; the native resource owns any device ref
+    IDirect3DDevice8* facade = nullptr; // owned +1 only in the isolated facade experiment
     void* native = nullptr;
     void* identity = nullptr;
     void* exposed = nullptr;
@@ -144,9 +145,9 @@ void* Canonical(Buffer* native) {
 template<class Buffer>
 class Wrapper final : public Buffer, public Control {
 public:
-    Wrapper(std::shared_ptr<BufferProxy::State> state, IDirect3DDevice8* owner_, Buffer* real,
-            void* canonical, UINT size) noexcept : state_(std::move(state)), real_(real), size_(size) {
-        owner = owner_; native = real; identity = canonical; vertex = Traits<Buffer>::kVertex;
+    Wrapper(std::shared_ptr<BufferProxy::State> state, IDirect3DDevice8* owner_, IDirect3DDevice8* facade_,
+            Buffer* real, void* canonical, UINT size) noexcept : state_(std::move(state)), real_(real), size_(size) {
+        owner = owner_; facade = facade_; native = real; identity = canonical; vertex = Traits<Buffer>::kVertex;
         exposed = static_cast<Buffer*>(this);
     }
     bool TryAddRef() noexcept override {
@@ -166,6 +167,7 @@ public:
             IsEqualIID(iid, Traits<Buffer>::Iid())) {
             *output = static_cast<Buffer*>(this); AddRef(); return S_OK;
         }
+        if (facade) { *output = nullptr; return E_NOINTERFACE; }
         LastError error; error.restore();
         const HRESULT hr = real_->QueryInterface(iid, output); error.capture();
         if (SUCCEEDED(hr)) {
@@ -200,13 +202,16 @@ public:
             state_->DetachLocked(this);
         }
         Buffer* real = real_;
+        IDirect3DDevice8* parent = facade;
         delete this;
         error.restore();
         real->Release();
         error.capture();
+        if (parent) parent->Release();
         return 0;
     }
     HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice8** output) override {
+        if (facade) return GetFacadeDevice(output);
         LastError error; error.restore();
         const HRESULT hr = real_->GetDevice(output); error.capture();
         if (SUCCEEDED(hr)) {
@@ -216,6 +221,7 @@ public:
         return hr;
     }
     HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID guid, const void* data, DWORD size, DWORD flags) override {
+        if (facade) return E_NOTIMPL;
         LastError error; error.restore();
         const HRESULT hr = real_->SetPrivateData(guid, data, size, flags); error.capture();
         if (SUCCEEDED(hr) && (flags & D3DSPD_IUNKNOWN)) {
@@ -224,6 +230,7 @@ public:
         return hr;
     }
     HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID guid, void* data, DWORD* size) override {
+        if (facade) return E_NOTIMPL;
         LastError error; error.restore();
         const HRESULT hr = real_->GetPrivateData(guid, data, size); error.capture();
         if (SUCCEEDED(hr)) {
@@ -231,7 +238,9 @@ public:
         }
         return hr;
     }
-    HRESULT STDMETHODCALLTYPE FreePrivateData(REFGUID guid) override { return real_->FreePrivateData(guid); }
+    HRESULT STDMETHODCALLTYPE FreePrivateData(REFGUID guid) override {
+        return facade ? E_NOTIMPL : real_->FreePrivateData(guid);
+    }
     DWORD STDMETHODCALLTYPE SetPriority(DWORD priority) override { return real_->SetPriority(priority); }
     DWORD STDMETHODCALLTYPE GetPriority() override { return real_->GetPriority(); }
     void STDMETHODCALLTYPE PreLoad() override { real_->PreLoad(); }
@@ -261,9 +270,35 @@ public:
         return hr;
     }
     // Destroy an unpublished wrapper without consuming its native reference.
-    void DiscardUnpublished() noexcept { delete this; }
+    void DiscardUnpublished() noexcept {
+        IDirect3DDevice8* parent = facade;
+        delete this;
+        if (parent) parent->Release();
+    }
 
 private:
+    HRESULT GetFacadeDevice(IDirect3DDevice8** output) {
+        LastError error;
+        IDirect3DDevice8* actual = nullptr;
+        error.restore();
+        const HRESULT hr = real_->GetDevice(output ? &actual : nullptr);
+        error.capture();
+        if (FAILED(hr)) return hr;
+        if (output) *output = nullptr;
+        void* actual_id = nullptr;
+        void* owner_id = nullptr;
+        if (actual) {
+            try { actual_id = Canonical(actual); owner_id = Canonical(owner); } catch (...) {}
+            actual->Release();
+        }
+        if (!output || !actual_id || actual_id != owner_id || !facade->AddRef()) {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            state_->PoisonLocked(owner);
+            return E_FAIL;
+        }
+        *output = facade;
+        return hr;
+    }
     static constexpr std::size_t kSnapshotLimit = 256u * 1024u;
     struct ReadContext { SnapshotReader reader; void* context; const void* source; };
     static bool Read(void* opaque, void* destination, std::size_t size) {
@@ -339,20 +374,29 @@ private:
 
 template<class Buffer>
 Buffer* Adopt(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8* owner,
-              Buffer* native, UINT size, bool fresh) noexcept {
+              IDirect3DDevice8* facade, Buffer* native, UINT size, bool fresh, bool closed) noexcept {
     if (!native) return nullptr;
     LastError error;
-    if (!state || !owner) {
+    const auto fallback = [&]() -> Buffer* {
+        if (!closed) return native;
+        native->Release();
+        return nullptr;
+    };
+    if (!state || !owner || (closed && !facade)) {
         if (state) { std::lock_guard<std::mutex> lock(state->mutex); state->PoisonAllLocked(); }
-        return native;
+        return fallback();
     }
     void* identity = nullptr;
     try { identity = Canonical(native); } catch (...) { identity = nullptr; }
     if (!identity) {
-        std::lock_guard<std::mutex> lock(state->mutex); state->PoisonLocked(owner); return native;
+        { std::lock_guard<std::mutex> lock(state->mutex); state->PoisonLocked(owner); }
+        return fallback();
     }
     Wrapper<Buffer>* candidate = nullptr;
-    if (fresh) candidate = new (std::nothrow) Wrapper<Buffer>(state, owner, native, identity, size);
+    if (fresh && (!facade || facade->AddRef())) {
+        candidate = new (std::nothrow) Wrapper<Buffer>(state, owner, facade, native, identity, size);
+        if (!candidate && facade) facade->Release();
+    }
     Control* found = nullptr;
     bool published = false;
     {
@@ -361,7 +405,8 @@ Buffer* Adopt(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8
         auto existing = state->identities.find(identity);
         if (existing != state->identities.end()) {
             Control* item = existing->second;
-            if (item->owner != owner || item->vertex != Traits<Buffer>::kVertex || !item->TryAddRef()) {
+            if (item->owner != owner || item->facade != facade ||
+                item->vertex != Traits<Buffer>::kVertex || !item->TryAddRef()) {
                 state->PoisonLocked(owner);
                 if (item->owner != owner) state->PoisonLocked(item->owner);
             } else {
@@ -394,7 +439,7 @@ Buffer* Adopt(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8
         } else state->PoisonLocked(owner);
     }
     if (candidate) candidate->DiscardUnpublished();
-    if (!found) return native;
+    if (!found) return fallback();
     // A newly published wrapper adopts native's returned reference. An
     // existing wrapper already owns one, so release the extra Create/Get ref.
     if (!published) native->Release();
@@ -414,11 +459,19 @@ std::shared_ptr<BufferProxy> BufferProxy::Create(SnapshotReader reader, void* co
 
 IDirect3DVertexBuffer8* BufferProxy::AdoptVertex(IDirect3DDevice8* owner, IDirect3DVertexBuffer8* native,
                                                  UINT size, bool fresh) noexcept {
-    return Adopt(state_, owner, native, size, fresh);
+    return Adopt(state_, owner, nullptr, native, size, fresh, false);
 }
 IDirect3DIndexBuffer8* BufferProxy::AdoptIndex(IDirect3DDevice8* owner, IDirect3DIndexBuffer8* native,
                                                UINT size, bool fresh) noexcept {
-    return Adopt(state_, owner, native, size, fresh);
+    return Adopt(state_, owner, nullptr, native, size, fresh, false);
+}
+IDirect3DVertexBuffer8* BufferProxy::AdoptVertexForFacade(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
+                                                          IDirect3DVertexBuffer8* native, UINT size, bool fresh) noexcept {
+    return Adopt(state_, owner, facade, native, size, fresh, true);
+}
+IDirect3DIndexBuffer8* BufferProxy::AdoptIndexForFacade(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
+                                                        IDirect3DIndexBuffer8* native, UINT size, bool fresh) noexcept {
+    return Adopt(state_, owner, facade, native, size, fresh, true);
 }
 
 namespace {

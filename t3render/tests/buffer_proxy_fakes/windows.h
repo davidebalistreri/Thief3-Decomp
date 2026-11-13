@@ -34,4 +34,5 @@ inline constexpr HRESULT E_FAIL = -1;
 inline constexpr HRESULT E_NOINTERFACE = -2;
 inline constexpr HRESULT E_POINTER = -3;
 inline constexpr HRESULT E_OUTOFMEMORY = -4;
+inline constexpr HRESULT E_NOTIMPL = -6;
 inline constexpr IID IID_IUnknown{1};

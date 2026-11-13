@@ -62,4 +62,5 @@ struct IUnknown {
 #define E_NOINTERFACE ((HRESULT)-2)
 #define E_POINTER ((HRESULT)-3)
 #define E_OUTOFMEMORY ((HRESULT)-4)
+#define E_NOTIMPL ((HRESULT)-6)
 #define S_OK ((HRESULT)0)

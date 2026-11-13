@@ -98,6 +98,7 @@ struct IDirect3DDevice8 {
  struct IDirect3DDevice8Vtbl* lpVtbl; int refs;
 #ifdef __cplusplus
  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID,void**);
+ ULONG STDMETHODCALLTYPE AddRef();
  ULONG STDMETHODCALLTYPE Release();
  HRESULT STDMETHODCALLTYPE Reset(D3DPRESENT_PARAMETERS*);
  HRESULT STDMETHODCALLTYPE Present(const RECT*,const RECT*,HWND,const RGNDATA*);
@@ -127,3 +128,9 @@ struct IDirect3DDevice8 {
  HRESULT STDMETHODCALLTYPE GetVertexShaderConstant(DWORD,void*,DWORD);
 #endif
 };
+
+#ifdef __cplusplus
+inline HRESULT IDirect3DDevice8::QueryInterface(REFIID iid, void** output) { return lpVtbl->QueryInterface(this, iid, output); }
+inline ULONG IDirect3DDevice8::AddRef() { return lpVtbl->AddRef(this); }
+inline ULONG IDirect3DDevice8::Release() { return lpVtbl->Release(this); }
+#endif

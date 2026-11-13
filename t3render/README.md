@@ -255,6 +255,9 @@ requires a matching declaration generation and successful, stable draw.
 These are candidates, not proof of shader identity or GPU input. Constants,
 pixel programs and buffers are still required for a replay. See the
 [program reader](ir/README_shader_program.md).
+In a [TDS test](benchmarks/d3d8/2026-11-13-tds-vertex-program/result.json),
+a prior Reset invalidated the declarations and no program was emitted. This
+does not establish which shader versions the game uses.
 
 ### Experimental buffered capture — isolated fixture only
 

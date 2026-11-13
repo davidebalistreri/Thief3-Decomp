@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "test": "tds_bedroom_vertex_program_observer",
+  "date": "2026-11-13",
+  "status": "PARTIAL",
+  "environment": {"os": "macOS arm64", "runtime": "Highball CrossOver 26.3 r30 / Wine x86"},
+  "scenario": {
+    "map": "SouthQuarter1_int1.gmp",
+    "save_slot": "Garrett’s Building",
+    "camera": "User oriented toward bed; no matched screenshot or exact pose attestation.",
+    "presentation": {"width": 1024, "height": 768, "windowed": false},
+    "trigger": "external marker after load, game in foreground",
+    "requested_frames": 1,
+    "declaration_observation": true,
+    "vertex_program_observation": true,
+    "declaration_history": false,
+    "buffer_observation": false
+  },
+  "proxy": {
+    "source_commit": "c65f5a3",
+    "sha256": "c2de75e3a1d49f3b84b027ab32f8077f51553e2991e94ef5e7f4cee5e00e11f9",
+    "temporary_install_removed": true,
+    "native_proxy_loaded": true,
+    "game_d3d8_forwarded_to": "Wine system32 builtin"
+  },
+  "result": {
+    "frame": 3416,
+    "draw_count": 481,
+    "calls": {"DrawIndexedPrimitive": 472, "DrawPrimitiveUP": 9},
+    "clear_count": 11,
+    "present_hresult": 0,
+    "concurrent_operations": false,
+    "stable_successful_draw_results": 481,
+    "declaration_status": {"unavailable": 459, "unknown": 22},
+    "unavailable_reason": {"reason": "reset_attempt", "scan_status": "complete", "draws": 459},
+    "raw_vertex_programs": 0,
+    "paired_ir_vertex_programs": 0,
+    "trace_sha256": "3f320cc3b9622fc51afb758279600f81fe9546b2d365ff8a793edebe5517c55f",
+    "partial_ir_sha256": "5d3936777569d2ae4fd6a1250c8c40fff347756a5b302014691be39b9c2fa78b",
+    "local_details": "build/t3render-captures/bedroom-programs-20261113-1636"
+  },
+  "limitations": [
+    "A Reset attempt before the frame invalidated the ordinary declarations; its pre-capture HRESULT and rebind sequence were not serialized in this run.",
+    "The observer emits a program candidate only alongside a declaration candidate; zero programs do not establish whether TDS uses a supported shader version.",
+    "No declaration history, VB/IB bytes, texture bytes, shader constants or pixel programs were captured.",
+    "No matched screenshot, real-room DX12 replay, native Windows test or gameplay/stealth parity claim."
+  ]
+}

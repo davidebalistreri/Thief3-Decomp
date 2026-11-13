@@ -28,6 +28,7 @@ PRIVATE_RECORD = re.compile(
     r"query=(?P<query>0x[0-9a-fA-F]{8}) query_size=(?P<query_size>\d+) "
     r"small=(?P<small>0x[0-9a-fA-F]{8}) small_size=(?P<small_size>\d+) "
     r"get=(?P<get>0x[0-9a-fA-F]{8}) match=(?P<match>[01]) free=(?P<free>0x[0-9a-fA-F]{8}) "
+    r"after_free=(?P<after_free>0x[0-9a-fA-F]{8}) "
     r"object_set=(?P<object_set>0x[0-9a-fA-F]{8}) object_get=(?P<object_get>0x[0-9a-fA-F]{8}) "
     r"object_same=(?P<object_same>[01]) object_free=(?P<object_free>0x[0-9a-fA-F]{8}) "
     r"refs=(?P<refs>\d+,\d+,\d+,\d+)\Z")
@@ -70,23 +71,28 @@ def inspect_private_data(lines, mode):
     records = [PRIVATE_RECORD.fullmatch(line) for line in lines if line.startswith("private_data ")]
     if any(record is None for record in records) or tuple(record['kind'] for record in records) != PRIVATE_KINDS:
         raise RunError("private-data resource observations are missing, duplicated or malformed")
-    hresults = ("missing", "set", "query", "small", "get", "free", "object_set", "object_get", "object_free")
+    observations = []
     for record in records:
         if mode == "facade":
-            if (any(record[key].lower() != "0x80004001" for key in hresults) or
+            if (any(record[key].lower() != "0x80004001" for key in ("missing", "object_set", "object_get", "object_free")) or
+                    successful_hresult(record['small']) or successful_hresult(record['after_free']) or
+                    any(not successful_hresult(record[key]) for key in ("set", "query", "get", "free")) or
                     (record['query_size'], record['small_size'], record['match'], record['object_same'], record['refs']) !=
-                    ("0", "1", "0", "0", "1,1,1,1")):
+                    ("4", "4", "1", "0", "1,1,1,1")):
                 raise RunError(f"unexpected private-data facade behavior for {record['kind']}")
-        elif (successful_hresult(record['missing']) or successful_hresult(record['small']) or
+        elif (successful_hresult(record['missing']) or successful_hresult(record['small']) or successful_hresult(record['after_free']) or
               any(not successful_hresult(record[key]) for key in ("set", "query", "get", "free", "object_set", "object_get", "object_free")) or
               (record['query_size'], record['small_size'], record['match'], record['object_same'], record['refs']) !=
               ("4", "4", "1", "1", "2,3,2,1")):
             raise RunError(f"unexpected native private-data behavior for {record['kind']}")
+        for key in ("set", "query", "query_size", "small", "small_size", "get", "match", "free", "after_free"):
+            observations.append((f"PrivateBlob.{record['kind']}.{key}", record[key].lower()))
     aliases = [line for line in lines if line.startswith("private_data_alias ")]
     expected = ("private_data_alias set=0x80004001 get=0x80004001 same=0 parent=0 free=0x80004001" if mode == "facade" else
                 "private_data_alias set=0x00000000 get=0x00000000 same=1 parent=1 free=0x00000000")
     if aliases != [expected]:
         raise RunError("private-data resource-alias observation is missing or unexpected")
+    return observations
 
 
 def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
@@ -117,9 +123,9 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
             [f"device_facade_fixture=PASS mode={mode}"]):
         raise RunError("COM identity or fixture completion marker is missing")
     if resource_facade:
-        # These native/facade results intentionally differ. Validate them as
-        # a documented compatibility gap, not as image/state parity records.
-        inspect_private_data(lines, mode)
+        # Compare observed blob operations; unknown/COM results intentionally
+        # differ and are validated separately as a compatibility gap.
+        actual.extend(inspect_private_data(lines, mode))
         for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                        "resource_facade_volume_roundtrips=PASS",
                        "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
@@ -231,13 +237,13 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
     if buffer_facade:
         result["limitations"] = ["Fixture only: not integrated with the proxy or TDS.",
                                  "VB/IB GetDevice returns the facade; other resources expose the native device.",
-                                 "Private data and unknown VB/IB interfaces fail closed; this differs from native behavior.",
+                                 "Unknown private-data provenance, IUnknown data and unknown VB/IB interfaces fail closed; this differs from native behavior.",
                                  "One retained-vertex state-block path preserves identity but invalidates bytes; reset and runtime concurrency are not exercised.",
                                  "Four synthetic triangles and selected fixed-function states only; no gameplay parity."]
     if resource_facade:
         result["limitations"] = ["Fixture only: not integrated with the proxy or TDS.",
                                  "Only selected 2D, cube, volume, surface, swapchain and buffer paths were exercised; other interfaces remain unverified.",
-                                 "Private data and unknown resource interfaces fail closed; this differs from native behavior.",
+                                 "Unknown private-data provenance, IUnknown data and unknown resource interfaces fail closed; this differs from native behavior.",
                                  "Two reset scenarios were exercised; runtime concurrency and comprehensive state-block behavior remain untested.",
                                  "Six synthetic triangles and selected fixed-function states only; no gameplay parity."]
     stage = "setup"

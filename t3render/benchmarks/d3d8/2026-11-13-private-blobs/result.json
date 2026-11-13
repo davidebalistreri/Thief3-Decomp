@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_private_blob_facade",
+  "date": "2026-11-13",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "steam_running": true,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "c9b34ac9769c8b6756885c5b7dba85656bd97378d435e305509c1c93c8ed5c21",
+    "t3render/src/buffer_proxy.cpp": "ba1e96eeb39b4bc27afe53c22f4f5808eb60f14a1f47e28e28ad3b71e265c884",
+    "t3render/src/buffer_proxy.hpp": "ffe836c34128c995d90be42e58e8a148bd3f0a76c563c79865d1db99d30b170d",
+    "t3render/src/private_blob.hpp": "e54b5b767393ce81959f7ad042f71c8baa24df9b97e27e5ef57745378b309627",
+    "t3render/ir/buffer_registry.cpp": "9e24931212d54e0ee58b7be7313a85510e9fc867f3a3b20297eff3e1f6138b84",
+    "t3render/ir/buffer_shadow.cpp": "9cfed54a6fcf4718e80fd1d8301a8afa5f84852ac70b428938b06d1e64cddafe",
+    "t3render/tests/private_blob_test.cpp": "501904649340c837a42b7298447a2ecac113bb3f0bf16807716b9342cf320b4b",
+    "t3render/tests/test_private_blob.py": "d5f017c70a2a63df6b6ae4b290ba005efe86a6dc24996d469a9ecd7f90d3a251",
+    "t3render/tests/d3d8_resource_facade.hpp": "6223ae5fcf20842e562c2c6db558a8375551fd31277c36461f6c65bf9bc7ed4d",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "21bdd67358220b05c452d35c84f105ef2a599328490784fe9eeba56d71ce9b54",
+    "t3render/tests/d3d8_device_facade.hpp": "c4ef8b488b0c48b9046c99fb7cd7f53ddfed752b2692044b5f883b5abcd42ed9",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "3afffa25888f24ebcced16fc290f8e7666ad1c0031df62d03df0e99e881e88b9",
+    "t3render/tests/test_d3d8_device_facade_runner.py": "5791d631586bccdef6f1e9bc3a66822e7904e2b3a4bf0539d3b8ca448b1a52f1",
+    "t3render/tools/run_d3d8_device_facade.py": "a74eaffb05a0f14ff258d0434aea9c9c1839f775e1a22662b593e70b2ec61bb8"
+  },
+  "fixture_sha256": "5770432a70b3f9d294a925a4193423f064796587e0d7df67df11112c9bbcc6e8",
+  "result": {
+    "resource_kinds": [
+      "vertex",
+      "index",
+      "texture",
+      "backbuffer",
+      "surface_level",
+      "cube",
+      "volume_texture",
+      "volume"
+    ],
+    "parity_records_each": 159,
+    "blob_byte_roundtrip": true,
+    "blob_size_query_short_buffer_and_post_free_match": true,
+    "unknown_guid_and_iunknown_facade_hresult": "0x80004001",
+    "rgb_ppm_sha256_both": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+    "baseline_log_sha256": "a453fc11d7ee92a00740d02a3f51f812eeb0c2b883697939f9867d5dbcd6ba32",
+    "facade_log_sha256": "10ab6a71ec73243139b392c01296146b0cd15b5d29a0adbc08f2f7379f7e93e8"
+  },
+  "limitations": [
+    "Fixture only: not integrated with the proxy or TDS.",
+    "Only GUIDs written as opaque blobs through the wrapper are eligible; maximum 64 per wrapper.",
+    "Unknown provenance, IUnknown private data and unknown resource interfaces fail closed.",
+    "Private-data overlap and reentrancy were exercised by a host test, not on native Wine or Windows.",
+    "Retiring a wrapper can discard private-data provenance even if its native resource survives.",
+    "RGB comparison covers synthetic images only, not alpha or gameplay."
+  ]
+}

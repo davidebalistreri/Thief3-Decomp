@@ -1,9 +1,11 @@
 #pragma once
 
 // Isolated COM experiment. This is not a complete device/resource boundary
-// and must not be installed in TDS. Private data and unknown IIDs fail closed.
+// and must not be installed in TDS. Unknown private-data provenance, COM
+// private data and unknown IIDs fail closed.
 #include <windows.h>
 #include <d3d8.h>
+#include "../src/private_blob.hpp"
 
 #ifdef max
 #pragma push_macro("max")
@@ -187,9 +189,20 @@ public:
         *output = this->state_->facade;
         return hr;
     }
-    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, const void*, DWORD, DWORD) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, void*, DWORD*) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE FreePrivateData(REFGUID) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID guid, const void* data, DWORD size, DWORD flags) override {
+        const GUID key = guid;
+        return private_blobs_.Set(key, flags, [&] { return this->real_->SetPrivateData(key, data, size, flags); });
+    }
+    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID guid, void* data, DWORD* size) override {
+        const GUID key = guid;
+        return private_blobs_.Get(key, [&] { return this->real_->GetPrivateData(key, data, size); });
+    }
+    HRESULT STDMETHODCALLTYPE FreePrivateData(REFGUID guid) override {
+        const GUID key = guid;
+        return private_blobs_.Free(key, [&] { return this->real_->FreePrivateData(key); });
+    }
+private:
+    t3render::buffers::PrivateBlobState private_blobs_;
 };
 
 template<class Interface>

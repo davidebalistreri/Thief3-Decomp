@@ -17,8 +17,15 @@ texture updates, target selection and surface copies; getters and resource
 creation adopt returned native references. Resource wrappers retain their
 native objects while dormant so a state block can restore the same wrapper.
 They do not retain the facade while dormant, and the facade closes the router
-at final release. Private-data methods return `E_NOTIMPL`, unsupported IIDs
-return `E_NOINTERFACE`, and failures can differ from native COM behavior.
+at final release. Unsupported IIDs return `E_NOINTERFACE`, and failures can
+differ from native COM behavior.
+
+Private data are forwarded only for opaque blobs written through a live
+wrapper. Unknown GUIDs and `IUnknown` values return `E_NOTIMPL`; the wrapper
+tracks at most 64 GUIDs and refuses overlapping or reentrant private-data
+calls. Failed writes or frees discard provenance. Reset retirement can discard
+that provenance, even if the native resource survives. This subset assumes the
+fixture's closed boundary and is not a complete COM implementation.
 Before `Reset`, the fixture discards existing buffer shadows and retires dormant
 resource and buffer wrappers, releasing their native references. After a
 stable successful reset, newly created buffers can be tracked again. Surviving
@@ -46,7 +53,7 @@ gameplay or a complete TDS capture.
 ## Highball observation (2026-11-13)
 
 The hidden x86 fixture compared separate native and facade runs on Highball
-CrossOver 26.3 r30. The latest run checked 87 recorded HRESULT/state observations and
+CrossOver 26.3 r30. The latest run checked 159 recorded HRESULT/state observations and
 identical RGB PPMs for six synthetic triangles. Two sample texture pixels came
 from a 2D texture uploaded with `UpdateTexture` and a cube map. It also checked
 texture/cube/surface parent and container round trips, buffer bindings through
@@ -77,14 +84,18 @@ A subsequent [private-data observation](../benchmarks/d3d8/2026-11-13-private-da
 compared vertex and index buffers, textures, backbuffers, texture levels,
 cube textures, volume textures and volume levels. On this Highball runtime,
 native private data round-tripped bytes and an application `IUnknown`; storing
-a vertex buffer in a texture also preserved its identity and device. The
-facade returned `E_NOTIMPL` in all those cases, so this is a measured
-compatibility gap, not private-data parity. Forwarding resource interfaces
+a vertex buffer in a texture also preserved its identity and device. At the
+time, the facade returned `E_NOTIMPL` for all those cases. Forwarding resource interfaces
 must also address facade/native identity and lifetime cycles; neither
 cross-resource lifetime nor unknown external interfaces were fully tested.
-The runner validates those intentionally different observations separately
-from image and state parity. Full local logs and PPMs are under
+Full local logs and PPMs are under
 `build/t3render-captures/2026-11-13-private-data-alias-final/`.
+
+The later [opaque-blob observation](../benchmarks/d3d8/2026-11-13-private-blobs/result.json)
+compares native and facade results for those eight resource types, including
+size queries, short buffers and reads after free. The `IUnknown` and unknown
+GUID cases still differ, and are checked separately. Its full local logs and
+PPMs are under `build/t3render-captures/2026-11-13-private-blobs-verified/`.
 
 The later [state-block observation](../benchmarks/d3d8/2026-11-13-stateblock-facade/result.json)
 exercised Create, Capture, Begin/End, Apply and Delete on the combined facade.

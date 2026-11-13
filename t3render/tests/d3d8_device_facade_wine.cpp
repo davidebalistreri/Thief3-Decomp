@@ -274,9 +274,8 @@ bool CheckFailedStateBlock(IDirect3DDevice8* device, IDirect3DDevice8* native,
 #endif
 
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
-// Characterize native private-data semantics separately from the image parity
-// assertions. The current facade intentionally returns E_NOTIMPL for all three
-// methods; neither path exchanges native resource interfaces as private data.
+// Characterize private-data semantics separately from image parity. The
+// facade accepts observed opaque bytes and rejects unknown/COM provenance.
 class PrivateUnknown final : public IUnknown {
 public:
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
@@ -308,6 +307,8 @@ bool ObservePrivateData(const char* kind, Resource* resource, bool facade_mode) 
     const HRESULT get = resource->GetPrivateData(blob_guid, output, &output_size);
     const bool matches = SUCCEEDED(get) && output_size == sizeof(bytes) && !std::memcmp(output, bytes, sizeof(bytes));
     const HRESULT freed = resource->FreePrivateData(blob_guid);
+    DWORD after_free_size = sizeof(output);
+    const HRESULT after_free = resource->GetPrivateData(blob_guid, output, &after_free_size);
 
     auto* unknown = new (std::nothrow) PrivateUnknown;
     if (!unknown) return false;
@@ -327,17 +328,18 @@ bool ObservePrivateData(const char* kind, Resource* resource, bool facade_mode) 
 
     const auto code = [](HRESULT hr) { return static_cast<unsigned long>(static_cast<std::uint32_t>(hr)); };
     std::printf("private_data kind=%s missing=0x%08lx set=0x%08lx query=0x%08lx query_size=%lu "
-                "small=0x%08lx small_size=%lu get=0x%08lx match=%u free=0x%08lx "
+                "small=0x%08lx small_size=%lu get=0x%08lx match=%u free=0x%08lx after_free=0x%08lx "
                 "object_set=0x%08lx object_get=0x%08lx object_same=%u object_free=0x%08lx refs=%lu,%lu,%lu,%lu\n",
                 kind, code(missing), code(set), code(query), static_cast<unsigned long>(query_size), code(small),
-                static_cast<unsigned long>(small_size), code(get), matches ? 1u : 0u, code(freed), code(object_set),
+                static_cast<unsigned long>(small_size), code(get), matches ? 1u : 0u, code(freed), code(after_free), code(object_set),
                 code(object_get), same ? 1u : 0u, code(object_free), static_cast<unsigned long>(refs_after_set),
                 static_cast<unsigned long>(refs_after_get), static_cast<unsigned long>(refs_after_free),
                 static_cast<unsigned long>(refs_after_returned_release));
-    if (facade_mode) return missing == E_NOTIMPL && set == E_NOTIMPL && query == E_NOTIMPL && small == E_NOTIMPL &&
-                            get == E_NOTIMPL && freed == E_NOTIMPL && object_set == E_NOTIMPL &&
-                            object_get == E_NOTIMPL && object_free == E_NOTIMPL;
-    return SUCCEEDED(set) && matches && SUCCEEDED(freed) && SUCCEEDED(object_set) && same && SUCCEEDED(object_free) &&
+    if (facade_mode) return missing == E_NOTIMPL && SUCCEEDED(set) && SUCCEEDED(query) && FAILED(small) &&
+                            query_size == sizeof(bytes) && small_size == sizeof(bytes) && matches && SUCCEEDED(freed) && FAILED(after_free) &&
+                            object_set == E_NOTIMPL && object_get == E_NOTIMPL && object_free == E_NOTIMPL &&
+                            refs_after_set == 1 && refs_after_get == 1 && refs_after_free == 1 && refs_after_returned_release == 1;
+    return SUCCEEDED(set) && matches && SUCCEEDED(freed) && FAILED(after_free) && SUCCEEDED(object_set) && same && SUCCEEDED(object_free) &&
            refs_after_set == 2 && refs_after_get == 3 && refs_after_free == 2 && refs_after_returned_release == 1;
 }
 

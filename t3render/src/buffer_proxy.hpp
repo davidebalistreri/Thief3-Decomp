@@ -76,7 +76,8 @@ public:
     // verifying the native parent's canonical identity. On final Release a
     // dormant wrapper retains its native resource and can be reacquired while
     // the facade lives; it does not retain the facade in that state. Unknown
-    // interfaces and private data fail closed. On failure these methods consume
+    // interfaces and unobserved or IUnknown private data fail closed; observed
+    // opaque private-data blobs have limited support. On failure these methods consume
     // native and return null instead of exposing a raw buffer. They do not
     // close aliases returned by textures, surfaces, swapchains or state blocks;
     // this is not safe to enable in TDS.

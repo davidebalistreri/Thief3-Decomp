@@ -32,7 +32,8 @@ also experiments with preserving shadows across successful state-block calls;
 the buffer-only fixture retains the conservative state-block policy.
 
 This is intentionally incomplete COM behavior: unknown buffer interfaces
-return `E_NOINTERFACE` and all buffer private-data methods return `E_NOTIMPL`.
+return `E_NOINTERFACE`; only previously observed opaque private-data blobs are
+forwarded, while unknown GUIDs and `IUnknown` data return `E_NOTIMPL`.
 The fixture invalidates observation at state-block and reset calls. It cannot
 provide transparent gameplay or preserve private-data behavior. Addressing
 native resource aliases, private-data behavior, complete state-block tracking,

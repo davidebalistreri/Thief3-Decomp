@@ -16,11 +16,11 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
     lines.append(f"factory_and_device_QI_roundtrip=PASS factory_initial_release={suffix}")
     if resource_facade:
         native_private = ("missing=0x88760866 set=0x00000000 query=0x00000000 query_size=4 "
-                          "small=0x88760867 small_size=4 get=0x00000000 match=1 free=0x00000000 "
+                          "small=0x88760867 small_size=4 get=0x00000000 match=1 free=0x00000000 after_free=0x88760866 "
                           "object_set=0x00000000 object_get=0x00000000 object_same=1 "
                           "object_free=0x00000000 refs=2,3,2,1")
-        facade_private = ("missing=0x80004001 set=0x80004001 query=0x80004001 query_size=0 "
-                          "small=0x80004001 small_size=1 get=0x80004001 match=0 free=0x80004001 "
+        facade_private = ("missing=0x80004001 set=0x00000000 query=0x00000000 query_size=4 "
+                          "small=0x88760867 small_size=4 get=0x00000000 match=1 free=0x00000000 after_free=0x88760866 "
                           "object_set=0x80004001 object_get=0x80004001 object_same=0 "
                           "object_free=0x80004001 refs=1,1,1,1")
         private = native_private if mode == "baseline" else facade_private
@@ -99,6 +99,14 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
                             [line.replace(alias, alias.replace("parent=", "parent=9")) for line in original]):
                 with self.subTest(mode=mode), self.assertRaises(probe.RunError):
                     self.inspect(changed, mode, resource_facade=True)
+
+    def test_private_blob_hresult_differences_are_compared(self):
+        native = fixture_log("baseline", resource_facade=True)
+        facade = fixture_log("facade", resource_facade=True)
+        baseline = self.inspect(native, "baseline", resource_facade=True)
+        changed = [line.replace("small=0x88760867", "small=0x80004005") if line.startswith("private_data kind=vertex ") else line
+                   for line in facade]
+        self.assertNotEqual(baseline, self.inspect(changed, resource_facade=True))
 
     def test_resource_facade_requires_each_roundtrip_and_final_close(self):
         baseline = self.inspect(fixture_log("baseline", resource_facade=True), "baseline", resource_facade=True)

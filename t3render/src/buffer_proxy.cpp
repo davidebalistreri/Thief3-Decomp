@@ -1,4 +1,5 @@
 #include "buffer_proxy.hpp"
+#include "private_blob.hpp"
 
 #include <atomic>
 #include <limits>
@@ -241,7 +242,10 @@ public:
         return hr;
     }
     HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID guid, const void* data, DWORD size, DWORD flags) override {
-        if (facade) return E_NOTIMPL;
+        if (facade) {
+            const GUID key = guid;
+            return private_blobs_.Set(key, flags, [&] { return real_->SetPrivateData(key, data, size, flags); });
+        }
         LastError error; error.restore();
         const HRESULT hr = real_->SetPrivateData(guid, data, size, flags); error.capture();
         if (SUCCEEDED(hr) && (flags & D3DSPD_IUNKNOWN)) {
@@ -250,7 +254,10 @@ public:
         return hr;
     }
     HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID guid, void* data, DWORD* size) override {
-        if (facade) return E_NOTIMPL;
+        if (facade) {
+            const GUID key = guid;
+            return private_blobs_.Get(key, [&] { return real_->GetPrivateData(key, data, size); });
+        }
         LastError error; error.restore();
         const HRESULT hr = real_->GetPrivateData(guid, data, size); error.capture();
         if (SUCCEEDED(hr)) {
@@ -259,7 +266,11 @@ public:
         return hr;
     }
     HRESULT STDMETHODCALLTYPE FreePrivateData(REFGUID guid) override {
-        return facade ? E_NOTIMPL : real_->FreePrivateData(guid);
+        if (facade) {
+            const GUID key = guid;
+            return private_blobs_.Free(key, [&] { return real_->FreePrivateData(key); });
+        }
+        return real_->FreePrivateData(guid);
     }
     DWORD STDMETHODCALLTYPE SetPriority(DWORD priority) override { return real_->SetPriority(priority); }
     DWORD STDMETHODCALLTYPE GetPriority() override { return real_->GetPriority(); }
@@ -415,6 +426,7 @@ private:
     Buffer* const real_;
     const UINT size_;
     std::atomic<ULONG> refs_{1};
+    PrivateBlobState private_blobs_;
 };
 
 template<class Buffer>

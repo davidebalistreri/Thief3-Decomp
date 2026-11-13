@@ -49,3 +49,5 @@ candidate observation, not a replay or proof of driver-consumed bytes.
 Append `--vertex-programs` in `program` mode to compare the observed VS 1.1
 words to the fixture input in the proxy run. The other two runs keep that
 observer disabled; HRESULT and RGB comparisons are unchanged.
+The [2026-11-13 Highball result](../benchmarks/d3d8/2026-11-13-vertex-program/result.json)
+passed, including the paired offline IR; it is not a TDS or DX12 replay test.

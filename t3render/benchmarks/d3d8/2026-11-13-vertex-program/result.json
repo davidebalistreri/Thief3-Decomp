@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_vertex_program_observer",
+  "date": "2026-11-13",
+  "status": "PASS",
+  "environment": {"os": "macOS arm64", "runtime": "Highball CrossOver 26.3 r30 / Wine x86"},
+  "source_commit": "c65f5a3",
+  "fixture_sha256": "810c393655d6b3202bf1224ac321dee0a7fc16ab44cd32943fa288d6b0ef6c91",
+  "proxy_sha256": "c2de75e3a1d49f3b84b027ab32f8077f51553e2991e94ef5e7f4cee5e00e11f9",
+  "source_sha256": {
+    "t3render/src/proxy.cpp": "00e93705473795bc43e972397422b03b5cb3ab2784da33c2b274808ee87948ec",
+    "t3render/src/capture.cpp": "9bbf1d1d38b92de5e03a802aa4ceee5a054f1324f0fafe26c953d239398f4965",
+    "t3render/ir/shader_program.cpp": "0a03fec1356722a092ffa2d48117b034fd4565cc2011697b8084881266465fbe",
+    "t3render/ir/vertex_declaration_registry.cpp": "f95bca02dfed9a7ed40af76ddca2246b633497cdfcefbc9ae46028403025de51",
+    "t3render/tools/trace_to_ir.py": "194044abaa30fd71bbe67f50060df1088c639142479fb2dc5cf7622df198a8e4",
+    "t3render/tools/run_d3d8_declaration_fixture.py": "9b95dd5069c0c2c0478984addaa768d2887a92fb5155215315bc40577d5431ec"
+  },
+  "result": {
+    "modes": ["builtin", "proxy_capture_off", "proxy_declarations_and_vertex_programs"],
+    "fixture_program": "vs_1_1, two UP draws",
+    "observed_program_candidates": 2,
+    "paired_ir_program_candidates": 2,
+    "hresult_and_rgb_parity": true,
+    "rgb_ppm_sha256": "c093048051cee6e2938757ca98e58f472d692f1c4050cdd0adf049dfa1f2159c",
+    "proxy_trace_sha256": "a4c0ab39f501f088a72e0983e9e7007c315262de6b71f7ee71509566d259baa3",
+    "partial_ir_sha256": "cd59c7181de4a9b2b25aa11f38f901de5dd8feb38c3f0327f8a4383537a28e63",
+    "local_details": "build/t3render-diagnostics/2026-11-13-vertex-program"
+  },
+  "limitations": [
+    "Synthetic fixture only, without TDS or game assets; no real frame or DX12 replay.",
+    "Only one VS 1.1 program, two UP draws and RGB are compared; alpha and native Windows are untested.",
+    "No buffer wrappers, state blocks, reset, unobserved aliases, concurrent mutation, pixel programs or shader constants.",
+    "Application-memory snapshots are candidates and do not prove driver-consumed bytes."
+  ]
+}

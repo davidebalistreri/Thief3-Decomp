@@ -692,6 +692,46 @@ void ClosedFacadeRetirement() {
     }
 }
 
+void ClosedFacadeResetRetiresDormantBuffers() {
+    Reader reader;
+    auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+    FakeDevice native_device, facade;
+    Vertex raw; Index live;
+    raw.device = &native_device; live.device = &native_device;
+    auto* buffer = proxy->AdoptVertexForFacade(&native_device, &facade, &raw, 8, true);
+    auto* index = proxy->AdoptIndexForFacade(&native_device, &facade, &live, 8, true);
+    const BYTE bytes[]{3, 5}; BYTE observed[2]{};
+    Fill(buffer, 0, bytes, 2); Fill(index, 0, bytes, 2);
+    raw.AddRef(); // A native state block retains this resource.
+    assert(buffer->Release() == 0 && raw.refs == 2);
+    bool reentered = false;
+    raw.on_release = [&] {
+        reentered = true;
+        (void)proxy->ReadIndex(&native_device, &live, 0, observed, 1);
+    };
+    SetLastError(85);
+    proxy->RetireFacadeDormantForReset(&native_device, &facade);
+    assert(reentered && GetLastError() == 85 && raw.refs == 1 && live.refs == 1);
+    raw.on_release = {};
+    assert(proxy->ReadIndex(&native_device, &live, 0, observed, 2) == RegistryResult::Unavailable);
+    raw.AddRef(); // A getter returns a +1 after reset.
+    auto* restored = proxy->AdoptVertexForFacade(&native_device, &facade, &raw, 0, false);
+    assert(restored && restored != &raw && raw.refs == 2);
+    IDirect3DDevice8* parent = nullptr;
+    assert(restored->GetDevice(&parent) == S_OK && parent == &facade);
+    parent->Release();
+    Fill(restored, 0, bytes, 2);
+    assert(proxy->ReadVertex(&native_device, &raw, 0, observed, 2) == RegistryResult::Unavailable);
+    Vertex after; after.device = &native_device;
+    auto* created = proxy->AdoptVertexForFacade(&native_device, &facade, &after, 8, true);
+    assert(created && created != &after);
+    Fill(created, 0, bytes, 2);
+    assert(proxy->ReadVertex(&native_device, &after, 0, observed, 2) == RegistryResult::Unavailable);
+    assert(restored->Release() == 0 && created->Release() == 0 && index->Release() == 0);
+    assert(proxy->CloseFacadeDevice(&native_device, &facade) && live.destroyed && after.destroyed && raw.refs == 1);
+    assert(raw.Release() == 0 && facade.Release() == 0 && native_device.Release() == 0);
+}
+
 void ClosedFacadeFailuresDoNotExposeNative() {
     Reader reader;
     const BYTE bytes[]{5, 6}; BYTE observed[2]{};
@@ -920,6 +960,7 @@ int main() {
     ClosedFacadeBufferBoundary();
     ClosedFacadeReacquiresDormantBuffers();
     ClosedFacadeRetirement();
+    ClosedFacadeResetRetiresDormantBuffers();
     ClosedFacadeFailuresDoNotExposeNative();
     UnlockFailureAndCopyFailures();
     CapacityAndUnknownBuffersForward();

@@ -91,6 +91,11 @@ public:
     // Returns false and retains any still-live wrapper on contract violation.
     bool CloseFacadeDevice(IDirect3DDevice8* owner, IDirect3DDevice8* facade) noexcept;
 
+    // Fixture-only reset preparation: permanently invalidate observed bytes,
+    // detach dormant facade buffers and release their native references outside
+    // the registry lock. Later getter/create wrappers remain untracked.
+    void RetireFacadeDormantForReset(IDirect3DDevice8* owner, IDirect3DDevice8* facade) noexcept;
+
     // Input is identified by pointer lookup only, never dereferenced. A pin
     // retains an issued wrapper while its native resource is passed to D3D.
     // Raw non-null inputs forward unchanged but invalidate owner evidence.

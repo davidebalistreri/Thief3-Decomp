@@ -23,6 +23,9 @@ This deliberately keeps native resources alive until facade teardown. The
 facade must call `CloseFacadeDevice` at its final release; it closes the
 registry and releases dormant native resources outside the lock. A premature
 close returns false and requires a later retry after live wrappers are released.
+The later [reset experiment](README_resource_facade.md) retires dormant
+buffers before reset and reconstructs wrappers without claiming their bytes;
+observation stays unavailable on that device.
 
 This is intentionally incomplete COM behavior: unknown buffer interfaces
 return `E_NOINTERFACE` and all buffer private-data methods return `E_NOTIMPL`.

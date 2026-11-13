@@ -540,6 +540,153 @@ bool WriteNew(const wchar_t* path, const std::vector<BYTE>& bytes) {
     return ok && closed;
 }
 
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+bool CheckReset(HWND window, bool facade_mode) {
+    ComPtr<IDirect3D8> native_factory, facade_factory;
+    native_factory.value = Direct3DCreate8(D3D_SDK_VERSION);
+    if (!native_factory.value) return false;
+    auto buffers = t3render::buffers::BufferProxy::Create(ReadFixtureMemory, nullptr);
+    if (!buffers) return false;
+    IDirect3D8* selected = native_factory.value;
+    if (facade_mode) {
+        native_factory->AddRef();
+        facade_factory.value = t3render::fixture::CreateBufferDeviceFacadeFactory(native_factory.value, buffers);
+        if (!facade_factory.value) { native_factory->Release(); return false; }
+        selected = facade_factory.value;
+    }
+    D3DDISPLAYMODE display{};
+    if (FAILED(selected->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &display))) return false;
+    D3DPRESENT_PARAMETERS pp{};
+    pp.BackBufferWidth = kWidth; pp.BackBufferHeight = kHeight; pp.BackBufferFormat = display.Format;
+    pp.BackBufferCount = 1; pp.SwapEffect = D3DSWAPEFFECT_DISCARD; pp.hDeviceWindow = window;
+    pp.Windowed = TRUE; pp.Flags = D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
+    ComPtr<IDirect3DDevice8> device;
+    if (FAILED(selected->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, window,
+                                     D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, device.put())) || !device.value) return false;
+    ComPtr<IDirect3DTexture8> managed;
+    ComPtr<IDirect3DSurface8> managed_level;
+    if (FAILED(device->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, managed.put())) || !managed.value ||
+        FAILED(managed->GetSurfaceLevel(0, managed_level.put())) || !managed_level.value) return false;
+    managed->Release(); managed.value = nullptr; // the level retains its native parent
+    ComPtr<IDirect3DVertexBuffer8> old_vb;
+    ComPtr<IDirect3DIndexBuffer8> old_ib;
+    ComPtr<IDirect3DTexture8> old_texture;
+    ComPtr<IDirect3DCubeTexture8> old_cube;
+    ComPtr<IDirect3DVolumeTexture8> old_volume;
+    ComPtr<IDirect3DSurface8> old_target;
+    ComPtr<IDirect3DSwapChain8> old_swap;
+    if (FAILED(device->CreateVertexBuffer(sizeof(Vertex) * 3, D3DUSAGE_WRITEONLY, kFvf, D3DPOOL_DEFAULT, old_vb.put())) || !old_vb.value ||
+        FAILED(device->CreateIndexBuffer(sizeof(WORD) * 3, D3DUSAGE_WRITEONLY, D3DFMT_INDEX16, D3DPOOL_DEFAULT, old_ib.put())) || !old_ib.value ||
+        FAILED(device->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, old_texture.put())) || !old_texture.value ||
+        FAILED(device->CreateCubeTexture(2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, old_cube.put())) || !old_cube.value ||
+        FAILED(device->CreateVolumeTexture(2, 2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, old_volume.put())) || !old_volume.value ||
+        FAILED(device->CreateRenderTarget(16, 16, display.Format, D3DMULTISAMPLE_NONE, TRUE, old_target.put())) || !old_target.value ||
+        FAILED(device->CreateAdditionalSwapChain(&pp, old_swap.put())) || !old_swap.value) return false;
+    old_vb->Release(); old_vb.value = nullptr;
+    old_ib->Release(); old_ib.value = nullptr;
+    old_texture->Release(); old_texture.value = nullptr;
+    old_cube->Release(); old_cube.value = nullptr;
+    old_volume->Release(); old_volume.value = nullptr;
+    old_target->Release(); old_target.value = nullptr;
+    old_swap->Release(); old_swap.value = nullptr;
+    const HRESULT reset_hr = device->Reset(&pp);
+    std::printf("resource_facade_reset_hr=0x%08lx\n", static_cast<unsigned long>(static_cast<std::uint32_t>(reset_hr)));
+    if (FAILED(reset_hr)) return false;
+    ComPtr<IDirect3DTexture8> recovered_parent;
+    ComPtr<IDirect3DDevice8> recovered_device;
+    if (FAILED(managed_level->GetContainer(IID_IDirect3DTexture8, reinterpret_cast<void**>(recovered_parent.put()))) ||
+        !recovered_parent.value || FAILED(recovered_parent->GetDevice(recovered_device.put())) ||
+        !recovered_device.value || !EqualIdentity(recovered_device.value, device.value)) return false;
+    const Vertex vertices[] = {{12, 12, 0.5f, 1, 0xffe43b3b}, {116, 12, 0.5f, 1, 0xffe43b3b},
+                               {12, 116, 0.5f, 1, 0xffe43b3b}};
+    const WORD indices[] = {0, 1, 2};
+    ComPtr<IDirect3DVertexBuffer8> vb, read_vb;
+    ComPtr<IDirect3DIndexBuffer8> ib, read_ib;
+    if (FAILED(device->CreateVertexBuffer(sizeof(vertices), D3DUSAGE_WRITEONLY, kFvf, D3DPOOL_DEFAULT, vb.put())) || !vb.value ||
+        FAILED(device->CreateIndexBuffer(sizeof(indices), D3DUSAGE_WRITEONLY, D3DFMT_INDEX16, D3DPOOL_DEFAULT, ib.put())) || !ib.value)
+        return false;
+    BYTE* mapped = nullptr;
+    if (FAILED(vb->Lock(0, sizeof(vertices), &mapped, 0)) || !mapped) return false;
+    std::memcpy(mapped, vertices, sizeof(vertices));
+    if (FAILED(vb->Unlock())) return false;
+    mapped = nullptr;
+    if (FAILED(ib->Lock(0, sizeof(indices), &mapped, 0)) || !mapped) return false;
+    std::memcpy(mapped, indices, sizeof(indices));
+    if (FAILED(ib->Unlock())) return false;
+    UINT stride = 0, base = 0;
+    if (FAILED(device->SetStreamSource(0, vb.value, sizeof(Vertex))) || FAILED(device->SetIndices(ib.value, 0)) ||
+        FAILED(device->GetStreamSource(0, read_vb.put(), &stride)) || read_vb.value != vb.value || stride != sizeof(Vertex) ||
+        FAILED(device->GetIndices(read_ib.put(), &base)) || read_ib.value != ib.value || base != 0) return false;
+    if (facade_mode) {
+        auto* native = static_cast<t3render::fixture::DeviceFixture*>(device.value)->NativeForFixture();
+        auto pin = buffers->UnwrapVertex(native, vb.value);
+        BYTE byte = 0;
+        if (!pin.wrapped() || buffers->ReadVertex(native, pin.native(), 0, &byte, 1) !=
+                              t3render::ir::RegistryResult::Unavailable) return false;
+    }
+    if (FAILED(device->SetVertexShader(kFvf)) || FAILED(device->SetPixelShader(0)) ||
+        FAILED(device->SetRenderState(D3DRS_LIGHTING, FALSE)) || FAILED(device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE)) ||
+        FAILED(device->SetRenderState(D3DRS_ZENABLE, FALSE)) || FAILED(device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE)) ||
+        FAILED(device->SetTexture(0, nullptr)) || FAILED(device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1)) ||
+        FAILED(device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE)) ||
+        FAILED(device->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE)) ||
+        FAILED(device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xff111318, 1, 0)) || FAILED(device->BeginScene()) ||
+        FAILED(device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 3, 0, 1)) || FAILED(device->EndScene())) return false;
+    ComPtr<IDirect3DSurface8> back;
+    D3DLOCKED_RECT locked{};
+    if (FAILED(device->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, back.put())) || !back.value ||
+        FAILED(back->LockRect(&locked, nullptr, D3DLOCK_READONLY))) return false;
+    std::uint32_t pixel = 0;
+    const bool valid = locked.pBits && locked.Pitch >= static_cast<INT>(kWidth * 4);
+    if (valid) std::memcpy(&pixel, static_cast<const BYTE*>(locked.pBits) + 30 * locked.Pitch + 30 * 4, sizeof(pixel));
+    if (FAILED(back->UnlockRect()) || !valid || (pixel & 0xffffffu) != 0xe43b3b ||
+        FAILED(device->Present(nullptr, nullptr, nullptr, nullptr))) return false;
+    std::printf("resource_facade_reset_pixel=0x%06lx\n", static_cast<unsigned long>(pixel & 0xffffffu));
+    std::printf("resource_facade_reset_roundtrips=PASS\n");
+    return true;
+}
+
+bool CheckResetWithLiveResources(HWND window, bool facade_mode) {
+    ComPtr<IDirect3D8> native_factory, facade_factory;
+    native_factory.value = Direct3DCreate8(D3D_SDK_VERSION);
+    if (!native_factory.value) return false;
+    auto buffers = t3render::buffers::BufferProxy::Create(ReadFixtureMemory, nullptr);
+    if (!buffers) return false;
+    IDirect3D8* selected = native_factory.value;
+    if (facade_mode) {
+        native_factory->AddRef();
+        facade_factory.value = t3render::fixture::CreateBufferDeviceFacadeFactory(native_factory.value, buffers);
+        if (!facade_factory.value) { native_factory->Release(); return false; }
+        selected = facade_factory.value;
+    }
+    D3DDISPLAYMODE display{};
+    if (FAILED(selected->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &display))) return false;
+    D3DPRESENT_PARAMETERS pp{};
+    pp.BackBufferWidth = kWidth; pp.BackBufferHeight = kHeight; pp.BackBufferFormat = display.Format;
+    pp.BackBufferCount = 1; pp.SwapEffect = D3DSWAPEFFECT_DISCARD; pp.hDeviceWindow = window; pp.Windowed = TRUE;
+    ComPtr<IDirect3DDevice8> device;
+    if (FAILED(selected->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, window,
+                                     D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, device.put())) || !device.value) return false;
+    ComPtr<IDirect3DVertexBuffer8> vb;
+    ComPtr<IDirect3DTexture8> texture;
+    if (FAILED(device->CreateVertexBuffer(sizeof(Vertex) * 3, D3DUSAGE_WRITEONLY, kFvf, D3DPOOL_DEFAULT, vb.put())) || !vb.value ||
+        FAILED(device->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, texture.put())) || !texture.value) return false;
+    const HRESULT held_hr = device->Reset(&pp);
+    ComPtr<IDirect3DDevice8> vb_parent, texture_parent;
+    if (FAILED(vb->GetDevice(vb_parent.put())) || !vb_parent.value || !EqualIdentity(vb_parent.value, device.value) ||
+        FAILED(texture->GetDevice(texture_parent.put())) || !texture_parent.value || !EqualIdentity(texture_parent.value, device.value))
+        return false;
+    vb->Release(); vb.value = nullptr;
+    texture->Release(); texture.value = nullptr;
+    const HRESULT recovery_hr = device->Reset(&pp);
+    std::printf("resource_facade_live_reset_hr=0x%08lx\n", static_cast<unsigned long>(static_cast<std::uint32_t>(held_hr)));
+    std::printf("resource_facade_recovery_reset_hr=0x%08lx\n", static_cast<unsigned long>(static_cast<std::uint32_t>(recovery_hr)));
+    if (FAILED(recovery_hr)) return false;
+    std::printf("resource_facade_live_reset_roundtrips=PASS\n");
+    return true;
+}
+#endif
+
 bool Render(HWND window, bool facade_mode, const wchar_t* output) {
     ComPtr<IDirect3D8> native_factory;
     native_factory.value = Direct3DCreate8(D3D_SDK_VERSION);
@@ -716,15 +863,24 @@ int wmain(int argc, wchar_t** argv) {
     UpdateWindow(window);
 #endif
     bool ok = Render(window, facade_mode, argv[2]);
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+    if (ok) ok = CheckReset(window, facade_mode);
+    if (ok) ok = CheckResetWithLiveResources(window, facade_mode);
+#endif
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
     if (facade_mode) {
-        ok = ok && t3render::fixture::buffer_facade_close_successes == 1 &&
+        ok = ok && t3render::fixture::buffer_facade_close_successes ==
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+             3 &&
+#else
+             1 &&
+#endif
              t3render::fixture::buffer_facade_close_failures == 0;
         if (ok) std::printf("buffer_facade_final_close=PASS\n");
     }
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
     if (facade_mode) {
-        ok = ok && t3render::fixture::resource_facade_close_successes == 1 &&
+        ok = ok && t3render::fixture::resource_facade_close_successes == 3 &&
              t3render::fixture::resource_facade_close_failures == 0;
         if (ok) std::printf("resource_facade_final_close=PASS\n");
     }

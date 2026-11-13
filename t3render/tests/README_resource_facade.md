@@ -19,12 +19,16 @@ native objects while dormant so a state block can restore the same wrapper.
 They do not retain the facade while dormant, and the facade closes the router
 at final release. Private-data methods return `E_NOTIMPL`, unsupported IIDs
 return `E_NOINTERFACE`, and failures can differ from native COM behavior.
-Keeping resources until facade teardown can change memory usage and reset
-behavior. An explicit resource limit can also cause allocation failure.
+Before `Reset`, the fixture invalidates buffer observations and retires dormant
+resource and buffer wrappers, releasing their native references. Getters can
+reconstruct a known parent or an untracked buffer wrapper afterwards. Buffer
+observation stays unavailable for that device, including after a failed reset;
+this is not yet sufficient for capturing the bedroom after a game reset. An
+explicit resource limit can also cause allocation failure.
 
 The boundary remains incomplete: only selected paths are exercised and unknown
-interfaces are rejected, not transparently forwarded. Reset, state-block
-coverage, private-data semantics, native Windows, runtime
+interfaces are rejected, not transparently forwarded. Complete reset and
+state-block coverage, private-data semantics, native Windows, runtime
 concurrency and T3SDK coexistence need more work. The raw device accessor in
 the fixture is only for verifying buffer shadow bytes; it is not exposed to an
 application or used to submit wrapped inputs. None of this establishes safe
@@ -33,7 +37,7 @@ gameplay or a complete TDS capture.
 ## Highball observation (2026-11-13)
 
 The hidden x86 fixture compared separate native and facade runs on Highball
-CrossOver 26.3 r30. The latest run checked 84 recorded HRESULT/state observations and
+CrossOver 26.3 r30. The latest run checked 87 recorded HRESULT/state observations and
 identical RGB PPMs for six synthetic triangles. Two sample texture pixels came
 from a 2D texture uploaded with `UpdateTexture` and a cube map. It also checked
 texture/cube/surface parent and container round trips, buffer bindings through
@@ -48,13 +52,19 @@ both native and facade returned `E_NOINTERFACE` for swapchain `QueryInterface`
 to the device and backbuffer `GetContainer` for the swapchain; backbuffer
 `GetContainer` for the device succeeded in both runs. Supported swapchain
 container identity is covered by the host fake, not by that runtime result.
+In a separate device test, a reset after releasing default-pool resources
+succeeded in both runs and a post-reset indexed draw produced the same checked
+pixel. With live default-pool resources, both runs returned `0x88760868`; after
+release, both recovered with a successful reset. A managed surface reacquired
+its parent after reset. These observations do not establish complete reset parity.
 VB/IB `WRITEONLY` shadows matched expected
 bytes during the selected draw window. Alpha, other resource types and the
 complete game are not tested. Steam remained open; TDS was not run.
 
-The [swapchain manifest](../benchmarks/d3d8/2026-11-13-swapchain-facade/result.json)
+The [reset manifest](../benchmarks/d3d8/2026-11-13-facade-reset/result.json)
 records the latest hashes and limitations. Full local logs and PPMs are under
-`build/t3render-captures/2026-11-13-swapchain-facade-final/`. The earlier
+`build/t3render-captures/2026-11-13-facade-reset-final/`. The earlier
+[swapchain manifest](../benchmarks/d3d8/2026-11-13-swapchain-facade/result.json),
 [volume manifest](../benchmarks/d3d8/2026-11-13-volume-facade/result.json) and
 [resource manifest](../benchmarks/d3d8/2026-11-13-resource-facade/result.json)
 record previous versions of the experiment.

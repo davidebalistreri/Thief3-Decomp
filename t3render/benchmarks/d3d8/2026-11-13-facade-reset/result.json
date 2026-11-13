@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_facade_reset",
+  "date": "2026-11-13",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "steam_running": true,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "c9b34ac9769c8b6756885c5b7dba85656bd97378d435e305509c1c93c8ed5c21",
+    "t3render/src/buffer_proxy.cpp": "6e8bd9c9820c012e5041e54d834bae172de690d5298961fc3f6a7fea95278ba1",
+    "t3render/src/buffer_proxy.hpp": "fc329f56a42694a2c836b0f2d47e1865d55368a956369efbd70931c7766102f5",
+    "t3render/ir/buffer_registry.cpp": "9e24931212d54e0ee58b7be7313a85510e9fc867f3a3b20297eff3e1f6138b84",
+    "t3render/ir/buffer_shadow.cpp": "9cfed54a6fcf4718e80fd1d8301a8afa5f84852ac70b428938b06d1e64cddafe",
+    "t3render/tests/d3d8_resource_facade.hpp": "bf7b017db2664996326e93eece1b24b72cea075ee78d8899322f96e8da0f241d",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "21bdd67358220b05c452d35c84f105ef2a599328490784fe9eeba56d71ce9b54",
+    "t3render/tests/d3d8_device_facade.hpp": "10fb31aeb457d33a6e97e878006b113ad3f3669943d65cf3229c3cd70123c29d",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "83c81404c5f7677c685c9124b3a8504e468d77434d8bc01f53ceca0949a0ffe5",
+    "t3render/tools/run_d3d8_device_facade.py": "c51967f097330437c30dd740c7b87545a14ed689c330ce5ca4896eb3c4b4bd9a"
+  },
+  "fixture_sha256": "e6aadc18f5ab4d832ecbb08669ee860400f28b1a76bf77d6aa3f49d724178185",
+  "result": {
+    "parity_records_each": 87,
+    "rgb_ppm_sha256_both": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+    "baseline_log_sha256": "5d4b40c2aeb0c09e8490fe4aa04c029984c4b7e8c0ce180a6d5479cad5ac6260",
+    "facade_log_sha256": "19826a3a37ed6c044e71cdb44d32ffe026b4bf879550df7696a548455a46cf9a",
+    "released_resources_reset_hr": "0x00000000",
+    "post_reset_indexed_draw_pixel_rgb": "0xe43b3b",
+    "live_resources_reset_hr": "0x88760868",
+    "after_release_recovery_reset_hr": "0x00000000",
+    "managed_surface_parent_reacquired": true,
+    "post_reset_buffer_bytes_unavailable": true,
+    "swapchain_volume_texture_surface_roundtrips": true,
+    "final_facade_close": true
+  },
+  "limitations": [
+    "Fixture only: not integrated with the proxy or TDS.",
+    "Only selected 2D, cube, volume, surface, swapchain and buffer paths were exercised; other interfaces remain unverified.",
+    "Private data and unknown resource interfaces fail closed; this differs from native behavior.",
+    "Two reset scenarios were exercised; runtime concurrency and comprehensive state-block behavior remain untested.",
+    "Six synthetic triangles and selected fixed-function states only; no gameplay parity.",
+    "PPM comparison covers RGB only, not alpha.",
+    "Post-reset pixel was checked at one point, not compared as a full frame.",
+    "Buffer observation remains unavailable after reset."
+  ]
+}

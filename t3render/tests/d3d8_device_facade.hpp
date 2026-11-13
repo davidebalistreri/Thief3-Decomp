@@ -170,6 +170,10 @@ public:
     HRESULT STDMETHODCALLTYPE Reset(D3DPRESENT_PARAMETERS * pPresentationParameters) override {
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
         InvalidateBuffers();
+        if (buffers_) buffers_->RetireFacadeDormantForReset(native_, this);
+#endif
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        if (resources_) resources_->RetireDormantForReset();
 #endif
         return native_->Reset(pPresentationParameters);
     }

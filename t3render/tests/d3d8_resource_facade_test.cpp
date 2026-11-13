@@ -83,12 +83,15 @@ struct TextureBase : Interface {
     Surface* surface = nullptr; // initial surface reference is held by this resource
     D3DRESOURCETYPE reported_type = static_cast<D3DRESOURCETYPE>(Type == Kind::Texture ? 3 : 5);
     bool fail_typed_query = false;
+    IUnknown* wrong_typed_identity = nullptr;
     std::function<void()> on_release;
     HRESULT QueryInterface(REFIID iid, void** out) override {
         if (!out) return E_POINTER;
         *out = nullptr;
         if (fail_typed_query && (IsEqualIID(iid, IID_IDirect3DTexture8) || IsEqualIID(iid, IID_IDirect3DCubeTexture8)))
             return E_NOINTERFACE;
+        if (wrong_typed_identity && (IsEqualIID(iid, IID_IDirect3DTexture8) || IsEqualIID(iid, IID_IDirect3DCubeTexture8)))
+            return wrong_typed_identity->QueryInterface(iid, out);
         if (!Supported(Type, iid) && !IsEqualIID(iid, kExtra)) return E_NOINTERFACE;
         AddRef(); *out = static_cast<Interface*>(this); SetLastError(71); return S_OK;
     }
@@ -421,6 +424,48 @@ void FailClosedAndLifetime() {
         assert(!router->AdoptBase(&raw) && raw.destroyed && GetLastError() == 83 && facade.refs == 1);
         assert(router->Close() && native.Release() == 0 && facade.Release() == 0);
     }
+    {
+        Device native, facade;
+        Texture raw, wrong;
+        raw.wrong_typed_identity = &wrong;
+        auto router = Router::Create(&native, &facade);
+        assert(!router->AdoptBase(&raw) && raw.destroyed && wrong.refs == 1 && !wrong.destroyed);
+        assert(wrong.Release() == 0 && router->Close() && native.Release() == 0 && facade.Release() == 0);
+    }
+}
+
+void ResetRetiresDormantAndReconstructsParent() {
+    Device native, facade;
+    Texture raw; Surface level;
+    raw.device = &native; raw.surface = &level; level.device = &native; level.container = &raw;
+    auto router = Router::Create(&native, &facade);
+    auto* texture = router->AdoptTexture(&raw);
+    IDirect3DSurface8* child = nullptr;
+    assert(texture->GetSurfaceLevel(0, &child) == S_OK && child);
+    raw.AddRef(); // A native state block or child retains the parent.
+    assert(texture->Release() == 0 && raw.refs == 2);
+    SetLastError(86);
+    router->RetireDormantForReset();
+    assert(GetLastError() == 86 && raw.refs == 1 && !raw.destroyed);
+    Texture wrong;
+    raw.wrong_typed_identity = &wrong;
+    void* invalid = reinterpret_cast<void*>(1);
+    assert(child->GetContainer(IID_IUnknown, &invalid) == E_FAIL && !invalid && wrong.refs == 1);
+    raw.wrong_typed_identity = nullptr;
+    void* result = nullptr;
+    assert(child->GetContainer(IID_IUnknown, &result) == S_OK && result && result != &raw);
+    auto* recovered = reinterpret_cast<IUnknown*>(result);
+    void* typed = nullptr;
+    assert(recovered->QueryInterface(IID_IDirect3DTexture8, &typed) == S_OK && typed == result);
+    auto* typed_texture = static_cast<IDirect3DTexture8*>(typed);
+    IDirect3DSurface8* same_child = nullptr;
+    assert(typed_texture->GetSurfaceLevel(0, &same_child) == S_OK && same_child == child);
+    same_child->Release(); typed_texture->Release(); recovered->Release();
+    assert(child->Release() == 0);
+    router->RetireDormantForReset();
+    assert(raw.refs == 1 && !raw.destroyed && !level.destroyed);
+    assert(raw.Release() == 0 && raw.destroyed && level.destroyed && wrong.Release() == 0);
+    assert(router->Close() && native.Release() == 0 && facade.Release() == 0);
 }
 
 void ConcurrentReacquisition() {
@@ -470,5 +515,6 @@ int main() {
     static_assert(!std::is_abstract_v<Wrapper<IDirect3DSwapChain8>>);
     ResourceGraph();
     FailClosedAndLifetime();
+    ResetRetiresDormantAndReconstructsParent();
     ConcurrentReacquisition();
 }

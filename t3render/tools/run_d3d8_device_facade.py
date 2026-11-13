@@ -86,7 +86,9 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
     if resource_facade:
         for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                        "resource_facade_volume_roundtrips=PASS",
-                       "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS"):
+                       "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
+                       "resource_facade_reset_roundtrips=PASS", "resource_facade_reset_pixel=0xe43b3b",
+                       "resource_facade_live_reset_roundtrips=PASS"):
             prefix = marker.partition("=")[0] + "="
             if [line for line in lines if line.startswith(prefix)] != [marker]:
                 raise RunError(f"resource facade marker missing or conflicting: {marker}")
@@ -96,6 +98,18 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
             values = [line[len(prefix):] for line in lines if line.startswith(prefix)]
             if len(values) != 1 or HEX_HRESULT.fullmatch(values[0]) is None:
                 raise RunError(f"swapchain {name} HRESULT is missing or invalid")
+            actual.append((label, values[0]))
+        prefix = "resource_facade_reset_hr="
+        reset = [line[len(prefix):] for line in lines if line.startswith(prefix)]
+        if len(reset) != 1 or not successful_hresult(reset[0]):
+            raise RunError("reset HRESULT is missing or unsuccessful")
+        actual.append(("ResetHRESULT", reset[0]))
+        for label, name in (("LiveResetHRESULT", "live"), ("RecoveryResetHRESULT", "recovery")):
+            prefix = f"resource_facade_{name}_reset_hr="
+            values = [line[len(prefix):] for line in lines if line.startswith(prefix)]
+            if (len(values) != 1 or HEX_HRESULT.fullmatch(values[0]) is None or
+                    (name == "recovery" and not successful_hresult(values[0]))):
+                raise RunError(f"{name} reset HRESULT is missing or invalid")
             actual.append((label, values[0]))
     if mode == "facade":
         names = (() if resource_facade else ("surface", "texture") if buffer_facade else
@@ -186,7 +200,7 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
         result["limitations"] = ["Fixture only: not integrated with the proxy or TDS.",
                                  "Only selected 2D, cube, volume, surface, swapchain and buffer paths were exercised; other interfaces remain unverified.",
                                  "Private data and unknown resource interfaces fail closed; this differs from native behavior.",
-                                 "Reset, runtime concurrency and comprehensive state-block behavior were not exercised.",
+                                 "Two reset scenarios were exercised; runtime concurrency and comprehensive state-block behavior remain untested.",
                                  "Six synthetic triangles and selected fixed-function states only; no gameplay parity."]
     stage = "setup"
     try:

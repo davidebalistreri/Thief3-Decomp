@@ -389,6 +389,26 @@ Interface* Adopt(const std::shared_ptr<State>& state, Interface* native, Kind ki
     return result ? static_cast<Interface*>(result->exposed) : nullptr;
 }
 
+template<class Interface>
+HRESULT AdoptContainer(const std::shared_ptr<State>& state, IUnknown* native, REFIID requested,
+                       REFIID candidate_iid, Kind kind, void** output) noexcept {
+    if (!Supported(kind, requested)) return E_NOINTERFACE;
+    void* candidate = nullptr;
+    const HRESULT hr = native->QueryInterface(candidate_iid, &candidate);
+    if (FAILED(hr)) return E_NOINTERFACE;
+    if (!candidate) return E_FAIL;
+    const void* original_identity = Identity(native);
+    const void* candidate_identity = Identity(static_cast<IUnknown*>(candidate));
+    if (!original_identity || original_identity != candidate_identity) {
+        static_cast<IUnknown*>(candidate)->Release();
+        return E_FAIL;
+    }
+    auto* wrapper = Adopt(state, static_cast<Interface*>(candidate), kind);
+    if (!wrapper) return E_FAIL;
+    *output = wrapper;
+    return S_OK;
+}
+
 inline HRESULT MapContainer(const std::shared_ptr<State>& state, REFIID iid, IUnknown* native, void** output) noexcept {
     LastError error;
     void* identity = Identity(native);
@@ -409,6 +429,21 @@ inline HRESULT MapContainer(const std::shared_ptr<State>& state, REFIID iid, IUn
             }
         }
         if (!revived) state->facade->Release();
+    }
+    if (identity && identity != owner && hr == E_NOINTERFACE) {
+        // A reset may have retired a dormant parent while a child or native
+        // state block still retains it. Reconstruct only known D3D interfaces.
+        hr = AdoptContainer<IDirect3DTexture8>(state, native, iid, IID_IDirect3DTexture8, Kind::Texture, output);
+        if (hr == E_NOINTERFACE)
+            hr = AdoptContainer<IDirect3DCubeTexture8>(state, native, iid, IID_IDirect3DCubeTexture8, Kind::Cube, output);
+        if (hr == E_NOINTERFACE)
+            hr = AdoptContainer<IDirect3DVolumeTexture8>(state, native, iid, IID_IDirect3DVolumeTexture8, Kind::VolumeTexture, output);
+        if (hr == E_NOINTERFACE)
+            hr = AdoptContainer<IDirect3DSwapChain8>(state, native, iid, IID_IDirect3DSwapChain8, Kind::SwapChain, output);
+        if (hr == E_NOINTERFACE)
+            hr = AdoptContainer<IDirect3DSurface8>(state, native, iid, IID_IDirect3DSurface8, Kind::Surface, output);
+        if (hr == E_NOINTERFACE)
+            hr = AdoptContainer<IDirect3DVolume8>(state, native, iid, IID_IDirect3DVolume8, Kind::Volume, output);
     }
     native->Release();
     return hr;
@@ -493,6 +528,13 @@ public:
         if (type == D3DRTYPE_TEXTURE) hr = native->QueryInterface(IID_IDirect3DTexture8, &typed);
         else if (type == D3DRTYPE_CUBETEXTURE) hr = native->QueryInterface(IID_IDirect3DCubeTexture8, &typed);
         else if (type == D3DRTYPE_VOLUMETEXTURE) hr = native->QueryInterface(IID_IDirect3DVolumeTexture8, &typed);
+        if (SUCCEEDED(hr) && typed) {
+            const void* original_identity = Identity(native);
+            const void* typed_identity = Identity(static_cast<IUnknown*>(typed));
+            if (!original_identity || original_identity != typed_identity) {
+                static_cast<IUnknown*>(typed)->Release(); typed = nullptr; hr = E_FAIL;
+            }
+        }
         native->Release();
         if (FAILED(hr) || !typed) return nullptr;
         if (type == D3DRTYPE_TEXTURE) return AdoptTexture(static_cast<IDirect3DTexture8*>(typed));
@@ -519,6 +561,28 @@ public:
             (it->second->kind != Kind::Texture && it->second->kind != Kind::Cube && it->second->kind != Kind::VolumeTexture) ||
             !it->second->TryAddRef()) return {};
         return TexturePin(it->second->NativeTexture(), it->second->Unknown());
+    }
+
+    // Release registry-owned native references for dormant wrappers before a
+    // reset. Live wrappers remain intact. Getters can re-adopt retained native
+    // resources later; unknown identities never escape as raw pointers.
+    void RetireDormantForReset() noexcept {
+        LastError error;
+        Entry* retired = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            if (state_->closing) return;
+            for (auto it = state_->wrappers.begin(); it != state_->wrappers.end();) {
+                Entry* item = (it++)->second;
+                if (item->Dormant()) {
+                    state_->identities.erase(item->identity);
+                    state_->wrappers.erase(item->exposed);
+                    item->next = retired;
+                    retired = item;
+                }
+            }
+        }
+        while (retired) { Entry* next = retired->next; retired->DestroyDormant(); retired = next; }
     }
 
     // The facade is still alive and no external wrapper reference may exist.

@@ -20,7 +20,10 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
                       "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
                       "resource_facade_swapchain_container_hr=0x80004002",
                       "resource_facade_swapchain_device_hr=0x80004002",
-                      "resource_facade_swapchain_container_device_hr=0x00000000"))
+                      "resource_facade_swapchain_container_device_hr=0x00000000",
+                      "resource_facade_reset_hr=0x00000000", "resource_facade_reset_pixel=0xe43b3b",
+                      "resource_facade_reset_roundtrips=PASS", "resource_facade_live_reset_hr=0x80004005",
+                      "resource_facade_recovery_reset_hr=0x00000000", "resource_facade_live_reset_roundtrips=PASS"))
     if mode == "facade":
         names = (() if resource_facade else ("surface", "texture") if buffer_facade else
                  ("surface", "texture", "vertex_buffer", "index_buffer"))
@@ -71,6 +74,8 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
         for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                        "resource_facade_volume_roundtrips=PASS",
                        "resource_facade_swapchain_roundtrips=PASS",
+                       "resource_facade_reset_pixel=0xe43b3b", "resource_facade_reset_roundtrips=PASS",
+                       "resource_facade_live_reset_roundtrips=PASS",
                        "resource_facade_surface_copy_and_target=PASS", "resource_facade_rejects_unknown_inputs=PASS",
                        "resource_facade_2d_cube_surface_roundtrips=PASS", "resource_facade_cube_binding=PASS",
                        "resource_facade_device_unwraps_buffers=PASS", "resource_facade_final_close=PASS"):
@@ -94,6 +99,31 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
             other = "0x80004002" if name == "container_device" else "0x00000000"
             alternate = [line.replace(marker, prefix + other) for line in wrapped]
             self.assertNotEqual(baseline_values, self.inspect(alternate, resource_facade=True))
+
+    def test_reset_hresult_is_required_successful_and_compared(self):
+        baseline = fixture_log("baseline", resource_facade=True)
+        wrapped = fixture_log("facade", resource_facade=True)
+        marker = "resource_facade_reset_hr=0x00000000"
+        for changed in ([line for line in wrapped if line != marker], wrapped + [marker],
+                        [line.replace(marker, "resource_facade_reset_hr=0x80004005") for line in wrapped]):
+            with self.assertRaises(probe.RunError):
+                self.inspect(changed, resource_facade=True)
+        other = [line.replace(marker, "resource_facade_reset_hr=0x00000001") for line in wrapped]
+        self.assertNotEqual(self.inspect(baseline, "baseline", resource_facade=True),
+                            self.inspect(other, resource_facade=True))
+
+    def test_live_and_recovery_reset_results_are_distinct(self):
+        baseline = fixture_log("baseline", resource_facade=True)
+        for name, value in (("live", "0x80004005"), ("recovery", "0x00000000")):
+            marker = f"resource_facade_{name}_reset_hr={value}"
+            for changed in ([line for line in baseline if line != marker], baseline + [marker],
+                            [line.replace(marker, f"resource_facade_{name}_reset_hr=bad") for line in baseline]):
+                with self.assertRaises(probe.RunError):
+                    self.inspect(changed, "baseline", resource_facade=True)
+        failed_recovery = [line.replace("resource_facade_recovery_reset_hr=0x00000000",
+                                        "resource_facade_recovery_reset_hr=0x80004005") for line in baseline]
+        with self.assertRaises(probe.RunError):
+            self.inspect(failed_recovery, "baseline", resource_facade=True)
 
     def test_buffer_facade_requires_parent_and_writeonly_evidence(self):
         baseline = self.inspect(fixture_log("baseline"), "baseline", True)

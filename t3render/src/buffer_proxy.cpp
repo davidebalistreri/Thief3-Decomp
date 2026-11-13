@@ -436,7 +436,7 @@ Buffer* Adopt(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8
         }
     }
     Wrapper<Buffer>* candidate = nullptr;
-    if (fresh) {
+    if (fresh || closed) {
         candidate = new (std::nothrow) Wrapper<Buffer>(state, owner, facade, native, identity, size);
     }
     Control* found = nullptr;
@@ -457,12 +457,17 @@ Buffer* Adopt(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8
                 found = item;
                 if (fresh) state->PoisonLocked(owner);  // duplicate creation is ambiguous
             } else state->PoisonLocked(owner);
-        } else if (device && !device->unsafe && !device->closing && !state->global_unsafe && fresh && candidate &&
-                   state->wrappers.size() < state->maximum) {
-            ir::BufferAvailability availability{};
-            const auto status = state->shadows.Register(reinterpret_cast<std::uintptr_t>(identity), size,
-                                                        candidate->token, availability);
-            if (status == ir::RegistryResult::Ok) {
+        } else if (!closing && candidate && state->wrappers.size() < state->maximum &&
+                   (closed || (device && !device->unsafe && !state->global_unsafe && fresh))) {
+            const bool can_track = device && !device->unsafe && !state->global_unsafe && fresh;
+            bool registered = false;
+            if (can_track) {
+                ir::BufferAvailability availability{};
+                registered = state->shadows.Register(reinterpret_cast<std::uintptr_t>(identity), size,
+                                                      candidate->token, availability) == ir::RegistryResult::Ok;
+            }
+            if (!registered) state->PoisonLocked(owner);
+            if (registered || closed) {
                 try {
                     const bool wrapper_added = state->wrappers.emplace(candidate->exposed, candidate).second;
                     const bool identity_added = state->identities.emplace(identity, candidate).second;
@@ -479,7 +484,7 @@ Buffer* Adopt(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8
                     state->DetachLocked(candidate);
                     state->PoisonLocked(owner);
                 }
-            } else state->PoisonLocked(owner);
+            }
         } else state->PoisonLocked(owner);
     }
     if (candidate) candidate->DiscardUnpublished();
@@ -548,6 +553,29 @@ bool BufferProxy::CloseFacadeDevice(IDirect3DDevice8* owner, IDirect3DDevice8* f
         retired = next;
     }
     return true;
+}
+
+void BufferProxy::RetireFacadeDormantForReset(IDirect3DDevice8* owner, IDirect3DDevice8* facade) noexcept {
+    LastError error;
+    if (!state_ || !owner || !facade) return;
+    Control* retired = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        state_->PoisonLocked(owner);
+        for (auto it = state_->wrappers.begin(); it != state_->wrappers.end();) {
+            Control* item = (it++)->second;
+            if (item->owner == owner && item->facade == facade && item->Dormant()) {
+                state_->DetachLocked(item);
+                item->retirement_next = retired;
+                retired = item;
+            }
+        }
+    }
+    while (retired) {
+        Control* next = retired->retirement_next;
+        retired->DestroyDormant();
+        retired = next;
+    }
 }
 
 namespace {

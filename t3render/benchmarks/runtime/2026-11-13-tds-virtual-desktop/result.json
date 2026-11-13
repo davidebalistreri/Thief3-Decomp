@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "test": "tds_highball_virtual_desktop_capture",
+  "date": "2026-11-13",
+  "status": "PARTIAL",
+  "environment": {"os": "macOS arm64", "runtime": "Highball CrossOver 26.3 r30 / Wine x86", "bottle": "Games"},
+  "scenario": {
+    "desktop": "T3RenderTDS",
+    "requested_desktop_dimensions": [1280, 800],
+    "game_map": "SouthQuarter1_int1.gmp",
+    "save_slot": "Garrett’s Building",
+    "game_presentation": {"width": 1024, "height": 768, "windowed": false},
+    "proxy_sha256": "10618aab6a43e5c48ec6de8787f1612744bb49da7057a91c7a4667e71da2c022",
+    "proxy_source_commit": "14b8efc",
+    "temporary_proxy_removed": true
+  },
+  "result": {
+    "user_report": "Switching to Codex was less invasive; the window still appeared on top and lacked requested title-bar controls.",
+    "background_marker": "No trace file observed during an initial 10-second check while the user was in Codex.",
+    "foreground_marker": "The same marker produced a complete trace after the user returned the game to the foreground.",
+    "frame": 1356,
+    "draw_count": 518,
+    "present_hresult": 0,
+    "declaration_hypotheses": 496,
+    "program_hypotheses": 92,
+    "trace_sha256": "08e3a44d5d3653712fbf429d97d03e5341d451b45b2fc45c2b54825d69b92499",
+    "partial_ir_sha256": "4e49adb2c9bd315cf6f7a705952e0f32e2fd839c94d69a1e3eb427dced8b5751",
+    "local_details": "build/t3render-captures/bedroom-desktop-20261113-1710"
+  },
+  "limitations": [
+    "A pending marker alone does not prove why no background frame was presented; vanilla focus-loss behavior is a plausible cause.",
+    "The device reported fullscreen even inside Wine's virtual desktop; this test did not provide a decorated or resizable game window.",
+    "Shader data remains pre-reset application-memory hypotheses, not proof of GPU input; buffer bytes and shader constants are absent.",
+    "No matched screenshot, real-room DX12 replay, native Windows test or gameplay/stealth parity claim.",
+    "The user asked the agent to terminate the test process after capture; Steam remained in the virtual desktop."
+  ]
+}

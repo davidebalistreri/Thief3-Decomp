@@ -19,9 +19,13 @@ env WINEPREFIX="$T3RENDER_BOTTLE" \
 
 For a later TDS test, Steam and its children would need to start in the same
 virtual desktop; an already-running Steam may launch the game outside it.
-Whether the launcher preserves the desktop, whether the 1024×768 game is
-contained in the window, and whether `Present` continues when unfocused have
-not been tested. Close or restart Steam only when convenient for the user.
+On a [follow-up TDS run](../benchmarks/runtime/2026-11-13-tds-virtual-desktop/result.json),
+the user could switch to Codex more easily, but reported a window that still
+appeared on top and lacked title-bar controls. The game's D3D presentation was
+still fullscreen inside the virtual desktop. A marker did not produce a frame
+while the user was in Codex; returning focus produced the trace. The cause of
+the background delay was not isolated. Close or restart Steam only when
+convenient for the user.
 
 T3SDK also offers `Display.Borderless=1` and `PauseInBackground=0`, but its
 loader is not currently installed in this bottle and compatibility with the

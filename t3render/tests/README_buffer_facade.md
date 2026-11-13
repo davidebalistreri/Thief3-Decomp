@@ -49,6 +49,9 @@ reset, runtime concurrency, native Windows, TDS or gameplay.
 
 The earlier [fail-closed benchmark](../benchmarks/d3d8/2026-11-13-buffer-facade/result.json)
 records the prior version before dormant-wrapper reacquisition was added.
+The [bedroom texture inventory](../tools/README_texture_inventory.md) also
+observed cube textures in the existing TDS trace, so a 2D-only resource boundary
+would not cover the benchmark's recorded texture types.
 
 With an existing i686 MinGW build and Highball engine, from `t3sdk`:
 

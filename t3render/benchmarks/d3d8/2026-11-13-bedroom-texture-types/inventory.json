@@ -1,0 +1,51 @@
+{
+  "schema": "t3render.texture-inventory",
+  "version": 1,
+  "source_sha256": "5a0735de29b1c910f47180a3aac5ce40d1ee5a5136d0f755523580887aa0e391",
+  "frames": [
+    {
+      "frame": 1638,
+      "frame_outcome": {
+        "present_succeeded": true,
+        "concurrent_operations": false,
+        "had_reset": false
+      },
+      "draw_outcomes": {
+        "succeeded": 518
+      },
+      "draws_with_missing_or_invalid_stages": 0,
+      "stage_observations": {
+        "bound": 893,
+        "unbound": 3251
+      },
+      "texture_types": {
+        "cube_texture": {
+          "bound_stage_observations": 185,
+          "draws_with_type": 156,
+          "distinct_observed_addresses": 2,
+          "by_stage": {
+            "0": 29,
+            "1": 155,
+            "3": 1
+          }
+        },
+        "texture_2d": {
+          "bound_stage_observations": 708,
+          "draws_with_type": 344,
+          "distinct_observed_addresses": 58,
+          "by_stage": {
+            "0": 259,
+            "1": 37,
+            "2": 234,
+            "3": 178
+          }
+        }
+      }
+    }
+  ],
+  "limitations": [
+    "Observations follow successful draw results; snapshots are not proof of GPU input.",
+    "Addresses are process-local, may be reused or aliased, and are not asset identities.",
+    "Texture bytes and asset names are absent; alias paths and unobserved draws remain unknown."
+  ]
+}

@@ -18,6 +18,13 @@
     "user_report": "Switching to Codex was less invasive; the window still appeared on top and lacked requested title-bar controls.",
     "background_marker": "No trace file observed during an initial 10-second check while the user was in Codex.",
     "foreground_marker": "The same marker produced a complete trace after the user returned the game to the foreground.",
+    "desktop_frame_attempt": {
+      "after_game_exit": true,
+      "desktop_window_class": "#32769",
+      "style_before": "0x96000000",
+      "attempt": "SetWindowLongW to a decorated, resizable style from a separate Wine process",
+      "result": "ERROR_ACCESS_DENIED (5); style unchanged"
+    },
     "frame": 1356,
     "draw_count": 518,
     "present_hresult": 0,

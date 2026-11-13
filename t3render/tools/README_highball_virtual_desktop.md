@@ -24,8 +24,11 @@ the user could switch to Codex more easily, but reported a window that still
 appeared on top and lacked title-bar controls. The game's D3D presentation was
 still fullscreen inside the virtual desktop. A marker did not produce a frame
 while the user was in Codex; returning focus produced the trace. The cause of
-the background delay was not isolated. Close or restart Steam only when
-convenient for the user.
+the background delay was not isolated. After TDS exited, the desktop window
+had no caption or resize frame; a separate Wine process attempting to change
+its style received `ERROR_ACCESS_DENIED` and left it unchanged. A decorated
+game window remains unverified. Close or restart Steam only when convenient for
+the user.
 
 T3SDK also offers `Display.Borderless=1` and `PauseInBackground=0`, but its
 loader is not currently installed in this bottle and compatibility with the

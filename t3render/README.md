@@ -234,6 +234,14 @@ fixture Reset only characterizes its tested Highball runtime, not TDS or other
 drivers. Existing traces cannot recover words that were discarded before this
 option was enabled.
 
+A later [TDS bedroom capture](benchmarks/d3d8/2026-11-13-tds-declaration-history/result.json)
+with history enabled contained 305 stable declaration candidates in 321 draws,
+and no pre-reset hypotheses. This is an observation of that run, not evidence
+that the previous reset was avoided or that the candidates match GPU input. All
+312 indexed draws bound WRITEONLY vertex and index buffers; reading them with
+`D3DLOCK_READONLY` is not a supported substitute for safe write observation.
+Buffer bytes and shader programs remain absent, so this frame cannot be replayed.
+
 ### Experimental buffered capture — isolated fixture only
 
 Set `T3RENDER_CAPTURE_BUFFERS=1` in addition to the capture configuration to

@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "test": "tds_bedroom_declaration_history",
+  "date": "2026-11-13",
+  "status": "PARTIAL",
+  "environment": {
+    "os": "macOS arm64",
+    "runtime": "Highball CrossOver 26.3 r30 / Wine x86"
+  },
+  "scenario": {
+    "map": "SouthQuarter1_int1.gmp",
+    "save_slot": "Garrett’s Building",
+    "camera": "User oriented toward bed; no matched screenshot or exact pose attestation.",
+    "presentation": {"width": 1024, "height": 768, "windowed": false},
+    "trigger": "external marker after load, game in foreground",
+    "requested_frames": 1,
+    "declaration_observation": true,
+    "declaration_history": true,
+    "buffer_observation": false
+  },
+  "proxy": {
+    "source_commit": "4920f7e67ebd2aff5c816a3a7dee6ba9e74c0954",
+    "sha256": "9079a629a133e7b002c5200515260af3a21385d46a8abd3e2f9f33642d678437",
+    "temporary_install_removed": true,
+    "native_proxy_loaded": true,
+    "game_d3d8_forwarded_to": "Wine system32 builtin"
+  },
+  "result": {
+    "frame": 1934,
+    "draw_count": 321,
+    "calls": {"DrawIndexedPrimitive": 312, "DrawPrimitiveUP": 9},
+    "clear_count": 6,
+    "present_hresult": 0,
+    "concurrent_operations": false,
+    "declaration_status": {"candidate": 305, "unknown": 16},
+    "stable_successful_candidates": 305,
+    "distinct_candidate_word_sequences": 2,
+    "distinct_candidate_generations": 15,
+    "pre_reset_hypotheses": 0,
+    "indexed_draw_buffer_descriptors": {
+      "vertex_writeonly_managed": 271,
+      "vertex_writeonly_dynamic_default_pool": 41,
+      "index_writeonly_managed": 312,
+      "index_format": "D3DFMT_INDEX16",
+      "distinct_vertex_buffer_tokens": 4,
+      "distinct_index_buffer_tokens": 50
+    },
+    "trace_sha256": "66331d46113a63284a613f6832351209be980a03179f90f225cad73c4429d5bf",
+    "partial_ir_sha256": "50587210cc085bf18ee4b7063d945e1ac35d43d5cfa5dfb43a8677824b9a368e",
+    "local_details": "build/t3render-captures/bedroom-history-20261113-1618"
+  },
+  "limitations": [
+    "Candidates are application-memory snapshots, not proof of shader identity or the data consumed by the driver; aliases and concurrent memory writes can be missed.",
+    "No pre-reset hypothesis was emitted; this does not prove whether a Reset occurred before capture or why this run differs from earlier runs.",
+    "The stable flag covers observed shader-operation overlap, not declaration accuracy, all alias paths or Present/Reset concurrency.",
+    "WRITEONLY flags describe bound buffers at draw time; no resource bytes or prior lock history were captured.",
+    "Texture bytes, shader programs and constants are absent; no matched screenshot or real-room DX12 replay was produced.",
+    "No native Windows test or gameplay/stealth parity claim."
+  ]
+}

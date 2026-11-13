@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_vertex_constants_hidden",
+  "date": "2026-11-13",
+  "status": "PASS",
+  "environment": {
+    "os": "macOS arm64",
+    "runtime": "Highball CrossOver 26.3 r30 / Wine x86",
+    "bottle": "Games; Steam running, TDS closed",
+    "fixture_window": "hidden"
+  },
+  "source_commit": "44f2830",
+  "fixture_sha256": "c86fc884e0d27f6739515577fe2b6492b1e49db5da79db06c644cc15c3396bb0",
+  "proxy_sha256": "2469d1446ee8d4df9b0b6e66cdaaa2cf84a946431b01a3619c618b12100696d3",
+  "source_sha256": {
+    "t3render/src/proxy.cpp": "96f3114b62ad063c2fe037e071a149904ac872b94f17dbf75a386c4c5a259b49",
+    "t3render/src/capture.cpp": "ad5871640d43146342560d55be1c9fb3c83c96d69c6a0c65f964dbacef816c0c",
+    "t3render/src/capture.hpp": "ee487f74aca5e8a824b05d7dced021efe8536e0e153f2872ef901f6c43799777",
+    "t3render/src/vtable_layout.c": "5c5bdf866dacf110fb7aad436071c8dfa37168e6219b770fbddda146eb6ade49",
+    "t3render/src/vtable_layout.h": "095b35408093307c1bb36a879d3b7ed95fea19d32e9e92e5f690e9ecc025100e",
+    "t3render/ir/vertex_declaration_registry.cpp": "69341205f6bf272a18eeebee72d8804f603754d2106467f486250a66821742f4",
+    "t3render/ir/vertex_declaration_registry.hpp": "cd0531018057e6be920551edf6457acedb6bbbf70c3a9f13dcc5f0e081086d51",
+    "t3render/tools/trace_to_ir.py": "6e59807489e1fb8f247feb11c7a71d85bbcac8a2a731805c86dfca23b8031b82",
+    "t3render/tools/run_d3d8_shader_reset_fixture.py": "e68064f2f0027352228910b855009d3c46a4256e7304b59e93a3a9c3c4a4a91a",
+    "t3render/tests/d3d8_shader_reset_fixture.cpp": "4d1631b8f8c25a19874e54cb57b8a7b0683b29fcd2eb0f80230204ef8181ef89"
+  },
+  "result": {
+    "scenarios": {
+      "valid_only": {"paired_c0_samples": 3, "trace_sha256": "50bfad6027f6f0233d011489535fd56ec500f528b4cf52da90c70f92a2bf7847"},
+      "failed_reset_then_recovery": {"paired_c0_samples": 3, "trace_sha256": "d0c95e62b381bfed58937ce14ca32998a556f5487a6ca864adffa2643c51cfcb"}
+    },
+    "reported_max_vertex_shader_constants": 256,
+    "sampled_registers_per_draw": 96,
+    "fixture_c0_bits": [0, 1065353216, 0, 1065353216],
+    "hresult_and_rgb_parity": true,
+    "rgb_ppm_sha256": "5c13a1848569e78c8d35c4aeab416aa738892bc9a9e4cba59ac9f72db43b11c2",
+    "local_details": "build/t3render-diagnostics/2026-11-13-vertex-constants-hidden"
+  },
+  "limitations": [
+    "Synthetic fixture only; no TDS process or game data, and no real-room DX12 replay.",
+    "Only the known c0 value is independently checked; the remaining sampled registers are not compared to a reference.",
+    "Two matching getter results and observed setter windows do not prove GPU input, alias completeness or native Windows behavior.",
+    "Failed Reset is followed immediately by recovery; its isolated effect is not observed."
+  ]
+}

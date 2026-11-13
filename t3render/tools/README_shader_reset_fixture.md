@@ -81,3 +81,5 @@ constant and compare each paired IR observation, HRESULT and RGB image while
 leaving the fixture window hidden. The option may yield `PARTIAL` if the
 runtime does not expose the requested registers. It does not launch TDS or
 validate shader constants in a game frame.
+The [2026-11-13 Highball run](../benchmarks/d3d8/2026-11-13-vertex-constants/result.json)
+passed in both scenarios, with three paired `c0` samples each.

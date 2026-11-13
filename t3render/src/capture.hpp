@@ -4,6 +4,7 @@
 #include <d3d8.h>
 #include <cstddef>
 #include <cstdint>
+#include <array>
 
 #include "../ir/vertex_declaration_registry.hpp"
 
@@ -28,6 +29,14 @@ struct ShaderSnapshot {
     HRESULT getter_result = E_FAIL;
     DWORD value = 0;
     ir::ShaderObservation declaration;
+    // Raw IEEE-754 bits sampled from the runtime before the draw. The getter
+    // does not prove what an unobserved alias or the GPU actually used.
+    bool constants_requested = false;
+    HRESULT constants_result = E_FAIL;
+    HRESULT constants_verify_result = E_FAIL;
+    bool constants_match = false;
+    std::uint32_t constants_count = 0;
+    std::array<std::uint32_t, 96u * 4u> constant_bits{};
 };
 
 // Parameters passed by the caller. UP pointers remain owned by the caller and
@@ -46,6 +55,8 @@ struct DrawCall {
 bool CaptureConfigured();
 // Advisory only: a concurrent Present may change the active window.
 bool CaptureWantsDraw(IDirect3DDevice8*);
+// 0 means unavailable caps or a disabled constant observation.
+std::uint32_t CaptureVertexConstantCount(IDirect3DDevice8*);
 void CaptureDevice(IDirect3DDevice8*, const D3DPRESENT_PARAMETERS*);
 // Called after final Release: the address is an identifier, not a live COM object.
 void CaptureDeviceReleased(IDirect3DDevice8*);

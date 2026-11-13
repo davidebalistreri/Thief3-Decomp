@@ -184,7 +184,8 @@ bool ResetRender(HWND window, const wchar_t* const* paths, bool failed_first) {
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
-    if (argc != 9 || std::wcscmp(argv[1], L"--out0") || std::wcscmp(argv[3], L"--out1") ||
+    if ((argc != 9 && (argc != 10 || std::wcscmp(argv[9], L"--hidden"))) ||
+        std::wcscmp(argv[1], L"--out0") || std::wcscmp(argv[3], L"--out1") ||
         std::wcscmp(argv[5], L"--out2") || !argv[2][0] || !argv[4][0] || !argv[6][0] ||
         std::wcscmp(argv[7], L"--scenario") ||
         (std::wcscmp(argv[8], L"recovery") && std::wcscmp(argv[8], L"valid-only"))) return 2;
@@ -195,7 +196,7 @@ int wmain(int argc, wchar_t** argv) {
     HWND window = CreateWindowW(name, name, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                 kSize, kSize, nullptr, nullptr, instance, nullptr);
     if (!window) { UnregisterClassW(name, instance); return 1; }
-    ShowWindow(window, SW_SHOWNOACTIVATE); UpdateWindow(window);
+    if (argc == 9) { ShowWindow(window, SW_SHOWNOACTIVATE); UpdateWindow(window); }
     const wchar_t* paths[] = {argv[2], argv[4], argv[6]};
     const bool ok = ResetRender(window, paths, !std::wcscmp(argv[8], L"recovery"));
     DestroyWindow(window); UnregisterClassW(name, instance);

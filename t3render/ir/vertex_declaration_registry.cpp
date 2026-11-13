@@ -306,6 +306,7 @@ ShaderTicket VertexDeclarationRegistry::BeginDelete(std::uint64_t id, std::uint3
 ShaderTicket VertexDeclarationRegistry::BeginSet(std::uint64_t id) noexcept { return Begin(id, ShaderOperation::Set, 0); }
 ShaderTicket VertexDeclarationRegistry::BeginReset(std::uint64_t id) noexcept { return Begin(id, ShaderOperation::Reset, 0); }
 ShaderTicket VertexDeclarationRegistry::BeginDraw(std::uint64_t id) noexcept { return Begin(id, ShaderOperation::Draw, 0); }
+ShaderTicket VertexDeclarationRegistry::BeginSetConstants(std::uint64_t id) noexcept { return Begin(id, ShaderOperation::SetConstants, 0); }
 
 bool VertexDeclarationRegistry::EndCreate(ShaderTicket ticket, bool native_success, bool handle_known,
                                           std::uint32_t handle, DeclarationSnapshot snapshot,

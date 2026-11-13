@@ -132,7 +132,7 @@ struct D3DPRESENT_PARAMETERS {
     D3DFORMAT AutoDepthStencilFormat;
     DWORD Flags, FullScreen_RefreshRateInHz, FullScreen_PresentationInterval;
 };
-struct D3DCAPS8 { DWORD MaxTextureBlendStages, MaxSimultaneousTextures, MaxStreams, MaxActiveLights; };
+struct D3DCAPS8 { DWORD MaxTextureBlendStages, MaxSimultaneousTextures, MaxStreams, MaxActiveLights, MaxVertexShaderConst; };
 struct D3DSURFACE_DESC { D3DFORMAT Format; DWORD Usage, Pool, Width, Height; };
 struct D3DVOLUME_DESC { D3DFORMAT Format; DWORD Usage, Pool, Width, Height, Depth; };
 struct D3DVERTEXBUFFER_DESC { D3DFORMAT Format; D3DRESOURCETYPE Type; DWORD Usage, Pool, Size, FVF; };

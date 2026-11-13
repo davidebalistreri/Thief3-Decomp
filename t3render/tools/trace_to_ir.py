@@ -490,6 +490,69 @@ def pre_reset_vertex_program(draw, result, header, program_budget, history_budge
             "shader_stable": history["shader_stable"], "draw_hresult": history["draw_hresult"]}
 
 
+CONSTANT_UNAVAILABLE_REASONS = frozenset(("caps_unavailable", "invalid_count", "getter_failed", "verification_failed",
+                                          "inconsistent_read", "frame_word_limit"))
+
+
+def vertex_constant_frame_words(draw, header):
+    if "vertex_constants" not in draw:
+        return 0
+    raw = draw["vertex_constants"]
+    if not isinstance(raw, dict):
+        return None
+    if (raw.get("status") == "unavailable" and raw.get("bits", "missing") is None and
+            isinstance(raw.get("reason"), str) and raw["reason"] in CONSTANT_UNAVAILABLE_REASONS):
+        return 0
+    count = uint32(raw.get("count"))
+    limit = uint32(object_or_empty(header.get("vertex_constant_capture")).get("registers_per_observation"))
+    bits = raw.get("bits")
+    if (raw.get("status") != "sampled" or uint32(raw.get("start_register")) != 0 or
+            count is None or limit is None or not 1 <= count <= min(limit, 96) or
+            not isinstance(bits, list) or len(bits) != count * 4 or any(uint32(v) is None for v in bits)):
+        return None
+    return len(bits)
+
+
+def observed_vertex_constants(draw, result, header, frame_begin, within_frame_budget):
+    capability = object_or_empty(header.get("vertex_constant_capture"))
+    limit = uint32(capability.get("registers_per_observation"))
+    frame_limit = uint32(capability.get("words_per_frame"))
+    if (capability.get("requested") is not True or limit is None or not 1 <= limit <= 96 or
+            frame_limit is None or not limit * 4 <= frame_limit <= 262144 or not within_frame_budget or
+            object_or_empty(header.get("declaration_capture")).get("requested") is not True or
+            result.get("shader_stable") is not True or hresult_succeeded(result.get("hr")) is not True or
+            uint32(draw.get("vertex_shader")) is None):
+        return None
+    raw = draw.get("vertex_constants")
+    if not isinstance(raw, dict):
+        return None
+    base = {"shader_value": draw["vertex_shader"], "shader_stable": True, "draw_hresult": result["hr"]}
+    caps = uint32(object_or_empty(frame_begin.get("caps")).get("vertex_shader_constants"))
+    if (raw.get("status") == "unavailable" and raw.get("bits", "missing") is None and
+            isinstance(raw.get("reason"), str) and raw["reason"] in CONSTANT_UNAVAILABLE_REASONS):
+        count = uint32(raw.get("count"))
+        first = hresult_succeeded(raw.get("getter_hr"))
+        second = hresult_succeeded(raw.get("verify_hr"))
+        reason = raw["reason"]
+        if count is None or first is None or second is None:
+            return None
+        if reason == "caps_unavailable":
+            if count != 0 or (caps is not None and caps != 0) or first is not False or second is not False: return None
+        elif reason == "invalid_count":
+            if count <= limit or first is not False or second is not False: return None
+        elif (caps is None or count != min(caps, limit) or count == 0 or
+              (reason == "getter_failed" and (first is not False or second is not False)) or
+              (reason == "verification_failed" and (first is not True or second is not False)) or
+              (reason in ("inconsistent_read", "frame_word_limit") and (first is not True or second is not True))):
+            return None
+        return {**base, "status": "unavailable", "reason": reason, "count": count, "bits": None}
+    if (vertex_constant_frame_words(draw, header) is None or raw.get("status") != "sampled" or
+            caps is None or raw["count"] != min(caps, limit) or
+            hresult_succeeded(raw.get("getter_hr")) is not True or hresult_succeeded(raw.get("verify_hr")) is not True):
+        return None
+    return {**base, "status": "sampled", "start_register": 0, "count": raw["count"], "bits": raw["bits"][:]}
+
+
 def buffer_binding(record):
     """Validate a getter's resource identity and declared byte size."""
     if not isinstance(record, dict) or hresult_succeeded(record.get("hr")) is not True:
@@ -707,6 +770,8 @@ def convert(path):
     frame_history_words = 0
     program_results = []
     frame_program_words = 0
+    constant_results = []
+    frame_constant_words = 0
     draw_index = 0
     for line_number, event in enumerate(records, 1):
         kind = event["event"]
@@ -723,6 +788,8 @@ def convert(path):
             frame_history_words = 0
             program_results = []
             frame_program_words = 0
+            constant_results = []
+            frame_constant_words = 0
             current = {"frame": event["frame"], "commands": [],
                        "compatibility": {"d3d8": {"frame_begin": event, "events": [], "frame_end": None}}}
             ir["frames"].append(current)
@@ -746,6 +813,12 @@ def convert(path):
                 program_history = pre_reset_vertex_program(draw, result, records[0], within_budget, within_history_budget)
                 if program_history is not None:
                     command["vertex_program_pre_reset"] = program_history
+            limit = uint32(object_or_empty(records[0].get("vertex_constant_capture")).get("words_per_frame"))
+            within_budget = frame_constant_words is not None and limit is not None and frame_constant_words <= limit
+            for command, draw, result in constant_results:
+                constants = observed_vertex_constants(draw, result, records[0], current["compatibility"]["d3d8"]["frame_begin"], within_budget)
+                if constants is not None:
+                    command["vertex_constants_observed"] = constants
             current["compatibility"]["d3d8"]["frame_end"] = event
             current = None
         elif kind == "draw":
@@ -755,6 +828,9 @@ def convert(path):
             used_words = vertex_program_frame_words(event, records[0])
             frame_program_words = (frame_program_words + used_words
                                    if frame_program_words is not None and used_words is not None else None)
+            used_words = vertex_constant_frame_words(event, records[0])
+            frame_constant_words = (frame_constant_words + used_words
+                                    if frame_constant_words is not None and used_words is not None else None)
             if "buffer_data" in event:
                 used = buffered_frame_bytes(event)
                 frame_buffer_bytes = (frame_buffer_bytes + used
@@ -791,6 +867,8 @@ def convert(path):
                     pre_reset_results.append((command, draw, event))
                 if "vertex_program" in draw or "vertex_program_pre_reset" in draw:
                     program_results.append((command, draw, event))
+                if "vertex_constants" in draw:
+                    constant_results.append((command, draw, event))
             if kind == "draw_result" and event.get("op_id") in buffered_pending:
                 mesh_record, draw, indexed = buffered_pending.pop(event["op_id"])
                 buffered_results.append((mesh_record, draw, event, indexed))

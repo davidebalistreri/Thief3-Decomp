@@ -83,6 +83,8 @@ struct IDirect3DDevice8Vtbl {
  HRESULT (*SetVertexShader)(IDirect3DDevice8*,DWORD);
  HRESULT (*GetVertexShader)(IDirect3DDevice8*,DWORD*);
  HRESULT (*DeleteVertexShader)(IDirect3DDevice8*,DWORD);
+ HRESULT (*SetVertexShaderConstant)(IDirect3DDevice8*,DWORD,const void*,DWORD);
+ HRESULT (*GetVertexShaderConstant)(IDirect3DDevice8*,DWORD,void*,DWORD);
 };
 struct IDirect3D8 {
  struct IDirect3D8Vtbl* lpVtbl; int refs;
@@ -121,5 +123,7 @@ struct IDirect3DDevice8 {
  HRESULT STDMETHODCALLTYPE SetVertexShader(DWORD);
  HRESULT STDMETHODCALLTYPE GetVertexShader(DWORD*);
  HRESULT STDMETHODCALLTYPE DeleteVertexShader(DWORD);
+ HRESULT STDMETHODCALLTYPE SetVertexShaderConstant(DWORD,const void*,DWORD);
+ HRESULT STDMETHODCALLTYPE GetVertexShaderConstant(DWORD,void*,DWORD);
 #endif
 };

@@ -45,6 +45,11 @@ static bool enabled = false, writable = true, reject_swap = false, recursive = f
 static bool buffers_requested = false;
 static bool declarations_requested = false, history_requested = false, invalid_history_option = false;
 static bool vertex_programs_requested = false;
+static bool vertex_constants_requested = false;
+static unsigned constant_cap = 4, constant_getters = 0;
+static bool constant_get_fail = false, constant_verify_fail = false, constant_partial = false, constant_overrun = false;
+static bool constant_get_reentry = false;
+static unsigned constant_release_on = 0;
 static bool declaration_testing = false, wants_draw = true;
 static bool declaration_reset_fails = false, declaration_set_fails = false, declaration_delete_fails = false;
 static bool declaration_create_fails = false, declaration_output_unreadable = false;
@@ -203,8 +208,9 @@ extern "C" DWORD GetEnvironmentVariableW(const wchar_t* name, wchar_t* value, DW
  const bool declarations = !std::wcscmp(name,L"T3RENDER_CAPTURE_DECLARATIONS");
  const bool history = !std::wcscmp(name,L"T3RENDER_CAPTURE_DECLARATION_HISTORY");
  const bool programs = !std::wcscmp(name,L"T3RENDER_CAPTURE_VERTEX_PROGRAMS");
+ const bool constants = !std::wcscmp(name,L"T3RENDER_CAPTURE_VERTEX_CONSTANTS");
  if ((!buffers || !buffers_requested) && (!declarations || !declarations_requested) && (!history || !history_requested) &&
-     (!programs || !vertex_programs_requested)) return 0;
+     (!programs || !vertex_programs_requested) && (!constants || !vertex_constants_requested)) return 0;
  if (size < 2) return 2;
  value[0]=((buffers && invalid_buffer_option) || (history && invalid_history_option)) ? L'0' : L'1'; value[1]=0; return 1;
 }
@@ -232,6 +238,7 @@ static void MockWriterEntry(int entry, IDirect3DDevice8* device) {
 namespace t3render {
 bool CaptureConfigured() { SetLastError(991); MockWriterEntry(1,&devices[0]); return enabled; }
 bool CaptureWantsDraw(IDirect3DDevice8* d) { SetLastError(991); MockWriterEntry(8,d); return wants_draw; }
+std::uint32_t CaptureVertexConstantCount(IDirect3DDevice8*) { SetLastError(991); return constant_cap; }
 void CaptureDevice(IDirect3DDevice8* d,const D3DPRESENT_PARAMETERS* p) {
  observed_params=const_cast<D3DPRESENT_PARAMETERS*>(p); events.push_back("capture-device");
  if (capture_device_reentry) {
@@ -432,11 +439,87 @@ static HRESULT get_shader(IDirect3DDevice8* device,DWORD* out) {
  *out=shader_value; return S_OK;
 }
 static HRESULT delete_shader(IDirect3DDevice8*,DWORD) { shader_input_error=GetLastError(); SetLastError(954); return declaration_delete_fails ? -83 : S_OK; }
+static HRESULT set_constants(IDirect3DDevice8*,DWORD,const void*,DWORD) { SetLastError(957); return S_OK; }
+static HRESULT get_constants(IDirect3DDevice8* device,DWORD first,void* data,DWORD count) {
+ ++constant_getters;
+ if (constant_getters==constant_release_on) assert(device->lpVtbl->Release(device)==0);
+ if (constant_get_reentry) {
+  constant_get_reentry=false;
+  const DWORD update[4]{};
+  assert(device->lpVtbl->SetVertexShaderConstant(device,0,update,1)==S_OK);
+ }
+ SetLastError(958);
+ if (constant_get_fail || (constant_verify_fail && constant_getters==2)) return E_FAIL;
+ assert(first==0 && data && count==4);
+ auto* bits=static_cast<DWORD*>(data);
+ const unsigned words=count*4;
+ for (unsigned i=0;i<words-(constant_partial?1u:0u);++i) bits[i]=0x3f800000u+i;
+ if (constant_overrun) bits[words]=0x12345678u;
+ return S_OK;
+}
 static IDirect3D8Vtbl factory_vt{query_factory,add_factory,release_factory,make_device};
 static IDirect3DDevice8Vtbl device_vt{query_device,add_device,release_device,reset,present,clear,draw,draw_indexed,draw_up,draw_indexed_up,
  create_vertex,create_index,set_stream,get_stream,set_indices,get_indices,process_vertices,
  begin_state_block,end_state_block,apply_state_block,capture_state_block,delete_state_block,create_state_block,
- create_shader,set_shader,get_shader,delete_shader};
+ create_shader,set_shader,get_shader,delete_shader,set_constants,get_constants};
+
+static int ConstantBoundaryTest(const std::string& mode) {
+ enabled=true; declaration_testing=true;
+ declarations_requested=mode!="const-without-decl";
+ vertex_constants_requested=mode!="const-off";
+ buffers_requested=mode=="const-combined";
+ constant_cap=mode=="const-no-caps" ? 0 : mode=="const-over-limit" ? 97 : 4;
+ constant_get_fail=mode=="const-get-fail";
+ constant_verify_fail=mode=="const-verify-fail";
+ constant_partial=mode=="const-partial";
+ constant_overrun=mode=="const-overrun";
+ constant_get_reentry=mode=="const-get-set";
+ constant_release_on=mode=="const-first-release" ? 1u : mode=="const-second-release" ? 2u : 0u;
+ declaration_getter_fails=mode=="const-shader-get-fail";
+ factory={&factory_vt,1}; devices[0]={&device_vt,1};
+ auto* f=Proxy_Direct3DCreate8(220); D3DPRESENT_PARAMETERS params{23}; IDirect3DDevice8* d=nullptr;
+ assert(f->lpVtbl->CreateDevice(f,0,0,nullptr,0,&params,&d)==S_OK);
+ const DWORD decl[]={1u<<29,0xffffffffu}; DWORD handle=0;
+ assert(d->lpVtbl->CreateVertexShader(d,decl,nullptr,&handle,0)==S_OK);
+ assert(d->lpVtbl->SetVertexShader(d,handle)==S_OK);
+ const DWORD update[4]={1,2,3,4};
+ SetLastError(101);
+ assert(d->lpVtbl->SetVertexShaderConstant(d,0,update,1)==S_OK && GetLastError()==957);
+ if (mode=="const-set-draw") {
+  block_draw=true;
+  std::thread worker([&] { assert(d->lpVtbl->DrawPrimitive(d,4,0,1)==14); });
+  while (!draw_entered) std::this_thread::yield();
+  assert(d->lpVtbl->SetVertexShaderConstant(d,0,update,1)==S_OK);
+  allow_draw=true; worker.join(); block_draw=false;
+ } else {
+  SetLastError(104);
+  const auto hr=d->lpVtbl->DrawPrimitive(d,4,0,1);
+  if (constant_release_on) {
+   assert(hr==D3DERR_INVALIDCALL && GetLastError()==104 && last_freed==d &&
+          constant_getters==constant_release_on && !observed_shader_present && !observed_shader_result);
+   assert(f->lpVtbl->Release(f)==0);
+   return 0;
+  }
+  assert(hr==14 && draw_input_error==104 && GetLastError()==955);
+ }
+ if (mode=="const-without-decl" || mode=="const-combined") {
+  assert(!observed_shader_present && constant_getters==0);
+ } else {
+  assert(observed_shader_present && observed_shader_result);
+  assert(observed_shader.constants_requested == (mode!="const-off"));
+  if (mode=="const-off" || mode=="const-no-caps" || mode=="const-over-limit" || mode=="const-shader-get-fail") assert(constant_getters==0);
+  else if (mode=="const-get-fail") assert(constant_getters==1);
+  else assert(constant_getters==2);
+  if (mode=="const-in" || mode=="const-set-draw" || mode=="const-get-set") {
+   assert(observed_shader.constants_result==S_OK && observed_shader.constants_verify_result==S_OK &&
+          observed_shader.constants_match && observed_shader.constants_count==4);
+   for (unsigned i=0;i<16;++i) assert(observed_shader.constant_bits[i]==0x3f800000u+i);
+  } else if (mode!="const-off") assert(!observed_shader.constants_match);
+  assert(observed_shader_stable == (mode!="const-set-draw" && mode!="const-get-set" && mode!="const-shader-get-fail"));
+ }
+ assert(d->lpVtbl->Release(d)==0 && f->lpVtbl->Release(f)==0);
+ return 0;
+}
 
 static int DeclarationHistoryBoundaryTest(const std::string& mode) {
  using t3render::ir::ShaderObservationStatus;
@@ -1064,6 +1147,7 @@ static int BufferBoundaryTest(const std::string& mode) {
 }
 
 int main(int argc, char** argv) {
+ if(argc==2 && std::string(argv[1]).find("const-")==0) return ConstantBoundaryTest(argv[1]);
  if(argc==2 && std::string(argv[1]).find("hist-")==0) return DeclarationHistoryBoundaryTest(argv[1]);
  if(argc==2 && std::string(argv[1]).find("decl-")==0) return DeclarationBoundaryTest(argv[1]);
  if(argc==2) return BufferBoundaryTest(argv[1]);

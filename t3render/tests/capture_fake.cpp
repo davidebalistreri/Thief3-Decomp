@@ -84,7 +84,7 @@ struct Device : IDirect3DDevice8 {
     D3DVIEWPORT8 viewport = {1, 2, 1280, 720, 0, 1};
 
     HRESULT GetDeviceCaps(D3DCAPS8* out) override {
-        ++getters; *out = {2, 2, 2, 4}; return S_OK;
+        ++getters; *out = {2, 2, 2, 4, 96}; return S_OK;
     }
     HRESULT GetTransform(D3DTRANSFORMSTATETYPE type, D3DMATRIX* out) override {
         ++getters;
@@ -389,6 +389,37 @@ int main(int argc, char** argv) {
         if (!token) return 8;
         t3render::CaptureShaderDrawResult(&device, token, S_OK, -1, true);
         t3render::CapturePresent(&device, S_OK);
+    } else if (scenario == "shader_constants_budget" || scenario == "shader_constants_unavailable") {
+        t3render::CapturePresent(&device, S_OK);
+        t3render::ShaderSnapshot snapshot;
+        snapshot.getter_result = S_OK;
+        snapshot.value = 0xf0000001u;
+        snapshot.constants_requested = true;
+        snapshot.constants_count = 96;
+        snapshot.constants_result = snapshot.constants_verify_result = S_OK;
+        snapshot.constants_match = true;
+        for (size_t i=0; i<snapshot.constant_bits.size(); ++i) snapshot.constant_bits[i]=0x3f800000u+static_cast<unsigned>(i);
+        auto call = draw; call.shader_snapshot = &snapshot;
+        const unsigned draws = scenario == "shader_constants_budget" ? 683 : 4;
+        for (unsigned i=0; i<draws; ++i) {
+            if (scenario == "shader_constants_unavailable") {
+                if (i==0) snapshot.constants_result=E_FAIL;
+                if (i==1) { snapshot.constants_result=S_OK; snapshot.constants_verify_result=E_FAIL; }
+                if (i==2) { snapshot.constants_verify_result=S_OK; snapshot.constants_match=false; }
+                if (i==3) { snapshot.constants_count=0; snapshot.constants_result=E_FAIL;
+                            snapshot.constants_verify_result=E_FAIL; snapshot.constants_match=false; }
+            }
+            const auto token = t3render::CaptureDraw(&device, call);
+            if (!token) return 8;
+            t3render::CaptureShaderDrawResult(&device, token, S_OK, -1, true);
+        }
+        t3render::CapturePresent(&device, S_OK);
+        if (scenario == "shader_constants_budget") {
+            const auto token = t3render::CaptureDraw(&device, call);
+            if (!token) return 8;
+            t3render::CaptureShaderDrawResult(&device, token, S_OK, -1, true);
+            t3render::CapturePresent(&device, S_OK);
+        }
     } else if (scenario == "shader_reason") {
         t3render::CapturePresent(&device, S_OK);
         t3render::ShaderSnapshot snapshot;
@@ -413,7 +444,8 @@ int main(int argc, char** argv) {
             t3render::CaptureShaderDrawResult(&device, token, S_OK, -1, i!=2);
         }
         t3render::CapturePresent(&device, S_OK);
-    } else if (scenario == "shader" || scenario == "shader_program" || scenario == "shader_program_unavailable") {
+    } else if (scenario == "shader" || scenario == "shader_program" || scenario == "shader_program_unavailable" ||
+               scenario == "shader_constants") {
         if (t3render::CaptureWantsDraw(&device)) return 8;
         t3render::CapturePresent(&device, S_OK);
         if (!t3render::CaptureWantsDraw(&device) || t3render::CaptureWantsDraw(&unrelated)) return 8;
@@ -425,6 +457,13 @@ int main(int argc, char** argv) {
         snapshot.declaration.words = {0x20000000u, 0xffffffffu};
         snapshot.declaration.program_status = t3render::ir::ShaderProgramStatus::Complete;
         snapshot.declaration.program_words = {0xfffe0101u, 1u, 0xc00f0000u, 0x90e40000u, 0x0000ffffu};
+        if (scenario == "shader_constants") {
+            snapshot.constants_requested = true;
+            snapshot.constants_count = 96;
+            snapshot.constants_result = snapshot.constants_verify_result = S_OK;
+            snapshot.constants_match = true;
+            for (size_t i=0; i<snapshot.constant_bits.size(); ++i) snapshot.constant_bits[i]=0x3f800000u+static_cast<unsigned>(i);
+        }
         if (scenario == "shader_program_unavailable") {
             snapshot.declaration.program_status = t3render::ir::ShaderProgramStatus::UnsupportedVersion;
             snapshot.declaration.program_words.clear();

@@ -230,6 +230,43 @@ class CaptureHostTests(unittest.TestCase):
         self.assertEqual(draws[0]["vertex_program"], {"status": "unavailable", "generation": 7,
                          "reason": "unsupported_version", "words": None})
 
+    def test_vertex_constants_require_opt_in_and_stable_paired_draw(self):
+        self.run_capture("shader_constants", frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1"})
+        self.assertTrue(all("vertex_constants" not in e for e in self.records() if e["event"] == "draw"))
+        self.path.unlink()
+        self.run_capture("shader_constants", frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1",
+            "T3RENDER_CAPTURE_VERTEX_CONSTANTS": "1"})
+        records = self.records()
+        self.assertEqual(records[0]["vertex_constant_capture"], {"requested": True,
+                         "registers_per_observation": 96, "words_per_frame": 262144})
+        begin = next(e for e in records if e["event"] == "frame_begin")
+        self.assertEqual(begin["caps"]["vertex_shader_constants"], 96)
+        draws = [e for e in records if e["event"] == "draw"]
+        self.assertEqual(draws[0]["vertex_constants"]["bits"], [0x3f800000+i for i in range(384)])
+        converted = subprocess.run([sys.executable, "-B", str(ROOT / "tools" / "trace_to_ir.py"), str(self.path)],
+                                   text=True, capture_output=True)
+        self.assertEqual(converted.returncode, 0, converted.stderr)
+        commands = json.loads(converted.stdout)["frames"][0]["commands"]
+        self.assertEqual(commands[0]["vertex_constants_observed"]["status"], "sampled")
+        self.assertTrue(all("vertex_constants_observed" not in command for command in commands[1:]))
+
+    def test_vertex_constant_failures_never_emit_partial_bits(self):
+        self.run_capture("shader_constants_unavailable", frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1",
+            "T3RENDER_CAPTURE_VERTEX_CONSTANTS": "1"})
+        draws = [e for e in self.records() if e["event"] == "draw"]
+        self.assertEqual([e["vertex_constants"]["reason"] for e in draws],
+                         ["getter_failed", "verification_failed", "inconsistent_read", "caps_unavailable"])
+        self.assertTrue(all(e["vertex_constants"]["bits"] is None for e in draws))
+
+    def test_vertex_constant_budget_resets_between_frames(self):
+        self.run_capture("shader_constants_budget", frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1",
+            "T3RENDER_CAPTURE_VERTEX_CONSTANTS": "1", "T3RENDER_CAPTURE_FRAMES": "2"})
+        draws = [e for e in self.records() if e["event"] == "draw"]
+        self.assertEqual(len(draws), 684)
+        self.assertTrue(all(e["vertex_constants"]["status"] == "sampled" for e in draws[:682]))
+        self.assertEqual(draws[682]["vertex_constants"]["reason"], "frame_word_limit")
+        self.assertEqual(draws[683]["vertex_constants"]["status"], "sampled")
+
     def test_frame_window_defaults_to_one_and_preserves_legacy_events(self):
         self.run_capture("window", frame="1")
         records = self.records()

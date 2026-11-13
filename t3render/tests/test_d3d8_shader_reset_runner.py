@@ -74,6 +74,18 @@ def trace_records(scenario="recovery", *, enabled=True, fallback=False, bad_hr=-
     return records + [{"event": "capture_end", "frames": 3}]
 
 
+def constant_trace():
+    records = trace_records("valid-only")
+    records[0]["vertex_constant_capture"] = {"requested": True, "registers_per_observation": 96,
+                                              "words_per_frame": 262144}
+    for item in records:
+        if item.get("event") == "frame_begin": item["caps"] = {"vertex_shader_constants": 1}
+        if item.get("event") == "draw":
+            item["vertex_constants"] = {"status": "sampled", "start_register": 0, "count": 1,
+                                        "getter_hr": 0, "verify_hr": 0, "bits": [0, 0x3f800000, 0, 0x3f800000]}
+    return records
+
+
 class ShaderResetRunnerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="t3-shader-reset-test-")
@@ -93,6 +105,24 @@ class ShaderResetRunnerTests(unittest.TestCase):
             observation = self.log(events(scenario), scenario)
             self.assertFalse(observation["partial"])
             for enabled in (True, False): self.trace(trace_records(scenario, enabled=enabled), observation, enabled, scenario)
+
+    def test_constant_fixture_requires_paired_known_c0(self):
+        records = constant_trace()
+        def inspect(items):
+            self.path.write_text("".join(json.dumps(item) + "\n" for item in items), encoding="utf-8")
+            return runner.inspect_constants(self.path)
+        self.assertEqual(inspect(records), {"samples": 3, "unavailable_reasons": []})
+        changed = copy.deepcopy(records)
+        next(x for x in changed if x.get("event") == "draw")["vertex_constants"]["bits"][1] = 0
+        with self.assertRaises(runner.RunError): inspect(changed)
+        changed = copy.deepcopy(records)
+        next(x for x in changed if x.get("event") == "draw_result")["shader_stable"] = False
+        with self.assertRaises(runner.RunError): inspect(changed)
+        changed = copy.deepcopy(records)
+        next(x for x in changed if x.get("event") == "draw")["vertex_constants"] = {
+            "status": "unavailable", "reason": "getter_failed", "count": 1,
+            "getter_hr": -1, "verify_hr": -1, "bits": None}
+        self.assertEqual(inspect(changed), {"samples": 2, "unavailable_reasons": ["getter_failed"]})
 
     def test_failure_not_reproduced_and_shader_fallback_are_partial(self):
         self.assertTrue(self.log(events(bad_hr="0x00000000"))["partial"])

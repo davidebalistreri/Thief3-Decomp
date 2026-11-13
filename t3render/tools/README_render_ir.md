@@ -133,6 +133,13 @@ data is removed after validation. No third-party modules are needed.
   Pixel programs and constants are not captured. An unavailable program can report its allowlisted scan or
   budget reason with null words; a malformed program payload suppresses all
   program observations in its frame.
+- Optional `vertex_constants_observed` contains raw IEEE-754 bits sampled
+  twice from the D3D8 getter before a draw, not interpreted camera matrices.
+  The capability, device caps, range, getter results, per-frame word budget and
+  matching successful, stable draw result must all agree. Malformed or
+  over-budget payloads suppress constant observations for that frame; reported
+  failures expose no partial values. Setter overlap is intercepted only on
+  observed device interfaces, so these samples are not proof of GPU input.
 - Material values are captured legacy parameters and texture slots, not PBR
   values or texture roles. Lights are reported only when observed: the list is
   explicitly incomplete even when empty, since capture samples a limited range

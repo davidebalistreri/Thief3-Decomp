@@ -36,6 +36,8 @@ constexpr uint64_t kHistoryFrameWords = 262144;
 constexpr uint64_t kHistoryDeviceWords = 8192;
 constexpr uint64_t kProgramObservationWords = 1024;
 constexpr uint64_t kProgramFrameWords = 262144;
+constexpr uint64_t kVertexConstantRegisters = 96;
+constexpr uint64_t kVertexConstantFrameWords = 262144;
 constexpr DWORD kClearRectLimit = 256;
 constexpr size_t kPendingOperationLimit = 4096;
 enum class OperationKind { Draw, Clear };
@@ -56,6 +58,7 @@ struct CaptureState {
     bool declaration_requested = false;
     bool history_requested = false;
     bool vertex_programs_requested = false;
+    bool vertex_constants_requested = false;
     bool begun = false;
     bool had_reset = false;
     uint64_t frame = 0;
@@ -67,6 +70,7 @@ struct CaptureState {
     uint64_t buffer_bytes = 0;
     uint64_t history_words = 0;
     uint64_t vertex_program_words = 0;
+    uint64_t vertex_constant_words = 0;
     uint64_t next_operation = 1;
     bool concurrent_operations = false;
     std::unordered_map<uint64_t, OperationKind> pending_operations;
@@ -159,6 +163,7 @@ void Initialize(CaptureState& s) {
     s.declaration_requested = Environment(L"T3RENDER_CAPTURE_DECLARATIONS") == L"1";
     s.history_requested = Environment(L"T3RENDER_CAPTURE_DECLARATION_HISTORY") == L"1";
     s.vertex_programs_requested = Environment(L"T3RENDER_CAPTURE_VERTEX_PROGRAMS") == L"1";
+    s.vertex_constants_requested = Environment(L"T3RENDER_CAPTURE_VERTEX_CONSTANTS") == L"1";
     // Missing means the legacy single frame; an explicitly empty, truncated,
     // or malformed value must not silently start a capture.
     wchar_t frames[2]{};
@@ -223,6 +228,8 @@ bool Open(CaptureState& s) {
         << ",\"words_per_device\":" << kHistoryDeviceWords << '}';
     if (s.vertex_programs_requested) out << ",\"vertex_program_capture\":{\"requested\":true,\"words_per_observation\":"
         << kProgramObservationWords << ",\"words_per_frame\":" << kProgramFrameWords << '}';
+    if (s.vertex_constants_requested) out << ",\"vertex_constant_capture\":{\"requested\":true,\"registers_per_observation\":"
+        << kVertexConstantRegisters << ",\"words_per_frame\":" << kVertexConstantFrameWords << '}';
     out << ",\"limitations\":["
         << "\"texture bytes and T3 asset names are not captured\","
         << "\"optional buffer shadows are bounded observations, not proof of driver input\","
@@ -231,7 +238,7 @@ bool Open(CaptureState& s) {
         << "\"draw and clear events describe attempts; results are paired by op_id\","
         << "\"concurrent device calls may have a different driver submission order\","
         << "\"concurrent_operations only covers draw/clear overlap, not Present or Reset\","
-        << "\"vertex programs and declarations are optional candidates; pixel programs and shader constants are not captured\","
+        << "\"vertex programs, declarations and constants are optional observations; pixel programs and constants are not captured\","
         << "\"light indices 0 through 31 only\","
         << "\"world transform indices 0 through 3 only\","
         << "\"texture stages at most 8 and vertex streams at most 16\","
@@ -285,10 +292,14 @@ void Begin(CaptureState& s) {
     }
     out << ",\"caps\":";
     if (!s.has_caps) out << "null";
-    else out << "{\"texture_blend_stages\":" << s.caps.MaxTextureBlendStages
+    else {
+        out << "{\"texture_blend_stages\":" << s.caps.MaxTextureBlendStages
              << ",\"simultaneous_textures\":" << s.caps.MaxSimultaneousTextures
              << ",\"streams\":" << s.caps.MaxStreams
-             << ",\"active_lights\":" << s.caps.MaxActiveLights << '}';
+             << ",\"active_lights\":" << s.caps.MaxActiveLights;
+        if (s.vertex_constants_requested) out << ",\"vertex_shader_constants\":" << s.caps.MaxVertexShaderConst;
+        out << '}';
+    }
     out << "}\n";
     if (Write(s, out.str())) s.begun = true;
 }
@@ -920,6 +931,7 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
     out << "],\"vertex_shader\":";
     uint64_t history_words_emitted = 0;
     uint64_t program_words_emitted = 0;
+    uint64_t constant_words_emitted = 0;
     if (SUCCEEDED(vs_hr)) out << vs; else out << "null";
     if (draw.shader_snapshot) {
         const auto& declaration = draw.shader_snapshot->declaration;
@@ -1009,6 +1021,36 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
             program_words_emitted = prior_program_count;
         }
     }
+    if (s.vertex_constants_requested && s.declaration_requested && draw.shader_snapshot &&
+        draw.shader_snapshot->constants_requested) {
+        const auto& sample = *draw.shader_snapshot;
+        const uint64_t count = sample.constants_count;
+        const uint64_t words = count * 4;
+        const char* reason = nullptr;
+        if (!count) reason = "caps_unavailable";
+        else if (count > kVertexConstantRegisters) reason = "invalid_count";
+        else if (FAILED(sample.constants_result)) reason = "getter_failed";
+        else if (FAILED(sample.constants_verify_result)) reason = "verification_failed";
+        else if (!sample.constants_match) reason = "inconsistent_read";
+        else if (s.vertex_constant_words > kVertexConstantFrameWords ||
+                 words > kVertexConstantFrameWords - s.vertex_constant_words) reason = "frame_word_limit";
+        if (reason) {
+            out << ",\"vertex_constants\":{\"status\":\"unavailable\",\"reason\":\"" << reason
+                << "\",\"count\":" << count << ",\"getter_hr\":" << static_cast<int32_t>(sample.constants_result)
+                << ",\"verify_hr\":" << static_cast<int32_t>(sample.constants_verify_result)
+                << ",\"bits\":null}";
+        } else {
+            out << ",\"vertex_constants\":{\"status\":\"sampled\",\"start_register\":0,\"count\":" << count
+                << ",\"getter_hr\":" << static_cast<int32_t>(sample.constants_result)
+                << ",\"verify_hr\":" << static_cast<int32_t>(sample.constants_verify_result) << ",\"bits\":[";
+            for (uint64_t i = 0; i < words; ++i) {
+                if (i) out << ',';
+                out << sample.constant_bits[static_cast<std::size_t>(i)];
+            }
+            out << "]}";
+            constant_words_emitted = words;
+        }
+    }
     out << ",\"pixel_shader\":";
     if (SUCCEEDED(ps_hr)) out << ps; else out << "null";
     out << ',';
@@ -1037,6 +1079,7 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
     if (!Write(s, out.str())) return false;
     s.history_words += history_words_emitted;
     s.vertex_program_words += program_words_emitted;
+    s.vertex_constant_words += constant_words_emitted;
     ++s.draws;
     return true;
 }
@@ -1198,6 +1241,7 @@ void CaptureDeviceReleased(IDirect3DDevice8* device) {
         s.buffer_bytes = 0;
         s.history_words = 0;
         s.vertex_program_words = 0;
+        s.vertex_constant_words = 0;
         s.had_reset = false;
         s.next_operation = 1;
         s.pending_operations.clear();
@@ -1228,6 +1272,16 @@ bool CaptureWantsDraw(IDirect3DDevice8* device) {
         std::lock_guard<std::mutex> lock(s.mutex);
         return s.enabled && !s.complete && device && device == s.device && s.triggered && s.frame == s.target;
     } catch (...) { Fail(); return false; }
+}
+
+std::uint32_t CaptureVertexConstantCount(IDirect3DDevice8* device) {
+    try {
+        auto& s = State();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (!s.enabled || s.complete || !device || device != s.device || !s.has_caps ||
+            !s.vertex_constants_requested || !s.declaration_requested) return 0;
+        return static_cast<std::uint32_t>(std::min<uint64_t>(s.caps.MaxVertexShaderConst, kVertexConstantRegisters));
+    } catch (...) { Fail(); return 0; }
 }
 
 uint64_t CaptureDraw(IDirect3DDevice8* device, const DrawCall& draw) {
@@ -1333,6 +1387,7 @@ void CapturePresent(IDirect3DDevice8* device, HRESULT result) {
             s.buffer_bytes = 0;
             s.history_words = 0;
             s.vertex_program_words = 0;
+            s.vertex_constant_words = 0;
             s.had_reset = false;
             s.concurrent_operations = false;
             ++s.frame;

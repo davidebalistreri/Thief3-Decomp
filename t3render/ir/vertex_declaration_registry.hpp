@@ -19,7 +19,7 @@ namespace t3render::ir {
 // Construction preallocates metadata outside the mutex: at most 64 devices,
 // 4096 handles per device and 65536 total slots. If that fails, OpenDevice
 // returns 0. Publish only after construction and destroy after all callers end.
-enum class ShaderOperation { None, Create, Delete, Set, Reset, Draw };
+enum class ShaderOperation { None, Create, Delete, Set, Reset, Draw, SetConstants };
 struct ShaderTicket {
     std::uint64_t device = 0;
     std::uint64_t sequence = 0;
@@ -83,6 +83,8 @@ public:
     ShaderTicket BeginSet(std::uint64_t device) noexcept;
     ShaderTicket BeginReset(std::uint64_t device) noexcept;
     ShaderTicket BeginDraw(std::uint64_t device) noexcept;
+    // A shader constant write overlapping a draw invalidates the sampled state.
+    ShaderTicket BeginSetConstants(std::uint64_t device) noexcept;
 
     // On a successful native Create, `handle_known` must attest a complete,
     // fault-safe DWORD read of the output. Unknown output poisons the device.

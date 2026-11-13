@@ -69,6 +69,12 @@ class ProxyTest(unittest.TestCase):
                      "decl-program-unsupported", "decl-program-without-decl"):
             with self.subTest(mode=mode): self.run_mode(mode)
 
+    def test_vertex_constant_sampling_and_mutation_windows(self):
+        for mode in ("const-in", "const-off", "const-without-decl", "const-combined", "const-no-caps", "const-over-limit",
+                     "const-get-fail", "const-verify-fail", "const-partial", "const-overrun", "const-shader-get-fail",
+                     "const-get-set", "const-set-draw", "const-first-release", "const-second-release"):
+            with self.subTest(mode=mode): self.run_mode(mode)
+
     def test_forwarding_and_lifecycle(self):
         self.run_mode()
 

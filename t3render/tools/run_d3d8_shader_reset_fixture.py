@@ -13,6 +13,7 @@ import tempfile
 from run_synthetic_up_replay import RunError, check_pe32, run_stage, sha256, valid_path, windows_path
 from run_d3d8_stateblock_experiment import check_stage_loader
 import trace_summary
+import trace_to_ir
 
 WORDS = [0x20000000, 0x40020000, 0x40040005, 0xffffffff]
 PROGRAM = [0xfffe0101, 1, 0xc00f0000, 0x90e40000, 1, 0xd00f0000, 0xa0e40000, 0xffff]
@@ -290,7 +291,34 @@ def inspect_trace(path, observation, enabled, scenario):
             raise RunError("fallback FVF unexpectedly matched a declaration")
 
 
-def execute(engine, bottle, fixture, proxy, output, timeout):
+def inspect_constants(path):
+    """Compare the known c0 value in each stable fixture draw; no TDS input."""
+    ir = trace_to_ir.convert(path)
+    capability = ir["compatibility"]["d3d8"]["header"].get("vertex_constant_capture")
+    if capability != {"requested": True, "registers_per_observation": 96, "words_per_frame": 262144}:
+        raise RunError("vertex-constant capability differs")
+    if len(ir["frames"]) != 3:
+        raise RunError("constant fixture has an unexpected frame count")
+    samples = 0
+    reasons = []
+    for frame in ir["frames"]:
+        if len(frame["commands"]) != 1:
+            raise RunError("constant fixture has an unexpected draw count")
+        command = frame["commands"][0]
+        raw = command["compatibility"]["d3d8"]["draw"].get("vertex_constants")
+        observed = command.get("vertex_constants_observed")
+        if not isinstance(raw, dict) or raw.get("status") == "unavailable":
+            reasons.append(raw.get("reason") if isinstance(raw, dict) else "missing")
+            continue
+        if (not isinstance(observed, dict) or observed.get("status") != "sampled" or
+                observed.get("start_register") != 0 or observed.get("count", 0) < 1 or
+                observed.get("bits", [])[:4] != [0, 0x3f800000, 0, 0x3f800000]):
+            raise RunError("paired c0 sample differs from the fixture's green constant")
+        samples += 1
+    return {"samples": samples, "unavailable_reasons": reasons}
+
+
+def execute(engine, bottle, fixture, proxy, output, timeout, constants=False, hidden=False):
     engine, bottle, fixture, proxy, output = map(valid_path, (engine, bottle, fixture, proxy, output))
     if any(not str(p).isascii() or '"' in str(p) for p in (fixture, proxy, output)):
         raise RunError("fixture, proxy and output paths must be ASCII without double quotes")
@@ -313,6 +341,7 @@ def execute(engine, bottle, fixture, proxy, output, timeout):
                 "DYLD_FALLBACK_LIBRARY_PATH": f"{frameworks}:{frameworks}/GStreamer.framework/Versions/1.0/lib",
                 "DYLD_FALLBACK_FRAMEWORK_PATH": str(frameworks), "WINEDEBUG": "-all,+loaddll"})
     manifest = {"schema": 1, "test": "synthetic_d3d8_shader_reset", "status": "FAIL",
+                "vertex_constants": constants, "hidden_window": hidden,
                 "fixture_sha256": sha256(fixture), "proxy_sha256": sha256(proxy), "scenarios": {},
                 "conclusions": {"valid-only": "inconclusive", "recovery": "inconclusive",
                                 "failed_reset_alone": "not_observed"},
@@ -342,28 +371,37 @@ def execute(engine, bottle, fixture, proxy, output, timeout):
                                   "T3RENDER_CAPTURE_FRAME": "0", "T3RENDER_CAPTURE_FRAMES": "3",
                                   "T3RENDER_CAPTURE_PATH": windows_path(trace)})
                     if mode == "proxy_on": child["T3RENDER_CAPTURE_DECLARATIONS"] = "1"
+                    if mode == "proxy_on" and constants: child["T3RENDER_CAPTURE_VERTEX_CONSTANTS"] = "1"
                 log = scenario_dir / f"{mode}.log"
                 outputs = [scenario_dir / f"{mode}_{i}.ppm" for i in range(3)]
                 args = [wine, executable]
                 for phase, path in enumerate(outputs): args += [f"--out{phase}", windows_path(path)]
                 args += ["--scenario", scenario]
+                if hidden: args.append("--hidden")
                 run_stage(stage, args, directory, child, log, timeout)
                 observed = inspect_log(log, scenario); observations.append(observed)
                 check_stage_loader(log, bottle, dll if mode != "baseline" else None)
                 mode_images = [inspect_image(path, observed["phases"][i]["original"]) for i, path in enumerate(outputs)]
                 images.append(mode_images)
-                if mode != "baseline": inspect_trace(trace, observed, mode == "proxy_on", scenario)
+                constant_result = None
+                if mode != "baseline":
+                    inspect_trace(trace, observed, mode == "proxy_on", scenario)
+                    if mode == "proxy_on" and constants:
+                        constant_result = inspect_constants(trace)
+                        partial = partial or constant_result["samples"] != 3
                 runs[mode] = {"log_sha256": sha256(log), "ppm_sha256": [sha256(p) for p in outputs],
                               "trace_sha256": sha256(trace) if mode != "baseline" else None,
                               "events": observed["events"],
                               "original_pixels_preserved": original_pixels_preserved(mode_images, observed["phases"])}
+                if constant_result is not None: runs[mode]["vertex_constants"] = constant_result
             stage = f"{scenario}/compare"
             for current in (1, 2):
                 if (observations[current]["events"] != observations[0]["events"] or
                         observations[current]["parity"] != observations[0]["parity"] or images[current] != images[0]):
                     raise RunError("baseline and proxy HRESULT/state observations or RGB pixels differ")
             scenario_partial = any(item["partial"] for item in observations) or any(
-                not run["original_pixels_preserved"] for run in runs.values())
+                not run["original_pixels_preserved"] for run in runs.values()) or (
+                constants and runs["proxy_on"]["vertex_constants"]["samples"] != 3)
             partial = partial or scenario_partial
             manifest["scenarios"][scenario] = {"status": "PARTIAL" if scenario_partial else "PASS", "runs": runs}
             if not scenario_partial: manifest["conclusions"][scenario] = "observed_usable_in_fixture"
@@ -380,8 +418,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for option in ("engine", "bottle", "fixture", "proxy", "output-dir"): parser.add_argument("--" + option, required=True)
     parser.add_argument("--timeout", type=float, default=45)
+    parser.add_argument("--vertex-constants", action="store_true", help="verify sampled c0 values in the proxy run")
+    parser.add_argument("--hidden", action="store_true", help="keep the fixture window hidden")
     args = parser.parse_args(argv)
-    try: result = execute(args.engine, args.bottle, args.fixture, args.proxy, args.output_dir, args.timeout)
+    try: result = execute(args.engine, args.bottle, args.fixture, args.proxy, args.output_dir, args.timeout,
+                          args.vertex_constants, args.hidden)
     except (RunError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr); return 1
     print(f"{result['status']}: synthetic Reset fixture; results: {args.output_dir}")

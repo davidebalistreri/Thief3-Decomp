@@ -75,3 +75,9 @@ python3 -B -m unittest t3render.tests.test_d3d8_shader_reset_runner -v
 Paths must be absolute; output must be a new directory outside binary, bottle
 and engine directories. Wine may update its bottle state. This smoke test does
 not verify native Windows, COM alias coverage, stealth or TDS replayability.
+
+Add `--vertex-constants --hidden` to sample the fixture's known green `c0`
+constant and compare each paired IR observation, HRESULT and RGB image while
+leaving the fixture window hidden. The option may yield `PARTIAL` if the
+runtime does not expose the requested registers. It does not launch TDS or
+validate shader constants in a game frame.

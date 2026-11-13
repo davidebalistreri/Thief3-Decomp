@@ -267,6 +267,24 @@ A [follow-up](benchmarks/d3d8/2026-11-13-tds-program-history/result.json)
 retained 495 declaration and 94 program hypotheses across successful Reset
 and rebind observations; they remain unverified pre-reset data.
 
+#### Vertex shader constant samples
+
+`T3RENDER_CAPTURE_VERTEX_CONSTANTS=1`, together with declaration observation,
+samples registers 0 through `min(MaxVertexShaderConst, 96) - 1` before each
+captured draw. It calls the runtime getter twice into differently initialized
+buffers and checks both results, their contents and guard words. Failed or
+inconsistent reads emit no values. The opt-in also intercepts constant writes:
+an observed write overlapping a draw invalidates the shader observation.
+The trace retains raw float bits, with a 262144-word frame budget; the offline
+IR exposes them only after a successful draw with a stable observed window.
+Caps must be available. The observer is suppressed with buffer observation.
+
+These samples are not proof of GPU input: unobserved aliases, driver behavior
+and mutations outside intercepted calls can still matter. Pixel shader
+constants, buffers and texture bytes are absent. The additional getters are
+diagnostic and may cost time or synchronize with the driver. The opt-in is
+validated with host tests and a hidden synthetic Highball fixture, not TDS.
+
 ### Experimental buffered capture — isolated fixture only
 
 Set `T3RENDER_CAPTURE_BUFFERS=1` in addition to the capture configuration to

@@ -70,6 +70,8 @@ using CreateVertexShader = Function<decltype(&IDirect3DDevice8::CreateVertexShad
 using SetVertexShader = Function<decltype(&IDirect3DDevice8::SetVertexShader)>;
 using GetVertexShader = Function<decltype(&IDirect3DDevice8::GetVertexShader)>;
 using DeleteVertexShader = Function<decltype(&IDirect3DDevice8::DeleteVertexShader)>;
+using SetVertexShaderConstant = Function<decltype(&IDirect3DDevice8::SetVertexShaderConstant)>;
+using GetVertexShaderConstant = Function<decltype(&IDirect3DDevice8::GetVertexShaderConstant)>;
 
 HRESULT STDMETHODCALLTYPE FactoryQuery(IDirect3D8*, REFIID, void**);
 ULONG STDMETHODCALLTYPE FactoryRelease(IDirect3D8*);
@@ -95,6 +97,7 @@ HRESULT STDMETHODCALLTYPE DeviceProcessVertices(IDirect3DDevice8*, UINT, UINT, U
 HRESULT STDMETHODCALLTYPE DeviceCreateVertexShader(IDirect3DDevice8*, const DWORD*, const DWORD*, DWORD*, DWORD);
 HRESULT STDMETHODCALLTYPE DeviceSetVertexShader(IDirect3DDevice8*, DWORD);
 HRESULT STDMETHODCALLTYPE DeviceDeleteVertexShader(IDirect3DDevice8*, DWORD);
+HRESULT STDMETHODCALLTYPE DeviceSetVertexShaderConstant(IDirect3DDevice8*, DWORD, const void*, DWORD);
 HRESULT STDMETHODCALLTYPE DeviceBeginStateBlock(IDirect3DDevice8*);
 HRESULT STDMETHODCALLTYPE DeviceEndStateBlock(IDirect3DDevice8*, DWORD*);
 HRESULT STDMETHODCALLTYPE DeviceApplyStateBlock(IDirect3DDevice8*, DWORD);
@@ -124,6 +127,7 @@ static_assert(std::is_same_v<ProcessVertices, decltype(&DeviceProcessVertices)>)
 static_assert(std::is_same_v<CreateVertexShader, decltype(&DeviceCreateVertexShader)>);
 static_assert(std::is_same_v<SetVertexShader, decltype(&DeviceSetVertexShader)>);
 static_assert(std::is_same_v<DeleteVertexShader, decltype(&DeviceDeleteVertexShader)>);
+static_assert(std::is_same_v<SetVertexShaderConstant, decltype(&DeviceSetVertexShaderConstant)>);
 static_assert(std::is_same_v<BeginStateBlock, decltype(&DeviceBeginStateBlock)>);
 static_assert(std::is_same_v<EndStateBlock, decltype(&DeviceEndStateBlock)>);
 static_assert(std::is_same_v<ApplyStateBlock, decltype(&DeviceApplyStateBlock)>);
@@ -145,6 +149,7 @@ struct Binding {
     std::shared_ptr<t3render::ir::VertexDeclarationRegistry> declarations;
     std::uint64_t declaration_device = 0;
     bool capture_vertex_programs = false;
+    bool capture_vertex_constants = false;
 };
 
 struct Registry {
@@ -154,6 +159,7 @@ struct Registry {
     std::shared_ptr<t3render::buffers::BufferProxy> buffers;
     std::shared_ptr<t3render::ir::VertexDeclarationRegistry> declarations;
     bool capture_vertex_programs = false;
+    bool capture_vertex_constants = false;
 };
 
 // Deliberately process-lifetime: COM objects may still be released during
@@ -292,6 +298,7 @@ bool Bind(void* object, bool device, bool track_declarations = true) noexcept {
             binding->declarations = binding->buffers ? nullptr : declarations;
             binding->declaration_device = binding->declarations ? declaration_token.id : 0;
             binding->capture_vertex_programs = binding->declarations && registry->capture_vertex_programs;
+            binding->capture_vertex_constants = binding->declarations && registry->capture_vertex_constants;
         }
         auto& v = binding->instrumented;
         if (device) {
@@ -317,6 +324,8 @@ bool Bind(void* object, bool device, bool track_declarations = true) noexcept {
                 v[l.device_create_vertex_shader] = reinterpret_cast<void*>(&DeviceCreateVertexShader);
                 v[l.device_set_vertex_shader] = reinterpret_cast<void*>(&DeviceSetVertexShader);
                 v[l.device_delete_vertex_shader] = reinterpret_cast<void*>(&DeviceDeleteVertexShader);
+                if (binding->capture_vertex_constants)
+                    v[l.device_set_vertex_shader_constant] = reinterpret_cast<void*>(&DeviceSetVertexShaderConstant);
             }
             if (binding->buffers || binding->declarations) {
                 v[l.device_begin_state_block] = reinterpret_cast<void*>(&DeviceBeginStateBlock);
@@ -439,6 +448,9 @@ void EnableDeclarationObserver() noexcept {
         wchar_t programs[2]{};
         const bool programs_requested = GetEnvironmentVariableW(L"T3RENDER_CAPTURE_VERTEX_PROGRAMS", programs, 2) == 1 &&
                                         programs[0] == L'1';
+        wchar_t constants[2]{};
+        const bool constants_requested = GetEnvironmentVariableW(L"T3RENDER_CAPTURE_VERTEX_CONSTANTS", constants, 2) == 1 &&
+                                         constants[0] == L'1';
         t3render::ir::ShaderRegistryLimits limits;
         if (history_requested) {
             limits.preserve_reset_history = true;
@@ -451,6 +463,7 @@ void EnableDeclarationObserver() noexcept {
         if (!registry->declarations) {
             registry->declarations = std::move(candidate);
             registry->capture_vertex_programs = programs_requested;
+            registry->capture_vertex_constants = constants_requested;
         }
     } catch (...) {
         Diagnostic("T3Render: declaration observation could not be enabled\n");
@@ -572,6 +585,11 @@ void PrepareShaderDraw(const std::shared_ptr<Binding>& binding, IDirect3DDevice8
         if (!wanted || Find(device, true) != binding) return;
         state.active = true;
         state.ticket = binding->declarations->BeginDraw(binding->declaration_device);
+        state.snapshot.constants_requested = binding->capture_vertex_constants;
+        if (state.snapshot.constants_requested) {
+            CaptureQueryScope scope(device);
+            state.snapshot.constants_count = t3render::CaptureVertexConstantCount(device);
+        }
         if (!shader_getter_active) {
             struct GetterGuard {
                 GetterGuard() { shader_getter_active = true; }
@@ -579,6 +597,32 @@ void PrepareShaderDraw(const std::shared_ptr<Binding>& binding, IDirect3DDevice8
             } getter_guard;
             state.snapshot.getter_result = reinterpret_cast<GetVertexShader>(binding->original[Layout().device_get_vertex_shader])(
                 device, &state.snapshot.value);
+            if (state.ticket && SUCCEEDED(state.snapshot.getter_result) && Find(device, true) == binding &&
+                state.snapshot.constants_requested && state.snapshot.constants_count &&
+                state.snapshot.constants_count <= state.snapshot.constant_bits.size() / 4) {
+                // Distinct sentinels detect a getter that reports success but
+                // leaves bytes unwritten; guard words also detect modest
+                // overruns. They cannot contain an arbitrarily broken driver.
+                std::array<std::uint32_t, 96u * 4u + 16u> first, verification;
+                first.fill(0xa5a5a5a5u);
+                verification.fill(0x5a5a5a5au);
+                state.snapshot.constants_result = reinterpret_cast<GetVertexShaderConstant>(
+                    binding->original[Layout().device_get_vertex_shader_constant])(
+                    device, 0, first.data(), state.snapshot.constants_count);
+                if (SUCCEEDED(state.snapshot.constants_result) && Find(device, true) == binding) {
+                    state.snapshot.constants_verify_result = reinterpret_cast<GetVertexShaderConstant>(
+                        binding->original[Layout().device_get_vertex_shader_constant])(
+                        device, 0, verification.data(), state.snapshot.constants_count);
+                    const auto words = static_cast<std::size_t>(state.snapshot.constants_count) * 4;
+                    state.snapshot.constants_match = SUCCEEDED(state.snapshot.constants_verify_result) &&
+                        words <= state.snapshot.constant_bits.size() &&
+                        std::all_of(first.begin() + words, first.end(), [](auto v) { return v == 0xa5a5a5a5u; }) &&
+                        std::all_of(verification.begin() + words, verification.end(), [](auto v) { return v == 0x5a5a5a5au; }) &&
+                        std::equal(verification.begin(), verification.begin() + words, first.begin());
+                    if (state.snapshot.constants_match)
+                        std::copy_n(first.begin(), words, state.snapshot.constant_bits.begin());
+                }
+            }
         }
         if (SUCCEEDED(state.snapshot.getter_result) && state.ticket)
             state.snapshot.declaration = binding->declarations->Observe(state.ticket, state.snapshot.value);
@@ -922,6 +966,28 @@ HRESULT STDMETHODCALLTYPE DeviceDeleteVertexShader(IDirect3DDevice8* device, DWO
     const HRESULT hr = reinterpret_cast<DeleteVertexShader>(binding->original[Layout().device_delete_vertex_shader])(device, value);
     error.Capture();
     (void)binding->declarations->EndDelete(ticket, SUCCEEDED(hr));
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE DeviceSetVertexShaderConstant(IDirect3DDevice8* device, DWORD first,
+                                                        const void* data, DWORD count) {
+    ErrorState error;
+    auto binding = Find(device, true);
+    if (!binding || !binding->declarations || !binding->capture_vertex_constants) return D3DERR_INVALIDCALL;
+    if (capture_query_active) {
+        InvalidateDeclaration(binding);
+        error.Restore();
+        const HRESULT hr = reinterpret_cast<SetVertexShaderConstant>(
+            binding->original[Layout().device_set_vertex_shader_constant])(device, first, data, count);
+        error.Capture();
+        return hr;
+    }
+    const auto ticket = binding->declarations->BeginSetConstants(binding->declaration_device);
+    error.Restore();
+    const HRESULT hr = reinterpret_cast<SetVertexShaderConstant>(
+        binding->original[Layout().device_set_vertex_shader_constant])(device, first, data, count);
+    error.Capture();
+    (void)binding->declarations->End(ticket);
     return hr;
 }
 

@@ -149,6 +149,7 @@ bool ReadFixtureMemory(void*, const void* source, void* destination, std::size_t
     return ReadProcessMemory(GetCurrentProcess(), source, destination, size, &copied) && copied == size;
 }
 
+#ifndef T3RENDER_RESOURCE_FACADE_FIXTURE
 bool CheckRetainedBuffer(IDirect3DDevice8* device, IDirect3DDevice8* native,
                          const std::shared_ptr<t3render::buffers::BufferProxy>& buffers) {
     ComPtr<IDirect3DVertexBuffer8> held;
@@ -188,6 +189,88 @@ bool CheckRetainedBuffer(IDirect3DDevice8* device, IDirect3DDevice8* native,
     std::printf("buffer_stateblock_retained_identity=PASS\n");
     return true;
 }
+#else
+bool CheckRetainedBuffer(IDirect3DDevice8* device, IDirect3DDevice8* native,
+                         const std::shared_ptr<t3render::buffers::BufferProxy>& buffers) {
+    const Vertex vertices[] = {{12, 12, 0.5f, 1, 0xffe43b3b}, {116, 12, 0.5f, 1, 0xffe43b3b},
+                               {12, 116, 0.5f, 1, 0xffe43b3b}};
+    const WORD indices[] = {0, 1, 2};
+    ComPtr<IDirect3DVertexBuffer8> vertex;
+    ComPtr<IDirect3DIndexBuffer8> index;
+    if (FAILED(device->CreateVertexBuffer(sizeof(vertices), D3DUSAGE_WRITEONLY, kFvf, D3DPOOL_MANAGED, vertex.put())) ||
+        !vertex.value || FAILED(device->CreateIndexBuffer(sizeof(indices), D3DUSAGE_WRITEONLY, D3DFMT_INDEX16,
+        D3DPOOL_MANAGED, index.put())) || !index.value) return false;
+    BYTE* mapped = nullptr;
+    if (FAILED(vertex->Lock(0, sizeof(vertices), &mapped, 0)) || !mapped) return false;
+    std::memcpy(mapped, vertices, sizeof(vertices));
+    if (FAILED(vertex->Unlock())) return false;
+    mapped = nullptr;
+    if (FAILED(index->Lock(0, sizeof(indices), &mapped, 0)) || !mapped) return false;
+    std::memcpy(mapped, indices, sizeof(indices));
+    if (FAILED(index->Unlock()) || FAILED(device->SetStreamSource(0, vertex.value, sizeof(Vertex))) ||
+        FAILED(device->SetIndices(index.value, 0))) return false;
+
+    DWORD saved = 0, recorded = 0;
+    if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &saved)) || FAILED(device->CaptureStateBlock(saved)) ||
+        FAILED(device->BeginStateBlock()) || FAILED(device->SetStreamSource(0, vertex.value, sizeof(Vertex))) ||
+        FAILED(device->SetIndices(index.value, 0)) || FAILED(device->EndStateBlock(&recorded)) ||
+        FAILED(device->ApplyStateBlock(recorded)) || FAILED(device->DeleteStateBlock(recorded))) return false;
+
+    IDirect3DVertexBuffer8* vertex_identity = vertex.value;
+    IDirect3DIndexBuffer8* index_identity = index.value;
+    if (FAILED(device->SetStreamSource(0, nullptr, 0)) || FAILED(device->SetIndices(nullptr, 0))) return false;
+    vertex->Release(); vertex.value = nullptr;
+    index->Release(); index.value = nullptr;
+    if (FAILED(device->ApplyStateBlock(saved))) return false;
+    UINT stride = 0, base = 0;
+    if (FAILED(device->GetStreamSource(0, vertex.put(), &stride)) || vertex.value != vertex_identity || stride != sizeof(Vertex) ||
+        FAILED(device->GetIndices(index.put(), &base)) || index.value != index_identity || base != 0) return false;
+
+    if (FAILED(device->SetVertexShader(kFvf)) || FAILED(device->SetPixelShader(0)) ||
+        FAILED(device->SetTexture(0, nullptr)) || FAILED(device->SetRenderState(D3DRS_LIGHTING, FALSE)) ||
+        FAILED(device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE))) return false;
+    auto vertex_pin = buffers->UnwrapVertex(native, vertex.value);
+    auto index_pin = buffers->UnwrapIndex(native, index.value);
+    Vertex vertex_copy[3]{}; WORD index_copy[3]{};
+    const auto draw = buffers->BeginDraw(native);
+    if (!vertex_pin.wrapped() || !index_pin.wrapped() || !draw ||
+        buffers->ReadVertex(native, vertex_pin.native(), 0, vertex_copy, sizeof(vertex_copy)) != t3render::ir::RegistryResult::Ok ||
+        buffers->ReadIndex(native, index_pin.native(), 0, index_copy, sizeof(index_copy)) != t3render::ir::RegistryResult::Ok ||
+        std::memcmp(vertex_copy, vertices, sizeof(vertices)) || std::memcmp(index_copy, indices, sizeof(indices))) return false;
+    const bool drawn = SUCCEEDED(device->BeginScene()) &&
+        SUCCEEDED(device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 3, 0, 1)) && SUCCEEDED(device->EndScene());
+    if (!buffers->EndDraw(native, draw) || !drawn || FAILED(device->DeleteStateBlock(saved)) ||
+        FAILED(device->SetStreamSource(0, nullptr, 0)) || FAILED(device->SetIndices(nullptr, 0))) return false;
+    std::memset(vertex_copy, 0, sizeof(vertex_copy));
+    std::memset(index_copy, 0, sizeof(index_copy));
+    if (buffers->ReadVertex(native, vertex_pin.native(), 0, vertex_copy, sizeof(vertex_copy)) != t3render::ir::RegistryResult::Ok ||
+        buffers->ReadIndex(native, index_pin.native(), 0, index_copy, sizeof(index_copy)) != t3render::ir::RegistryResult::Ok ||
+        std::memcmp(vertex_copy, vertices, sizeof(vertices)) || std::memcmp(index_copy, indices, sizeof(indices))) return false;
+    std::printf("buffer_stateblock_retained_identity=PASS\n");
+    std::printf("resource_facade_stateblock_buffer_shadows=PASS\n");
+    return true;
+}
+
+bool CheckFailedStateBlock(IDirect3DDevice8* device, IDirect3DDevice8* native,
+                           const std::shared_ptr<t3render::buffers::BufferProxy>& buffers) {
+    ComPtr<IDirect3DVertexBuffer8> vertex;
+    if (FAILED(device->CreateVertexBuffer(sizeof(Vertex), D3DUSAGE_WRITEONLY, kFvf, D3DPOOL_MANAGED, vertex.put())) ||
+        !vertex.value) return false;
+    BYTE* mapped = nullptr;
+    if (FAILED(vertex->Lock(0, sizeof(Vertex), &mapped, 0)) || !mapped) return false;
+    std::memset(mapped, 0x4d, sizeof(Vertex));
+    if (FAILED(vertex->Unlock())) return false;
+    auto pin = buffers->UnwrapVertex(native, vertex.value);
+    BYTE observed = 0;
+    if (!pin.wrapped() || buffers->ReadVertex(native, pin.native(), 0, &observed, 1) !=
+        t3render::ir::RegistryResult::Ok || observed != 0x4d) return false;
+    const HRESULT hr = device->DeleteStateBlock(0xffffffffu);
+    if (SUCCEEDED(hr) || buffers->ReadVertex(native, pin.native(), 0, &observed, 1) !=
+        t3render::ir::RegistryResult::Unavailable) return false;
+    std::printf("resource_facade_failed_stateblock_invalidates=PASS\n");
+    return true;
+}
+#endif
 #endif
 
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
@@ -993,6 +1076,7 @@ bool Render(HWND window, bool facade_mode, const wchar_t* output) {
 #endif
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
     if (!CheckTextureStateBlock(draw_device) || !CheckSurfaceTransfers(draw_device, facade_mode)) return false;
+    if (facade_mode && !CheckFailedStateBlock(draw_device, native_owner, buffers)) return false;
 #endif
     return true;
 }

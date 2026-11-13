@@ -48,6 +48,7 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
                               "resource_facade_2d_cube_surface_roundtrips=PASS", "resource_facade_cube_binding=PASS",
                               "resource_facade_device_unwraps_buffers=PASS", "resource_facade_rejects_unknown_inputs=PASS",
                               "resource_facade_post_reset_buffer_epoch=PASS", "resource_facade_recovery_buffer_epoch=PASS",
+                              "resource_facade_stateblock_buffer_shadows=PASS", "resource_facade_failed_stateblock_invalidates=PASS",
                               "resource_facade_final_close=PASS"))
             else:
                 lines.append("resource_get_device_boundary=native_nonbuffer; wrapped_buffers=facade")
@@ -110,6 +111,7 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
                        "resource_facade_live_reset_roundtrips=PASS",
                        "resource_facade_surface_copy_and_target=PASS", "resource_facade_rejects_unknown_inputs=PASS",
                        "resource_facade_post_reset_buffer_epoch=PASS", "resource_facade_recovery_buffer_epoch=PASS",
+                       "resource_facade_stateblock_buffer_shadows=PASS", "resource_facade_failed_stateblock_invalidates=PASS",
                        "resource_facade_2d_cube_surface_roundtrips=PASS", "resource_facade_cube_binding=PASS",
                        "resource_facade_device_unwraps_buffers=PASS", "resource_facade_final_close=PASS"):
             for changed in ([line for line in wrapped if line != marker], wrapped + [marker],

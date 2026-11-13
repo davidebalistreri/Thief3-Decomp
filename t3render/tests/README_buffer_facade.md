@@ -27,7 +27,9 @@ The later [reset experiment](README_resource_facade.md) uses the more complete
 resource facade to retire dormant buffers and track new buffers after a stable
 successful reset. Surviving and reacquired buffers remain unknown. The
 buffer-only facade still permanently invalidates observation on reset because
-native resource aliases can escape its device boundary.
+native resource aliases can escape its device boundary. The combined fixture
+also experiments with preserving shadows across successful state-block calls;
+the buffer-only fixture retains the conservative state-block policy.
 
 This is intentionally incomplete COM behavior: unknown buffer interfaces
 return `E_NOINTERFACE` and all buffer private-data methods return `E_NOTIMPL`.

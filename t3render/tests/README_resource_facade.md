@@ -29,6 +29,12 @@ permanently invalidates observation. The fixture guards native buffer Create/Get
 calls through adoption to detect overlap with reset. An explicit resource limit
 can also cause allocation failure.
 
+In this combined fixture, the six state-block calls are bracketed by buffer
+mutation windows; a failed call invalidates observation. Successful sequential
+calls can preserve existing shadows, including for dormant wrappers later
+reacquired from bindings. This relies on the fixture's closed boundary and is
+not the policy of the production proxy or the buffer-only fixture.
+
 The boundary remains incomplete: only selected paths are exercised and unknown
 interfaces are rejected, not transparently forwarded. Complete reset and
 state-block coverage, private-data semantics, native Windows, runtime
@@ -80,8 +86,16 @@ The runner validates those intentionally different observations separately
 from image and state parity. Full local logs and PPMs are under
 `build/t3render-captures/2026-11-13-private-data-alias-final/`.
 
+The later [state-block observation](../benchmarks/d3d8/2026-11-13-stateblock-facade/result.json)
+exercised Create, Capture, Begin/End, Apply and Delete on the combined facade.
+After VB/IB wrappers became dormant and were reacquired, their `WRITEONLY`
+shadow bytes still matched during an indexed draw and after deletion. An invalid
+Delete invalidated the shadow. The separate buffer-only fixture continued to
+invalidate observations conservatively. Runtime concurrency, all state-block
+variants and real TDS remain untested.
+
 The [reset epoch manifest](../benchmarks/d3d8/2026-11-13-facade-reset-epoch/result.json)
-records the latest hashes and limitations. Full local logs and PPMs are under
+records its hashes and limitations. Full local logs and PPMs are under
 `build/t3render-captures/2026-11-13-facade-reset-epoch-final/`. The earlier
 [reset manifest](../benchmarks/d3d8/2026-11-13-facade-reset/result.json),
 [swapchain manifest](../benchmarks/d3d8/2026-11-13-swapchain-facade/result.json),

@@ -165,6 +165,7 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
                                 "resource_facade_2d_cube_surface_roundtrips=PASS", "resource_facade_cube_binding=PASS",
                                 "resource_facade_device_unwraps_buffers=PASS", "resource_facade_rejects_unknown_inputs=PASS",
                                 "resource_facade_post_reset_buffer_epoch=PASS", "resource_facade_recovery_buffer_epoch=PASS",
+                                "resource_facade_stateblock_buffer_shadows=PASS", "resource_facade_failed_stateblock_invalidates=PASS",
                                 "resource_facade_final_close=PASS"))
             else:
                 markers.append("resource_get_device_boundary=native_nonbuffer; wrapped_buffers=facade")

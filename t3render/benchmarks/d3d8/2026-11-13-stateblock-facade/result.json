@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_stateblock_resource_facade",
+  "date": "2026-11-13",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "steam_running": true,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "c9b34ac9769c8b6756885c5b7dba85656bd97378d435e305509c1c93c8ed5c21",
+    "t3render/src/buffer_proxy.cpp": "d3db833b4b235c6a341930a55a06dbfad86a1a126e9fec227691c68cb867ba88",
+    "t3render/src/buffer_proxy.hpp": "917dc90b948db83808f2eab49af050c979b6653954bec1ddbbdeb19dc5aed9c3",
+    "t3render/ir/buffer_registry.cpp": "9e24931212d54e0ee58b7be7313a85510e9fc867f3a3b20297eff3e1f6138b84",
+    "t3render/ir/buffer_shadow.cpp": "9cfed54a6fcf4718e80fd1d8301a8afa5f84852ac70b428938b06d1e64cddafe",
+    "t3render/tests/d3d8_resource_facade.hpp": "bf7b017db2664996326e93eece1b24b72cea075ee78d8899322f96e8da0f241d",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "21bdd67358220b05c452d35c84f105ef2a599328490784fe9eeba56d71ce9b54",
+    "t3render/tests/d3d8_buffer_facade_wine.cpp": "b0bcf03030e288f35aa11ab62a201a9de09cb00f587d8db6962547c6f4af5640",
+    "t3render/tests/d3d8_device_facade.hpp": "c4ef8b488b0c48b9046c99fb7cd7f53ddfed752b2692044b5f883b5abcd42ed9",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "aaa151fc2495effe86161f6e3b96b38628ab270bb304483a5c6246006909472e",
+    "t3render/tests/test_d3d8_device_facade_runner.py": "03d5d22e6d2f6ba012230cead665e8ab5174a2f788d201ab22d3a2edc374f43c",
+    "t3render/tools/run_d3d8_device_facade.py": "c4dce1eafba8bfd63d0f2071a5c911a2c97128cee0fb8a3e70ad2c3aa8abcddb"
+  },
+  "resource_facade": {
+    "fixture_sha256": "cd0c942c301085f90ffd8d1bca09eb1b7d737f05e07dc350d6e61a4c0087445e",
+    "parity_records_each": 87,
+    "rgb_ppm_sha256_both": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+    "baseline_log_sha256": "6f29a1132b5dffc191b7d981ffe162e204d475d2b9349faf78ea098ccdbe3f11",
+    "facade_log_sha256": "45048efd70df15432ec835a7f041f3efa5315d6ace1885045794c0d2a68182a5"
+  },
+  "buffer_facade_regression": {
+    "fixture_sha256": "039b57e732da535434d3db70d4652dbdce17c8cf1ccfbaaa86618a6449ba5c3e",
+    "parity_records_each": 81,
+    "rgb_ppm_sha256_both": "6c1c61fd0434bf500fd9b7e0a206b92461fc12e46efc117b3d5cc93749713bb4",
+    "baseline_log_sha256": "e1962c11a78c1aa6e2802fe6b0b04a4d6d293eda1031a9ae6f0937d99981a990",
+    "facade_log_sha256": "b4672070fd64b8126e0832e32e61ce85c22c4d2e51e70a0c3236edc786d81aab"
+  },
+  "observations": {
+    "methods": [
+      "Create",
+      "Capture",
+      "Begin",
+      "End",
+      "Apply",
+      "Delete"
+    ],
+    "reacquired_vb_ib_identity_and_writeonly_shadows_match": true,
+    "shadows_match_during_indexed_draw_and_after_delete": true,
+    "failed_delete_invalidates_shadows": true,
+    "buffer_only_facade_retains_conservative_invalidation": true
+  },
+  "limitations": [
+    "Fixture only: not integrated with the proxy or TDS.",
+    "Only selected resource paths and sequential state-block operations were exercised.",
+    "Runtime concurrency, other state-block variants and native Windows remain untested.",
+    "Private data and unknown resource interfaces fail closed; this differs from native behavior.",
+    "RGB comparison covers synthetic images only, not alpha or gameplay."
+  ]
+}

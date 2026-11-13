@@ -455,37 +455,49 @@ public:
         return native_->GetRenderState(State, pValue);
     }
     HRESULT STDMETHODCALLTYPE BeginStateBlock() override {
-#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        return StateBlockCall([&] { return native_->BeginStateBlock(); });
+#elif defined(T3RENDER_BUFFER_FACADE_FIXTURE)
         InvalidateBuffers();
 #endif
         return native_->BeginStateBlock();
     }
     HRESULT STDMETHODCALLTYPE EndStateBlock(DWORD * pToken) override {
-#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        return StateBlockCall([&] { return native_->EndStateBlock(pToken); });
+#elif defined(T3RENDER_BUFFER_FACADE_FIXTURE)
         InvalidateBuffers();
 #endif
         return native_->EndStateBlock(pToken);
     }
     HRESULT STDMETHODCALLTYPE ApplyStateBlock(DWORD Token) override {
-#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        return StateBlockCall([&] { return native_->ApplyStateBlock(Token); });
+#elif defined(T3RENDER_BUFFER_FACADE_FIXTURE)
         InvalidateBuffers();
 #endif
         return native_->ApplyStateBlock(Token);
     }
     HRESULT STDMETHODCALLTYPE CaptureStateBlock(DWORD Token) override {
-#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        return StateBlockCall([&] { return native_->CaptureStateBlock(Token); });
+#elif defined(T3RENDER_BUFFER_FACADE_FIXTURE)
         InvalidateBuffers();
 #endif
         return native_->CaptureStateBlock(Token);
     }
     HRESULT STDMETHODCALLTYPE DeleteStateBlock(DWORD Token) override {
-#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        return StateBlockCall([&] { return native_->DeleteStateBlock(Token); });
+#elif defined(T3RENDER_BUFFER_FACADE_FIXTURE)
         InvalidateBuffers();
 #endif
         return native_->DeleteStateBlock(Token);
     }
     HRESULT STDMETHODCALLTYPE CreateStateBlock(D3DSTATEBLOCKTYPE Type,DWORD * pToken) override {
-#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+        return StateBlockCall([&] { return native_->CreateStateBlock(Type, pToken); });
+#elif defined(T3RENDER_BUFFER_FACADE_FIXTURE)
         InvalidateBuffers();
 #endif
         return native_->CreateStateBlock(Type, pToken);
@@ -721,6 +733,17 @@ private:
     }
 #endif
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+    template<class Call>
+    HRESULT StateBlockCall(Call call) {
+        if (!buffers_) return call();
+        FixtureBufferOperation operation(buffers_.get(), native_);
+        const HRESULT hr = call();
+        const DWORD error = GetLastError();
+        // The native failure may have partially changed bindings or recording.
+        if (FAILED(hr)) buffers_->InvalidateDevice(native_);
+        SetLastError(error);
+        return hr;
+    }
     HRESULT WrapSurfaceResult(HRESULT hr, IDirect3DSurface8** output) noexcept {
         const DWORD error = GetLastError();
         if (SUCCEEDED(hr) && output && *output) {

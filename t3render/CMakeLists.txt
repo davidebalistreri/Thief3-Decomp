@@ -56,7 +56,7 @@ endif()
 
 # Portable utilities used by the optional D3D8 buffer observer.
 add_library(t3render_ir STATIC ir/buffer_shadow.cpp ir/buffer_registry.cpp
-  ir/vertex_declaration.cpp ir/vertex_declaration_registry.cpp)
+  ir/vertex_declaration.cpp ir/vertex_declaration_registry.cpp ir/shader_program.cpp)
 target_compile_features(t3render_ir PUBLIC cxx_std_17)
 target_include_directories(t3render_ir PUBLIC ir)
 if(MSVC)

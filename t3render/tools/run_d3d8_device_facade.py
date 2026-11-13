@@ -95,7 +95,7 @@ def inspect_log(path, mode, buffer_facade=False):
         if buffer_facade:
             for marker in ("resource_get_device_boundary=native_nonbuffer; wrapped_buffers=facade",
                            "buffer_parent_facade_roundtrip=PASS", "buffer_shadow_writeonly_and_draw_window=PASS",
-                           "buffer_stateblock_retained_fail_closed=PASS"):
+                           "buffer_stateblock_retained_identity=PASS", "buffer_facade_final_close=PASS"):
                 if lines.count(marker) != 1:
                     raise RunError(f"buffer facade marker missing: {marker}")
         elif lines.count("resource_get_device_boundary=native_device; wrapped_buffers=not_tested") != 1:
@@ -152,7 +152,7 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False):
         result["limitations"] = ["Fixture only: not integrated with the proxy or TDS.",
                                  "VB/IB GetDevice returns the facade; other resources expose the native device.",
                                  "Private data and unknown VB/IB interfaces fail closed; this differs from native behavior.",
-                                 "One retained-vertex state-block path fails closed; reset and runtime concurrency are not exercised.",
+                                 "One retained-vertex state-block path preserves identity but invalidates bytes; reset and runtime concurrency are not exercised.",
                                  "Four synthetic triangles and selected fixed-function states only; no gameplay parity."]
     stage = "setup"
     try:

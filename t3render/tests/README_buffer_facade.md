@@ -14,15 +14,20 @@ the native owner alive through the facade and intercept every method that
 accepts a buffer. The fixture unwraps only recognized buffers for stream,
 index and `ProcessVertices` calls; unknown inputs fail rather than forwarding a
 possibly wrapped pointer to D3D. Live getters recover the existing wrapper.
-If a wrapper has died, an attempt to adopt a later native getter reference
-fails and consumes that reference; it does not reconstruct a shadow.
+After its final external `Release`, a dormant wrapper retains its native
+resource and shadow without retaining the facade. A later getter can reactivate
+the wrapper; a state block or another hazard can still invalidate its shadow.
+This deliberately keeps native resources alive until facade teardown. The
+facade must call `CloseFacadeDevice` at its final release; it closes the
+registry and releases dormant native resources outside the lock. A premature
+close returns false and requires a later retry after live wrappers are released.
 
 This is intentionally incomplete COM behavior: unknown buffer interfaces
 return `E_NOINTERFACE` and all buffer private-data methods return `E_NOTIMPL`.
 The fixture invalidates observation at state-block and reset calls. It cannot
 provide transparent gameplay or preserve private-data behavior. Addressing
-native resource aliases, resource identity and retained buffers across state
-blocks, reset and concurrent calls remains necessary before integration.
+native resource aliases, private-data behavior, complete state-block tracking,
+reset and concurrent calls remains necessary before integration.
 
 ## Highball observation (2026-11-13)
 
@@ -32,14 +37,18 @@ images for four synthetic triangles. The facade run verified VB/IB `GetDevice`
 and `IUnknown` round trips, set bindings and drew through the returned facade,
 and compared the complete `WRITEONLY` shadow bytes during a stable draw
 window. After a state block captured a vertex binding, the fixture unbound it,
-released its wrapper, restored the state block and confirmed that reacquiring
-the now-untracked resource failed closed. Steam remained open; TDS was not run.
+released its wrapper, restored the state block and reacquired the same wrapper.
+The state-block call conservatively invalidated its bytes. The fixture also
+confirmed the facade's final close completed. Steam remained open; TDS was not run.
 
-The [manifest](../benchmarks/d3d8/2026-11-13-buffer-facade/result.json)
+The [manifest](../benchmarks/d3d8/2026-11-13-buffer-reacquisition/result.json)
 records source, executable, log and image hashes. Full logs and PPMs are in
-`build/t3render-captures/2026-11-13-buffer-facade-restored-hidden/`. The
+`build/t3render-captures/2026-11-13-buffer-facade-reacquire-v2/`. The
 fixture compares RGB, not alpha, and does not exercise all state-block types,
 reset, runtime concurrency, native Windows, TDS or gameplay.
+
+The earlier [fail-closed benchmark](../benchmarks/d3d8/2026-11-13-buffer-facade/result.json)
+records the prior version before dormant-wrapper reacquisition was added.
 
 With an existing i686 MinGW build and Highball engine, from `t3sdk`:
 

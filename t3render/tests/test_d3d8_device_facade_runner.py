@@ -20,7 +20,7 @@ def fixture_log(mode, buffer_facade=False):
         if buffer_facade:
             lines.extend(("resource_get_device_boundary=native_nonbuffer; wrapped_buffers=facade",
                           "buffer_parent_facade_roundtrip=PASS", "buffer_shadow_writeonly_and_draw_window=PASS",
-                          "buffer_stateblock_retained_fail_closed=PASS"))
+                          "buffer_stateblock_retained_identity=PASS", "buffer_facade_final_close=PASS"))
         else:
             lines.append("resource_get_device_boundary=native_device; wrapped_buffers=not_tested")
     lines.append(f"device_facade_fixture=PASS mode={mode}")
@@ -52,7 +52,8 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
         wrapped = fixture_log("facade", True)
         self.assertEqual(baseline, self.inspect(wrapped, buffer_facade=True))
         for marker in ("buffer_parent_facade_roundtrip=PASS", "buffer_shadow_writeonly_and_draw_window=PASS",
-                       "buffer_stateblock_retained_fail_closed=PASS",
+                       "buffer_stateblock_retained_identity=PASS",
+                       "buffer_facade_final_close=PASS",
                        "resource_get_device_boundary=native_nonbuffer; wrapped_buffers=facade"):
             for replacement in ([], [marker, marker], [marker + "_INVALID"]):
                 with self.subTest(marker=marker, replacement=replacement):

@@ -72,8 +72,10 @@ public:
     // Isolated facade experiment only. The caller must own both device
     // references, facade must retain owner, and the caller must intercept
     // every path that can accept an emitted wrapper.
-    // A wrapper retains facade until its final Release, and GetDevice returns
-    // it only after verifying the native parent's canonical identity. Unknown
+    // A live wrapper retains facade, and GetDevice returns it only after
+    // verifying the native parent's canonical identity. On final Release a
+    // dormant wrapper retains its native resource and can be reacquired while
+    // the facade lives; it does not retain the facade in that state. Unknown
     // interfaces and private data fail closed. On failure these methods consume
     // native and return null instead of exposing a raw buffer. They do not
     // close aliases returned by textures, surfaces, swapchains or state blocks;
@@ -82,6 +84,12 @@ public:
                                                   IDirect3DVertexBuffer8* native, UINT size, bool freshly_created) noexcept;
     IDirect3DIndexBuffer8* AdoptIndexForFacade(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
                                                 IDirect3DIndexBuffer8* native, UINT size, bool freshly_created) noexcept;
+
+    // The facade must call this before its own final destruction, with no
+    // live buffer references. It prevents reacquisition, retires dormant
+    // wrappers and releases their native resources outside the registry lock.
+    // Returns false and retains any still-live wrapper on contract violation.
+    bool CloseFacadeDevice(IDirect3DDevice8* owner, IDirect3DDevice8* facade) noexcept;
 
     // Input is identified by pointer lookup only, never dereferenced. A pin
     // retains an issued wrapper while its native resource is passed to D3D.

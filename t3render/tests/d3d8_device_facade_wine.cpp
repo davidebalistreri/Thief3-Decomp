@@ -120,15 +120,22 @@ bool CheckRetainedBuffer(IDirect3DDevice8* device, IDirect3DDevice8* native,
     existing->Release(); existing.value = nullptr;
     // Remove the active device binding so only the state block can retain it.
     if (FAILED(device->SetStreamSource(0, nullptr, 0))) return false;
+    IDirect3DVertexBuffer8* const original_identity = held.value;
     held->Release(); held.value = nullptr;
     if (FAILED(device->ApplyStateBlock(token))) return false;
     ComPtr<IDirect3DVertexBuffer8> reacquired;
     const HRESULT hr = device->GetStreamSource(0, reacquired.put(), &stride);
-    const bool closed = FAILED(hr) && !reacquired.value;
+    const bool same = SUCCEEDED(hr) && reacquired.value == original_identity && stride == sizeof(Vertex);
+    if (same) {
+        auto pin = buffers->UnwrapVertex(native, reacquired.value);
+        BYTE byte = 0;
+        if (!pin.wrapped() || buffers->ReadVertex(native, pin.native(), 0, &byte, 1) !=
+                              t3render::ir::RegistryResult::Unavailable) return false;
+    }
     const bool cleaned = SUCCEEDED(device->DeleteStateBlock(token)) &&
                          SUCCEEDED(device->SetStreamSource(0, nullptr, 0));
-    if (!closed || !cleaned) return false;
-    std::printf("buffer_stateblock_retained_fail_closed=PASS\n");
+    if (!same || !cleaned) return false;
+    std::printf("buffer_stateblock_retained_identity=PASS\n");
     return true;
 }
 #endif
@@ -414,7 +421,14 @@ int wmain(int argc, wchar_t** argv) {
     ShowWindow(window, SW_SHOWNOACTIVATE);
     UpdateWindow(window);
 #endif
-    const bool ok = Render(window, facade_mode, argv[2]);
+    bool ok = Render(window, facade_mode, argv[2]);
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+    if (facade_mode) {
+        ok = ok && t3render::fixture::buffer_facade_close_successes == 1 &&
+             t3render::fixture::buffer_facade_close_failures == 0;
+        if (ok) std::printf("buffer_facade_final_close=PASS\n");
+    }
+#endif
     DestroyWindow(window);
     UnregisterClassW(name, instance);
     std::printf("device_facade_fixture=%s mode=%s\n", ok ? "PASS" : "FAIL", facade_mode ? "facade" : "baseline");

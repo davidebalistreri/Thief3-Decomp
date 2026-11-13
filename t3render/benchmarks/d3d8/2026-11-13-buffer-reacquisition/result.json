@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_buffer_facade_reacquisition",
+  "date": "2026-11-13",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "steam_running": true,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/src/buffer_proxy.cpp": "8895a24a78b7d8a9b9484dafc72f04da4ed59c454c102d0cb08cd5c19f3a7e7f",
+    "t3render/src/buffer_proxy.hpp": "5d019cb0f83158e3eb739e731864862d95cbfb2fc9aa55b127612110b3c873da",
+    "t3render/tests/d3d8_device_facade.hpp": "5d212aaa4e5a9382b6790ec9822a5103af171af5d7fc0058de34f75509d451e6",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "7250196ae9aeaf8b55395cb879f4eb61f95c57a2f9d5fdc231f2986a698793ea",
+    "t3render/tests/d3d8_buffer_facade_wine.cpp": "b0bcf03030e288f35aa11ab62a201a9de09cb00f587d8db6962547c6f4af5640",
+    "t3render/tools/run_d3d8_device_facade.py": "4b682b6928d29ed5c33f98eaa038699d1b17546fae3cc9ba39f54d544488d814"
+  },
+  "fixture_sha256": "433c9cfce6262f1596cb023a9fe7e8dfdddca28a1a6c93d94b40cdfb4810e5f0",
+  "result": {
+    "parity_records_each": 81,
+    "rgb_ppm_sha256_both": "6c1c61fd0434bf500fd9b7e0a206b92461fc12e46efc117b3d5cc93749713bb4",
+    "baseline_log_sha256": "265939cd226f4e8d86ec470ab5abb0593997979b3c32b98aa94e9e44af0db617",
+    "facade_log_sha256": "cc69277425b7b556beec4dd66b5698fbafdf2fbb62e2c71b5ff0425f494bbccd",
+    "vb_ib_get_device_facade_roundtrip": true,
+    "writeonly_buffer_bytes_match": true,
+    "draw_window_stable": true,
+    "stateblock_restored_same_vertex_wrapper": true,
+    "stateblock_invalidates_shadow": true,
+    "native_device_escapes": [
+      "surface",
+      "texture"
+    ],
+    "final_facade_close": true
+  },
+  "limitations": [
+    "Synthetic fixture only: not integrated with the proxy or TDS.",
+    "Resources other than VB/IB still expose the native device.",
+    "Private data and unknown VB/IB interfaces fail closed; native behavior differs.",
+    "One retained-vertex state-block path preserved identity but invalidated bytes; reset and runtime concurrency were not tested.",
+    "Dormant wrappers keep native resources alive until facade teardown.",
+    "Four synthetic triangles and selected fixed-function states only; no gameplay parity.",
+    "PPM comparison covers RGB only, not alpha."
+  ]
+}

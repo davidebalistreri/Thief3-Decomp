@@ -27,10 +27,14 @@ struct Control {
     ir::BufferToken token{};
     bool pending_lock = false, locked = false, pending_unlock = false, read_only = false;
     bool counted_lock = false;
+    Control* retirement_next = nullptr;
     const void* data = nullptr;
     std::size_t length = 0;
     std::uint64_t operation = 0;
     virtual bool TryAddRef() noexcept = 0;
+    virtual bool TryRevive() noexcept = 0;
+    virtual bool Dormant() const noexcept = 0;
+    virtual void DestroyDormant() noexcept = 0;
     virtual IUnknown* Unknown() noexcept = 0;
 protected:
     ~Control() = default;
@@ -38,6 +42,7 @@ protected:
 
 struct DeviceState {
     bool unsafe = false;
+    bool closing = false;
     std::uint64_t draw = 0, mutation = 0;
     std::size_t active_locks = 0;
 };
@@ -160,6 +165,17 @@ public:
                                             std::memory_order_relaxed)) return true;
         }
     }
+    bool TryRevive() noexcept override {
+        ULONG zero = 0;
+        return refs_.compare_exchange_strong(zero, 1, std::memory_order_acq_rel,
+                                             std::memory_order_relaxed);
+    }
+    bool Dormant() const noexcept override { return refs_.load(std::memory_order_acquire) == 0; }
+    void DestroyDormant() noexcept override {
+        Buffer* real = real_;
+        delete this;
+        real->Release();
+    }
     IUnknown* Unknown() noexcept override { return static_cast<Buffer*>(this); }
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) override {
         if (!output) return E_POINTER;
@@ -186,6 +202,7 @@ public:
         }
     }
     ULONG STDMETHODCALLTYPE Release() override {
+        if (facade) return ReleaseFacade();
         ULONG count = refs_.load(std::memory_order_relaxed);
         for (;;) {
             if (!count || count == std::numeric_limits<ULONG>::max()) return count;
@@ -270,13 +287,29 @@ public:
         return hr;
     }
     // Destroy an unpublished wrapper without consuming its native reference.
-    void DiscardUnpublished() noexcept {
-        IDirect3DDevice8* parent = facade;
-        delete this;
-        if (parent) parent->Release();
-    }
+    void DiscardUnpublished() noexcept { delete this; }
 
 private:
+    ULONG ReleaseFacade() {
+        LastError error;
+        bool final = false;
+        ULONG result = 0;
+        {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            ULONG count = refs_.load(std::memory_order_relaxed);
+            for (;;) {
+                if (!count || count == std::numeric_limits<ULONG>::max()) return count;
+                if (refs_.compare_exchange_weak(count, count - 1, std::memory_order_acq_rel,
+                                                std::memory_order_relaxed)) break;
+            }
+            result = count - 1;
+            final = count == 1;
+            if (final && counted_lock) state_->PoisonLocked(owner);
+        }
+        // Parent final Release may call CloseFacadeDevice and delete this.
+        if (final) { IDirect3DDevice8* parent = facade; parent->Release(); }
+        return result;
+    }
     HRESULT GetFacadeDevice(IDirect3DDevice8** output) {
         LastError error;
         IDirect3DDevice8* actual = nullptr;
@@ -392,28 +425,37 @@ Buffer* Adopt(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8
         { std::lock_guard<std::mutex> lock(state->mutex); state->PoisonLocked(owner); }
         return fallback();
     }
+    bool facade_ref = false;
+    if (facade) {
+        facade_ref = facade->AddRef() != 0;
+        if (!facade_ref) {
+            { std::lock_guard<std::mutex> lock(state->mutex); state->PoisonLocked(owner); }
+            return fallback();
+        }
+    }
     Wrapper<Buffer>* candidate = nullptr;
-    if (fresh && (!facade || facade->AddRef())) {
+    if (fresh) {
         candidate = new (std::nothrow) Wrapper<Buffer>(state, owner, facade, native, identity, size);
-        if (!candidate && facade) facade->Release();
     }
     Control* found = nullptr;
-    bool published = false;
+    bool published = false, revived = false;
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         auto* device = state->DeviceLocked(owner);
+        const auto recorded_device = state->devices.find(owner);
+        const bool closing = recorded_device != state->devices.end() && recorded_device->second.closing;
         auto existing = state->identities.find(identity);
         if (existing != state->identities.end()) {
             Control* item = existing->second;
             if (item->owner != owner || item->facade != facade ||
-                item->vertex != Traits<Buffer>::kVertex || !item->TryAddRef()) {
+                item->vertex != Traits<Buffer>::kVertex || (facade && closing)) {
                 state->PoisonLocked(owner);
                 if (item->owner != owner) state->PoisonLocked(item->owner);
-            } else {
+            } else if (item->TryAddRef() || (facade && (revived = item->TryRevive()))) {
                 found = item;
                 if (fresh) state->PoisonLocked(owner);  // duplicate creation is ambiguous
-            }
-        } else if (device && !device->unsafe && !state->global_unsafe && fresh && candidate &&
+            } else state->PoisonLocked(owner);
+        } else if (device && !device->unsafe && !device->closing && !state->global_unsafe && fresh && candidate &&
                    state->wrappers.size() < state->maximum) {
             ir::BufferAvailability availability{};
             const auto status = state->shadows.Register(reinterpret_cast<std::uintptr_t>(identity), size,
@@ -439,6 +481,7 @@ Buffer* Adopt(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8
         } else state->PoisonLocked(owner);
     }
     if (candidate) candidate->DiscardUnpublished();
+    if (facade_ref && !published && !revived) facade->Release();
     if (!found) return fallback();
     // A newly published wrapper adopts native's returned reference. An
     // existing wrapper already owns one, so release the extra Create/Get ref.
@@ -472,6 +515,37 @@ IDirect3DVertexBuffer8* BufferProxy::AdoptVertexForFacade(IDirect3DDevice8* owne
 IDirect3DIndexBuffer8* BufferProxy::AdoptIndexForFacade(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
                                                         IDirect3DIndexBuffer8* native, UINT size, bool fresh) noexcept {
     return Adopt(state_, owner, facade, native, size, fresh, true);
+}
+
+bool BufferProxy::CloseFacadeDevice(IDirect3DDevice8* owner, IDirect3DDevice8* facade) noexcept {
+    LastError error;
+    if (!state_ || !owner || !facade) return false;
+    Control* retired = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        (void)state_->DeviceLocked(owner); // record a close even before the first buffer exists
+        auto device = state_->devices.find(owner);
+        if (device != state_->devices.end()) device->second.closing = true;
+        state_->PoisonLocked(owner);
+        for (const auto& entry : state_->wrappers) {
+            const Control* item = entry.second;
+            if (item->owner == owner && item->facade == facade && !item->Dormant()) return false;
+        }
+        for (auto it = state_->wrappers.begin(); it != state_->wrappers.end();) {
+            Control* item = (it++)->second;
+            if (item->owner == owner && item->facade == facade) {
+                state_->DetachLocked(item);
+                item->retirement_next = retired;
+                retired = item;
+            }
+        }
+    }
+    while (retired) {
+        Control* next = retired->retirement_next;
+        retired->DestroyDormant();
+        retired = next;
+    }
+    return true;
 }
 
 namespace {

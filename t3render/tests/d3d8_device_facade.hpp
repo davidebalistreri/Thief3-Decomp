@@ -15,6 +15,11 @@
 
 namespace t3render::fixture {
 
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+inline std::atomic<unsigned> buffer_facade_close_successes{0};
+inline std::atomic<unsigned> buffer_facade_close_failures{0};
+#endif
+
 class FixtureReferenceCount final {
 public:
     struct Decrement { ULONG count; bool final; };
@@ -59,6 +64,12 @@ public:
         const DWORD before = GetLastError();
         IDirect3DDevice8* native = native_;
         IDirect3D8* parent = factory_;
+#ifdef T3RENDER_BUFFER_FACADE_FIXTURE
+        if (buffers_) {
+            if (buffers_->CloseFacadeDevice(native_, this)) ++buffer_facade_close_successes;
+            else ++buffer_facade_close_failures;
+        }
+#endif
         delete this;
         SetLastError(before);
         native->Release();

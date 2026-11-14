@@ -77,13 +77,21 @@ void BufferRegistry::ClearStaging(Entry& entry) noexcept {
 }
 
 void BufferRegistry::AbandonEntry(Entry& entry, BufferAbandonCause cause) noexcept {
-    if (entry.availability != BufferAvailability::Abandoned) entry.abandon_cause = cause;
+    if (entry.availability != BufferAvailability::Abandoned) {
+        entry.abandon_cause = cause;
+        entry.restart_after_repeated_unlock = cause == BufferAbandonCause::RepeatedUnlock;
+    } else {
+        // Preserve the first cause for diagnostics, but never recover through
+        // a later invalidation whose effects are unknown.
+        entry.restart_after_repeated_unlock = false;
+    }
     ClearStaging(entry);
     if (entry.shadow) {
         used_bytes_ -= entry.shadow->storage_bytes();
         entry.shadow.reset();
     }
     entry.availability = BufferAvailability::Abandoned;
+    entry.post_repeated_unlock_epoch = false;
     entry.locked = false;
 }
 
@@ -210,6 +218,42 @@ RegistryResult BufferRegistry::AbandonCause(BufferToken token, BufferAbandonCaus
     if (result != RegistryResult::Ok) return result;
     if (entry->availability != BufferAvailability::Abandoned) return RegistryResult::InvalidOperation;
     cause = entry->abandon_cause;
+    return RegistryResult::Ok;
+}
+
+RegistryResult BufferRegistry::RestartAfterRepeatedUnlock(BufferToken token) noexcept {
+    Entry* entry = nullptr;
+    const auto result = Find(token, entry);
+    if (result != RegistryResult::Ok) return result;
+    if (entry->availability != BufferAvailability::Abandoned ||
+        entry->abandon_cause != BufferAbandonCause::RepeatedUnlock || !entry->restart_after_repeated_unlock ||
+        entry->locked || entry->shadow)
+        return RegistryResult::InvalidOperation;
+    std::unique_ptr<BufferShadow> fresh;
+    try { fresh.reset(new (std::nothrow) BufferShadow(entry->size, byte_budget_ - used_bytes_)); }
+    catch (...) { return RegistryResult::AllocationFailed; }
+    if (!fresh) return RegistryResult::AllocationFailed;
+    switch (fresh->status()) {
+    case ShadowStatus::BudgetExceeded: return RegistryResult::BudgetExceeded;
+    case ShadowStatus::TooLarge: return RegistryResult::Unavailable;
+    case ShadowStatus::AllocationFailed: return RegistryResult::AllocationFailed;
+    case ShadowStatus::Ready: break;
+    }
+    used_bytes_ += fresh->storage_bytes();
+    entry->shadow = std::move(fresh);
+    entry->availability = BufferAvailability::Tracked;
+    entry->abandon_cause = BufferAbandonCause::Unknown;
+    entry->restart_after_repeated_unlock = false;
+    entry->post_repeated_unlock_epoch = true;
+    return RegistryResult::Ok;
+}
+
+RegistryResult BufferRegistry::IsPostRepeatedUnlockEpoch(BufferToken token, bool& post_repeat) const noexcept {
+    const Entry* entry = nullptr;
+    const auto result = Find(token, entry);
+    if (result != RegistryResult::Ok) return result;
+    if (entry->availability != BufferAvailability::Tracked) return RegistryResult::Unavailable;
+    post_repeat = entry->post_repeated_unlock_epoch;
     return RegistryResult::Ok;
 }
 

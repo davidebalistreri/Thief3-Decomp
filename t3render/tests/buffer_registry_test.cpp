@@ -169,6 +169,34 @@ void DiscardReadOnlyAndFailures() {
     assert(registry.AbandonCause(repeated, cause) == R::UnknownResource);
 }
 
+void RestartAfterRepeatedUnlock() {
+    BufferRegistry registry(18, 3);
+    const auto token = Register(registry, 1, 8);
+    const std::array<std::uint8_t, 2> old{1, 2}, fresh{7, 8};
+    std::array<std::uint8_t, 2> out{};
+    Write(registry, token, 2, old.data(), old.size());
+    assert(registry.RestartAfterRepeatedUnlock(token) == R::InvalidOperation);
+    assert(registry.Abandon(token, BufferAbandonCause::RepeatedUnlock) == R::Ok);
+    assert(registry.RestartAfterRepeatedUnlock(token) == R::Ok);
+    assert(registry.Read(token, 2, out.data(), out.size()) == R::UnknownData);
+    Write(registry, token, 2, fresh.data(), fresh.size());
+    assert(registry.Read(token, 2, out.data(), out.size()) == R::Ok && out == fresh);
+    assert(registry.Read(token, 0, out.data(), out.size()) == R::UnknownData);
+    assert(registry.Abandon(token, BufferAbandonCause::RepeatedUnlock) == R::Ok);
+    const auto one = Register(registry, 2, 8);
+    const auto two = Register(registry, 3, 8);
+    assert(registry.RestartAfterRepeatedUnlock(token) == R::BudgetExceeded);
+    assert(registry.Read(token, 2, out.data(), out.size()) == R::Unavailable);
+    assert(registry.Release(two) == R::Ok);
+    assert(registry.Abandon(token) == R::Ok); // a later unknown invalidation revokes recovery
+    BufferAbandonCause cause{};
+    assert(registry.AbandonCause(token, cause) == R::Ok && cause == BufferAbandonCause::RepeatedUnlock);
+    assert(registry.RestartAfterRepeatedUnlock(token) == R::InvalidOperation);
+    assert(registry.Release(token) == R::Ok);
+    assert(registry.RestartAfterRepeatedUnlock(token) == R::UnknownResource);
+    assert(registry.Release(one) == R::Ok && registry.used_bytes() == 0);
+}
+
 void GlobalBudgetAndOverflow() {
     BufferRegistry registry(18, 4);
     const auto first = Register(registry, 1, 8);
@@ -238,6 +266,7 @@ int main() {
     GenerationsAndLimits();
     PartialWritesAndStaging();
     DiscardReadOnlyAndFailures();
+    RestartAfterRepeatedUnlock();
     GlobalBudgetAndOverflow();
     FaultSafeReader();
 }

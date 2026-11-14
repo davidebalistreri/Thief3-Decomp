@@ -110,6 +110,13 @@ class CaptureHostTests(unittest.TestCase):
         self.assertFalse(header["replayable"])
         self.assertTrue(header["experimental_facade"]["repeated_unlock_resource_discard"])
 
+    def test_post_repeat_recovery_is_explicit_in_header(self):
+        self.run_capture("experimental_recovery_header", frame="1")
+        header = self.records()[0]
+        self.assertTrue(header["experimental_facade"]["repeated_unlock_resource_discard"])
+        self.assertTrue(header["experimental_facade"]["repeated_unlock_post_write_recovery"])
+        self.assertFalse(header["replayable"])
+
     def test_reentrant_device_operation_abandons_partial_frame(self):
         for scenario in ("shader_abandon", "shader_abandon_all"):
             with self.subTest(scenario=scenario):
@@ -550,6 +557,7 @@ class CaptureHostTests(unittest.TestCase):
             captured = draws[2]["buffer_data"][part]
             self.assertEqual(captured["status"], "captured")
             self.assertNotIn("shadow_reason", captured)
+            self.assertEqual(captured.get("shadow_observation"), "post_repeated_unlock_write" if part == "vertex" else None)
 
     def test_buffered_budget_counts_only_successful_shadow_bytes(self):
         self.run_capture("buffer_budget", frame="1")

@@ -107,6 +107,7 @@ struct BufferProxy::State {
     std::uint64_t next_operation = 1, next_draw = 1, next_reset = 1;
     bool global_unsafe = false;
     bool allow_repeated_unlock = false;
+    bool allow_repeated_unlock_recovery = false;
     unsigned global_poison_line = 0;
 
     void ClearLockLocked(Control* item) noexcept {
@@ -524,11 +525,16 @@ private:
         const auto kind = flags & D3DLOCK_READONLY ? ir::BufferLock::ReadOnly :
                           flags & D3DLOCK_DISCARD ? ir::BufferLock::Discard : ir::BufferLock::Write;
         if (token.identity && token.generation) {
-            const auto result = state_->shadows.BeginLock(token, offset, length_, kind);
+            auto result = state_->shadows.BeginLock(token, offset, length_, kind);
             ir::BufferAvailability availability{};
-            const bool discarded = state_->allow_repeated_unlock && result == ir::RegistryResult::Unavailable &&
+            bool discarded = state_->allow_repeated_unlock && result == ir::RegistryResult::Unavailable &&
                 state_->shadows.Availability(token, availability) == ir::RegistryResult::Ok &&
                 availability == ir::BufferAvailability::Abandoned;
+            if (discarded && state_->allow_repeated_unlock_recovery &&
+                state_->shadows.RestartAfterRepeatedUnlock(token) == ir::RegistryResult::Ok) {
+                result = state_->shadows.BeginLock(token, offset, length_, kind);
+                discarded = false;
+            }
             if (result != ir::RegistryResult::Ok && !discarded) {
                 state_->PoisonLocked(owner); return 0;
             }
@@ -807,6 +813,16 @@ bool BufferProxy::EnableRepeatedUnlockExperiment() noexcept {
     return true;
 }
 
+bool BufferProxy::EnableRepeatedUnlockRecoveryExperiment() noexcept {
+    LastError error;
+    if (!state_) return false;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (state_->global_unsafe || !state_->allow_repeated_unlock || !state_->devices.empty() ||
+        !state_->wrappers.empty() || state_->allow_repeated_unlock_recovery) return false;
+    state_->allow_repeated_unlock_recovery = true;
+    return true;
+}
+
 BufferProxy::RepeatedUnlockStats BufferProxy::GetRepeatedUnlockStats(IDirect3DDevice8* owner) noexcept {
     LastError error;
     if (!state_) return {};
@@ -1017,7 +1033,12 @@ ir::RegistryResult ReadPrepared(const std::shared_ptr<BufferProxy::State>& state
     const auto result = state->shadows.Read(token, offset, destination, length);
     if (detail) {
         switch (result) {
-        case ir::RegistryResult::Ok: *detail = ShadowReadStatus::Captured; break;
+        case ir::RegistryResult::Ok: {
+            bool post_repeat = false;
+            *detail = state->shadows.IsPostRepeatedUnlockEpoch(token, post_repeat) == ir::RegistryResult::Ok && post_repeat
+                          ? ShadowReadStatus::CapturedPostRepeatedUnlock : ShadowReadStatus::Captured;
+            break;
+        }
         case ir::RegistryResult::UnknownData: *detail = ShadowReadStatus::UnknownData; break;
         case ir::RegistryResult::UnknownResource: case ir::RegistryResult::StaleGeneration:
             *detail = ShadowReadStatus::UnknownResource; break;

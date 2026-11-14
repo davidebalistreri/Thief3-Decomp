@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "post_repeated_unlock_write_recovery",
+  "status": "PASS",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86",
+  "fixture_sha256": "cdf28a20a0899685d7bddafa6211cf6f52ea18b8f31e12e4b312ade8a3ef5f76",
+  "baseline_facade_ppm_sha256": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+  "recovered_buffer_triangle_rgb": "0xe43b3b",
+  "synthetic_d3d8_dx12_ppm_sha256": "5f46fcdfe5237797a1425f91d3abc19689c225e67e38b5ecbf7f25b39db16c85",
+  "observation": "After a successful repeated Unlock, only explicitly rewritten ranges became known; after a full rewrite the recovered buffer rendered the expected pixel in native and facade runs.",
+  "local_results": "build/t3render-captures/2026-11-14-repeat-write-recovery-fixture",
+  "limitations": [
+    "Synthetic serial fixture only; no evidence of game parity or that TDS rewrites the affected ranges after repeated Unlock.",
+    "The synchronized DX12 image is a separate synthetic draw, not the recovered buffer or a TDS frame.",
+    "Unobserved aliases, runtime concurrency and the prior TDS menu rendering regression remain unverified."
+  ]
+}

@@ -183,7 +183,8 @@ bool ReadObservedIndex(void* context, IDirect3DDevice8* device, IDirect3DIndexBu
 t3render::buffers::ShadowReadStatus DetailedVertex(void* context, IDirect3DDevice8* device, IDirect3DVertexBuffer8* buffer,
                                                    std::size_t offset, void* destination, std::size_t length) {
     if (ReadObservedVertex(context, device, buffer, offset, destination, length))
-        return t3render::buffers::ShadowReadStatus::Captured;
+        return static_cast<ObserverState*>(context)->repeated_unlock
+            ? t3render::buffers::ShadowReadStatus::CapturedPostRepeatedUnlock : t3render::buffers::ShadowReadStatus::Captured;
     return static_cast<ObserverState*>(context)->repeated_unlock
         ? t3render::buffers::ShadowReadStatus::AbandonedRepeatedUnlock : t3render::buffers::ShadowReadStatus::Abandoned;
 }
@@ -324,6 +325,7 @@ int main(int argc, char** argv) {
         std::cout << "history_requested=" << t3render::CaptureDeclarationHistoryRequested() << '\n';
     if (scenario == "experimental_header") t3render::CaptureExperimentalFacade();
     if (scenario == "experimental_repeated_header") t3render::CaptureExperimentalFacade(true);
+    if (scenario == "experimental_recovery_header") t3render::CaptureExperimentalFacade(true, true);
     t3render::CaptureDevice(&device, &presentation);
     t3render::CaptureDevice(&unrelated, &presentation);
     const auto draw = MakeDraw(t3render::DrawKind::Primitive);

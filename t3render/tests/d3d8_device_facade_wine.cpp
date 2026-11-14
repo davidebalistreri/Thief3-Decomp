@@ -2098,7 +2098,8 @@ bool ObserveRepeatedUnlockExperiment(HWND window, bool facade_mode) {
     ComPtr<IDirect3D8> native_factory, facade_factory;
     native_factory.value = Direct3DCreate8(D3D_SDK_VERSION);
     auto buffers = t3render::buffers::BufferProxy::Create(ReadFixtureMemory, nullptr);
-    if (!native_factory.value || !buffers || !buffers->EnableRepeatedUnlockExperiment()) return false;
+    if (!native_factory.value || !buffers || !buffers->EnableRepeatedUnlockExperiment() ||
+        !buffers->EnableRepeatedUnlockRecoveryExperiment()) return false;
     IDirect3D8* selected = native_factory.value;
     if (facade_mode) {
         native_factory->AddRef();
@@ -2151,13 +2152,37 @@ bool ObserveRepeatedUnlockExperiment(HWND window, bool facade_mode) {
             std::memcmp(copied_indices, index_data, sizeof(index_data)) ||
             buffers->GetRepeatedUnlockStats(native).completed != 1) return false;
     }
+    // A repeated Unlock discards all prior evidence. Re-observe a partial
+    // write first, then the remainder; never infer the untouched bytes.
+    data = nullptr;
+    if (FAILED(affected->Lock(0, sizeof(Vertex), &data, 0)) || !data) return false;
+    std::memcpy(data, vertices, sizeof(Vertex));
+    if (FAILED(affected->Unlock())) return false;
+    if (facade_mode) {
+        auto first = buffers->UnwrapVertex(native, affected.value);
+        Vertex copy[3]{};
+        if (buffers->ReadVertex(native, first.native(), 0, copy, sizeof(copy)) != t3render::ir::RegistryResult::UnknownData ||
+            buffers->ReadVertex(native, first.native(), 0, copy, sizeof(Vertex)) != t3render::ir::RegistryResult::Ok ||
+            std::memcmp(copy, vertices, sizeof(Vertex))) return false;
+    }
+    data = nullptr;
+    if (FAILED(affected->Lock(sizeof(Vertex), sizeof(vertices) - sizeof(Vertex), &data, 0)) || !data) return false;
+    std::memcpy(data, vertices + 1, sizeof(vertices) - sizeof(Vertex));
+    if (FAILED(affected->Unlock())) return false;
+    if (facade_mode) {
+        auto first = buffers->UnwrapVertex(native, affected.value);
+        Vertex copy[3]{};
+        if (buffers->ReadVertex(native, first.native(), 0, copy, sizeof(copy)) != t3render::ir::RegistryResult::Ok ||
+            std::memcmp(copy, vertices, sizeof(vertices))) return false;
+        std::printf("repeated_unlock_write_recovery=PASS\n");
+    }
     if (FAILED(device->SetVertexShader(kFvf)) || FAILED(device->SetPixelShader(0)) ||
         FAILED(device->SetRenderState(D3DRS_LIGHTING, FALSE)) || FAILED(device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE)) ||
         FAILED(device->SetRenderState(D3DRS_ZENABLE, FALSE)) || FAILED(device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE)) ||
         FAILED(device->SetTexture(0, nullptr)) || FAILED(device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1)) ||
         FAILED(device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE)) ||
         FAILED(device->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE)) ||
-        FAILED(device->SetStreamSource(0, visible.value, sizeof(Vertex))) || FAILED(device->SetIndices(indices.value, 0)) ||
+        FAILED(device->SetStreamSource(0, affected.value, sizeof(Vertex))) || FAILED(device->SetIndices(indices.value, 0)) ||
         FAILED(device->Clear(0, nullptr, D3DCLEAR_TARGET, kClear, 1, 0)) || FAILED(device->BeginScene())) return false;
     if (facade_mode && !(ticket = buffers->BeginDraw(native))) return false;
     const HRESULT draw = device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 3, 0, 1);

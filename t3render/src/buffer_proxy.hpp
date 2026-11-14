@@ -103,6 +103,9 @@ public:
     // recognized repeated Unlock discards that buffer's shadow before the
     // native call and holds a device mutation window through its completion.
     bool EnableRepeatedUnlockExperiment() noexcept;
+    // Also opt in to observing new writes after a successful repeated Unlock.
+    // Pre-Unlock contents are never restored. Must be enabled before devices.
+    bool EnableRepeatedUnlockRecoveryExperiment() noexcept;
     struct RepeatedUnlockStats { bool enabled = false; std::uint64_t completed = 0; };
     RepeatedUnlockStats GetRepeatedUnlockStats(IDirect3DDevice8* owner) noexcept;
 

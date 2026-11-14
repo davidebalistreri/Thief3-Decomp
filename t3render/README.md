@@ -89,6 +89,17 @@ Success preserves unrelated shadows; failure, detected overlap or any other
 mismatch invalidates the device. Draws outside the capture window are not
 bracketed, so this does not establish general concurrency safety. A discarded
 shadow is never restored by later locks.
+With the additional opt-in `T3RENDER_EXPERIMENTAL_REPEAT_RECOVERY=1`, a
+successful repeated Unlock may instead start a fresh, entirely unknown shadow
+on a later observed Lock. Only ranges subsequently written and successfully
+staged become observable; old contents are never copied into the new shadow.
+Unknown invalidations still revoke recovery. The trace header records this
+policy and recovered payloads carry `shadow_observation` set to
+`post_repeated_unlock_write`. Budget or snapshot limits can still leave ranges
+unknown. These observations are not proof of GPU input. The [synthetic
+Highball fixture](benchmarks/d3d8/2026-11-14-repeat-write-recovery/result.json)
+checks partial and full rewrites; it does not establish whether TDS rewrites
+the missing ranges.
 The header and per-draw counter explicitly identify this policy. Its
 [Highball fixture](benchmarks/d3d8/2026-11-14-repeated-unlock-policy/result.json)
 checks this restricted sequence; unobserved native aliases, general TDS

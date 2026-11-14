@@ -81,7 +81,7 @@ bool CaptureConfigured();
 // Configuration only. History is never a post-reset program candidate.
 bool CaptureDeclarationHistoryRequested();
 // Marks the opt-in experimental facade before the first frame is opened.
-void CaptureExperimentalFacade(bool repeated_unlock_policy = false);
+void CaptureExperimentalFacade(bool repeated_unlock_policy = false, bool post_repeat_recovery = false);
 // Advisory only: a concurrent Present may change the active window.
 bool CaptureWantsDraw(IDirect3DDevice8*);
 // 0 means unavailable caps or a disabled constant observation.

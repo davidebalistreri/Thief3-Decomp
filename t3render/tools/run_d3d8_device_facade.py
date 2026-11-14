@@ -133,6 +133,9 @@ def inspect_repeated_unlock_experiment(lines, mode):
     expected = ["repeated_unlock_experiment_shadow=PASS"] if mode == "facade" else []
     if [line for line in lines if line.startswith("repeated_unlock_experiment_shadow=")] != expected:
         raise RunError("repeated Unlock shadow isolation is missing or conflicting")
+    recovery = ["repeated_unlock_write_recovery=PASS"] if mode == "facade" else []
+    if [line for line in lines if line.startswith("repeated_unlock_write_recovery=")] != recovery:
+        raise RunError("repeated Unlock write recovery is missing or conflicting")
     return {"repeated": repeated.lower(), "pixel": pixel.lower()}
 
 

@@ -61,6 +61,7 @@ struct CaptureState {
     bool vertex_constants_requested = false;
     bool experimental_facade = false;
     bool experimental_repeated_unlock = false;
+    bool experimental_repeat_recovery = false;
     bool begun = false;
     bool had_reset = false;
     uint64_t frame = 0;
@@ -235,6 +236,7 @@ bool Open(CaptureState& s) {
     if (s.experimental_facade) {
         out << ",\"experimental_facade\":{\"enabled\":true,\"identity_verified\":false,\"concurrency_verified\":false";
         if (s.experimental_repeated_unlock) out << ",\"repeated_unlock_resource_discard\":true";
+        if (s.experimental_repeat_recovery) out << ",\"repeated_unlock_post_write_recovery\":true";
         out << '}';
     }
     out << ",\"limitations\":["
@@ -531,6 +533,7 @@ struct UpBytes {
     const char* status = "unreadable";
     const char* shadow_reason = nullptr;
     const char* shadow_abandon_cause = nullptr;
+    const char* shadow_observation = nullptr;
     uint64_t byte_count = 0;
     bool byte_count_known = false;
     std::string hex;
@@ -633,6 +636,7 @@ void BytesJson(std::ostream& out, const UpBytes& data) {
     else out << "null";
     if (data.shadow_reason) out << ",\"shadow_reason\":\"" << data.shadow_reason << '\"';
     if (data.shadow_abandon_cause) out << ",\"shadow_abandon_cause\":\"" << data.shadow_abandon_cause << '\"';
+    if (data.shadow_observation) out << ",\"shadow_observation\":\"" << data.shadow_observation << '\"';
 }
 
 const char* ShadowReason(buffers::ShadowReadStatus status) noexcept {
@@ -650,6 +654,7 @@ const char* ShadowReason(buffers::ShadowReadStatus status) noexcept {
     case ShadowReadStatus::Unavailable: return "unavailable";
     case ShadowReadStatus::Other: return "other";
     case ShadowReadStatus::Captured: return nullptr;
+    case ShadowReadStatus::CapturedPostRepeatedUnlock: return nullptr;
     }
     return "other";
 }
@@ -676,10 +681,13 @@ UpBytes ReadShadow(CaptureState& s, const BufferObserver& observer, IDirect3DDev
     bool read = false;
     if (detailed) {
         const auto observed = detailed(observer.context, device, resource, static_cast<size_t>(offset), copy.data(), size);
-        read = observed == buffers::ShadowReadStatus::Captured;
+        read = observed == buffers::ShadowReadStatus::Captured ||
+               observed == buffers::ShadowReadStatus::CapturedPostRepeatedUnlock;
         if (!read) result.shadow_reason = ShadowReason(observed);
         if (observed == buffers::ShadowReadStatus::AbandonedRepeatedUnlock)
             result.shadow_abandon_cause = "repeated_unlock";
+        if (observed == buffers::ShadowReadStatus::CapturedPostRepeatedUnlock)
+            result.shadow_observation = "post_repeated_unlock_write";
     } else read = reader(observer.context, device, resource, static_cast<size_t>(offset), copy.data(), size);
     if (!read) {
         result.status = "unknown"; return result;
@@ -1290,13 +1298,14 @@ bool CaptureDeclarationHistoryRequested() {
     } catch (...) { Fail(); return false; }
 }
 
-void CaptureExperimentalFacade(bool repeated_unlock_policy) {
+void CaptureExperimentalFacade(bool repeated_unlock_policy, bool post_repeat_recovery) {
     try {
         auto& s = State();
         std::lock_guard<std::mutex> lock(s.mutex);
         if (s.enabled && !s.complete && !s.begun && s.file == INVALID_HANDLE_VALUE) {
             s.experimental_facade = true;
             s.experimental_repeated_unlock = repeated_unlock_policy;
+            s.experimental_repeat_recovery = repeated_unlock_policy && post_repeat_recovery;
         }
     } catch (...) { Fail(); }
 }

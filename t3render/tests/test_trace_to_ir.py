@@ -250,6 +250,25 @@ class TraceToIrTests(unittest.TestCase):
         self.assertEqual(result["frames"][0]["commands"][0]["compatibility"]["d3d8"]["draw"]["buffer_data"],
                          draw["buffer_data"])
 
+    def test_post_repeat_buffer_observation_keeps_its_provenance(self):
+        draw = buffered_fixture()
+        draw["buffer_data"]["vertex"]["shadow_observation"] = "post_repeated_unlock_write"
+        header = copy.deepcopy(HEADER_BUFFER)
+        header["experimental_facade"] = {"enabled": True, "repeated_unlock_resource_discard": True,
+                                         "repeated_unlock_post_write_recovery": True}
+        self.write(buffered_events(draw, header=header))
+        observed = trace_to_ir.convert(self.path)["meshes"][0]["buffered_data_observed"]
+        self.assertEqual(observed["vertex"]["shadow_observation"], "post_repeated_unlock_write")
+        self.assertEqual(observed["index"]["status"], "captured")
+        for malformed in (None, "unknown"):
+            with self.subTest(malformed=malformed):
+                header["experimental_facade"]["repeated_unlock_post_write_recovery"] = malformed
+                self.write(buffered_events(draw, header=header))
+                observed = trace_to_ir.convert(self.path)["meshes"][0]["buffered_data_observed"]
+                self.assertEqual(observed["vertex"]["status"], "unknown")
+                self.assertIsNone(observed["vertex"]["data"])
+                self.assertEqual(observed["index"]["status"], "captured")
+
     def test_unstable_or_failed_buffered_draw_never_exposes_bytes(self):
         draw = buffered_fixture()
         for hr, stable in ((0, False), (-1, True), (0x80004005, True), (-1, False)):

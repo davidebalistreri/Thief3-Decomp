@@ -1615,6 +1615,40 @@ void UnlockMismatchDiagnostics() {
     }
 }
 
+void RepeatedUnlockWriteRecovery() {
+    Reader reader;
+    auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+    assert(!proxy->EnableRepeatedUnlockRecoveryExperiment());
+    assert(proxy->EnableRepeatedUnlockExperiment());
+    assert(proxy->EnableRepeatedUnlockRecoveryExperiment());
+    assert(!proxy->EnableRepeatedUnlockRecoveryExperiment());
+    FakeDevice native, facade;
+    Vertex affected, other;
+    auto* a = proxy->AdoptVertexForFacade(&native, &facade, &affected, 8, true);
+    auto* b = proxy->AdoptVertexForFacade(&native, &facade, &other, 8, true);
+    const BYTE old[]{1, 2, 3, 4}, fresh[]{8, 9}; BYTE out[4]{};
+    Fill(a, 0, old, 4); Fill(b, 0, old, 4);
+    assert(a->Unlock() == S_OK);
+    assert(proxy->ReadVertex(&native, &affected, 0, out, 4) == RegistryResult::Unavailable);
+    Fill(a, 1, fresh, 2);
+    assert(proxy->ReadVertex(&native, &affected, 0, out, 4) == RegistryResult::UnknownData);
+    assert(proxy->ReadVertex(&native, &affected, 1, out, 2) == RegistryResult::Ok &&
+           out[0] == fresh[0] && out[1] == fresh[1]);
+    const auto ticket = proxy->BeginDraw(&native);
+    assert(ticket && proxy->PrepareVertexGetter(&native, &affected, ticket).ReadDetailed(&native, &affected, 1, out, 2) ==
+           ShadowReadStatus::CapturedPostRepeatedUnlock);
+    assert(proxy->EndDraw(&native, ticket));
+    assert(proxy->ReadVertex(&native, &other, 0, out, 4) == RegistryResult::Ok);
+    assert(a->Unlock() == S_OK);
+    assert(proxy->ReadVertex(&native, &affected, 1, out, 2) == RegistryResult::Unavailable);
+    proxy->InvalidateVertex(&native, a); // a second unknown invalidation blocks restart
+    Fill(a, 1, fresh, 2);
+    assert(proxy->ReadVertex(&native, &affected, 1, out, 2) == RegistryResult::Unavailable);
+    assert(a->Release() == 0 && b->Release() == 0);
+    assert(proxy->CloseFacadeDevice(&native, &facade));
+    assert(facade.Release() == 0 && native.Release() == 0);
+}
+
 void RepeatedUnlockExperiment() {
     Reader reader;
     for (unsigned scenario = 0; scenario < 4; ++scenario) {
@@ -1706,4 +1740,5 @@ int main() {
     ResetProcessAndFailures();
     UnlockMismatchDiagnostics();
     RepeatedUnlockExperiment();
+    RepeatedUnlockWriteRecovery();
 }

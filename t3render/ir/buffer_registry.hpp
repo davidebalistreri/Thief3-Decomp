@@ -77,6 +77,11 @@ public:
     // future tracking unreliable. Abandon is permanent for this generation.
     RegistryResult Abandon(BufferToken token, BufferAbandonCause cause = BufferAbandonCause::Unknown) noexcept;
     RegistryResult AbandonCause(BufferToken token, BufferAbandonCause& cause) const noexcept;
+    // Experimental: start an entirely unknown shadow after a repeated-Unlock
+    // abandonment. Only later successful, observed writes can make bytes known.
+    // The caller must ensure that the repeated native Unlock has completed.
+    RegistryResult RestartAfterRepeatedUnlock(BufferToken token) noexcept;
+    RegistryResult IsPostRepeatedUnlockEpoch(BufferToken token, bool& post_repeat) const noexcept;
     RegistryResult Read(BufferToken token, std::size_t offset, void* destination,
                         std::size_t length) const noexcept;
 
@@ -90,6 +95,8 @@ private:
         std::size_t size = 0;
         BufferAvailability availability = BufferAvailability::AllocationFailed;
         BufferAbandonCause abandon_cause = BufferAbandonCause::Unknown;
+        bool restart_after_repeated_unlock = false;
+        bool post_repeated_unlock_epoch = false;
         std::unique_ptr<BufferShadow> shadow;
         bool locked = false;
         BufferLock kind = BufferLock::ReadOnly;

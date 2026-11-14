@@ -658,6 +658,18 @@ def buffered_data(draw, result, header, indexed, within_frame_budget):
     output["vertex"] = buffered_vertex(raw.get("vertex"), draw, indexed, limit)
     if indexed:
         output["index"] = buffered_index(raw.get("index"), draw, limit)
+    for component, unknown in (("vertex", unknown_vertex), ("index", unknown_index)):
+        part = raw.get(component)
+        if not isinstance(part, dict) or "shadow_observation" not in part:
+            continue
+        facade = object_or_empty(header.get("experimental_facade"))
+        if (part["shadow_observation"] != "post_repeated_unlock_write" or
+                facade.get("enabled") is not True or
+                facade.get("repeated_unlock_resource_discard") is not True or
+                facade.get("repeated_unlock_post_write_recovery") is not True):
+            output[component] = unknown
+        elif output[component] is not None and output[component]["status"] == "captured":
+            output[component]["shadow_observation"] = "post_repeated_unlock_write"
     return output
 
 

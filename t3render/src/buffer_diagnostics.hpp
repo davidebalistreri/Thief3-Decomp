@@ -8,7 +8,7 @@ enum class InvalidationCause { Internal, Explicit, StateBlock, ProcessVertices, 
 
 // Observation-only classification; never authorizes a read or restores bytes.
 enum class ShadowReadStatus {
-    Captured, UnknownResource, UnknownData, Abandoned, AbandonedRepeatedUnlock, BudgetExceeded,
+    Captured, CapturedPostRepeatedUnlock, UnknownResource, UnknownData, Abandoned, AbandonedRepeatedUnlock, BudgetExceeded,
     TooLarge, AllocationFailed, Busy, InvalidRange, Unavailable, Other
 };
 

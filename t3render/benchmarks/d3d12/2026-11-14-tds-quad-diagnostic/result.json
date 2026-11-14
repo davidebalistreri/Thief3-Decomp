@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "partial_tds_indexed_quad_dx12_diagnostic",
+  "status": "DIAGNOSTIC_ONLY",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86, D3D12 via Vulkan/MoltenVK/Metal",
+  "source": {
+    "scene": "SouthQuarter1_int1, Garrett's Building save, bedroom",
+    "trace_sha256": "5f58b21cbec1b12c397e817fd5d5b82baafaedd2bbff59159cb5546f61a8600d",
+    "frame": 1392,
+    "global_ir_draw": 668,
+    "source_line": 1367,
+    "candidate_fvf": "0x242",
+    "index_count": 6,
+    "referenced_vertex_count": 4,
+    "viewport": [0, 0, 1024, 768, 0, 0.5],
+    "packet_sha256": "91870cba7c838c75e52b9c280205e7403437286eada8c46c1406c001fbb18a36",
+    "converter_sha256": "bfdda96efe09abd9c5973715e99bb01f2580c2c4255df93530ff170b8b6da05c",
+    "replay_source_sha256": "61387796089c767852186f0ab855aed042fc0f591f6d2e5029c70d68447496d8",
+    "replay_executable_sha256": "eaa57d0f894dd033490f62d6017f0e83091b46e88f6735798c633a5bbea4204c"
+  },
+  "result": {
+    "changed_pixels": 420,
+    "rgb": "a06523",
+    "pixel_bounds_inclusive": [921, 290, 940, 310],
+    "ppm_sha256": "e754219338ecbae9ce22548e6df59d2bf2885343289e7e20f25f52a721f26a64",
+    "png_sha256": "38d38a1218f85440c943fd7fee72d841624026c4963374acc113a14c38d952f8",
+    "rgba_fnv1a64": "f655c1c991f7b8dd",
+    "local_image": "build/t3render-diagnostics/2026-11-14-tds-quad-preview/quad.png",
+    "local_detail_10x": "build/t3render-diagnostics/2026-11-14-tds-quad-preview/quad-detail-10x.png"
+  },
+  "validation": {
+    "projection": "CPU row-vector calculation of the observed positions and matrices projects the corners to x=920.07..940.56, y=289.53..310.03 before the assumed half-pixel correction; DX12 pixels lie at the expected area.",
+    "view_sensitivity": "Adding 10 to VIEW row 3 column 0 moved the pixel bounds 11 pixels right and changed 462 pixels across the two images; this is not a fidelity comparison.",
+    "synthetic_camera_regression": "Existing 256x256 camera fixture output retained SHA-256 3bc2b44c9201d989467993755a9d21cd3888813f6746a3c0d625e7e2077c8fd6.",
+    "host_suite": "328 Python tests passed before the final converter guard; the affected converter and parser tests passed again after it was added.",
+    "sanitizers": "Host replay parser compiled with ASan/UBSan and accepted the diagnostic and synthetic packets while rejecting a truncated packet and an oversized viewport; no sanitizer errors."
+  },
+  "limitations": [
+    "The quad and its relationship to the room are unidentified. There is no synchronized D3D8 screenshot or pixel-to-pixel comparison.",
+    "FVF interpretation, buffer bytes, transforms, viewport and original render target are not proven to match the GPU inputs or final image.",
+    "Only two expanded triangles are rendered on black with flat vertex color; textures, alpha test, blending, depth, stencil, lighting, other draws and postprocessing are omitted.",
+    "The D3D8 half-pixel adjustment and fixed-function transform interpretation are assumptions for this draw, not established TDS parity.",
+    "The large room vertex buffer, visible shaders and texture contents remain incomplete; experimental facade menu text is still truncated.",
+    "The game-derived packet and images are local and are not committed."
+  ]
+}

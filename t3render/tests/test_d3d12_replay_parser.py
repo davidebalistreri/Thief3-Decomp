@@ -16,6 +16,11 @@ int main() {
     const std::string bytes((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
     Frame frame{};
     if (!ParseFrameBytes(bytes.data(), bytes.size(), frame)) return 2;
+    if (frame.diagnostic) {
+        std::cout << "diagnostic " << frame.width << ' ' << frame.height << ' ' << frame.min_depth << ' '
+                  << frame.max_depth << ' ' << frame.scene.size() << ' ' << frame.scene[1].vertices[2].x << '\n';
+        return 0;
+    }
     if (!frame.scene.empty()) {
         std::cout << "scene " << frame.scene.size() << ' ' << frame.clear_argb << ' '
                   << frame.scene[0].matrices[0][12] << ' ' << frame.scene[1].matrices[0][12] << ' '
@@ -44,6 +49,8 @@ WORLD = b"0 1 0 0 -1 0 0 0 0 0 1 0 0.1 -0.05 2 1\n"
 VIEW = b"0.9 0 0 0 0 1.1 0 0 0 0 1 0 -0.05 0.05 0.5 1\n"
 PROJECTION = b"1.8 0 0 0 0 1.8 0 0 0 0 1.06666667 1 0 0 -0.53333336 0\n"
 CAMERA_VERTICES = b"-0.7 0.8 0 4294901760\n0.8 0 0.2 4294901760\n-0.7 -0.8 0.1 4294901760\n"
+DIAGNOSTIC = (b"T3R_DIAGNOSTIC_XYZ_V1\n1024 768\n0 0.5\n4278190080\n" + WORLD + VIEW + PROJECTION +
+              CAMERA_VERTICES + CAMERA_VERTICES)
 
 
 class D3D12ReplayParserTests(unittest.TestCase):
@@ -143,6 +150,20 @@ class D3D12ReplayParserTests(unittest.TestCase):
                     data.replace(b"\n2\n", b"\n2 extra\n", 1),
                     data + b"extra", data[:-30],
                     data.replace(b"4294901760", b"0", 1)):
+            with self.subTest(data=bad[:80]): self.assert_rejected(bad)
+
+    def test_diagnostic_packet_keeps_original_viewport_and_depth(self):
+        result = self.parse(DIAGNOSTIC)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        self.assertEqual(result.stdout, b"diagnostic 1024 768 0 0.5 2 -0.7\n")
+        for bad in (DIAGNOSTIC.replace(b"1024 768", b"2049 768"),
+                    DIAGNOSTIC.replace(b"1024 768", b"0 768"),
+                    DIAGNOSTIC.replace(b"0 0.5\n", b"0.8 0.5\n", 1),
+                    DIAGNOSTIC.replace(b"0 0.5\n", b"nan 1\n", 1),
+                    DIAGNOSTIC.replace(b"4294901760", b"4278255360", 1),
+                    DIAGNOSTIC.replace(b"4294901760", b"16711680", 1),
+                    DIAGNOSTIC.replace(b"-0.7 0.8", b"10001 0.8", 1),
+                    DIAGNOSTIC[:-30], DIAGNOSTIC + b"extra"):
             with self.subTest(data=bad[:80]): self.assert_rejected(bad)
 
 

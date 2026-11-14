@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 project(T3Render LANGUAGES C CXX)
 
 option(T3RENDER_D3D12_PROBE_ONLY "Build only the standalone D3D12 probe for Win32 or x64" OFF)
-option(T3RENDER_BUILD_D3D12_REPLAY_UP "Build the limited synthetic UP replay" OFF)
+option(T3RENDER_BUILD_D3D12_REPLAY_UP "Build the limited synthetic replay and diagnostic quad preview" OFF)
 
 function(t3render_add_d3d12_probe)
   add_executable(t3render_d3d12_probe tests/d3d12_offscreen.cpp)

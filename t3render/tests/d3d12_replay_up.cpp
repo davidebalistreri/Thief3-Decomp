@@ -1,7 +1,8 @@
 // Bounded one-triangle D3D12 replay of synthetic D3D8 XYZRHW|DIFFUSE or
 // XYZ|DIFFUSE with captured WORLD/VIEW/PROJECTION. A bounded synthetic scene
 // may contain several ordered XYZ draws. Flat opaque color only; this is not a
-// general frame reader, D3D8 emulator, or T3 replay.
+// general frame reader, D3D8 emulator, or T3 replay. A separate diagnostic
+// packet can display one observed, indexed quad with explicit approximations.
 #ifndef T3RENDER_REPLAY_PARSER_TEST
 #include <windows.h>
 #include <d3d12.h>
@@ -60,6 +61,9 @@ struct SceneDraw {
 };
 struct Frame {
     std::uint32_t clear_argb = 0;
+    std::uint32_t width = kWidth, height = kHeight;
+    float min_depth = 0.0f, max_depth = 1.0f;
+    bool diagnostic = false;
     Vertex vertices[3]{};
     bool camera = false;
     float matrices[3][16]{}; // D3D8 row-major WORLD, VIEW, PROJECTION
@@ -132,6 +136,63 @@ bool ParseFrameBytes(const char* bytes, std::size_t size, Frame& frame) {
     std::string lines[9];
     if (!std::getline(stream, lines[0])) { std::fprintf(stderr, "missing header\n"); return false; }
     if (!lines[0].empty() && lines[0].back() == '\r') lines[0].pop_back();
+    if (lines[0] == "T3R_DIAGNOSTIC_XYZ_V1") {
+        // Exactly two expanded triangles, one viewport and one set of
+        // observed transforms. No assertion of game-frame equivalence.
+        std::string viewport_line, depth_line, clear_line, width, height, clear;
+        Frame parsed;
+        if (!std::getline(stream, viewport_line) || !std::getline(stream, depth_line) ||
+            !std::getline(stream, clear_line)) return false;
+        auto viewport = Line(viewport_line);
+        auto depth = Line(depth_line);
+        auto background = Line(clear_line);
+        if (!(viewport >> width >> height) || !AtEnd(viewport) ||
+            !DecimalU32(width, parsed.width) || !DecimalU32(height, parsed.height) ||
+            !parsed.width || !parsed.height || parsed.width > 2048 || parsed.height > 2048 ||
+            !(depth >> parsed.min_depth >> parsed.max_depth) || !AtEnd(depth) ||
+            !std::isfinite(parsed.min_depth) || !std::isfinite(parsed.max_depth) ||
+            parsed.min_depth < 0 || parsed.max_depth > 1 || parsed.min_depth > parsed.max_depth ||
+            !(background >> clear) || !AtEnd(background) || !DecimalU32(clear, parsed.clear_argb) ||
+            (parsed.clear_argb >> 24) != 255) {
+            std::fprintf(stderr, "invalid diagnostic viewport, depth range or clear color\n"); return false;
+        }
+        for (auto& matrix : parsed.matrices) {
+            std::string text;
+            if (!std::getline(stream, text)) return false;
+            auto line = Line(text);
+            for (float& value : matrix) {
+                if (!(line >> value) || !std::isfinite(value) || std::fabs(value) > 10000) {
+                    std::fprintf(stderr, "invalid diagnostic matrix\n"); return false;
+                }
+            }
+            if (!AtEnd(line)) return false;
+        }
+        for (unsigned triangle = 0; triangle < 2; ++triangle) {
+            SceneDraw draw;
+            std::memcpy(draw.matrices, parsed.matrices, sizeof(draw.matrices));
+            for (auto& vertex : draw.vertices) {
+                std::string text, color;
+                if (!std::getline(stream, text)) return false;
+                auto line = Line(text);
+                if (!(line >> vertex.x >> vertex.y >> vertex.z >> color) || !AtEnd(line) ||
+                    !DecimalU32(color, vertex.argb) || (vertex.argb >> 24) != 255 ||
+                    !std::isfinite(vertex.x) || !std::isfinite(vertex.y) || !std::isfinite(vertex.z) ||
+                    std::fabs(vertex.x) > 10000 || std::fabs(vertex.y) > 10000 || std::fabs(vertex.z) > 10000) {
+                    std::fprintf(stderr, "invalid diagnostic vertex\n"); return false;
+                }
+                vertex.rhw = 1.0f;
+            }
+            if (draw.vertices[0].argb != draw.vertices[1].argb ||
+                draw.vertices[0].argb != draw.vertices[2].argb) {
+                std::fprintf(stderr, "diagnostic triangle requires uniform color\n"); return false;
+            }
+            parsed.scene.push_back(draw);
+        }
+        if (!AtEnd(stream)) return false;
+        parsed.camera = parsed.diagnostic = true;
+        frame = std::move(parsed);
+        return true;
+    }
     if (lines[0] == "T3R_MULTI_XYZ_V1") {
         std::string viewport, clear, count_line, count_text;
         std::uint32_t count = 0;
@@ -323,23 +384,24 @@ bool WriteAll(HANDLE file, const void* data, DWORD bytes) {
     return true;
 }
 
-bool WritePpm(const wchar_t* path, const std::uint8_t* pixels, std::size_t offset, std::size_t pitch) {
+bool WritePpm(const wchar_t* path, const std::uint8_t* pixels, std::size_t offset, std::size_t pitch,
+              std::uint32_t width, std::uint32_t height) {
     Handle file{CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr)};
     if (file.value == INVALID_HANDLE_VALUE) {
         std::fprintf(stderr, "cannot create output image (error %lu; existing files are not replaced)\n", GetLastError());
         return false;
     }
-    static const char header[] = "P6\n256 256\n255\n";
-    if (!WriteAll(file.value, header, static_cast<DWORD>(sizeof(header) - 1))) {
+    const std::string header = "P6\n" + std::to_string(width) + " " + std::to_string(height) + "\n255\n";
+    if (!WriteAll(file.value, header.data(), static_cast<DWORD>(header.size()))) {
         std::fprintf(stderr, "incomplete output remains at %s\n", Utf8(path).c_str()); return false;
     }
-    std::uint8_t row[kWidth * 3];
-    for (UINT y = 0; y < kHeight; ++y) {
-        for (UINT x = 0; x < kWidth; ++x) {
+    std::vector<std::uint8_t> row(width * 3);
+    for (UINT y = 0; y < height; ++y) {
+        for (UINT x = 0; x < width; ++x) {
             const auto* p = pixels + offset + y * pitch + x * 4;
             row[x * 3] = p[0]; row[x * 3 + 1] = p[1]; row[x * 3 + 2] = p[2];
         }
-        if (!WriteAll(file.value, row, sizeof(row))) {
+        if (!WriteAll(file.value, row.data(), static_cast<DWORD>(row.size()))) {
             std::fprintf(stderr, "incomplete output remains at %s\n", Utf8(path).c_str()); return false;
         }
     }
@@ -408,7 +470,7 @@ int Replay(const Frame& frame, const wchar_t* output) {
     D3D12_HEAP_PROPERTIES target_heap{}; target_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
     target_heap.CreationNodeMask = 1; target_heap.VisibleNodeMask = 1;
     D3D12_RESOURCE_DESC target_desc{}; target_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    target_desc.Width = kWidth; target_desc.Height = kHeight; target_desc.DepthOrArraySize = 1; target_desc.MipLevels = 1;
+    target_desc.Width = frame.width; target_desc.Height = frame.height; target_desc.DepthOrArraySize = 1; target_desc.MipLevels = 1;
     target_desc.Format = kFormat; target_desc.SampleDesc.Count = 1; target_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
     target_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
     D3D12_CLEAR_VALUE clear{}; clear.Format = kFormat;
@@ -425,10 +487,10 @@ int Replay(const Frame& frame, const wchar_t* output) {
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     UINT rows = 0; UINT64 row_size = 0, total_size = 0;
     device->GetCopyableFootprints(&target_desc, 0, 1, 0, &footprint, &rows, &row_size, &total_size);
-    if (rows != kHeight || row_size != kWidth * 4 || footprint.Footprint.RowPitch < row_size ||
+    if (rows != frame.height || row_size != frame.width * 4 || footprint.Footprint.RowPitch < row_size ||
         !total_size || total_size > static_cast<UINT64>(SIZE_MAX) || footprint.Offset > total_size ||
         row_size > total_size - footprint.Offset ||
-        UINT64(kHeight - 1) > (total_size - footprint.Offset - row_size) / footprint.Footprint.RowPitch) {
+        UINT64(frame.height - 1) > (total_size - footprint.Offset - row_size) / footprint.Footprint.RowPitch) {
         std::fprintf(stderr, "unsupported readback footprint\n"); return 1;
     }
     D3D12_HEAP_PROPERTIES read_heap{}; read_heap.Type = D3D12_HEAP_TYPE_READBACK;
@@ -511,10 +573,11 @@ int Replay(const Frame& frame, const wchar_t* output) {
     if (!Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.value, pipeline.value,
                                          IID_PPV_ARGS(list.put())), "CreateCommandList")) return 1;
     list->SetGraphicsRootSignature(root.value);
-    const float viewport_size[2] = {static_cast<float>(kWidth), static_cast<float>(kHeight)};
+    const float viewport_size[2] = {static_cast<float>(frame.width), static_cast<float>(frame.height)};
     list->SetGraphicsRoot32BitConstants(0, 2, viewport_size, frame.camera ? 48 : 0);
-    const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(kWidth), static_cast<float>(kHeight), 0, 1};
-    const D3D12_RECT scissor{0, 0, static_cast<LONG>(kWidth), static_cast<LONG>(kHeight)};
+    const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(frame.width), static_cast<float>(frame.height),
+                                  frame.min_depth, frame.max_depth};
+    const D3D12_RECT scissor{0, 0, static_cast<LONG>(frame.width), static_cast<LONG>(frame.height)};
     list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &scissor);
     list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
     list->ClearRenderTargetView(rtv, clear.Color, 0, nullptr);
@@ -568,8 +631,8 @@ int Replay(const Frame& frame, const wchar_t* output) {
         static_cast<std::uint8_t>(frame.clear_argb), static_cast<std::uint8_t>(frame.clear_argb >> 24)};
     std::uint64_t hash = UINT64_C(14695981039346656037);
     std::size_t changed_rgb = 0;
-    for (UINT y = 0; y < kHeight; ++y) {
-        for (UINT x = 0; x < kWidth; ++x) {
+    for (UINT y = 0; y < frame.height; ++y) {
+        for (UINT x = 0; x < frame.width; ++x) {
             const auto* pixel = pixels + offset + y * pitch + x * 4;
             if (std::memcmp(pixel, background, 3)) ++changed_rgb;
             for (unsigned channel = 0; channel < 4; ++channel) {
@@ -577,7 +640,7 @@ int Replay(const Frame& frame, const wchar_t* output) {
             }
         }
     }
-    const bool output_ok = !output || (changed_rgb && WritePpm(output, pixels, offset, pitch));
+    const bool output_ok = !output || (changed_rgb && WritePpm(output, pixels, offset, pitch, frame.width, frame.height));
     const D3D12_RANGE no_write{0, 0};
     readback->Unmap(0, &no_write);
     if (!changed_rgb) {
@@ -586,10 +649,11 @@ int Replay(const Frame& frame, const wchar_t* output) {
     }
     if (!output_ok) return 1;
     std::printf("replay=%s viewport=%ux%u pitch=%u changed_pixels=%zu fnv1a64=%016llx\n",
-                !frame.scene.empty() ? "T3R_MULTI_XYZ_V1" : frame.camera ? "T3R_XYZ_V1" : "T3R_UP_V1", kWidth, kHeight,
+                frame.diagnostic ? "T3R_DIAGNOSTIC_XYZ_V1" : !frame.scene.empty() ? "T3R_MULTI_XYZ_V1" : frame.camera ? "T3R_XYZ_V1" : "T3R_UP_V1", frame.width, frame.height,
                 footprint.Footprint.RowPitch, changed_rgb, static_cast<unsigned long long>(hash));
     std::printf("pixel_centers=D3D8_integer_plus_0.5_to_DX12 (assumption); output=RGBA8\n");
-    std::printf("result=PASS; no general D3D8 parity claimed\n");
+    std::printf(frame.diagnostic ? "result=DIAGNOSTIC; partial geometry only, no D3D8 parity claimed\n"
+                                 : "result=PASS; no general D3D8 parity claimed\n");
     return 0;
 }
 #endif

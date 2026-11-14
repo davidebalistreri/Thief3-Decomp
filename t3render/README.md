@@ -97,8 +97,10 @@ compatibility and the menu text regression remain unverified. A later
 used this flag and obtained 144 indexed draws with VB, IB, declaration,
 program and constants candidates in the same record. All 144 have color writes
 disabled and stencil enabled; they are not sufficient for the visible room.
-The frame remains partial and non-replayable; the user reported truncated menu
-text in that run.
+One color-writing indexed quad from that frame can now be displayed by the
+[partial DX12 diagnostic](tools/README_diagnostic_quad.md). Its content is not
+identified, and this is not a replay of the room. The frame remains partial and
+non-replayable; the user reported truncated menu text in that run.
 
 Add `-DT3RENDER_BUILD_SMOKE_TEST=ON` at configuration time to build a
 standalone D3D8 program in the `smoke/` subdirectory. It draws four synthetic

@@ -26,6 +26,7 @@ struct BufferObserver {
     const char* failure_cause = nullptr;
     unsigned failure_line = 0;
     buffers::UnlockFailure failure_unlock{};
+    buffers::LockFailure failure_lock{};
     bool repeated_unlock_policy = false;
     std::uint64_t repeated_unlocks = 0;
     // Optional detailed reads replace the corresponding boolean callback. The

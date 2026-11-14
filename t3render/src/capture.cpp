@@ -808,6 +808,14 @@ void CaptureBuffered(std::ostream& out, CaptureState& s, IDirect3DDevice8* devic
             if (unlock.unlock_result_known) out << unlock.unlock_hr_candidate; else out << "null";
             out << '}';
         }
+        const auto& lock = observer.failure_lock;
+        if (lock.present) {
+            out << ",\"lock\":{\"resource\":\"" << (lock.vertex ? "vertex" : "index")
+                << "\",\"registry_result\":\"" << lock.registry_result << "\",\"recovery_attempted\":"
+                << (lock.recovery_attempted ? "true" : "false") << ",\"offset\":" << lock.offset
+                << ",\"requested_bytes\":" << lock.requested_bytes << ",\"normalized_bytes\":" << lock.normalized_bytes
+                << ",\"buffer_size\":" << lock.buffer_size << ",\"flags\":" << lock.flags << '}';
+        }
         out << '}';
     }
     out << ",\"vertex\":{";

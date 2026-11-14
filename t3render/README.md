@@ -96,7 +96,10 @@ staged become observable; old contents are never copied into the new shadow.
 Unknown invalidations still revoke recovery. The trace header records this
 policy and recovered payloads carry `shadow_observation` set to
 `post_repeated_unlock_write`. Budget or snapshot limits can still leave ranges
-unknown. These observations are not proof of GPU input. The [synthetic
+unknown. Ambiguous or out-of-range locks on a discarded buffer do not start a
+new epoch. A registry failure invalidating the device now records the attempted
+range and result without changing the forwarded native call. These observations
+are not proof of GPU input. The [synthetic
 Highball fixture](benchmarks/d3d8/2026-11-14-repeat-write-recovery/result.json)
 checks partial and full rewrites; it does not establish whether TDS rewrites
 the missing ranges. An initial [TDS test](benchmarks/runtime/2026-11-14-tds-repeat-write-recovery/result.json)

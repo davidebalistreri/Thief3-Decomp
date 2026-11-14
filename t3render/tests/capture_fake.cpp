@@ -627,6 +627,10 @@ int main(int argc, char** argv) {
         observer.failure_unlock.present = true; observer.failure_unlock.vertex = true;
         observer.failure_unlock.last_lock_known = true; observer.failure_unlock.last_lock_hr = E_FAIL;
         observer.failure_unlock.unlock_result_known = true; observer.failure_unlock.unlock_hr_candidate = S_OK;
+        observer.failure_lock.present = true; observer.failure_lock.vertex = true;
+        observer.failure_lock.recovery_attempted = true; observer.failure_lock.registry_result = "invalid_range";
+        observer.failure_lock.offset = 1; observer.failure_lock.requested_bytes = 0;
+        observer.failure_lock.normalized_bytes = 0; observer.failure_lock.buffer_size = 8; observer.failure_lock.flags = 0;
         observer.repeated_unlock_policy = true; observer.repeated_unlocks = 2;
         if (!emit(false)) return 8;
         bindings.vertex->Release(); bindings.index->Release();

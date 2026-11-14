@@ -27,8 +27,20 @@ const char* CauseName(InvalidationCause cause) noexcept {
     case InvalidationCause::ProcessVertices: return "process_vertices";
     case InvalidationCause::ExternalPrivateData: return "external_private_data";
     case InvalidationCause::UnlockMismatch: return "unlock_mismatch";
+    case InvalidationCause::LockRegistry: return "lock_registry";
     }
     return "unknown";
+}
+const char* RegistryFailureName(ir::RegistryResult result) noexcept {
+    switch (result) {
+    case ir::RegistryResult::UnknownResource: return "unknown_resource";
+    case ir::RegistryResult::StaleGeneration: return "stale_generation";
+    case ir::RegistryResult::InvalidRange: return "invalid_range";
+    case ir::RegistryResult::InvalidLock: return "invalid_lock";
+    case ir::RegistryResult::OverlappingLocks: return "overlapping_locks";
+    case ir::RegistryResult::Unavailable: return "unavailable";
+    default: return "other";
+    }
 }
 struct LastError final {
     DWORD value = GetLastError();
@@ -75,6 +87,7 @@ struct DeviceState {
     unsigned poison_line = 0;
     InvalidationCause poison_cause = InvalidationCause::Internal;
     UnlockFailure unlock_failure;
+    LockFailure lock_failure;
     void* unlock_failure_native = nullptr; // identity comparison only; never dereferenced
     bool closing = false;
     bool reset_recovery = false;
@@ -530,13 +543,28 @@ private:
             bool discarded = state_->allow_repeated_unlock && result == ir::RegistryResult::Unavailable &&
                 state_->shadows.Availability(token, availability) == ir::RegistryResult::Ok &&
                 availability == ir::BufferAvailability::Abandoned;
-            if (discarded && state_->allow_repeated_unlock_recovery &&
-                state_->shadows.RestartAfterRepeatedUnlock(token) == ir::RegistryResult::Ok) {
-                result = state_->shadows.BeginLock(token, offset, length_, kind);
-                discarded = false;
+            bool recovery_attempted = false;
+            // An ambiguous or out-of-range lock on an already abandoned
+            // resource stays unobserved; do not start a fresh epoch for it.
+            const bool representable = length_ && offset <= size_ && length_ <= size_ - offset;
+            if (discarded && state_->allow_repeated_unlock_recovery && representable) {
+                recovery_attempted = true;
+                if (state_->shadows.RestartAfterRepeatedUnlock(token) == ir::RegistryResult::Ok) {
+                    result = state_->shadows.BeginLock(token, offset, length_, kind);
+                    discarded = false;
+                }
             }
             if (result != ir::RegistryResult::Ok && !discarded) {
-                state_->PoisonLocked(owner); return 0;
+                LockFailure diagnostic;
+                diagnostic.present = true; diagnostic.vertex = vertex;
+                diagnostic.recovery_attempted = recovery_attempted;
+                diagnostic.registry_result = RegistryFailureName(result);
+                diagnostic.offset = offset; diagnostic.requested_bytes = bytes; diagnostic.flags = flags;
+                diagnostic.normalized_bytes = length_; diagnostic.buffer_size = size_;
+                state_->PoisonLocked(owner, __LINE__, InvalidationCause::LockRegistry);
+                if (device->unsafe && device->poison_cause == InvalidationCause::LockRegistry && !device->lock_failure.present)
+                    device->lock_failure = diagnostic;
+                return 0;
             }
         }
         operation = state_->next_operation++;
@@ -1237,7 +1265,7 @@ DrawFailure BufferProxy::DescribeDrawFailure(IDirect3DDevice8* owner) noexcept {
     if (device == state_->devices.end()) return {"device_unknown", "unknown", 0};
     if (device->second.unsafe)
         return {"device_unsafe", CauseName(device->second.poison_cause), device->second.poison_line,
-                device->second.unlock_failure};
+                device->second.unlock_failure, device->second.lock_failure};
     return {"window_unavailable", "unknown", 0};
 }
 bool BufferProxy::EndDraw(IDirect3DDevice8* owner, std::uint64_t token) noexcept {

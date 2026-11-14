@@ -462,7 +462,9 @@ class CaptureHostTests(unittest.TestCase):
                          {"status": "device_unsafe", "cause": "unlock_mismatch", "source_line": 123,
                           "unlock": {"resource": "vertex", "pending_lock": False, "locked": False,
                                      "pending_unlock": False, "operation_exhausted": False,
-                                     "last_lock_hr": -1, "unlock_hr_candidate": 0}})
+                                     "last_lock_hr": -1, "unlock_hr_candidate": 0},
+                          "lock": {"resource": "vertex", "registry_result": "invalid_range", "recovery_attempted": True,
+                                   "offset": 1, "requested_bytes": 0, "normalized_bytes": 0, "buffer_size": 8, "flags": 0}})
         self.assertEqual(draws[3]["buffer_data"]["repeated_unlocks_completed"], 2)
         self.assertFalse(results[draws[3]["op_id"]]["buffer_stable"])
         for component in ("vertex", "index"):

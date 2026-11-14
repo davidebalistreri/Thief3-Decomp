@@ -28,6 +28,7 @@ public:
             observer_.failure_cause = failure.cause;
             observer_.failure_line = failure.source_line;
             observer_.failure_unlock = failure.unlock;
+            observer_.failure_lock = failure.lock;
         }
         if (device && draw) {
             bindings_.vertex_result = device->GetStreamSource(0, &bindings_.vertex, &bindings_.stride);

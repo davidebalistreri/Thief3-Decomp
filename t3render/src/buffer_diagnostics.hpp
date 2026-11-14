@@ -4,7 +4,7 @@
 
 namespace t3render::buffers {
 
-enum class InvalidationCause { Internal, Explicit, StateBlock, ProcessVertices, ExternalPrivateData, UnlockMismatch };
+enum class InvalidationCause { Internal, Explicit, StateBlock, ProcessVertices, ExternalPrivateData, UnlockMismatch, LockRegistry };
 
 // Observation-only classification; never authorizes a read or restores bytes.
 enum class ShadowReadStatus {
@@ -25,11 +25,21 @@ struct UnlockFailure {
     std::int32_t unlock_hr_candidate = 0;
 };
 
+struct LockFailure {
+    bool present = false;
+    bool vertex = false;
+    bool recovery_attempted = false;
+    const char* registry_result = "unknown";
+    std::uint32_t offset = 0, requested_bytes = 0, flags = 0;
+    std::uint64_t normalized_bytes = 0, buffer_size = 0;
+};
+
 struct DrawFailure {
     const char* status = "unavailable"; // static diagnostic string
     const char* cause = "unknown";      // static diagnostic string
     unsigned source_line = 0;           // buffer_proxy.cpp, 0 if unavailable
     UnlockFailure unlock{};
+    LockFailure lock{};
 };
 
 }  // namespace t3render::buffers

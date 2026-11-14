@@ -453,6 +453,13 @@ void UnknownNativeLocks() {
         assert(v->Lock(invalid_range ? 1 : 0, invalid_range ? 0 : 2, &mapped,
                        invalid_range ? 0 : 0x40000000u) == S_OK && mapped);
         assert(proxy->BeginDraw(Owner()) == 0);
+        if (invalid_range) {
+            const auto failure = proxy->DescribeDrawFailure(Owner());
+            assert(!std::strcmp(failure.cause, "lock_registry") && failure.lock.present && failure.lock.vertex);
+            assert(!std::strcmp(failure.lock.registry_result, "invalid_range") && !failure.lock.recovery_attempted);
+            assert(failure.lock.offset == 1 && failure.lock.requested_bytes == 0 &&
+                   failure.lock.normalized_bytes == 0 && failure.lock.buffer_size == 8);
+        }
         assert(proxy->ReadIndex(Owner(), &ib, 0, out, 2) == RegistryResult::Unavailable);
         assert(v->Unlock() == S_OK);
         assert(v->Release() == 0 && i->Release() == 0);
@@ -1630,6 +1637,12 @@ void RepeatedUnlockWriteRecovery() {
     Fill(a, 0, old, 4); Fill(b, 0, old, 4);
     assert(a->Unlock() == S_OK);
     assert(proxy->ReadVertex(&native, &affected, 0, out, 4) == RegistryResult::Unavailable);
+    BYTE* ambiguous = nullptr;
+    assert(a->Lock(1, 0, &ambiguous, 0) == S_OK && ambiguous && a->Unlock() == S_OK);
+    // An ambiguous lock on an abandoned buffer must not poison other buffers
+    // or resurrect old bytes. A later exact write may start a fresh epoch.
+    assert(proxy->ReadVertex(&native, &affected, 1, out, 2) == RegistryResult::Unavailable);
+    assert(proxy->ReadVertex(&native, &other, 0, out, 4) == RegistryResult::Ok);
     Fill(a, 1, fresh, 2);
     assert(proxy->ReadVertex(&native, &affected, 0, out, 4) == RegistryResult::UnknownData);
     assert(proxy->ReadVertex(&native, &affected, 1, out, 2) == RegistryResult::Ok &&

@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "repeated_unlock_recovery_lock_range_regression",
+  "status": "PASS",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86",
+  "fixture_sha256": "e8b7b39a652f8a2b4141dbb4190d6736cfcc787e3c4b344546d7a00306495262",
+  "baseline_facade_ppm_sha256": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+  "synthetic_d3d8_dx12_ppm_sha256": "5f46fcdfe5237797a1425f91d3abc19689c225e67e38b5ecbf7f25b39db16c85",
+  "observation": "The Highball fixture maintained native/facade pixel parity and re-observed partial/full writes; the ambiguous abandoned-buffer range and lock diagnostics are host-tested.",
+  "local_results": "build/t3render-captures/2026-11-14-repeat-lock-range-fixture",
+  "limitations": [
+    "Fixture only: TDS and a real room replay were not tested.",
+    "The DX12 comparison uses a separate synthetic draw.",
+    "The actual cause of the earlier TDS lock-registry failure is unknown until another capture records its parameters."
+  ]
+}

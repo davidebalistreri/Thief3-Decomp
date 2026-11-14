@@ -81,23 +81,26 @@ private:
 };
 
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
-class FixturePrivateVertexBridge final : public t3render::resource_fixture::PrivateVertexBridge {
+class FixturePrivateBufferBridge final : public t3render::resource_fixture::PrivateBufferBridge {
 public:
-    FixturePrivateVertexBridge(std::shared_ptr<t3render::buffers::BufferProxy> buffers,
+    FixturePrivateBufferBridge(std::shared_ptr<t3render::buffers::BufferProxy> buffers,
                                IDirect3DDevice8* native, IDirect3DDevice8* facade) noexcept
         : buffers_(std::move(buffers)), native_(native), facade_(facade) {}
-    bool Pin(const void* candidate, t3render::resource_fixture::PrivateVertexPin& pin) noexcept override {
-        IDirect3DVertexBuffer8* native = nullptr;
-        pin.guard = buffers_->PinPrivateVertex(native_, facade_, candidate, &native);
-        pin.native = native;
+    bool Pin(const void* candidate, t3render::resource_fixture::PrivateBufferPin& pin) noexcept override {
+        bool vertex = false;
+        pin.guard = buffers_->PinPrivateBuffer(native_, facade_, candidate, &pin.native, &vertex);
+        pin.kind = vertex ? t3render::buffers::PrivateDataKind::VertexBuffer :
+                            t3render::buffers::PrivateDataKind::IndexBuffer;
         return pin.guard && pin.native;
     }
-    IUnknown* Adopt(IUnknown* native) noexcept override {
+    IUnknown* Adopt(t3render::buffers::PrivateDataKind kind, IUnknown* native) noexcept override {
         if (!native) return nullptr;
+        const bool vertex_kind = kind == t3render::buffers::PrivateDataKind::VertexBuffer;
+        if (!vertex_kind && kind != t3render::buffers::PrivateDataKind::IndexBuffer) { native->Release(); return nullptr; }
         // Verify the returned interface and identity before entering the buffer
         // registry. No raw native pointer is ever returned to the caller.
         void* typed = nullptr;
-        const HRESULT hr = native->QueryInterface(IID_IDirect3DVertexBuffer8, &typed);
+        const HRESULT hr = native->QueryInterface(vertex_kind ? IID_IDirect3DVertexBuffer8 : IID_IDirect3DIndexBuffer8, &typed);
         void* original_identity = nullptr;
         void* typed_identity = nullptr;
         if (!FAILED(hr) && typed) {
@@ -107,10 +110,17 @@ public:
         const bool same = original_identity && original_identity == typed_identity;
         native->Release();
         if (FAILED(hr) || !typed) return nullptr;
-        auto* vertex = static_cast<IDirect3DVertexBuffer8*>(typed);
-        D3DVERTEXBUFFER_DESC desc{};
-        if (!same || FAILED(vertex->GetDesc(&desc))) { vertex->Release(); return nullptr; }
-        return buffers_->AdoptVertexForFacade(native_, facade_, vertex, desc.Size, false);
+        if (!same) { static_cast<IUnknown*>(typed)->Release(); return nullptr; }
+        if (vertex_kind) {
+            auto* vertex = static_cast<IDirect3DVertexBuffer8*>(typed);
+            D3DVERTEXBUFFER_DESC desc{};
+            if (FAILED(vertex->GetDesc(&desc))) { vertex->Release(); return nullptr; }
+            return buffers_->AdoptVertexForFacade(native_, facade_, vertex, desc.Size, false);
+        }
+        auto* index = static_cast<IDirect3DIndexBuffer8*>(typed);
+        D3DINDEXBUFFER_DESC desc{};
+        if (FAILED(index->GetDesc(&desc))) { index->Release(); return nullptr; }
+        return buffers_->AdoptIndexForFacade(native_, facade_, index, desc.Size, false);
     }
 private:
     std::shared_ptr<t3render::buffers::BufferProxy> buffers_;
@@ -773,7 +783,7 @@ private:
         factory_->AddRef();
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
         try {
-            auto bridge = std::make_shared<FixturePrivateVertexBridge>(buffers_, native_, this);
+            auto bridge = std::make_shared<FixturePrivateBufferBridge>(buffers_, native_, this);
             resources_ = t3render::resource_fixture::Router::Create(native_, this, 4096, std::move(bridge));
         } catch (...) {}
 #endif

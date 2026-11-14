@@ -110,12 +110,12 @@ public:
     VertexPin UnwrapVertex(IDirect3DDevice8* owner, IDirect3DVertexBuffer8* input) noexcept;
     IndexPin UnwrapIndex(IDirect3DDevice8* owner, IDirect3DIndexBuffer8* input) noexcept;
 
-    // Fixture-only private-data bridge: recognize an issued live vertex
+    // Fixture-only private-data bridge: recognize an issued live VB/IB
     // wrapper by address without dereferencing unknown inputs or poisoning
     // observation on a miss. The returned guard pins the wrapper until the
     // native SetPrivateData has acquired its own reference.
-    IUnknown* PinPrivateVertex(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
-                               const void* input, IDirect3DVertexBuffer8** native) noexcept;
+    IUnknown* PinPrivateBuffer(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
+                               const void* input, IUnknown** native, bool* vertex) noexcept;
 
     // Conservative invalidation. Once a device escapes, its data remains
     // unavailable; wrappers already issued must still be unwrapped normally.

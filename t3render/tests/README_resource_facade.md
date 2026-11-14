@@ -21,8 +21,8 @@ at final release. Unsupported IIDs return `E_NOINTERFACE`, and failures can
 differ from native COM behavior.
 
 Private data support opaque blobs and, on non-buffer resource facades, a
-recognized live vertex-buffer facade from the same device. The bridge pins the
-facade during Set, stores the native VB in the native resource, and maps a
+recognized live vertex- or index-buffer facade from the same device. The bridge pins the
+facade during Set, stores the native buffer in the native resource, and maps a
 native Get back to the facade using the buffer registry. It never stores the
 wrapper in native private data. Other `IUnknown` values, unknown GUIDs and
 unknown inputs return `E_NOTIMPL`. Buffer facades themselves still accept only
@@ -122,6 +122,13 @@ and overlapping calls. This does not solve external `IUnknown`, other resource
 types, cross-device or self references, runtime concurrency, native Windows,
 or the longer retention of dormant native resources. Full local logs and PPMs
 are under `build/t3render-captures/2026-11-14-private-vertex-bridge-v4/`.
+
+The subsequent [buffer bridge observation](../benchmarks/d3d8/2026-11-14-private-buffer-bridge/result.json)
+also translates a texture-to-index-buffer reference. It switches the same GUID
+from VB to IB, and checks both buffers after dormancy and a successful Reset
+with the private references still present during facade teardown. It has the
+same restrictions as the vertex-only experiment. Logs and PPMs are under
+`build/t3render-captures/2026-11-14-private-buffer-bridge-v2/`.
 
 The later [state-block observation](../benchmarks/d3d8/2026-11-13-stateblock-facade/result.json)
 exercised Create, Capture, Begin/End, Apply and Delete on the combined facade.

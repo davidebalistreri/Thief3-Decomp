@@ -275,8 +275,8 @@ bool CheckFailedStateBlock(IDirect3DDevice8* device, IDirect3DDevice8* native,
 
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
 // Characterize private-data semantics separately from image parity. The
-// facade accepts observed opaque bytes and the separately bridged vertex
-// buffer case; unknown/external COM provenance is still rejected.
+// facade accepts observed opaque bytes and separately bridged buffer cases;
+// unknown/external COM provenance is still rejected.
 class PrivateUnknown final : public IUnknown {
 public:
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
@@ -374,11 +374,27 @@ bool ObservePrivateDataResources(IDirect3DDevice8* device, IDirect3DVertexBuffer
         reinterpret_cast<void**>(returned_buffer.put()))) && returned_buffer.value &&
         SUCCEEDED(returned_buffer->GetDevice(returned_device.put())) && returned_device.value &&
         EqualIdentity(returned_device.value, device);
+    // Reuse the same GUID for an index buffer, retaining the first returned
+    // vertex interface while the native private reference is replaced.
+    const HRESULT index_set = texture->SetPrivateData(alias_guid, static_cast<IUnknown*>(ib), sizeof(IUnknown*), D3DSPD_IUNKNOWN);
+    ComPtr<IUnknown> index_value;
+    DWORD index_size = sizeof(index_value.value);
+    const HRESULT index_get = texture->GetPrivateData(alias_guid, index_value.put(), &index_size);
+    ComPtr<IDirect3DIndexBuffer8> returned_index;
+    ComPtr<IDirect3DDevice8> index_device;
+    const bool index_same = SUCCEEDED(index_get) && index_value.value && index_size == sizeof(index_value.value) &&
+                            EqualIdentity(index_value.value, ib);
+    const bool index_parent = index_same && SUCCEEDED(index_value->QueryInterface(IID_IDirect3DIndexBuffer8,
+        reinterpret_cast<void**>(returned_index.put()))) && returned_index.value &&
+        SUCCEEDED(returned_index->GetDevice(index_device.put())) && EqualIdentity(index_device.value, device);
     const HRESULT freed = texture->FreePrivateData(alias_guid);
     const auto code = [](HRESULT hr) { return static_cast<unsigned long>(static_cast<std::uint32_t>(hr)); };
     std::printf("private_data_alias set=0x%08lx get=0x%08lx same=%u parent=%u free=0x%08lx\n",
                 code(set), code(get), same ? 1u : 0u, parent ? 1u : 0u, code(freed));
-    return SUCCEEDED(set) && SUCCEEDED(get) && SUCCEEDED(freed) && same && parent;
+    std::printf("private_data_index_alias set=0x%08lx get=0x%08lx same=%u parent=%u\n",
+                code(index_set), code(index_get), index_same ? 1u : 0u, index_parent ? 1u : 0u);
+    return SUCCEEDED(set) && SUCCEEDED(get) && SUCCEEDED(freed) && same && parent &&
+           SUCCEEDED(index_set) && SUCCEEDED(index_get) && index_same && index_parent;
 }
 
 bool ObserveTranslatedPrivateLifetime(HWND window, bool facade_mode) {
@@ -405,11 +421,15 @@ bool ObserveTranslatedPrivateLifetime(HWND window, bool facade_mode) {
         D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, device.put())) || !device.value) return false;
     ComPtr<IDirect3DTexture8> texture;
     ComPtr<IDirect3DVertexBuffer8> vertex;
+    ComPtr<IDirect3DIndexBuffer8> index;
     if (FAILED(device->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, texture.put())) || !texture.value ||
         FAILED(device->CreateVertexBuffer(sizeof(Vertex), D3DUSAGE_WRITEONLY, kFvf, D3DPOOL_MANAGED, vertex.put())) ||
-        !vertex.value) return false;
+        !vertex.value || FAILED(device->CreateIndexBuffer(3 * sizeof(WORD), D3DUSAGE_WRITEONLY, D3DFMT_INDEX16,
+                                                          D3DPOOL_MANAGED, index.put())) || !index.value) return false;
     const GUID key{0x3ee22a96, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
-    if (FAILED(texture->SetPrivateData(key, vertex.value, sizeof(IUnknown*), D3DSPD_IUNKNOWN))) return false;
+    const GUID index_key{0x3ee22a97, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
+    if (FAILED(texture->SetPrivateData(key, vertex.value, sizeof(IUnknown*), D3DSPD_IUNKNOWN)) ||
+        FAILED(texture->SetPrivateData(index_key, index.value, sizeof(IUnknown*), D3DSPD_IUNKNOWN))) return false;
     DWORD query_size = 0;
     if (FAILED(texture->GetPrivateData(key, nullptr, &query_size)) || query_size != sizeof(IUnknown*)) return false;
     IUnknown* untouched = reinterpret_cast<IUnknown*>(1);
@@ -419,7 +439,22 @@ bool ObserveTranslatedPrivateLifetime(HWND window, bool facade_mode) {
     IUnknown* const original = vertex.value; // compared only while its dormant facade is retained
     const ULONG remaining = vertex->Release();
     vertex.value = nullptr;
-    if (facade_mode && remaining != 0) return false;
+    IUnknown* const original_index = index.value;
+    const ULONG index_remaining = index->Release();
+    index.value = nullptr;
+    if (facade_mode && (remaining != 0 || index_remaining != 0)) return false;
+    ComPtr<IUnknown> index_value;
+    ComPtr<IDirect3DIndexBuffer8> recovered_index;
+    ComPtr<IDirect3DDevice8> index_parent;
+    DWORD index_size = sizeof(index_value.value);
+    if (FAILED(texture->GetPrivateData(index_key, index_value.put(), &index_size)) || !index_value.value ||
+        index_size != sizeof(index_value.value) || (facade_mode && index_value.value != original_index) ||
+        FAILED(index_value->QueryInterface(IID_IDirect3DIndexBuffer8, reinterpret_cast<void**>(recovered_index.put()))) ||
+        !recovered_index.value || FAILED(recovered_index->GetDevice(index_parent.put())) ||
+        !EqualIdentity(index_parent.value, device.value)) return false;
+    index_parent->Release(); index_parent.value = nullptr;
+    recovered_index->Release(); recovered_index.value = nullptr;
+    index_value->Release(); index_value.value = nullptr;
     ComPtr<IUnknown> value;
     DWORD size = sizeof(value.value);
     if (FAILED(texture->GetPrivateData(key, value.put(), &size)) || !value.value || size != sizeof(value.value) ||
@@ -434,6 +469,15 @@ bool ObserveTranslatedPrivateLifetime(HWND window, bool facade_mode) {
     // Reset retires the dormant vertex facade; the live managed texture's
     // private data must reacquire it without exposing the native interface.
     if (FAILED(device->Reset(&pp))) return false;
+    index_size = sizeof(index_value.value);
+    if (FAILED(texture->GetPrivateData(index_key, index_value.put(), &index_size)) || !index_value.value ||
+        index_size != sizeof(index_value.value) ||
+        FAILED(index_value->QueryInterface(IID_IDirect3DIndexBuffer8, reinterpret_cast<void**>(recovered_index.put()))) ||
+        !recovered_index.value || FAILED(recovered_index->GetDevice(index_parent.put())) ||
+        !EqualIdentity(index_parent.value, device.value)) return false;
+    index_parent->Release(); index_parent.value = nullptr;
+    recovered_index->Release(); recovered_index.value = nullptr;
+    index_value->Release(); index_value.value = nullptr;
     size = sizeof(value.value);
     if (FAILED(texture->GetPrivateData(key, value.put(), &size)) || !value.value || size != sizeof(value.value) ||
         FAILED(value->QueryInterface(IID_IDirect3DVertexBuffer8, reinterpret_cast<void**>(recovered.put()))) ||

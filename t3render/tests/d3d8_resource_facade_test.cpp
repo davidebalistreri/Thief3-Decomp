@@ -516,31 +516,45 @@ void ConcurrentReacquisition() {
 }
 
 void PrivateVertexTranslation() {
-    struct Bridge final : PrivateVertexBridge {
+    struct Bridge final : PrivateBufferBridge {
         Device* target_native;
         Device* target_facade;
+        Device* index_native;
+        Device* index_facade;
         bool fail_adopt = false;
-        Bridge(Device* native, Device* facade) : target_native(native), target_facade(facade) {}
-        bool Pin(const void* candidate, PrivateVertexPin& pin) noexcept override {
-            if (candidate != target_facade) return false;
-            target_facade->AddRef(); pin.guard = target_facade; pin.native = target_native; return true;
+        Bridge(Device* native, Device* facade, Device* index, Device* index_wrapper)
+            : target_native(native), target_facade(facade), index_native(index), index_facade(index_wrapper) {}
+        bool Pin(const void* candidate, PrivateBufferPin& pin) noexcept override {
+            if (candidate == target_facade) {
+                pin.guard = target_facade; pin.native = target_native;
+                pin.kind = t3render::buffers::PrivateDataKind::VertexBuffer;
+            } else if (candidate == index_facade) {
+                pin.guard = index_facade; pin.native = index_native;
+                pin.kind = t3render::buffers::PrivateDataKind::IndexBuffer;
+            } else return false;
+            pin.guard->AddRef();
+            return true;
         }
-        IUnknown* Adopt(IUnknown* native) noexcept override {
-            assert(native == target_native);
+        IUnknown* Adopt(t3render::buffers::PrivateDataKind kind, IUnknown* native) noexcept override {
+            const bool vertex = kind == t3render::buffers::PrivateDataKind::VertexBuffer;
+            assert(vertex || kind == t3render::buffers::PrivateDataKind::IndexBuffer);
+            assert(native == (vertex ? target_native : index_native));
             native->Release();
             if (fail_adopt) return nullptr;
-            target_facade->AddRef(); return target_facade;
+            auto* result = vertex ? target_facade : index_facade;
+            result->AddRef(); return result;
         }
     };
-    Device native, facade, target_native, target_facade;
+    Device native, facade, target_native, target_facade, index_native, index_facade;
     Texture texture; texture.device = &native;
-    auto bridge = std::make_shared<Bridge>(&target_native, &target_facade);
+    auto bridge = std::make_shared<Bridge>(&target_native, &target_facade, &index_native, &index_facade);
     auto router = Router::Create(&native, &facade, 8, bridge);
     auto* wrapped = router->AdoptTexture(&texture);
     assert(wrapped);
     IUnknown* stored = nullptr;
+    bool expect_index = false;
     texture.on_private_set = [&](REFGUID, const void* data, DWORD size, DWORD flags) {
-        assert(data == &target_native && size == sizeof(IUnknown*) && flags == D3DSPD_IUNKNOWN);
+        assert(data == (expect_index ? &index_native : &target_native) && size == sizeof(IUnknown*) && flags == D3DSPD_IUNKNOWN);
         DWORD nested_size = 0;
         SetLastError(201);
         assert(wrapped->GetPrivateData(kExtra, nullptr, &nested_size) == E_NOTIMPL && GetLastError() == 201);
@@ -582,6 +596,14 @@ void PrivateVertexTranslation() {
     assert(wrapped->FreePrivateData(kExtra) == S_OK && target_native.refs == 1 && GetLastError() == 206);
     size = sizeof(result);
     assert(wrapped->GetPrivateData(kExtra, &result, &size) == E_FAIL);
+    expect_index = true;
+    assert(wrapped->SetPrivateData(kExtra, &index_facade, sizeof(IUnknown*), D3DSPD_IUNKNOWN) == S_OK);
+    size = sizeof(result);
+    assert(wrapped->GetPrivateData(kExtra, &result, &size) == S_OK && result == &index_facade);
+    assert(index_native.refs == 2 && index_facade.refs == 2);
+    result->Release();
+    assert(wrapped->FreePrivateData(kExtra) == S_OK && index_native.refs == 1 && index_facade.refs == 1);
+    expect_index = false;
 
     std::mutex mutex;
     std::condition_variable condition;
@@ -612,7 +634,8 @@ void PrivateVertexTranslation() {
     assert(target_facade.refs == 1 && target_native.refs == 2);
     assert(wrapped->FreePrivateData(kExtra) == S_OK && target_native.refs == 1);
     assert(wrapped->Release() == 0 && router->Close() && texture.destroyed);
-    assert(native.Release() == 0 && facade.Release() == 0 && target_native.Release() == 0 && target_facade.Release() == 0);
+    assert(native.Release() == 0 && facade.Release() == 0 && target_native.Release() == 0 && target_facade.Release() == 0 &&
+           index_native.Release() == 0 && index_facade.Release() == 0);
 }
 } // namespace
 

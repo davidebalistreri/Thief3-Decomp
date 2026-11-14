@@ -44,22 +44,23 @@ struct LastError final {
     void capture() { value = GetLastError(); }
 };
 
-struct PrivateVertexPin final {
+struct PrivateBufferPin final {
     IUnknown* native = nullptr; // borrowed; kept alive by guard
     IUnknown* guard = nullptr; // owned facade reference
-    ~PrivateVertexPin() { if (guard) { LastError error; guard->Release(); } }
-    PrivateVertexPin() = default;
-    PrivateVertexPin(const PrivateVertexPin&) = delete;
-    PrivateVertexPin& operator=(const PrivateVertexPin&) = delete;
+    t3render::buffers::PrivateDataKind kind = t3render::buffers::PrivateDataKind::Blob;
+    ~PrivateBufferPin() { if (guard) { LastError error; guard->Release(); } }
+    PrivateBufferPin() = default;
+    PrivateBufferPin(const PrivateBufferPin&) = delete;
+    PrivateBufferPin& operator=(const PrivateBufferPin&) = delete;
 };
 
-// Only a deliberately recognized vertex-buffer facade can cross this bridge.
+// Only deliberately recognized buffer facades can cross this bridge.
 // No callback is invoked with the private-data or router mutex held.
-struct PrivateVertexBridge {
-    virtual bool Pin(const void* candidate, PrivateVertexPin& pin) noexcept = 0;
+struct PrivateBufferBridge {
+    virtual bool Pin(const void* candidate, PrivateBufferPin& pin) noexcept = 0;
     // Consumes a successful native GetPrivateData +1, including on failure.
-    virtual IUnknown* Adopt(IUnknown* native) noexcept = 0;
-    virtual ~PrivateVertexBridge() = default;
+    virtual IUnknown* Adopt(t3render::buffers::PrivateDataKind kind, IUnknown* native) noexcept = 0;
+    virtual ~PrivateBufferBridge() = default;
 };
 
 inline void* Identity(IUnknown* value) {
@@ -101,13 +102,13 @@ protected:
 
 struct State {
     State(IDirect3DDevice8* owner_, IDirect3DDevice8* facade_, std::size_t maximum_,
-          std::shared_ptr<PrivateVertexBridge> bridge_) noexcept
+          std::shared_ptr<PrivateBufferBridge> bridge_) noexcept
         : owner(owner_), facade(facade_), maximum(maximum_), bridge(std::move(bridge_)) {}
     std::mutex mutex;
     IDirect3DDevice8* const owner; // facade must retain this native device
     IDirect3DDevice8* const facade;
     const std::size_t maximum;
-    const std::shared_ptr<PrivateVertexBridge> bridge;
+    const std::shared_ptr<PrivateBufferBridge> bridge;
     bool closing = false;
     std::unordered_map<void*, Entry*> identities;
     std::unordered_map<void*, Entry*> wrappers;
@@ -214,10 +215,12 @@ public:
         const GUID key = guid;
         if (flags == D3DSPD_IUNKNOWN && size == sizeof(IUnknown*) && this->state_->bridge) {
             LastError error;
-            PrivateVertexPin pin;
-            if (!this->state_->bridge->Pin(data, pin) || !pin.native || !pin.guard) return E_NOTIMPL;
+            PrivateBufferPin pin;
+            if (!this->state_->bridge->Pin(data, pin) || !pin.native || !pin.guard ||
+                (pin.kind != t3render::buffers::PrivateDataKind::VertexBuffer &&
+                 pin.kind != t3render::buffers::PrivateDataKind::IndexBuffer)) return E_NOTIMPL;
             error.restore();
-            const HRESULT hr = private_blobs_.SetTyped(key, t3render::buffers::PrivateDataKind::VertexBuffer,
+            const HRESULT hr = private_blobs_.SetTyped(key, pin.kind,
                 [&] { return this->real_->SetPrivateData(key, pin.native, size, flags); });
             error.capture();
             return hr;
@@ -240,7 +243,7 @@ public:
                 if (native) native->Release();
                 return E_FAIL;
             }
-            IUnknown* mapped = this->state_->bridge->Adopt(native);
+            IUnknown* mapped = this->state_->bridge->Adopt(kind, native);
             if (!mapped) return E_FAIL;
             std::memcpy(data, &mapped, sizeof(mapped));
             return hr;
@@ -565,7 +568,7 @@ public:
     };
     static std::shared_ptr<Router> Create(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
                                          std::size_t maximum = 4096,
-                                         std::shared_ptr<PrivateVertexBridge> bridge = {}) noexcept {
+                                         std::shared_ptr<PrivateBufferBridge> bridge = {}) noexcept {
         LastError error;
         if (!owner || !facade || !maximum) return {};
         try { return std::shared_ptr<Router>(new Router(std::make_shared<State>(owner, facade, maximum, std::move(bridge)))); }

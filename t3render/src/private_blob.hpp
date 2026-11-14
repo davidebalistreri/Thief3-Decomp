@@ -28,7 +28,7 @@
 
 namespace t3render::buffers {
 
-enum class PrivateDataKind { Blob, VertexBuffer };
+enum class PrivateDataKind { Blob, VertexBuffer, IndexBuffer };
 
 class PrivateBlobState final {
 public:

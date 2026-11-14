@@ -742,18 +742,21 @@ BufferProxy::IndexPin BufferProxy::UnwrapIndex(IDirect3DDevice8* owner, IDirect3
     IUnknown* guard = Unwrap(state_, owner, input, native);
     return IndexPin(native, guard);
 }
-IUnknown* BufferProxy::PinPrivateVertex(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
-                                         const void* input, IDirect3DVertexBuffer8** native) noexcept {
+IUnknown* BufferProxy::PinPrivateBuffer(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
+                                         const void* input, IUnknown** native, bool* vertex) noexcept {
     LastError error;
-    if (!native) return nullptr;
+    if (!native || !vertex) return nullptr;
     *native = nullptr;
+    *vertex = false;
     if (!state_ || !owner || !facade || !input) return nullptr;
     std::lock_guard<std::mutex> lock(state_->mutex);
     const auto found = state_->wrappers.find(const_cast<void*>(input));
     if (found == state_->wrappers.end()) return nullptr;
     Control* item = found->second;
-    if (!item->vertex || item->owner != owner || item->facade != facade || !item->TryAddRef()) return nullptr;
-    *native = static_cast<IDirect3DVertexBuffer8*>(item->native);
+    if (item->owner != owner || item->facade != facade || !item->TryAddRef()) return nullptr;
+    *vertex = item->vertex;
+    *native = item->vertex ? static_cast<IUnknown*>(static_cast<IDirect3DVertexBuffer8*>(item->native)) :
+                            static_cast<IUnknown*>(static_cast<IDirect3DIndexBuffer8*>(item->native));
     return item->Unknown(); // owned wrapper reference, released outside the lock
 }
 void BufferProxy::StopObservation() noexcept {

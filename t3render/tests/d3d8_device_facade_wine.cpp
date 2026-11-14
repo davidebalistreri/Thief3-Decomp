@@ -1097,13 +1097,18 @@ bool ObserveCombinedResetEpoch(IDirect3DDevice8* device, IDirect3DDevice8* nativ
         observer.ShaderStatusForFixture(old_shader) != t3render::ir::ShaderObservationStatus::Unavailable ||
         FAILED(device->Reset(&pp)) || !observer.ShaderWindowAvailableForFixture() ||
         observer.ShaderStatusForFixture(old_shader) != t3render::ir::ShaderObservationStatus::Unavailable ||
-        FAILED(device->SetVertexShader(kFvf)) || FAILED(device->DeleteVertexShader(old_shader))) return false;
+        FAILED(device->SetVertexShader(kFvf))) return false;
+    facade->SetCombinedObserver(nullptr);
+    if (FAILED(device->DeleteVertexShader(old_shader))) return false;
     // All earlier state blocks were deleted before this reset and the old
-    // shader has just been retired; this isolated epoch is fully observed.
-    if (!observer.EnableFixtureStateBlocks()) return false;
+    // shader has just been retired. Use a new explicitly attested observer;
+    // deletion invalidates the previous one even with tracking disabled.
+    t3render::fixture::CombinedCaptureObserver fresh_observer(native, buffers, pp);
+    if (!fresh_observer.valid() || !fresh_observer.EnableFixtureStateBlocks()) return false;
+    facade->SetCombinedObserver(&fresh_observer);
     DWORD fresh_shader = 0;
     if (FAILED(device->CreateVertexShader(kCombinedDeclaration, kCombinedProgram, &fresh_shader, D3DUSAGE_SOFTWAREPROCESSING)) ||
-        !fresh_shader || observer.ShaderStatusForFixture(fresh_shader) != t3render::ir::ShaderObservationStatus::Candidate)
+        !fresh_shader || fresh_observer.ShaderStatusForFixture(fresh_shader) != t3render::ir::ShaderObservationStatus::Candidate)
         return false;
     ComPtr<IDirect3DVertexBuffer8> fresh;
     if (FAILED(device->CreateVertexBuffer(4, D3DUSAGE_WRITEONLY, 0, D3DPOOL_MANAGED, fresh.put())) || !fresh.value)
@@ -1126,7 +1131,7 @@ bool ObserveCombinedResetEpoch(IDirect3DDevice8* device, IDirect3DDevice8* nativ
     UINT stride = 0;
     if (FAILED(device->ApplyStateBlock(block)) || FAILED(device->GetStreamSource(0, fresh.put(), &stride)) ||
         !fresh.value || stride != 4 || FAILED(device->GetVertexShader(&selected)) || selected != fresh_shader ||
-        observer.ShaderStatusForFixture(fresh_shader) != t3render::ir::ShaderObservationStatus::Candidate) return false;
+        fresh_observer.ShaderStatusForFixture(fresh_shader) != t3render::ir::ShaderObservationStatus::Candidate) return false;
     {
         auto pin = buffers.UnwrapVertex(native, fresh.value);
         if (!pin.wrapped() || buffers.ReadVertex(native, pin.native(), 0, observed, sizeof(observed)) != t3render::ir::RegistryResult::Ok ||
@@ -1195,6 +1200,19 @@ bool ObserveCombinedStateBlockReuseHazard(IDirect3DDevice8* device, IDirect3DDev
         !replacement || FAILED(device->ApplyStateBlock(block)) || observer.ShaderWindowAvailableForFixture() ||
         FAILED(device->DeleteStateBlock(block)) || FAILED(device->SetVertexShader(kFvf)) ||
         FAILED(device->DeleteVertexShader(replacement))) return false;
+    // A reset disables the tracked state-block epoch. Deletion must still
+    // invalidate shader evidence, even without an enabled block tracker.
+    facade->SetCombinedObserver(nullptr);
+    t3render::fixture::CombinedCaptureObserver no_blocks(native, buffers, pp);
+    if (!no_blocks.valid()) return false;
+    facade->SetCombinedObserver(&no_blocks);
+    DWORD untracked_epoch_shader = 0;
+    if (FAILED(device->CreateVertexShader(kCombinedDeclaration, kCombinedProgram, &untracked_epoch_shader,
+                                          D3DUSAGE_SOFTWAREPROCESSING)) || !untracked_epoch_shader ||
+        !no_blocks.ShaderWindowAvailableForFixture() || FAILED(device->SetVertexShader(untracked_epoch_shader)) ||
+        FAILED(device->DeleteVertexShader(untracked_epoch_shader)) || no_blocks.ShaderWindowAvailableForFixture() ||
+        FAILED(device->SetVertexShader(kFvf))) return false;
+    facade->SetCombinedObserver(nullptr);
     std::printf("combined_stateblock_shader_reuse_invalidates=PASS\n");
     return true;
 }

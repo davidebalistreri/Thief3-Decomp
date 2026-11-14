@@ -153,13 +153,15 @@ public:
         if (writer_active_) { Unsupported(); SetLastError(before); return native_->DeleteVertexShader(value); }
         // A deleted shader can remain reachable through a block or the
         // current binding. Do not trust later handle reuse in this epoch.
-        bool invalidate = false;
         {
             std::lock_guard<std::mutex> lock(state_blocks_mutex_);
-            invalidate = state_blocks_enabled_;
-            if (invalidate) ++shader_epoch_;
+            ++shader_epoch_;
         }
-        if (invalidate) Unsupported();
+        // Reset disables state-block tracking, but does not prove that a
+        // deleted shader ceased to be bound or retained by an older block.
+        // This hazard concerns shader identity; retain independent VB/IB
+        // evidence so the resulting diagnostic frame can still be useful.
+        Invalidate();
         const auto ticket = shaders_.BeginDelete(device_, value);
         SetLastError(before);
         const HRESULT hr = native_->DeleteVertexShader(value);

@@ -43,7 +43,9 @@ This is a deliberately experimental COM boundary: unsupported interfaces,
 resource aliases, reset, private data, and runtime concurrency can change game
 behavior or invalidate evidence. A known state-block epoch begins at device
 creation; shader deletion and unrecognized state-block operations invalidate
-observations rather than trusting a reused handle. Reset retires this epoch.
+observations rather than trusting a reused handle. Shader deletion alone
+invalidates shader evidence without discarding independent buffer shadows.
+Reset retires the state-block epoch.
 The trace is always marked non-replayable, and records unsafe or unavailable
 data rather than presenting it as confirmed. Texture contents are not captured.
 The proxy does not alter stealth data.

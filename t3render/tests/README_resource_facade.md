@@ -288,8 +288,9 @@ local logs and images are under
 The later [combined reset/recovery observation](../benchmarks/d3d8/2026-11-14-combined-reset-recovery/result.json)
 keeps a new fixture observer attached across a deliberately failed Reset and
 a successful recovery Reset. Shader sampling remains unavailable during
-recovery; the old shader remains unavailable after recovery. A newly created
-shader and a fresh managed `WRITEONLY` buffer become observable. Surviving
+recovery; the old shader remains unavailable after recovery. After that shader
+is retired, a new observer with an explicitly attested epoch can observe a
+newly created shader and a fresh managed `WRITEONLY` buffer. Surviving
 pre-reset buffer bytes remain unknown. This reset sequence is separate from
 the earlier captured draw; no reset is present in that replayed frame. The test
 does not establish parity for every Reset, state block or concurrent call.
@@ -313,8 +314,8 @@ enables a fixture-only policy after an explicitly attested fresh shader/state-bl
 epoch. A known `D3DSBT_ALL` block was created, captured and applied; a released
 managed `WRITEONLY` VB was reacquired with its shadow intact and the shader
 remained a candidate. A shader deletion invalidates the observation before
-forwarding, and unknown tokens, other block types and Begin/End recording also
-invalidate it. A separate bound-shader deletion check on this Highball runtime
+forwarding even when state-block tracking is disabled, and unknown tokens,
+other block types and Begin/End recording also invalidate it. A separate bound-shader deletion check on this Highball runtime
 found the handle was reused but no longer bound; the new shader rendered red
 when explicitly bound. This does not relax the production proxy's conservative
 state-block behavior. The attestation, sequential calls, lifetime and reset

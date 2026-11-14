@@ -97,6 +97,8 @@ def inspect_private_data(lines, mode):
     if [line for line in lines if line.startswith("private_resource_self_and_cross_aliases=")] != [
             "private_resource_self_and_cross_aliases=PASS"]:
         raise RunError("private-data resource self/cross-reference observation is missing or conflicting")
+    if [line for line in lines if line.startswith("private_buffer_sources=")] != ["private_buffer_sources=PASS"]:
+        raise RunError("buffer private-data source observation is missing or conflicting")
     return observations
 
 
@@ -137,6 +139,8 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
             raise RunError("private-data resource lifetime observation is missing or conflicting")
         if [line for line in lines if line.startswith("private_translated_lifetime=")] != ["private_translated_lifetime=PASS"]:
             raise RunError("translated private-data lifetime observation is missing or conflicting")
+        if [line for line in lines if line.startswith("private_buffer_sources_reset=")] != ["private_buffer_sources_reset=PASS"]:
+            raise RunError("buffer private-data reset observation is missing or conflicting")
         for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                        "resource_facade_volume_roundtrips=PASS",
                        "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
@@ -254,7 +258,7 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
     if resource_facade:
         result["limitations"] = ["Fixture only: not integrated with the proxy or TDS.",
                                  "Only selected 2D, cube, volume, surface, swapchain and buffer paths were exercised; other interfaces remain unverified.",
-                                 "Only known same-device buffer/resource IUnknown values from non-buffer resource facades are translated; external COM values and unknown interfaces fail closed.",
+                                 "Only known same-device buffer/resource IUnknown values are translated; external COM values and unknown interfaces fail closed.",
                                  "One diagnostic intentionally stores a wrapped IUnknown on a borrowed native texture, then breaks the cycle; this is not an application path.",
                                  "Two reset scenarios were exercised; runtime concurrency and comprehensive state-block behavior remain untested.",
                                  "Six synthetic triangles and selected fixed-function states only; no gameplay parity."]

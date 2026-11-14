@@ -516,7 +516,7 @@ void ConcurrentReacquisition() {
 }
 
 void PrivateVertexTranslation() {
-    struct Bridge final : PrivateBufferBridge {
+    struct Bridge final : PrivateObjectBridge {
         Device* target_native;
         Device* target_facade;
         Device* index_native;

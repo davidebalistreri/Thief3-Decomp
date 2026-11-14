@@ -28,9 +28,11 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
         lines.append("private_data_alias set=0x00000000 get=0x00000000 same=1 parent=1 free=0x00000000")
         lines.append("private_data_index_alias set=0x00000000 get=0x00000000 same=1 parent=1")
         lines.append("private_resource_self_and_cross_aliases=PASS")
+        lines.append("private_buffer_sources=PASS")
         lines.append("private_lifetime_native_dependent_release=PASS" if mode == "baseline" else
                      "private_lifetime_naive_cycle_and_cleanup=PASS")
         lines.append("private_translated_lifetime=PASS")
+        lines.append("private_buffer_sources_reset=PASS")
         lines.extend(("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                       "resource_facade_volume_roundtrips=PASS",
                       "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
@@ -113,6 +115,11 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
                             [line.replace(resources, "private_resource_self_and_cross_aliases=FAIL") for line in original]):
                 with self.subTest(mode=mode), self.assertRaises(probe.RunError):
                     self.inspect(changed, mode, resource_facade=True)
+            buffer_sources = "private_buffer_sources=PASS"
+            for changed in ([line for line in original if line != buffer_sources], original + [buffer_sources],
+                            [line.replace(buffer_sources, "private_buffer_sources=FAIL") for line in original]):
+                with self.subTest(mode=mode), self.assertRaises(probe.RunError):
+                    self.inspect(changed, mode, resource_facade=True)
             lifetime = next(line for line in original if line.startswith("private_lifetime_"))
             for changed in ([line for line in original if line != lifetime], original + [lifetime],
                             [line.replace(lifetime, lifetime.replace("=PASS", "=FAIL")) for line in original]):
@@ -121,6 +128,11 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
             translated = "private_translated_lifetime=PASS"
             for changed in ([line for line in original if line != translated], original + [translated],
                             [line.replace(translated, "private_translated_lifetime=FAIL") for line in original]):
+                with self.subTest(mode=mode), self.assertRaises(probe.RunError):
+                    self.inspect(changed, mode, resource_facade=True)
+            buffer_reset = "private_buffer_sources_reset=PASS"
+            for changed in ([line for line in original if line != buffer_reset], original + [buffer_reset],
+                            [line.replace(buffer_reset, "private_buffer_sources_reset=FAIL") for line in original]):
                 with self.subTest(mode=mode), self.assertRaises(probe.RunError):
                     self.inspect(changed, mode, resource_facade=True)
 

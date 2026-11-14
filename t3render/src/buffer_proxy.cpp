@@ -2,6 +2,7 @@
 #include "private_blob.hpp"
 
 #include <atomic>
+#include <cstring>
 #include <limits>
 #include <mutex>
 #include <new>
@@ -47,6 +48,8 @@ struct DeviceState {
     bool reset_recovery = false;
     std::uint64_t draw = 0, mutation = 0, reset = 0;
     std::size_t active_locks = 0;
+    IDirect3DDevice8* private_facade = nullptr; // borrowed; live buffer keeps it alive
+    std::weak_ptr<PrivateObjectBridge> private_bridge;
 };
 }  // namespace
 
@@ -244,6 +247,18 @@ public:
     HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID guid, const void* data, DWORD size, DWORD flags) override {
         if (facade) {
             const GUID key = guid;
+            if (flags == D3DSPD_IUNKNOWN && size == sizeof(IUnknown*)) {
+                LastError error;
+                auto bridge = PrivateBridge();
+                PrivateObjectPin pin;
+                if (!bridge || !bridge->Pin(data, pin) || !pin.native || !pin.guard ||
+                    pin.kind == PrivateDataKind::Blob) return E_NOTIMPL;
+                error.restore();
+                const HRESULT hr = private_blobs_.SetTyped(key, pin.kind,
+                    [&] { return real_->SetPrivateData(key, pin.native, size, flags); });
+                error.capture();
+                return hr;
+            }
             return private_blobs_.Set(key, flags, [&] { return real_->SetPrivateData(key, data, size, flags); });
         }
         LastError error; error.restore();
@@ -256,7 +271,23 @@ public:
     HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID guid, void* data, DWORD* size) override {
         if (facade) {
             const GUID key = guid;
-            return private_blobs_.Get(key, [&] { return real_->GetPrivateData(key, data, size); });
+            return private_blobs_.GetTyped(key, [&](PrivateDataKind kind) {
+                if (kind == PrivateDataKind::Blob) return real_->GetPrivateData(key, data, size);
+                auto bridge = PrivateBridge();
+                if (!bridge) return E_NOTIMPL;
+                IUnknown* native = nullptr;
+                const HRESULT hr = real_->GetPrivateData(key, data ? &native : nullptr, size);
+                LastError error;
+                if (FAILED(hr) || !data) return hr;
+                if (!native || !size || *size != sizeof(IUnknown*)) {
+                    if (native) native->Release();
+                    return E_FAIL;
+                }
+                IUnknown* mapped = bridge->Adopt(kind, native);
+                if (!mapped) return E_FAIL;
+                std::memcpy(data, &mapped, sizeof(mapped));
+                return hr;
+            });
         }
         LastError error; error.restore();
         const HRESULT hr = real_->GetPrivateData(guid, data, size); error.capture();
@@ -304,6 +335,12 @@ public:
     void DiscardUnpublished() noexcept { delete this; }
 
 private:
+    std::shared_ptr<PrivateObjectBridge> PrivateBridge() noexcept {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        const auto found = state_->devices.find(owner);
+        if (found == state_->devices.end() || found->second.closing || found->second.private_facade != facade) return {};
+        return found->second.private_bridge.lock();
+    }
     ULONG ReleaseFacade() {
         LastError error;
         bool final = false;
@@ -758,6 +795,17 @@ IUnknown* BufferProxy::PinPrivateBuffer(IDirect3DDevice8* owner, IDirect3DDevice
     *native = item->vertex ? static_cast<IUnknown*>(static_cast<IDirect3DVertexBuffer8*>(item->native)) :
                             static_cast<IUnknown*>(static_cast<IDirect3DIndexBuffer8*>(item->native));
     return item->Unknown(); // owned wrapper reference, released outside the lock
+}
+bool BufferProxy::InstallFacadePrivateBridge(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
+                                              const std::shared_ptr<PrivateObjectBridge>& bridge) noexcept {
+    LastError error;
+    if (!state_ || !owner || !facade || !bridge) return false;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    auto* device = state_->DeviceLocked(owner);
+    if (!device || device->closing || device->private_facade) return false;
+    device->private_facade = facade;
+    device->private_bridge = bridge;
+    return true;
 }
 void BufferProxy::StopObservation() noexcept {
     LastError error;

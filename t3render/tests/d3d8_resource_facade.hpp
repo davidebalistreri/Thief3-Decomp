@@ -44,24 +44,8 @@ struct LastError final {
     void capture() { value = GetLastError(); }
 };
 
-struct PrivateObjectPin final {
-    IUnknown* native = nullptr; // borrowed; kept alive by guard
-    IUnknown* guard = nullptr; // owned facade reference
-    t3render::buffers::PrivateDataKind kind = t3render::buffers::PrivateDataKind::Blob;
-    ~PrivateObjectPin() { if (guard) { LastError error; guard->Release(); } }
-    PrivateObjectPin() = default;
-    PrivateObjectPin(const PrivateObjectPin&) = delete;
-    PrivateObjectPin& operator=(const PrivateObjectPin&) = delete;
-};
-
-// Only deliberately recognized buffer facades can cross this bridge.
-// No callback is invoked with the private-data or router mutex held.
-struct PrivateBufferBridge {
-    virtual bool Pin(const void* candidate, PrivateObjectPin& pin) noexcept = 0;
-    // Consumes a successful native GetPrivateData +1, including on failure.
-    virtual IUnknown* Adopt(t3render::buffers::PrivateDataKind kind, IUnknown* native) noexcept = 0;
-    virtual ~PrivateBufferBridge() = default;
-};
+using t3render::buffers::PrivateObjectBridge;
+using t3render::buffers::PrivateObjectPin;
 
 inline void* Identity(IUnknown* value) {
     if (!value) return nullptr;
@@ -103,13 +87,13 @@ protected:
 
 struct State {
     State(IDirect3DDevice8* owner_, IDirect3DDevice8* facade_, std::size_t maximum_,
-          std::shared_ptr<PrivateBufferBridge> bridge_) noexcept
+          std::shared_ptr<PrivateObjectBridge> bridge_) noexcept
         : owner(owner_), facade(facade_), maximum(maximum_), bridge(std::move(bridge_)) {}
     std::mutex mutex;
     IDirect3DDevice8* const owner; // facade must retain this native device
     IDirect3DDevice8* const facade;
     const std::size_t maximum;
-    const std::shared_ptr<PrivateBufferBridge> bridge;
+    const std::shared_ptr<PrivateObjectBridge> bridge;
     bool closing = false;
     std::unordered_map<void*, Entry*> identities;
     std::unordered_map<void*, Entry*> wrappers;
@@ -618,7 +602,7 @@ public:
     };
     static std::shared_ptr<Router> Create(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
                                          std::size_t maximum = 4096,
-                                         std::shared_ptr<PrivateBufferBridge> bridge = {}) noexcept {
+                                         std::shared_ptr<PrivateObjectBridge> bridge = {}) noexcept {
         LastError error;
         if (!owner || !facade || !maximum) return {};
         try { return std::shared_ptr<Router>(new Router(std::make_shared<State>(owner, facade, maximum, std::move(bridge)))); }
@@ -632,6 +616,19 @@ public:
     }
     IDirect3DSwapChain8* AdoptSwapChain(IDirect3DSwapChain8* native) noexcept {
         return Adopt(state_, native, Kind::SwapChain);
+    }
+    bool PinPrivateObject(const void* candidate, PrivateObjectPin& pin) noexcept {
+        LastError error;
+        return PinPrivateResource(state_, candidate, pin);
+    }
+    // Consumes the native private-data reference even when mapping fails.
+    IUnknown* AdoptPrivateObject(t3render::buffers::PrivateDataKind kind, IUnknown* native) noexcept {
+        LastError error;
+        if (!native) return nullptr;
+        const IID* iid = PrivateResourceIid(kind);
+        if (!iid) { native->Release(); return nullptr; }
+        void* result = nullptr;
+        return FAILED(MapContainer(state_, *iid, native, &result)) ? nullptr : static_cast<IUnknown*>(result);
     }
 
     // Adopts the native getter's +1. Unknown base texture types fail closed.

@@ -20,13 +20,14 @@ They do not retain the facade while dormant, and the facade closes the router
 at final release. Unsupported IIDs return `E_NOINTERFACE`, and failures can
 differ from native COM behavior.
 
-Private data support opaque blobs and, on non-buffer resource facades, known
-live buffer or resource facades from the same device. The bridge pins the
+Private data support opaque blobs and known live buffer or resource facades
+from the same device. The combined fixture shares its bridge with VB/IB
+facades; the separate buffer-only fixture continues to reject COM values. The bridge pins the
 facade during Set, stores the native object in the native resource, and maps a
 native Get back to the facade using the registries. It never stores the
 wrapper in native private data. External `IUnknown` values, unknown GUIDs and
-cross-device or unknown inputs return `E_NOTIMPL`. Buffer facades themselves
-still accept only opaque blobs. The wrapper tracks at most 64 GUIDs and refuses overlapping or
+cross-device or unknown inputs return `E_NOTIMPL`. The wrapper tracks at most
+64 GUIDs and refuses overlapping or
 reentrant private-data calls. Failed writes or frees discard provenance. Reset
 retirement can discard a source wrapper's provenance even if the native
 resource survives. This subset assumes the fixture's closed boundary and is
@@ -135,10 +136,19 @@ adds texture, cube, volume texture, volume and surface targets. It checks a
 texture self-reference and a texture/cube cycle, explicitly freeing those
 references as required by native COM. A managed cube held only by a texture's
 private data was reacquired before and after Reset. Device/registry teardown
-completed with that native private reference still stored. Swapchain private
-targets, external COM objects, cross-device inputs, buffer sources and general
-runtime concurrency remain unverified or unsupported. Full local logs and PPMs
+completed with that native private reference still stored. At that milestone,
+buffer sources were still unsupported. Swapchain private targets, external COM
+objects, cross-device inputs and general runtime concurrency remain unverified
+or unsupported. Full local logs and PPMs
 are under `build/t3render-captures/2026-11-14-private-resource-bridge-v2/`.
+
+The [buffer-source observation](../benchmarks/d3d8/2026-11-14-private-buffer-sources/result.json)
+checks VB and IB private-data sources against both buffers and selected
+textures/surfaces/volumes, including buffer self-references and a deliberately
+broken VB/texture cycle. A live VB source retained its cube reference across a
+Reset. If a source wrapper itself is retired, its private-data provenance is
+still lost and subsequent access fails closed. Full local logs and PPMs are
+under `build/t3render-captures/2026-11-14-private-buffer-sources-v2/`.
 
 The later [state-block observation](../benchmarks/d3d8/2026-11-13-stateblock-facade/result.json)
 exercised Create, Capture, Begin/End, Apply and Delete on the combined facade.

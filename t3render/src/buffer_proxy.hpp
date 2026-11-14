@@ -14,6 +14,7 @@
 
 namespace t3render::buffers {
 
+struct PrivateObjectBridge;
 using SnapshotReader = bool (*)(void* context, const void* source, void* destination, std::size_t length);
 
 class BufferProxy final {
@@ -76,8 +77,9 @@ public:
     // verifying the native parent's canonical identity. On final Release a
     // dormant wrapper retains its native resource and can be reacquired while
     // the facade lives; it does not retain the facade in that state. Unknown
-    // interfaces and unobserved or IUnknown private data fail closed; observed
-    // opaque private-data blobs have limited support. On failure these methods consume
+    // interfaces and unobserved private data fail closed; observed opaque
+    // blobs and, if a fixture bridge is explicitly installed, recognized
+    // same-device COM private data have limited support. On failure these methods consume
     // native and return null instead of exposing a raw buffer. They do not
     // close aliases returned by textures, surfaces, swapchains or state blocks;
     // this is not safe to enable in TDS.
@@ -116,6 +118,11 @@ public:
     // native SetPrivateData has acquired its own reference.
     IUnknown* PinPrivateBuffer(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
                                const void* input, IUnknown** native, bool* vertex) noexcept;
+
+    // Fixture-only: the device owns the bridge; the buffer registry retains
+    // it weakly, avoiding a bridge/registry ownership cycle.
+    bool InstallFacadePrivateBridge(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
+                                    const std::shared_ptr<PrivateObjectBridge>& bridge) noexcept;
 
     // Conservative invalidation. Once a device escapes, its data remains
     // unavailable; wrappers already issued must still be unwrapped normally.

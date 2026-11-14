@@ -1,4 +1,5 @@
 #include "../src/buffer_proxy.hpp"
+#include "../src/private_blob.hpp"
 
 #include <array>
 #include <atomic>
@@ -38,6 +39,9 @@ struct FakeBuffer final : Interface {
     unsigned locks = 0, unlocks = 0, queries = 0;
     std::atomic<unsigned> releases{0};
     std::function<void()> on_query, on_release, on_lock, on_unlock;
+    std::function<HRESULT(REFGUID, const void*, DWORD, DWORD)> on_private_set;
+    std::function<HRESULT(REFGUID, void*, DWORD*)> on_private_get;
+    std::function<HRESULT(REFGUID)> on_private_free;
     HRESULT QueryInterface(REFIID iid, void** out) override {
         ++queries;
         if (on_query) on_query();
@@ -61,9 +65,13 @@ struct FakeBuffer final : Interface {
         if (out && SUCCEEDED(device_result)) { *out = device; if (device) device->AddRef(); }
         SetLastError(830); return device_result;
     }
-    HRESULT SetPrivateData(REFGUID, const void*, DWORD, DWORD) override { return S_OK; }
-    HRESULT GetPrivateData(REFGUID, void*, DWORD*) override { return S_OK; }
-    HRESULT FreePrivateData(REFGUID) override { return S_OK; }
+    HRESULT SetPrivateData(REFGUID key, const void* data, DWORD size, DWORD flags) override {
+        return on_private_set ? on_private_set(key, data, size, flags) : S_OK;
+    }
+    HRESULT GetPrivateData(REFGUID key, void* data, DWORD* size) override {
+        return on_private_get ? on_private_get(key, data, size) : S_OK;
+    }
+    HRESULT FreePrivateData(REFGUID key) override { return on_private_free ? on_private_free(key) : S_OK; }
     DWORD SetPriority(DWORD priority) override { return priority; }
     DWORD GetPriority() override { return 0; }
     void PreLoad() override {}
@@ -659,6 +667,84 @@ void ClosedFacadeReacquiresDormantBuffers() {
     assert(facade.Release() == 0 && native_device.Release() == 0);
 }
 
+void ClosedFacadeBufferPrivateData() {
+    struct Bridge final : PrivateObjectBridge {
+        std::shared_ptr<BufferProxy> proxy;
+        FakeDevice *owner, *facade, *resource_native, *resource_facade;
+        Bridge(std::shared_ptr<BufferProxy> proxy_, FakeDevice* owner_, FakeDevice* facade_,
+               FakeDevice* resource_, FakeDevice* wrapper_) : proxy(std::move(proxy_)), owner(owner_),
+               facade(facade_), resource_native(resource_), resource_facade(wrapper_) {}
+        bool Pin(const void* candidate, PrivateObjectPin& pin) noexcept override {
+            if (candidate == resource_facade) {
+                resource_facade->AddRef(); pin.guard = resource_facade; pin.native = resource_native;
+                pin.kind = PrivateDataKind::Texture; return true;
+            }
+            bool vertex = false;
+            pin.guard = proxy->PinPrivateBuffer(owner, facade, candidate, &pin.native, &vertex);
+            pin.kind = vertex ? PrivateDataKind::VertexBuffer : PrivateDataKind::IndexBuffer;
+            return pin.guard && pin.native;
+        }
+        IUnknown* Adopt(PrivateDataKind kind, IUnknown* native) noexcept override {
+            if (kind == PrivateDataKind::IndexBuffer)
+                return proxy->AdoptIndexForFacade(owner, facade, static_cast<IDirect3DIndexBuffer8*>(native), 8, false);
+            assert(kind == PrivateDataKind::Texture && native == resource_native);
+            native->Release(); resource_facade->AddRef(); return resource_facade;
+        }
+    };
+    Reader reader;
+    auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+    FakeDevice native, facade, resource_native, resource_facade;
+    auto bridge = std::make_shared<Bridge>(proxy, &native, &facade, &resource_native, &resource_facade);
+    assert(proxy->InstallFacadePrivateBridge(&native, &facade, bridge));
+    assert(!proxy->InstallFacadePrivateBridge(&native, &facade, bridge));
+    Vertex vb; Index ib; vb.device = &native; ib.device = &native;
+    auto* source = proxy->AdoptVertexForFacade(&native, &facade, &vb, 8, true);
+    auto* target = proxy->AdoptIndexForFacade(&native, &facade, &ib, 8, true);
+    assert(source && target);
+    IUnknown* stored = nullptr;
+    vb.on_private_set = [&](REFGUID, const void* data, DWORD size, DWORD flags) {
+        assert((data == &ib || data == &resource_native) && size == sizeof(IUnknown*) && flags == D3DSPD_IUNKNOWN);
+        DWORD nested_size = 0;
+        assert(source->GetPrivateData(kAlias, nullptr, &nested_size) == E_NOTIMPL);
+        auto* value = const_cast<IUnknown*>(static_cast<const IUnknown*>(data));
+        value->AddRef(); if (stored) stored->Release(); stored = value;
+        SetLastError(901); return S_OK;
+    };
+    vb.on_private_get = [&](REFGUID, void* data, DWORD* size) {
+        if (!stored || !size || !data || *size < sizeof(IUnknown*)) return E_FAIL;
+        stored->AddRef(); std::memcpy(data, &stored, sizeof(stored)); *size = sizeof(stored);
+        SetLastError(902); return S_OK;
+    };
+    vb.on_private_free = [&](REFGUID) {
+        if (!stored) return E_FAIL;
+        stored->Release(); stored = nullptr; SetLastError(903); return S_OK;
+    };
+    assert(source->SetPrivateData(kAlias, target, sizeof(IUnknown*), D3DSPD_IUNKNOWN) == S_OK);
+    assert(GetLastError() == 901 && stored == &ib && ib.refs == 2);
+    assert(target->Release() == 0 && ib.refs == 2);
+    IUnknown* value = nullptr; DWORD size = sizeof(value);
+    assert(source->GetPrivateData(kAlias, &value, &size) == S_OK && value == target && GetLastError() == 902);
+    value->Release();
+    const auto ticket = proxy->BeginFacadeReset(&native, &facade);
+    assert(ticket && ib.refs == 1 && !ib.destroyed && proxy->EndFacadeReset(&native, ticket, true));
+    size = sizeof(value); value = nullptr;
+    assert(source->GetPrivateData(kAlias, &value, &size) == S_OK && value);
+    void* typed = nullptr;
+    assert(value->QueryInterface(IID_IDirect3DIndexBuffer8, &typed) == S_OK && typed);
+    IDirect3DDevice8* parent = nullptr;
+    assert(static_cast<IDirect3DIndexBuffer8*>(typed)->GetDevice(&parent) == S_OK && parent == &facade);
+    parent->Release(); static_cast<IUnknown*>(typed)->Release(); value->Release();
+    assert(source->SetPrivateData(kAlias, &resource_facade, sizeof(IUnknown*), D3DSPD_IUNKNOWN) == S_OK);
+    assert(stored == &resource_native && resource_native.refs == 2 && resource_facade.refs == 1);
+    size = sizeof(value); value = nullptr;
+    assert(source->GetPrivateData(kAlias, &value, &size) == S_OK && value == &resource_facade);
+    value->Release();
+    assert(source->FreePrivateData(kAlias) == S_OK && resource_native.refs == 1 && GetLastError() == 903);
+    assert(source->Release() == 0 && proxy->CloseFacadeDevice(&native, &facade));
+    assert(vb.destroyed && ib.destroyed && facade.Release() == 0 && native.Release() == 0 &&
+           resource_native.Release() == 0 && resource_facade.Release() == 0);
+}
+
 void ClosedFacadeRetirement() {
     Reader reader;
     for (bool stop : {false, true}) {
@@ -1142,6 +1228,7 @@ int main() {
     OwnerIsolationAndFlagModes();
     ClosedFacadeBufferBoundary();
     ClosedFacadeReacquiresDormantBuffers();
+    ClosedFacadeBufferPrivateData();
     ClosedFacadeRetirement();
     ClosedFacadeResetRetiresDormantBuffers();
     ClosedFacadeResetEpochs();

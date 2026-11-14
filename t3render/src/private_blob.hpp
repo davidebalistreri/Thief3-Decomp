@@ -32,6 +32,26 @@ enum class PrivateDataKind {
     Blob, VertexBuffer, IndexBuffer, Surface, Texture, Cube, VolumeTexture, Volume, SwapChain
 };
 
+struct PrivateObjectPin final {
+    IUnknown* native = nullptr; // borrowed while guard is held
+    IUnknown* guard = nullptr;  // owned facade reference
+    PrivateDataKind kind = PrivateDataKind::Blob;
+    ~PrivateObjectPin() {
+        if (guard) { const DWORD error = GetLastError(); guard->Release(); SetLastError(error); }
+    }
+    PrivateObjectPin() = default;
+    PrivateObjectPin(const PrivateObjectPin&) = delete;
+    PrivateObjectPin& operator=(const PrivateObjectPin&) = delete;
+};
+
+// Fixture-only bridge. An implementation recognizes issued live facade
+// pointers and consumes the native GetPrivateData reference when adopting.
+struct PrivateObjectBridge {
+    virtual bool Pin(const void* candidate, PrivateObjectPin& pin) noexcept = 0;
+    virtual IUnknown* Adopt(PrivateDataKind kind, IUnknown* native) noexcept = 0;
+    virtual ~PrivateObjectBridge() = default;
+};
+
 class PrivateBlobState final {
 public:
     template<class Call>

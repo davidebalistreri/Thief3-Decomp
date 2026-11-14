@@ -81,20 +81,30 @@ private:
 };
 
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
-class FixturePrivateBufferBridge final : public t3render::resource_fixture::PrivateBufferBridge {
+class FixturePrivateObjectBridge final : public t3render::resource_fixture::PrivateObjectBridge {
 public:
-    FixturePrivateBufferBridge(std::shared_ptr<t3render::buffers::BufferProxy> buffers,
+    FixturePrivateObjectBridge(std::shared_ptr<t3render::buffers::BufferProxy> buffers,
                                IDirect3DDevice8* native, IDirect3DDevice8* facade) noexcept
         : buffers_(std::move(buffers)), native_(native), facade_(facade) {}
+    void Attach(const std::shared_ptr<t3render::resource_fixture::Router>& router) noexcept { resources_ = router; }
     bool Pin(const void* candidate, t3render::resource_fixture::PrivateObjectPin& pin) noexcept override {
         bool vertex = false;
         pin.guard = buffers_->PinPrivateBuffer(native_, facade_, candidate, &pin.native, &vertex);
-        pin.kind = vertex ? t3render::buffers::PrivateDataKind::VertexBuffer :
-                            t3render::buffers::PrivateDataKind::IndexBuffer;
-        return pin.guard && pin.native;
+        if (pin.guard && pin.native) {
+            pin.kind = vertex ? t3render::buffers::PrivateDataKind::VertexBuffer :
+                                t3render::buffers::PrivateDataKind::IndexBuffer;
+            return true;
+        }
+        auto router = resources_.lock();
+        return router && router->PinPrivateObject(candidate, pin);
     }
     IUnknown* Adopt(t3render::buffers::PrivateDataKind kind, IUnknown* native) noexcept override {
         if (!native) return nullptr;
+        if (t3render::resource_fixture::PrivateResourceIid(kind)) {
+            auto router = resources_.lock();
+            if (!router) { native->Release(); return nullptr; }
+            return router->AdoptPrivateObject(kind, native);
+        }
         const bool vertex_kind = kind == t3render::buffers::PrivateDataKind::VertexBuffer;
         if (!vertex_kind && kind != t3render::buffers::PrivateDataKind::IndexBuffer) { native->Release(); return nullptr; }
         // Verify the returned interface and identity before entering the buffer
@@ -124,6 +134,7 @@ public:
     }
 private:
     std::shared_ptr<t3render::buffers::BufferProxy> buffers_;
+    std::weak_ptr<t3render::resource_fixture::Router> resources_;
     IDirect3DDevice8* const native_; // borrowed, kept alive by the device facade
     IDirect3DDevice8* const facade_;
 };
@@ -783,8 +794,12 @@ private:
         factory_->AddRef();
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
         try {
-            auto bridge = std::make_shared<FixturePrivateBufferBridge>(buffers_, native_, this);
-            resources_ = t3render::resource_fixture::Router::Create(native_, this, 4096, std::move(bridge));
+            auto bridge = std::make_shared<FixturePrivateObjectBridge>(buffers_, native_, this);
+            resources_ = t3render::resource_fixture::Router::Create(native_, this, 4096, bridge);
+            if (resources_) {
+                bridge->Attach(resources_);
+                if (!buffers_->InstallFacadePrivateBridge(native_, this, bridge)) resources_.reset();
+            }
         } catch (...) {}
 #endif
     }

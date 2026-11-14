@@ -199,6 +199,20 @@ buffers; the eager policy is isolated and must not be used in TDS. Host fakes
 also exercise a getter racing final Release. Logs and PPMs are under
 `build/t3render-captures/2026-11-14-eager-buffer-lifetime-v2/`.
 
+The [persistent eager-buffer experiment](../benchmarks/d3d8/2026-11-14-persistent-eager-buffers/result.json)
+extends the marker to retain budgeted VB/IB shadow state without owning the
+native resource or device. Managed `WRITEONLY` VB and IB bytes and private
+blobs survived wrapper retirement and state-block reacquisition in Highball.
+For the interval without wrappers, the fixture resolves a valid, caller-owned
+native getter reference by canonical `IUnknown`; the ordinary read API still
+rejects unknown pointers without dereferencing them. After Reset, old shadow
+bytes remain unknown. Host tests cover address reuse, marker collisions,
+getter/final-Release races, reentrancy, reset and hazard invalidation. This is
+still opt-in and fixture-only: the reserved GUID changes native private data,
+external COM values are rejected, the capture observer is not unified and
+neither TDS nor native Windows have been validated. Logs and PPMs are under
+`build/t3render-captures/2026-11-14-persistent-eager-buffers-v6/`.
+
 The later [state-block observation](../benchmarks/d3d8/2026-11-13-stateblock-facade/result.json)
 exercised Create, Capture, Begin/End, Apply and Delete on the combined facade.
 After VB/IB wrappers became dormant and were reacquired, their `WRITEONLY`

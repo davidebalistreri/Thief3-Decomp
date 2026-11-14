@@ -12,6 +12,8 @@
 #include <memory>
 #include <utility>
 
+namespace t3render::markers { class PrivateMarkerStore; }
+
 namespace t3render::buffers {
 
 struct PrivateObjectBridge;
@@ -124,7 +126,8 @@ public:
     // retirement, a reacquired buffer's previous shadow is unknown.
     bool InstallFacadePrivateBridge(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
                                     const std::shared_ptr<PrivateObjectBridge>& bridge,
-                                    bool retain_buffers = true) noexcept;
+                                    bool retain_buffers = true,
+                                    const std::shared_ptr<t3render::markers::PrivateMarkerStore>& markers = {}) noexcept;
 
     // Conservative invalidation. Once a device escapes, its data remains
     // unavailable; wrappers already issued must still be unwrapped normally.
@@ -147,12 +150,19 @@ public:
     std::uint64_t BeginBindingMutation(IDirect3DDevice8* owner) noexcept;
     void EndBindingMutation(IDirect3DDevice8* owner, std::uint64_t token) noexcept;
 
-    // Exact native-pointer lookup only. Aliases, dead wrappers, invalid owners,
-    // unknown ranges and incomplete data never become synthetic zeroes.
+    // Exact native-pointer lookup only; unknown pointers are not dereferenced.
+    // Unknown or unstable data never become synthetic zeroes.
     ir::RegistryResult ReadVertex(IDirect3DDevice8* owner, IDirect3DVertexBuffer8* native,
                                    std::size_t offset, void* destination, std::size_t length) noexcept;
     ir::RegistryResult ReadIndex(IDirect3DDevice8* owner, IDirect3DIndexBuffer8* native,
                                   std::size_t offset, void* destination, std::size_t length) noexcept;
+    // Isolated persistent experiment only: the caller guarantees a valid +1
+    // native COM reference obtained from a getter for the duration of this
+    // call. A missing live wrapper may be resolved by canonical IUnknown.
+    ir::RegistryResult ReadVertexFromGetter(IDirect3DDevice8* owner, IDirect3DVertexBuffer8* native,
+                                            std::size_t offset, void* destination, std::size_t length) noexcept;
+    ir::RegistryResult ReadIndexFromGetter(IDirect3DDevice8* owner, IDirect3DIndexBuffer8* native,
+                                           std::size_t offset, void* destination, std::size_t length) noexcept;
 
 private:
     explicit BufferProxy(std::shared_ptr<State> state) noexcept : state_(std::move(state)) {}

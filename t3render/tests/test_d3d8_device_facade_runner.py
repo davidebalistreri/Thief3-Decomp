@@ -41,6 +41,8 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
         lines.append("private_external_eager_stateblock_and_resource=PASS")
         lines.append("eager_buffer_lifetime=PASS shadow=unavailable provenance=unavailable" if mode == "facade" else
                      "eager_buffer_lifetime=PASS shadow=not_observed provenance=preserved")
+        lines.append("persistent_eager_buffer=PASS shadow=preserved provenance=preserved reset=unknown" if mode == "facade" else
+                     "persistent_eager_buffer=PASS shadow=not_observed provenance=preserved reset=not_observed")
         lines.extend(("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                       "resource_facade_volume_roundtrips=PASS",
                       "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
@@ -160,6 +162,11 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
             eager_buffer = next(line for line in original if line.startswith("eager_buffer_lifetime="))
             for changed in ([line for line in original if line != eager_buffer], original + [eager_buffer],
                             [line.replace(eager_buffer, eager_buffer + "bad") for line in original]):
+                with self.subTest(mode=mode), self.assertRaises(probe.RunError):
+                    self.inspect(changed, mode, resource_facade=True)
+            persistent = next(line for line in original if line.startswith("persistent_eager_buffer="))
+            for changed in ([line for line in original if line != persistent], original + [persistent],
+                            [line.replace(persistent, persistent + "bad") for line in original]):
                 with self.subTest(mode=mode), self.assertRaises(probe.RunError):
                     self.inspect(changed, mode, resource_facade=True)
 

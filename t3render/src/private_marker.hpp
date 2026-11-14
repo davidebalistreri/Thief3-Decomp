@@ -4,7 +4,7 @@
 // retain that resource, its facade or its device. Do not use this in TDS.
 #include <windows.h>
 #include <d3d8.h>
-#include "../src/private_blob.hpp"
+#include "private_blob.hpp"
 
 #ifdef max
 #pragma push_macro("max")
@@ -33,7 +33,7 @@
 #undef T3RENDER_MARKER_RESTORE_MAX
 #endif
 
-namespace t3render::resource_fixture {
+namespace t3render::markers {
 
 #ifdef _WIN32
 inline const GUID kPrivateMarkerGuid{0x6fe28a31, 0xb561, 0x45e7, {0xb7, 0x19, 0x83, 0x5d, 0x4a, 0x71, 0xc2, 0x90}};
@@ -88,15 +88,36 @@ public:
     bool TryAddRef() noexcept { return AddRef() != 0; }
     t3render::buffers::PrivateBlobState state;
     bool ready = false; // accessed only with core mutex held
+    std::shared_ptr<void> BufferPayload() noexcept {
+        std::lock_guard<std::mutex> lock(payload_mutex_);
+        return buffer_payload_;
+    }
+    bool InstallBufferPayload(const std::shared_ptr<void>& payload) noexcept {
+        std::lock_guard<std::mutex> lock(payload_mutex_);
+        if (buffer_payload_ || !payload) return false;
+        buffer_payload_ = payload;
+        return true;
+    }
 private:
     std::shared_ptr<PrivateMarkerCore> core_;
     void* const identity_;
     std::atomic<ULONG> refs_{1};
+    std::mutex payload_mutex_;
+    std::shared_ptr<void> buffer_payload_;
 };
 
 class PrivateMarkerStore final {
 public:
     explicit PrivateMarkerStore(std::size_t maximum) : core_(std::make_shared<PrivateMarkerCore>(maximum)) {}
+
+    // A shared store may back only one buffer observer state. Its weak owner
+    // never extends that state's lifetime and is not reusable after expiry.
+    bool BindBufferObserver(const std::shared_ptr<void>& owner) noexcept {
+        if (!owner) return false;
+        std::lock_guard<std::mutex> lock(binding_mutex_);
+        if (!bound_) { observer_ = owner; bound_ = true; return true; }
+        return !observer_.owner_before(owner) && !owner.owner_before(observer_);
+    }
 
     // The caller keeps the native source alive and supplies its canonical
     // identity. Native calls are outside the registry mutex. A collision with
@@ -139,6 +160,9 @@ public:
     }
 private:
     std::shared_ptr<PrivateMarkerCore> core_;
+    std::mutex binding_mutex_;
+    std::weak_ptr<void> observer_;
+    bool bound_ = false;
 };
 
 class PrivateMarkerCache final {
@@ -171,4 +195,4 @@ private:
     PrivateMarker* marker_ = nullptr;
 };
 
-} // namespace t3render::resource_fixture
+} // namespace t3render::markers

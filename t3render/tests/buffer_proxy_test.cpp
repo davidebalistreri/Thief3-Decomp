@@ -1,5 +1,6 @@
 #include "../src/buffer_proxy.hpp"
 #include "../src/private_blob.hpp"
+#include "../src/private_marker.hpp"
 
 #include <array>
 #include <atomic>
@@ -7,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <new>
 #include <utility>
 #include <thread>
 
@@ -785,6 +787,201 @@ void EagerFacadeBufferRetirement() {
     }
 }
 
+void PersistentEagerBufferShadows() {
+    struct EmptyBridge final : PrivateObjectBridge {
+        bool Pin(const void*, PrivateObjectPin&) noexcept override { return false; }
+        IUnknown* Adopt(PrivateDataKind, IUnknown* native) noexcept override {
+            if (native) native->Release();
+            return nullptr;
+        }
+    };
+    Reader reader;
+    auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+    FakeDevice native, facade;
+    auto bridge = std::make_shared<EmptyBridge>();
+    auto markers = std::make_shared<t3render::markers::PrivateMarkerStore>(8);
+    assert(proxy->InstallFacadePrivateBridge(&native, &facade, bridge, false, markers));
+    Vertex vb; Index ib; vb.device = &native; ib.device = &native;
+    IUnknown *vertex_marker = nullptr, *index_marker = nullptr;
+    bool blob_stored = false;
+    const BYTE blob[]{7, 9};
+    auto configure = [&](auto& raw, IUnknown*& slot) {
+        IUnknown** marker = &slot;
+        auto* resource = &raw;
+        raw.on_private_get = [&, marker](REFGUID key, void* data, DWORD* size) {
+            if (IsEqualIID(key, t3render::markers::kPrivateMarkerGuid))
+                return *marker ? S_OK : D3DERR_NOTFOUND;
+            if (!blob_stored || !size) return D3DERR_NOTFOUND;
+            if (data && *size >= sizeof(blob)) std::memcpy(data, blob, sizeof(blob));
+            *size = sizeof(blob); return S_OK;
+        };
+        raw.on_private_set = [&, marker](REFGUID key, const void* data, DWORD size, DWORD flags) {
+            if (IsEqualIID(key, t3render::markers::kPrivateMarkerGuid)) {
+                assert(!*marker && size == sizeof(IUnknown*) && flags == D3DSPD_IUNKNOWN);
+                *marker = const_cast<IUnknown*>(static_cast<const IUnknown*>(data)); (*marker)->AddRef(); return S_OK;
+            }
+            assert(data == blob && size == sizeof(blob) && flags == 0);
+            blob_stored = true; return S_OK;
+        };
+        raw.on_release = [resource, marker] {
+            if (!resource->refs && *marker) { auto* old = *marker; *marker = nullptr; old->Release(); }
+        };
+    };
+    configure(vb, vertex_marker); configure(ib, index_marker);
+    auto* vertex = proxy->AdoptVertexForFacade(&native, &facade, &vb, 8, true);
+    auto* index = proxy->AdoptIndexForFacade(&native, &facade, &ib, 8, true);
+    assert(vertex && index && vertex_marker && index_marker);
+    const BYTE data[]{1, 4, 9}; BYTE observed[sizeof(data)]{};
+    Fill(vertex, 0, data, sizeof(data)); Fill(index, 0, data, sizeof(data));
+    assert(vertex->SetPrivateData(kAlias, blob, sizeof(blob), 0) == S_OK);
+    assert(vertex->SetPrivateData(t3render::markers::kPrivateMarkerGuid, blob, sizeof(blob), 0) == E_NOTIMPL);
+    vb.AddRef(); ib.AddRef(); // native state block retains both
+    assert(vertex->Release() == 0 && index->Release() == 0 && facade.refs == 1);
+    assert(proxy->ReadVertex(&native, reinterpret_cast<IDirect3DVertexBuffer8*>(1), 0, observed, sizeof(observed)) ==
+           RegistryResult::UnknownResource); // ordinary reads never dereference unknown inputs
+    assert(proxy->ReadVertex(&native, &vb, 0, observed, sizeof(observed)) == RegistryResult::UnknownResource);
+    assert(proxy->ReadVertexFromGetter(&native, &vb, 0, observed, sizeof(observed)) == RegistryResult::Ok &&
+           !std::memcmp(observed, data, sizeof(data)));
+    assert(proxy->ReadIndexFromGetter(&native, &ib, 0, observed, sizeof(observed)) == RegistryResult::Ok &&
+           !std::memcmp(observed, data, sizeof(data)));
+    VertexAlias alias(vb);
+    bool reentered = false;
+    vb.on_query = [&] {
+        reentered = true;
+        assert(proxy->ReadVertexFromGetter(&native, &vb, 0, observed, sizeof(observed)) == RegistryResult::UnknownResource);
+    };
+    SetLastError(37);
+    assert(proxy->ReadVertexFromGetter(&native, &alias, 0, observed, sizeof(observed)) == RegistryResult::Ok &&
+           reentered && GetLastError() == 37 && !std::memcmp(observed, data, sizeof(data)));
+    vb.on_query = {};
+    vb.AddRef(); ib.AddRef();
+    vertex = proxy->AdoptVertexForFacade(&native, &facade, &vb, 8, false);
+    index = proxy->AdoptIndexForFacade(&native, &facade, &ib, 8, false);
+    assert(vertex && index);
+    BYTE retrieved[sizeof(blob)]{}; DWORD blob_size = sizeof(retrieved);
+    assert(vertex->GetPrivateData(kAlias, retrieved, &blob_size) == S_OK && blob_size == sizeof(blob) &&
+           !std::memcmp(retrieved, blob, sizeof(blob)));
+    assert(proxy->ReadVertex(&native, &vb, 0, observed, sizeof(observed)) == RegistryResult::Ok);
+    const BYTE update[]{6, 5};
+    const BYTE updated[]{1, 6, 5};
+    Fill(vertex, 1, update, sizeof(update));
+    assert(proxy->ReadVertex(&native, &vb, 0, observed, sizeof(observed)) == RegistryResult::Ok &&
+           !std::memcmp(observed, updated, sizeof(updated)));
+    alignas(Vertex) unsigned char storage[sizeof(Vertex)];
+    IUnknown* recycled_marker = nullptr;
+    auto* recycled = new (storage) Vertex;
+    recycled->device = &native; configure(*recycled, recycled_marker);
+    auto* transient = proxy->AdoptVertexForFacade(&native, &facade, recycled, 8, true);
+    assert(transient && recycled_marker);
+    Fill(transient, 0, data, sizeof(data));
+    assert(transient->Release() == 0 && recycled->destroyed && !recycled_marker);
+    recycled->~Vertex();
+    recycled = new (storage) Vertex;
+    recycled->device = &native; configure(*recycled, recycled_marker);
+    transient = proxy->AdoptVertexForFacade(&native, &facade, recycled, 8, true);
+    assert(transient && recycled_marker &&
+           proxy->ReadVertex(&native, recycled, 0, observed, sizeof(observed)) == RegistryResult::UnknownData);
+    Fill(transient, 0, data, sizeof(data));
+    assert(transient->Release() == 0 && recycled->destroyed && !recycled_marker);
+    recycled->~Vertex();
+    for (unsigned n = 0; n < 100; ++n) {
+        Vertex racing; racing.device = &native;
+        IUnknown* racing_marker = nullptr;
+        configure(racing, racing_marker);
+        auto* current = proxy->AdoptVertexForFacade(&native, &facade, &racing, 8, true);
+        assert(current && racing_marker);
+        Fill(current, 0, data, sizeof(data));
+        racing.AddRef(); // native binding keeps the identity alive
+        std::atomic<bool> go{false};
+        std::thread getter([&] {
+            while (!go.load()) std::this_thread::yield();
+            racing.AddRef();
+            auto* found = proxy->AdoptVertexForFacade(&native, &facade, &racing, 8, false);
+            assert(found);
+            found->Release();
+        });
+        go = true;
+        current->Release();
+        getter.join();
+        assert(proxy->ReadVertexFromGetter(&native, &racing, 0, observed, sizeof(observed)) == RegistryResult::Ok &&
+               !std::memcmp(observed, data, sizeof(data)));
+        assert(racing.Release() == 0 && racing.destroyed && !racing_marker);
+    }
+    Vertex collision; collision.device = &native;
+    collision.on_private_get = [](REFGUID key, void*, DWORD*) {
+        assert(IsEqualIID(key, t3render::markers::kPrivateMarkerGuid)); return S_OK;
+    };
+    auto* unmarked = proxy->AdoptVertexForFacade(&native, &facade, &collision, 8, true);
+    assert(unmarked);
+    Fill(unmarked, 0, data, sizeof(data));
+    collision.AddRef();
+    assert(unmarked->Release() == 0 &&
+           proxy->ReadVertex(&native, &collision, 0, observed, sizeof(observed)) == RegistryResult::UnknownResource);
+    assert(collision.Release() == 0);
+    assert(vertex->Release() == 0 && index->Release() == 0);
+    assert(proxy->ReadVertexFromGetter(&native, &vb, 0, observed, sizeof(observed)) == RegistryResult::Ok &&
+           !std::memcmp(observed, updated, sizeof(updated)));
+    bool reset_reentered = false;
+    vb.on_query = [&] {
+        reset_reentered = true;
+        const auto reset = proxy->BeginFacadeReset(&native, &facade);
+        assert(reset && proxy->EndFacadeReset(&native, reset, true));
+    };
+    assert(proxy->ReadVertexFromGetter(&native, &vb, 0, observed, sizeof(observed)) == RegistryResult::UnknownResource);
+    assert(reset_reentered && proxy->ReadIndexFromGetter(&native, &ib, 0, observed, sizeof(observed)) == RegistryResult::UnknownResource);
+    vb.on_query = {};
+    vb.AddRef();
+    vertex = proxy->AdoptVertexForFacade(&native, &facade, &vb, 8, false);
+    assert(vertex && proxy->ReadVertex(&native, &vb, 0, observed, sizeof(observed)) == RegistryResult::UnknownResource);
+    blob_size = sizeof(retrieved);
+    assert(vertex->GetPrivateData(kAlias, retrieved, &blob_size) == S_OK);
+    assert(vertex->Release() == 0 && proxy->CloseFacadeDevice(&native, &facade));
+    assert(vb.Release() == 0 && ib.Release() == 0 && !vertex_marker && !index_marker);
+    assert(native.Release() == 0 && facade.Release() == 0);
+
+    auto hazardous = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+    FakeDevice native2, facade2;
+    auto markers2 = std::make_shared<t3render::markers::PrivateMarkerStore>(8);
+    assert(hazardous->InstallFacadePrivateBridge(&native2, &facade2, bridge, false, markers2));
+    Vertex dormant; Index active; dormant.device = &native2; active.device = &native2;
+    IUnknown *dormant_marker = nullptr, *active_marker = nullptr;
+    configure(dormant, dormant_marker); configure(active, active_marker);
+    auto* dormant_wrapper = hazardous->AdoptVertexForFacade(&native2, &facade2, &dormant, 8, true);
+    auto* active_wrapper = hazardous->AdoptIndexForFacade(&native2, &facade2, &active, 8, true);
+    assert(dormant_wrapper && active_wrapper && dormant_marker && active_marker);
+    Fill(dormant_wrapper, 0, data, sizeof(data));
+    dormant.AddRef(); dormant_wrapper->Release();
+    BYTE* mapped = nullptr;
+    assert(active_wrapper->Lock(0, 2, &mapped, 0) == S_OK && mapped);
+    assert(hazardous->BeginDraw(&native2) == 0 &&
+           hazardous->ReadVertexFromGetter(&native2, &dormant, 0, observed, sizeof(observed)) == RegistryResult::Unavailable);
+    assert(active_wrapper->Unlock() == S_OK && active_wrapper->Release() == 0 && dormant.Release() == 0);
+    assert(hazardous->CloseFacadeDevice(&native2, &facade2) && !dormant_marker && !active_marker);
+    assert(native2.Release() == 0 && facade2.Release() == 0);
+
+    auto cross = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+    FakeDevice first_device, first_facade, second_device, second_facade;
+    auto shared_markers = std::make_shared<t3render::markers::PrivateMarkerStore>(8);
+    assert(cross->InstallFacadePrivateBridge(&first_device, &first_facade, bridge, false, shared_markers));
+    assert(cross->InstallFacadePrivateBridge(&second_device, &second_facade, bridge, false, shared_markers));
+    auto unrelated = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+    assert(!unrelated->InstallFacadePrivateBridge(&second_device, &second_facade, bridge, false, shared_markers));
+    Vertex cross_raw; cross_raw.device = &first_device;
+    IUnknown* cross_marker = nullptr; configure(cross_raw, cross_marker);
+    auto* first_wrapper = cross->AdoptVertexForFacade(&first_device, &first_facade, &cross_raw, 8, true);
+    assert(first_wrapper && cross_marker);
+    Fill(first_wrapper, 0, data, sizeof(data));
+    cross_raw.AddRef(); first_wrapper->Release();
+    cross_raw.AddRef();
+    auto* foreign = cross->AdoptVertexForFacade(&second_device, &second_facade, &cross_raw, 8, false);
+    assert(foreign && cross->ReadVertexFromGetter(&first_device, &cross_raw, 0, observed, sizeof(observed)) == RegistryResult::Unavailable &&
+           cross->ReadVertexFromGetter(&second_device, &cross_raw, 0, observed, sizeof(observed)) == RegistryResult::Unavailable);
+    foreign->Release(); cross_raw.Release();
+    assert(cross->CloseFacadeDevice(&first_device, &first_facade) && cross->CloseFacadeDevice(&second_device, &second_facade));
+    assert(!cross_marker && first_device.Release() == 0 && first_facade.Release() == 0 &&
+           second_device.Release() == 0 && second_facade.Release() == 0);
+}
+
 void ClosedFacadeRetirement() {
     Reader reader;
     for (bool stop : {false, true}) {
@@ -1270,6 +1467,7 @@ int main() {
     ClosedFacadeReacquiresDormantBuffers();
     ClosedFacadeBufferPrivateData();
     EagerFacadeBufferRetirement();
+    PersistentEagerBufferShadows();
     ClosedFacadeRetirement();
     ClosedFacadeResetRetiresDormantBuffers();
     ClosedFacadeResetEpochs();

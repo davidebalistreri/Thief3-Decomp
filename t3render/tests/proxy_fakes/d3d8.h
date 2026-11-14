@@ -5,6 +5,7 @@ typedef int D3DPOOL; typedef int D3DRESOURCETYPE; typedef int D3DSTATEBLOCKTYPE;
 typedef DWORD D3DCOLOR;
 typedef struct { int32_t x1, y1, x2, y2; } D3DRECT;
 #define D3DERR_INVALIDCALL ((HRESULT)-7)
+#define D3DERR_NOTFOUND ((HRESULT)-8)
 #define D3DPOOL_MANAGED 1
 #define D3DFMT_INDEX16 101
 #define D3DRTYPE_VERTEXBUFFER 6

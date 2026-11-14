@@ -6,7 +6,7 @@
 #include <windows.h>
 #include <d3d8.h>
 #include "../src/private_blob.hpp"
-#include "d3d8_private_marker.hpp"
+#include "../src/private_marker.hpp"
 
 #ifdef max
 #pragma push_macro("max")
@@ -47,6 +47,9 @@ struct LastError final {
 
 using t3render::buffers::PrivateObjectBridge;
 using t3render::buffers::PrivateObjectPin;
+using t3render::markers::kPrivateMarkerGuid;
+using t3render::markers::PrivateMarkerCache;
+using t3render::markers::PrivateMarkerStore;
 
 inline void* Identity(IUnknown* value) {
     if (!value) return nullptr;
@@ -661,6 +664,7 @@ public:
     IDirect3DSwapChain8* AdoptSwapChain(IDirect3DSwapChain8* native) noexcept {
         return Adopt(state_, native, Kind::SwapChain);
     }
+    std::shared_ptr<PrivateMarkerStore> PrivateMarkers() const noexcept { return state_->markers; }
     bool PinPrivateObject(const void* candidate, PrivateObjectPin& pin) noexcept {
         LastError error;
         return PinPrivateResource(state_, candidate, pin);

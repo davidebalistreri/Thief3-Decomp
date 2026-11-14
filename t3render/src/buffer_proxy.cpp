@@ -1,5 +1,6 @@
 #include "buffer_proxy.hpp"
 #include "private_blob.hpp"
+#include "private_marker.hpp"
 
 #include <atomic>
 #include <cstring>
@@ -26,6 +27,9 @@ struct Control {
     void* identity = nullptr;
     void* exposed = nullptr;
     bool vertex = false;
+    bool persistent = false;
+    bool marker_enabled = false;
+    t3render::markers::PrivateMarker* marker = nullptr; // owned by the wrapper
     ir::BufferToken token{};
     bool pending_lock = false, locked = false, pending_unlock = false, read_only = false;
     bool counted_lock = false;
@@ -42,6 +46,10 @@ protected:
     ~Control() = default;
 };
 
+struct PersistentShadow {
+    ir::BufferToken token{};
+    bool vertex = false;
+};
 struct DeviceState {
     bool unsafe = false;
     bool closing = false;
@@ -51,6 +59,8 @@ struct DeviceState {
     IDirect3DDevice8* private_facade = nullptr; // borrowed; live buffer keeps it alive
     std::weak_ptr<PrivateObjectBridge> private_bridge;
     bool retain_buffers = true;
+    std::weak_ptr<t3render::markers::PrivateMarkerStore> markers;
+    std::unordered_map<void*, PersistentShadow> persistent;
 };
 }  // namespace
 
@@ -101,6 +111,7 @@ struct BufferProxy::State {
             entry.second.unsafe = true; entry.second.draw = 0;
             entry.second.mutation = 0; entry.second.reset = 0;
             entry.second.reset_recovery = false; entry.second.active_locks = 0;
+            for (const auto& shadow : entry.second.persistent) shadows.Abandon(shadow.second.token);
         }
     }
     DeviceState* DeviceLocked(IDirect3DDevice8* owner) noexcept {
@@ -117,21 +128,56 @@ struct BufferProxy::State {
         if (!device || device->unsafe) return;
         device->unsafe = true; device->draw = 0; device->mutation = 0;
         device->reset = 0; device->reset_recovery = false;
+        for (const auto& shadow : device->persistent) shadows.Abandon(shadow.second.token);
         for (auto& entry : wrappers)
             if (entry.second->owner == owner) AbandonLocked(entry.second);
     }
-    void DetachLocked(Control* item) noexcept {
+    void DetachLocked(Control* item, bool preserve = false) noexcept {
         auto it = wrappers.find(item->exposed);
         if (it != wrappers.end() && it->second == item) wrappers.erase(it);
         it = identities.find(item->identity);
         if (it != identities.end() && it->second == item) identities.erase(it);
         it = native.find(item->native);
         if (it != native.end() && it->second == item) native.erase(it);
-        shadows.Release(item->token);
+        if (!preserve) {
+            if (item->persistent) {
+                const auto device = devices.find(item->owner);
+                if (device != devices.end()) {
+                    const auto found = device->second.persistent.find(item->identity);
+                    if (found != device->second.persistent.end() && found->second.token.generation == item->token.generation)
+                        device->second.persistent.erase(found);
+                }
+            }
+            shadows.Release(item->token);
+        }
+    }
+    void ClearPersistentLocked(DeviceState& device) noexcept {
+        for (const auto& entry : device.persistent) shadows.Release(entry.second.token);
+        device.persistent.clear();
     }
 };
 
 namespace {
+struct BufferLease final {
+    std::weak_ptr<BufferProxy::State> state;
+    IDirect3DDevice8* owner = nullptr;
+    ir::BufferToken token{};
+    bool vertex = false;
+    ~BufferLease() {
+        auto shared = state.lock();
+        if (!shared || !token.identity || !token.generation) return;
+        std::lock_guard<std::mutex> lock(shared->mutex);
+        const auto device = shared->devices.find(owner);
+        if (device == shared->devices.end()) return;
+        const auto found = device->second.persistent.find(reinterpret_cast<void*>(token.identity));
+        if (found != device->second.persistent.end() && found->second.token.identity == token.identity &&
+            found->second.token.generation == token.generation) {
+            shared->shadows.Release(token);
+            device->second.persistent.erase(found);
+        }
+    }
+};
+
 template<class Buffer> struct Traits;
 template<> struct Traits<IDirect3DVertexBuffer8> {
     using Desc = D3DVERTEXBUFFER_DESC;
@@ -248,6 +294,7 @@ public:
     HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID guid, const void* data, DWORD size, DWORD flags) override {
         if (facade) {
             const GUID key = guid;
+            if (marker_enabled && IsEqualIID(key, t3render::markers::kPrivateMarkerGuid)) return E_NOTIMPL;
             if (flags == D3DSPD_IUNKNOWN && size == sizeof(IUnknown*)) {
                 LastError error;
                 auto bridge = PrivateBridge();
@@ -255,12 +302,12 @@ public:
                 if (!bridge || !bridge->Pin(data, pin) || !pin.native || !pin.guard ||
                     pin.kind == PrivateDataKind::Blob) return E_NOTIMPL;
                 error.restore();
-                const HRESULT hr = private_blobs_.SetTyped(key, pin.kind,
+                const HRESULT hr = PrivateState().SetTyped(key, pin.kind,
                     [&] { return real_->SetPrivateData(key, pin.native, size, flags); });
                 error.capture();
                 return hr;
             }
-            return private_blobs_.Set(key, flags, [&] { return real_->SetPrivateData(key, data, size, flags); });
+            return PrivateState().Set(key, flags, [&] { return real_->SetPrivateData(key, data, size, flags); });
         }
         LastError error; error.restore();
         const HRESULT hr = real_->SetPrivateData(guid, data, size, flags); error.capture();
@@ -272,7 +319,8 @@ public:
     HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID guid, void* data, DWORD* size) override {
         if (facade) {
             const GUID key = guid;
-            return private_blobs_.GetTyped(key, [&](PrivateDataKind kind) {
+            if (marker_enabled && IsEqualIID(key, t3render::markers::kPrivateMarkerGuid)) return E_NOTIMPL;
+            return PrivateState().GetTyped(key, [&](PrivateDataKind kind) {
                 if (kind == PrivateDataKind::Blob) return real_->GetPrivateData(key, data, size);
                 auto bridge = PrivateBridge();
                 if (!bridge) return E_NOTIMPL;
@@ -300,7 +348,8 @@ public:
     HRESULT STDMETHODCALLTYPE FreePrivateData(REFGUID guid) override {
         if (facade) {
             const GUID key = guid;
-            return private_blobs_.Free(key, [&] { return real_->FreePrivateData(key); });
+            if (marker_enabled && IsEqualIID(key, t3render::markers::kPrivateMarkerGuid)) return E_NOTIMPL;
+            return PrivateState().Free(key, [&] { return real_->FreePrivateData(key); });
         }
         return real_->FreePrivateData(guid);
     }
@@ -336,6 +385,7 @@ public:
     void DiscardUnpublished() noexcept { delete this; }
 
 private:
+    PrivateBlobState& PrivateState() noexcept { return marker ? marker->state : private_blobs_; }
     std::shared_ptr<PrivateObjectBridge> PrivateBridge() noexcept {
         std::lock_guard<std::mutex> lock(state_->mutex);
         const auto found = state_->devices.find(owner);
@@ -364,7 +414,7 @@ private:
             if (final) {
                 parent = facade;
                 if (device != state_->devices.end() && !device->second.retain_buffers) {
-                    state_->DetachLocked(this);
+                    state_->DetachLocked(this, persistent);
                     retire = true;
                 }
             }
@@ -471,7 +521,7 @@ private:
         state_->ClearLockLocked(this);
     }
 
-    ~Wrapper() = default;
+    ~Wrapper() { if (marker) marker->Release(); }
     std::shared_ptr<BufferProxy::State> state_;
     Buffer* const real_;
     const UINT size_;
@@ -507,10 +557,32 @@ Buffer* Adopt(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8
             return fallback();
         }
     }
+    std::shared_ptr<t3render::markers::PrivateMarkerStore> marker_store;
+    if (closed) {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        const auto device = state->devices.find(owner);
+        if (device != state->devices.end() && device->second.private_facade == facade &&
+            !device->second.retain_buffers && !device->second.closing)
+            marker_store = device->second.markers.lock();
+    }
+    auto* marker = marker_store ? marker_store->Acquire(identity, native, fresh) : nullptr;
     Wrapper<Buffer>* candidate = nullptr;
     if (fresh || closed) {
         candidate = new (std::nothrow) Wrapper<Buffer>(state, owner, facade, native, identity, size);
     }
+    std::shared_ptr<BufferLease> lease;
+    if (candidate) {
+        candidate->marker = marker;
+        candidate->marker_enabled = static_cast<bool>(marker_store);
+        marker = nullptr;
+        if (fresh && candidate->marker) {
+            try {
+                lease = std::make_shared<BufferLease>();
+                lease->state = state; lease->owner = owner; lease->vertex = Traits<Buffer>::kVertex;
+            } catch (...) {}
+        }
+    }
+    if (marker) marker->Release();
     Control* found = nullptr;
     bool published = false, revived = false;
     {
@@ -538,10 +610,40 @@ Buffer* Adopt(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8
                 ir::BufferAvailability availability{};
                 registered = state->shadows.Register(reinterpret_cast<std::uintptr_t>(identity), size,
                                                       candidate->token, availability) == ir::RegistryResult::Ok;
+                if (registered && candidate->marker && lease) {
+                    try {
+                        if (device->persistent.emplace(identity, PersistentShadow{candidate->token,
+                                                                                  Traits<Buffer>::kVertex}).second) {
+                            lease->token = candidate->token;
+                            if (candidate->marker->InstallBufferPayload(lease)) candidate->persistent = true;
+                            else { device->persistent.erase(identity); lease->token = {}; }
+                        }
+                    } catch (...) {}
+                }
+            } else if (!fresh && device && !device->unsafe && !state->global_unsafe && candidate->marker) {
+                auto payload = candidate->marker->BufferPayload();
+                auto previous = std::static_pointer_cast<BufferLease>(payload);
+                if (previous) {
+                    const auto expected = device->persistent.find(identity);
+                    const auto previous_state = previous->state.lock();
+                    ir::BufferAvailability availability{};
+                    if (previous_state == state && previous->owner != owner) {
+                        state->PoisonLocked(owner);
+                        state->PoisonLocked(previous->owner);
+                    }
+                    if (previous_state == state && previous->owner == owner && previous->vertex == Traits<Buffer>::kVertex &&
+                        expected != device->persistent.end() && expected->second.token.identity == previous->token.identity &&
+                        expected->second.token.generation == previous->token.generation &&
+                        !device->unsafe && state->shadows.Availability(previous->token, availability) == ir::RegistryResult::Ok) {
+                        candidate->token = previous->token;
+                        candidate->persistent = true;
+                        registered = true;
+                    }
+                }
             }
             // In a closed facade a getter may return a previously retired
-            // resource. Keep its identity and lock windows, but never infer
-            // its contents. Allocation or registration failures still poison.
+            // resource. Without a matching persistent marker its contents
+            // remain unknown. Allocation or registration failures still poison.
             if (!registered && !(closed && !fresh && device && !device->unsafe && !state->global_unsafe))
                 state->PoisonLocked(owner);
             if (registered || closed) {
@@ -623,6 +725,7 @@ bool BufferProxy::CloseFacadeDevice(IDirect3DDevice8* owner, IDirect3DDevice8* f
                 retired = item;
             }
         }
+        if (device != state_->devices.end()) state_->ClearPersistentLocked(device->second);
     }
     while (retired) {
         Control* next = retired->retirement_next;
@@ -639,6 +742,8 @@ void BufferProxy::RetireFacadeDormantForReset(IDirect3DDevice8* owner, IDirect3D
     {
         std::lock_guard<std::mutex> lock(state_->mutex);
         state_->PoisonLocked(owner);
+        const auto device = state_->devices.find(owner);
+        if (device != state_->devices.end()) state_->ClearPersistentLocked(device->second);
         for (auto it = state_->wrappers.begin(); it != state_->wrappers.end();) {
             Control* item = (it++)->second;
             if (item->owner == owner && item->facade == facade && item->Dormant()) {
@@ -673,6 +778,7 @@ std::uint64_t BufferProxy::BeginFacadeReset(IDirect3DDevice8* owner, IDirect3DDe
         }
         ticket = state_->next_reset++;
         device->reset = ticket;
+        state_->ClearPersistentLocked(*device);
         for (auto it = state_->wrappers.begin(); it != state_->wrappers.end();) {
             Control* item = (it++)->second;
             if (item->owner != owner) continue;
@@ -735,18 +841,41 @@ IUnknown* Unwrap(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevi
     return item->Unknown();
 }
 
+thread_local bool persistent_identity_query = false;
+
 template<class Buffer>
 ir::RegistryResult Read(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8* owner,
-                        Buffer* native, std::size_t offset, void* destination, std::size_t length) noexcept {
+                        Buffer* native, std::size_t offset, void* destination, std::size_t length,
+                        bool trusted_getter) noexcept {
     if (!state || !owner || !native) return ir::RegistryResult::UnknownResource;
-    std::lock_guard<std::mutex> lock(state->mutex);
-    const auto device = state->devices.find(owner);
+    std::unique_lock<std::mutex> lock(state->mutex);
+    auto device = state->devices.find(owner);
     if (state->global_unsafe || device == state->devices.end() || device->second.unsafe ||
         device->second.reset || device->second.reset_recovery)
         return ir::RegistryResult::Unavailable;
     const auto found = state->native.find(native);
-    if (found == state->native.end() || found->second->owner != owner ||
-        found->second->vertex != Traits<Buffer>::kVertex) return ir::RegistryResult::UnknownResource;
+    if (found == state->native.end()) {
+        if (!trusted_getter || device->second.persistent.empty() || persistent_identity_query)
+            return ir::RegistryResult::UnknownResource;
+        // The caller holds a native getter reference. Canonicalize outside the
+        // mutex: an interface pointer can be a tear-off and its address alone
+        // is not stable after the last facade reference is released.
+        lock.unlock();
+        struct QueryScope { QueryScope() { persistent_identity_query = true; } ~QueryScope() { persistent_identity_query = false; } } scope;
+        void* identity = nullptr;
+        try { identity = Canonical(native); } catch (...) {}
+        if (!identity) return ir::RegistryResult::UnknownResource;
+        lock.lock();
+        device = state->devices.find(owner);
+        if (state->global_unsafe || device == state->devices.end() || device->second.unsafe ||
+            device->second.reset || device->second.reset_recovery) return ir::RegistryResult::Unavailable;
+        const auto shadow = device->second.persistent.find(identity);
+        if (shadow == device->second.persistent.end() || shadow->second.vertex != Traits<Buffer>::kVertex)
+            return ir::RegistryResult::UnknownResource;
+        return state->shadows.Read(shadow->second.token, offset, destination, length);
+    }
+    if (found->second->owner != owner || found->second->vertex != Traits<Buffer>::kVertex)
+        return ir::RegistryResult::UnknownResource;
     if (!found->second->token.identity || !found->second->token.generation) return ir::RegistryResult::UnknownResource;
     return state->shadows.Read(found->second->token, offset, destination, length);
 }
@@ -811,15 +940,18 @@ IUnknown* BufferProxy::PinPrivateBuffer(IDirect3DDevice8* owner, IDirect3DDevice
 }
 bool BufferProxy::InstallFacadePrivateBridge(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
                                               const std::shared_ptr<PrivateObjectBridge>& bridge,
-                                              bool retain_buffers) noexcept {
+                                              bool retain_buffers,
+                                              const std::shared_ptr<t3render::markers::PrivateMarkerStore>& markers) noexcept {
     LastError error;
     if (!state_ || !owner || !facade || !bridge) return false;
+    if (markers && (retain_buffers || !markers->BindBufferObserver(state_))) return false;
     std::lock_guard<std::mutex> lock(state_->mutex);
     auto* device = state_->DeviceLocked(owner);
     if (!device || device->closing || device->private_facade) return false;
     device->private_facade = facade;
     device->private_bridge = bridge;
     device->retain_buffers = retain_buffers;
+    device->markers = markers;
     return true;
 }
 void BufferProxy::StopObservation() noexcept {
@@ -904,12 +1036,22 @@ void BufferProxy::EndBindingMutation(IDirect3DDevice8* owner, std::uint64_t toke
 ir::RegistryResult BufferProxy::ReadVertex(IDirect3DDevice8* owner, IDirect3DVertexBuffer8* native,
                                             std::size_t offset, void* destination, std::size_t length) noexcept {
     LastError error;
-    return Read(state_, owner, native, offset, destination, length);
+    return Read(state_, owner, native, offset, destination, length, false);
 }
 ir::RegistryResult BufferProxy::ReadIndex(IDirect3DDevice8* owner, IDirect3DIndexBuffer8* native,
                                            std::size_t offset, void* destination, std::size_t length) noexcept {
     LastError error;
-    return Read(state_, owner, native, offset, destination, length);
+    return Read(state_, owner, native, offset, destination, length, false);
+}
+ir::RegistryResult BufferProxy::ReadVertexFromGetter(IDirect3DDevice8* owner, IDirect3DVertexBuffer8* native,
+                                                     std::size_t offset, void* destination, std::size_t length) noexcept {
+    LastError error;
+    return Read(state_, owner, native, offset, destination, length, true);
+}
+ir::RegistryResult BufferProxy::ReadIndexFromGetter(IDirect3DDevice8* owner, IDirect3DIndexBuffer8* native,
+                                                    std::size_t offset, void* destination, std::size_t length) noexcept {
+    LastError error;
+    return Read(state_, owner, native, offset, destination, length, true);
 }
 
 }  // namespace t3render::buffers

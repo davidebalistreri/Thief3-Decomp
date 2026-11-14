@@ -838,7 +838,7 @@ bool ObserveExternalPrivateLifetime(HWND window, bool facade_mode, bool eager = 
     return true;
 }
 
-bool ObserveEagerBufferLifetime(HWND window, bool facade_mode) {
+bool ObserveEagerBufferLifetime(HWND window, bool facade_mode, bool persistent = false) {
     ComPtr<IDirect3D8> native_factory;
     native_factory.value = Direct3DCreate8(D3D_SDK_VERSION);
     if (!native_factory.value) return false;
@@ -850,7 +850,8 @@ bool ObserveEagerBufferLifetime(HWND window, bool facade_mode) {
     IDirect3D8* selected = native_factory.value;
     if (facade_mode) {
         native_factory->AddRef();
-        facade_factory.value = t3render::fixture::CreateEagerAllFacadeFactory(native_factory.value, buffers);
+        facade_factory.value = persistent ? t3render::fixture::CreatePersistentEagerFacadeFactory(native_factory.value, buffers) :
+                                           t3render::fixture::CreateEagerAllFacadeFactory(native_factory.value, buffers);
         if (!facade_factory.value) { native_factory->Release(); return false; }
         selected = facade_factory.value;
     }
@@ -862,39 +863,91 @@ bool ObserveEagerBufferLifetime(HWND window, bool facade_mode) {
         D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, device.put())) || !device.value) return false;
     const Vertex vertices[] = {{12, 12, 0.5f, 1, 0xffe43b3b}, {116, 12, 0.5f, 1, 0xffe43b3b},
                                {12, 116, 0.5f, 1, 0xffe43b3b}};
+    const WORD indices[]{0, 1, 2};
     ComPtr<IDirect3DVertexBuffer8> vertex;
+    ComPtr<IDirect3DIndexBuffer8> index;
     if (FAILED(device->CreateVertexBuffer(sizeof(vertices), D3DUSAGE_WRITEONLY, kFvf, D3DPOOL_MANAGED, vertex.put())) ||
-        !vertex.value) return false;
+        !vertex.value || FAILED(device->CreateIndexBuffer(sizeof(indices), D3DUSAGE_WRITEONLY, D3DFMT_INDEX16,
+                                                          D3DPOOL_MANAGED, index.put())) || !index.value) return false;
     BYTE* mapped = nullptr;
     if (FAILED(vertex->Lock(0, sizeof(vertices), &mapped, 0)) || !mapped) return false;
     std::memcpy(mapped, vertices, sizeof(vertices));
+    if (FAILED(vertex->Unlock())) return false;
+    mapped = nullptr;
+    if (FAILED(index->Lock(0, sizeof(indices), &mapped, 0)) || !mapped) return false;
+    std::memcpy(mapped, indices, sizeof(indices));
     const GUID blob_key{0x3ee22a9e, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
     const BYTE blob[]{0x18, 0x42};
-    if (FAILED(vertex->Unlock()) || FAILED(vertex->SetPrivateData(blob_key, blob, sizeof(blob), 0)) ||
-        FAILED(device->SetStreamSource(0, vertex.value, sizeof(Vertex)))) return false;
+    if (FAILED(index->Unlock()) || FAILED(vertex->SetPrivateData(blob_key, blob, sizeof(blob), 0)) ||
+        FAILED(index->SetPrivateData(blob_key, blob, sizeof(blob), 0)) ||
+        FAILED(device->SetStreamSource(0, vertex.value, sizeof(Vertex))) || FAILED(device->SetIndices(index.value, 0))) return false;
     IDirect3DDevice8* native = facade_mode ?
         static_cast<t3render::fixture::DeviceFixture*>(device.value)->NativeForFixture() : device.value;
     ComPtr<IDirect3DVertexBuffer8> native_vertex;
-    UINT stride = 0;
+    ComPtr<IDirect3DIndexBuffer8> native_index;
+    UINT stride = 0, base = 0;
     if (!native || FAILED(native->GetStreamSource(0, native_vertex.put(), &stride)) || !native_vertex.value ||
-        stride != sizeof(Vertex)) return false;
+        stride != sizeof(Vertex) || FAILED(native->GetIndices(native_index.put(), &base)) || !native_index.value || base != 0) return false;
     if (facade_mode) {
-        Vertex observed[3]{};
+        Vertex observed[3]{}; WORD observed_indices[3]{};
         if (buffers->ReadVertex(native, native_vertex.value, 0, observed, sizeof(observed)) != t3render::ir::RegistryResult::Ok ||
-            std::memcmp(observed, vertices, sizeof(vertices))) return false;
+            std::memcmp(observed, vertices, sizeof(vertices)) ||
+            buffers->ReadIndex(native, native_index.value, 0, observed_indices, sizeof(observed_indices)) != t3render::ir::RegistryResult::Ok ||
+            std::memcmp(observed_indices, indices, sizeof(indices))) return false;
     }
     DWORD block = 0;
-    if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &block)) || FAILED(device->SetStreamSource(0, nullptr, 0))) return false;
+    if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &block)) || FAILED(device->SetStreamSource(0, nullptr, 0)) ||
+        FAILED(device->SetIndices(nullptr, 0))) return false;
+    bool block_active = true;
     vertex->Release(); vertex.value = nullptr;
+    index->Release(); index.value = nullptr;
+    if (facade_mode && persistent) {
+        Vertex observed[3]{}; WORD observed_indices[3]{};
+        if (buffers->ReadVertex(native, native_vertex.value, 0, observed, sizeof(observed)) != t3render::ir::RegistryResult::UnknownResource ||
+            buffers->ReadVertexFromGetter(native, native_vertex.value, 0, observed, sizeof(observed)) != t3render::ir::RegistryResult::Ok ||
+            std::memcmp(observed, vertices, sizeof(vertices)) ||
+            buffers->ReadIndexFromGetter(native, native_index.value, 0, observed_indices, sizeof(observed_indices)) != t3render::ir::RegistryResult::Ok ||
+            std::memcmp(observed_indices, indices, sizeof(indices))) return false;
+    }
     if (FAILED(device->ApplyStateBlock(block)) || FAILED(device->GetStreamSource(0, vertex.put(), &stride)) ||
-        !vertex.value || stride != sizeof(Vertex)) return false;
+        !vertex.value || stride != sizeof(Vertex) || FAILED(device->GetIndices(index.put(), &base)) || !index.value || base != 0) return false;
     BYTE copied[sizeof(blob)]{}; DWORD copied_size = sizeof(copied);
     const HRESULT read = vertex->GetPrivateData(blob_key, copied, &copied_size);
-    if (facade_mode) {
-        Vertex observed[3]{};
-        if (read != E_NOTIMPL || buffers->ReadVertex(native, native_vertex.value, 0, observed, sizeof(observed)) !=
-                                  t3render::ir::RegistryResult::UnknownResource) return false;
-    } else if (FAILED(read) || copied_size != sizeof(blob) || std::memcmp(copied, blob, sizeof(blob))) return false;
+    BYTE copied_index[sizeof(blob)]{}; DWORD index_size = sizeof(copied_index);
+    const HRESULT index_read = index->GetPrivateData(blob_key, copied_index, &index_size);
+    if (facade_mode && !persistent) {
+        Vertex observed[3]{}; WORD observed_indices[3]{};
+        if (read != E_NOTIMPL || index_read != E_NOTIMPL ||
+            buffers->ReadVertex(native, native_vertex.value, 0, observed, sizeof(observed)) != t3render::ir::RegistryResult::UnknownResource ||
+            buffers->ReadIndex(native, native_index.value, 0, observed_indices, sizeof(observed_indices)) != t3render::ir::RegistryResult::UnknownResource) return false;
+    } else if (FAILED(read) || copied_size != sizeof(blob) || std::memcmp(copied, blob, sizeof(blob)) ||
+               FAILED(index_read) || index_size != sizeof(blob) || std::memcmp(copied_index, blob, sizeof(blob))) return false;
+    if (facade_mode && persistent) {
+        Vertex observed[3]{}; WORD observed_indices[3]{};
+        if (buffers->ReadVertex(native, native_vertex.value, 0, observed, sizeof(observed)) != t3render::ir::RegistryResult::Ok ||
+            std::memcmp(observed, vertices, sizeof(vertices)) ||
+            buffers->ReadIndex(native, native_index.value, 0, observed_indices, sizeof(observed_indices)) != t3render::ir::RegistryResult::Ok ||
+            std::memcmp(observed_indices, indices, sizeof(indices))) return false;
+    }
+
+    if (persistent) {
+        if (FAILED(device->SetStreamSource(0, nullptr, 0)) || FAILED(device->SetIndices(nullptr, 0)) || FAILED(device->DeleteStateBlock(block)) ||
+            FAILED(device->Reset(&pp))) return false;
+        block_active = false;
+        if (facade_mode) {
+            Vertex observed[3]{}; WORD observed_indices[3]{};
+            if (buffers->ReadVertex(native, native_vertex.value, 0, observed, sizeof(observed)) !=
+                t3render::ir::RegistryResult::UnknownResource ||
+                buffers->ReadIndex(native, native_index.value, 0, observed_indices, sizeof(observed_indices)) !=
+                t3render::ir::RegistryResult::UnknownResource) return false;
+        }
+        copied_size = sizeof(copied);
+        if (FAILED(vertex->GetPrivateData(blob_key, copied, &copied_size)) || copied_size != sizeof(blob) ||
+            std::memcmp(copied, blob, sizeof(blob))) return false;
+        index_size = sizeof(copied_index);
+        if (FAILED(index->GetPrivateData(blob_key, copied_index, &index_size)) || index_size != sizeof(blob) ||
+            std::memcmp(copied_index, blob, sizeof(blob))) return false;
+    }
 
     auto destroyed = std::make_shared<std::atomic<bool>>(false);
     auto* holder = new (std::nothrow) PrivateDeviceHolder(device.value, destroyed);
@@ -905,8 +958,11 @@ bool ObserveEagerBufferLifetime(HWND window, bool facade_mode) {
     }
     const HRESULT stored = native_vertex->SetPrivateData(holder_key, holder, sizeof(IUnknown*), D3DSPD_IUNKNOWN);
     holder->Release();
-    if (FAILED(stored) || FAILED(device->SetStreamSource(0, nullptr, 0)) || FAILED(device->DeleteStateBlock(block))) return false;
+    if (FAILED(stored) || FAILED(device->SetStreamSource(0, nullptr, 0)) || FAILED(device->SetIndices(nullptr, 0)) ||
+        (block_active && FAILED(device->DeleteStateBlock(block)))) return false;
     native_vertex->Release(); native_vertex.value = nullptr;
+    native_index->Release(); native_index.value = nullptr;
+    index->Release(); index.value = nullptr;
     vertex->Release(); vertex.value = nullptr;
     if (!destroyed->load()) return false;
     const unsigned resources_closed = t3render::fixture::resource_facade_close_successes.load();
@@ -914,8 +970,10 @@ bool ObserveEagerBufferLifetime(HWND window, bool facade_mode) {
     const ULONG device_remaining = device->Release(); device.value = nullptr;
     if (facade_mode && (device_remaining != 0 || t3render::fixture::resource_facade_close_successes != resources_closed + 1 ||
         t3render::fixture::buffer_facade_close_successes != buffers_closed + 1)) return false;
-    std::printf("eager_buffer_lifetime=PASS shadow=%s provenance=%s\n",
-                facade_mode ? "unavailable" : "not_observed", facade_mode ? "unavailable" : "preserved");
+    if (persistent) std::printf("persistent_eager_buffer=PASS shadow=%s provenance=preserved reset=%s\n",
+                                facade_mode ? "preserved" : "not_observed", facade_mode ? "unknown" : "not_observed");
+    else std::printf("eager_buffer_lifetime=PASS shadow=%s provenance=%s\n",
+                     facade_mode ? "unavailable" : "not_observed", facade_mode ? "unavailable" : "preserved");
     return true;
 }
 
@@ -1647,12 +1705,13 @@ int wmain(int argc, wchar_t** argv) {
     if (ok) ok = ObserveExternalPrivateLifetime(window, facade_mode);
     if (ok) ok = ObserveExternalPrivateLifetime(window, facade_mode, true);
     if (ok) ok = ObserveEagerBufferLifetime(window, facade_mode);
+    if (ok) ok = ObserveEagerBufferLifetime(window, facade_mode, true);
 #endif
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
     if (facade_mode) {
         ok = ok && t3render::fixture::buffer_facade_close_successes ==
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
-             8 &&
+             9 &&
 #else
              1 &&
 #endif
@@ -1661,7 +1720,7 @@ int wmain(int argc, wchar_t** argv) {
     }
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
     if (facade_mode) {
-        ok = ok && t3render::fixture::resource_facade_close_successes == 8 &&
+        ok = ok && t3render::fixture::resource_facade_close_successes == 9 &&
              t3render::fixture::resource_facade_close_failures == 0;
         if (ok) std::printf("resource_facade_final_close=PASS\n");
     }

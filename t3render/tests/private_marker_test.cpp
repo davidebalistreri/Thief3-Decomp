@@ -1,4 +1,4 @@
-#include "d3d8_private_marker.hpp"
+#include "../src/private_marker.hpp"
 
 #include <cassert>
 #include <condition_variable>
@@ -6,7 +6,7 @@
 #include <mutex>
 #include <thread>
 
-using namespace t3render::resource_fixture;
+using namespace t3render::markers;
 
 namespace {
 struct Native final {
@@ -40,6 +40,13 @@ void* Identity(unsigned n) { return reinterpret_cast<void*>(static_cast<std::uin
 
 int main() {
     const GUID data_key{42};
+    PrivateMarkerStore ownership(2);
+    auto owner = std::make_shared<int>(1);
+    auto other = std::make_shared<int>(2);
+    assert(ownership.BindBufferObserver(owner) && ownership.BindBufferObserver(owner));
+    assert(!ownership.BindBufferObserver(other));
+    owner.reset();
+    assert(!ownership.BindBufferObserver(other));
     PrivateMarkerStore store(2);
     Native first;
     first.on_store = [&] { assert(!store.Acquire(Identity(1), &first, false)); };

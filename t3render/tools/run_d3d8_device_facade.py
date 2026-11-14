@@ -159,6 +159,10 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
                         "eager_buffer_lifetime=PASS shadow=not_observed provenance=preserved")
         if [line for line in lines if line.startswith("eager_buffer_lifetime=")] != [eager_buffer]:
             raise RunError("eager buffer lifetime or capture limitation is missing or conflicting")
+        persistent = ("persistent_eager_buffer=PASS shadow=preserved provenance=preserved reset=unknown" if mode == "facade" else
+                      "persistent_eager_buffer=PASS shadow=not_observed provenance=preserved reset=not_observed")
+        if [line for line in lines if line.startswith("persistent_eager_buffer=")] != [persistent]:
+            raise RunError("persistent eager buffer observation is missing or conflicting")
         for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                        "resource_facade_volume_roundtrips=PASS",
                        "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
@@ -281,6 +285,7 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
                                  "Another diagnostic deliberately stores an external COM object holding the facade device in a borrowed native texture, then breaks its cycle.",
                                  "The separate eager-retirement diagnostic attaches a reserved-GUID marker to native resources; it is not production-transparent.",
                                  "The eager-buffer diagnostic loses WRITEONLY shadow bytes and private-data provenance after wrapper retirement.",
+                                 "The separate persistent-buffer diagnostic retains shadows across selected state-block reacquisition but invalidates them on reset.",
                                  "Two reset scenarios were exercised; runtime concurrency and comprehensive state-block behavior remain untested.",
                                  "Six synthetic triangles and selected fixed-function states only; no gameplay parity."]
     stage = "setup"

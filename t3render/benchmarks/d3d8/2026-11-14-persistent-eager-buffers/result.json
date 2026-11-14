@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_persistent_eager_buffers",
+  "date": "2026-11-14",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "c9b34ac9769c8b6756885c5b7dba85656bd97378d435e305509c1c93c8ed5c21",
+    "t3render/src/buffer_proxy.cpp": "a2c4e68d997002df8d340025f9ed2a098c0b6d4ce1807751211d41ef7522c434",
+    "t3render/src/buffer_proxy.hpp": "542eb88a0c86e5dc21e4cf6ddef2c67c28f2ddaf257a5f1fe434fd36b3c988f0",
+    "t3render/src/private_blob.hpp": "aff906733cbfbc136ec7b72aa9f65f1905b246db193e9f8b370688186ee47bfb",
+    "t3render/src/private_marker.hpp": "37b58cc95fb7227556570b3ed5956ac66d7a24ca7733f0cc7f4adedc2b70857a",
+    "t3render/ir/buffer_registry.cpp": "9e24931212d54e0ee58b7be7313a85510e9fc867f3a3b20297eff3e1f6138b84",
+    "t3render/ir/buffer_shadow.cpp": "9cfed54a6fcf4718e80fd1d8301a8afa5f84852ac70b428938b06d1e64cddafe",
+    "t3render/tests/d3d8_resource_facade.hpp": "e9224804b106cfb3e1a149233854bbe3cd0c882c3a8ef201776b356cfe346eea",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "21bdd67358220b05c452d35c84f105ef2a599328490784fe9eeba56d71ce9b54",
+    "t3render/tests/d3d8_device_facade.hpp": "bb9952f26ccc3f934c072c0b2dbfe89e5a56bdf08d2d62e3797aad7ae06aa946",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "0d4c0b99e6d9a977439ed3805ece30924d81e3f92ca17d86d22bd54130e1085b",
+    "t3render/tests/buffer_proxy_test.cpp": "59671edd28abc1b2bbf5d4f4ec05094438b52476e9c1fca1a0de7f857d40e471",
+    "t3render/tests/private_marker_test.cpp": "4a9f95013c2bf1d0c9dae78b5e12855df876721a9ee6b405251a97c75441068b",
+    "t3render/tests/test_private_marker.py": "e592ebfa6bbfa3434dd4985d0673bffe66ed44f0d3f8b0c7e789e4fb7d2bc77c",
+    "t3render/tests/buffer_proxy_fakes/d3d8.h": "cb01c9b24059e25590872998bfffefff228fb5052f3a3256e6338eeb5d7d206b",
+    "t3render/tests/test_d3d8_device_facade_runner.py": "625a0ed401496db12e4ce2ce6f28824db54a397bbc20c29a6fa7d59c6d397217",
+    "t3render/tools/run_d3d8_device_facade.py": "fd2e5d736a91bf90a9d1372e007fda2cd99a4ee8c098719fc6cb10ca83b405e4"
+  },
+  "fixture_sha256": "eaa97101190ac6506ade5bf834cdde7635bdc2601001a37ae0b8ae19eb0d7c09",
+  "result": {
+    "managed_writeonly_vb_ib_shadow_before_retirement": "known",
+    "trusted_getter_shadow_without_wrappers": "preserved",
+    "stateblock_reacquired_shadows": "preserved",
+    "vb_ib_private_blob_after_reacquisition": "preserved",
+    "shadow_after_reset": "unknown",
+    "eager_external_holder_released_without_cycle": true,
+    "parity_records_each_default_fixture": 159,
+    "rgb_ppm_sha256_both_default_fixture": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+    "baseline_log_sha256": "ce9a49660e469e700bdf67e3b4eef01fb52e63d04edda152e71e2dc01d361cce",
+    "facade_log_sha256": "4010bf72cd69f240a299af09ff2a71b466cdfb3b8b0d90e188c8193ef08d90ce"
+  },
+  "limitations": [
+    "Opt-in isolated fixture experiment only; not integrated into the proxy or TDS.",
+    "External IUnknown forwarding is simulated through a borrowed native VB; actual facade rejects external COM values.",
+    "Marker reserves native private-data GUID and requires a closed native alias boundary.",
+    "Canonical lookup requires a valid caller-owned native getter reference; old shadows are invalidated on reset.",
+    "The RGB/state comparison uses the default policy; the persistent eager-buffer test is a separate lifetime experiment.",
+    "No unified observer or DX12 replay of these buffers; one Wine runtime, not native Windows or TDS."
+  ]
+}

@@ -790,7 +790,7 @@ private:
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
     DeviceFixture(IDirect3DDevice8* native, IDirect3D8* factory, IDirect3D8* native_factory,
                   std::shared_ptr<t3render::buffers::BufferProxy> buffers, bool retain_resources,
-                  bool retain_buffers) noexcept
+                  bool retain_buffers, bool preserve_buffer_shadows) noexcept
         : native_(native), factory_(factory), native_factory_(native_factory), buffers_(std::move(buffers)) {
         factory_->AddRef();
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
@@ -799,12 +799,14 @@ private:
             resources_ = t3render::resource_fixture::Router::Create(native_, this, 4096, bridge, retain_resources);
             if (resources_) {
                 bridge->Attach(resources_);
-                if (!buffers_->InstallFacadePrivateBridge(native_, this, bridge, retain_buffers)) resources_.reset();
+                auto markers = preserve_buffer_shadows ? resources_->PrivateMarkers() : nullptr;
+                if (!buffers_->InstallFacadePrivateBridge(native_, this, bridge, retain_buffers, markers)) resources_.reset();
             }
         } catch (...) {}
 #else
         (void)retain_resources;
         (void)retain_buffers;
+        (void)preserve_buffer_shadows;
 #endif
     }
     void InvalidateBuffers() noexcept {
@@ -865,12 +867,14 @@ public:
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
     static IDirect3D8* AdoptBuffers(IDirect3D8* native,
                                     std::shared_ptr<t3render::buffers::BufferProxy> buffers,
-                                    bool retain_resources = true, bool retain_buffers = true) noexcept {
+                                    bool retain_resources = true, bool retain_buffers = true,
+                                    bool preserve_buffer_shadows = false) noexcept {
         const DWORD before = GetLastError();
         auto* facade = native && buffers ? new (std::nothrow) DeviceFixtureFactory(native) : nullptr;
         if (facade) {
             facade->buffers_ = std::move(buffers);
             facade->retain_resources_ = retain_resources; facade->retain_buffers_ = retain_buffers;
+            facade->preserve_buffer_shadows_ = preserve_buffer_shadows;
         }
         SetLastError(before);
         return facade;
@@ -908,7 +912,8 @@ public:
             return FAILED(hr) ? hr : E_FAIL;
         }
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
-        auto* facade = new (std::nothrow) DeviceFixture(native_device, this, native_, buffers_, retain_resources_, retain_buffers_);
+        auto* facade = new (std::nothrow) DeviceFixture(native_device, this, native_, buffers_, retain_resources_, retain_buffers_,
+                                                        preserve_buffer_shadows_);
 #else
         auto* facade = new (std::nothrow) DeviceFixture(native_device, this, native_);
 #endif
@@ -973,6 +978,7 @@ private:
     std::shared_ptr<t3render::buffers::BufferProxy> buffers_;
     bool retain_resources_ = true;
     bool retain_buffers_ = true;
+    bool preserve_buffer_shadows_ = false;
 #endif
     FixtureReferenceCount refs_;
 };
@@ -997,6 +1003,10 @@ inline IDirect3D8* CreateEagerResourceFacadeFactory(IDirect3D8* native,
 inline IDirect3D8* CreateEagerAllFacadeFactory(IDirect3D8* native,
                                                std::shared_ptr<t3render::buffers::BufferProxy> buffers) noexcept {
     return DeviceFixtureFactory::AdoptBuffers(native, std::move(buffers), false, false);
+}
+inline IDirect3D8* CreatePersistentEagerFacadeFactory(IDirect3D8* native,
+                                                      std::shared_ptr<t3render::buffers::BufferProxy> buffers) noexcept {
+    return DeviceFixtureFactory::AdoptBuffers(native, std::move(buffers), false, false, true);
 }
 #endif
 #endif

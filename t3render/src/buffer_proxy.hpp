@@ -19,6 +19,14 @@ namespace t3render::buffers {
 struct PrivateObjectBridge;
 using SnapshotReader = bool (*)(void* context, const void* source, void* destination, std::size_t length);
 
+enum class InvalidationCause { Internal, Explicit, StateBlock, ProcessVertices, ExternalPrivateData };
+
+struct DrawFailure {
+    const char* status = "unavailable"; // static diagnostic string
+    const char* cause = "unknown";      // static diagnostic string
+    unsigned source_line = 0;           // buffer_proxy.cpp, 0 if unavailable
+};
+
 class BufferProxy final {
 public:
     struct State;
@@ -164,13 +172,16 @@ public:
     // Once capture stops, free all shadows while retaining the weak wrapper
     // mappings needed to forward already-issued COM objects until Release.
     void StopObservation() noexcept;
-    void InvalidateDevice(IDirect3DDevice8* owner) noexcept;
+    void InvalidateDevice(IDirect3DDevice8* owner, InvalidationCause cause = InvalidationCause::Explicit) noexcept;
     void InvalidateVertex(IDirect3DDevice8* owner, IDirect3DVertexBuffer8* input) noexcept;
 
     // A nonzero token marks a draw window from before snapshot until after the
     // native draw returns. EndDraw returns false if overlap/escape invalidated
     // the window. Direct writes to a mapped pointer remain unobservable.
     std::uint64_t BeginDraw(IDirect3DDevice8* owner) noexcept;
+    // Diagnostic only: explains why a draw ticket was unavailable. It never
+    // restores a poisoned device or attests the safety of subsequent calls.
+    DrawFailure DescribeDrawFailure(IDirect3DDevice8* owner) noexcept;
     bool EndDraw(IDirect3DDevice8* owner, std::uint64_t token) noexcept;
 
     // Cover the entire native SetStreamSource/SetIndices/ProcessVertices call.

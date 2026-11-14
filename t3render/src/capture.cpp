@@ -699,7 +699,8 @@ void CaptureBuffered(std::ostream& out, CaptureState& s, IDirect3DDevice8* devic
     const bool offset_known = first_known && stride_known && Product(first, stride, vertex_offset);
     const bool vertex_size_known = vertex_count_known && stride_known && Product(vertex_count, stride, vertex_size);
     UpBytes vertex;
-    if (FAILED(vertex_hr)) vertex.status = "getter_failed";
+    if (draw.buffer_bindings && !observer.valid) vertex.status = "window_unavailable";
+    else if (FAILED(vertex_hr)) vertex.status = "getter_failed";
     else if (!vb) vertex.status = "unbound";
     else if (!first_known || !vertex_count_known) vertex.status = "unknown_range";
     else if (!offset_known || !vertex_size_known || first > UINT64_C(0xffffffff) ||
@@ -719,7 +720,8 @@ void CaptureBuffered(std::ostream& out, CaptureState& s, IDirect3DDevice8* devic
     bool index_format_known = false;
     UpBytes index;
     if (indexed) {
-        if (FAILED(index_hr)) index.status = "getter_failed";
+        if (draw.buffer_bindings && !observer.valid) index.status = "window_unavailable";
+        else if (FAILED(index_hr)) index.status = "getter_failed";
         else if (!ib) index.status = "unbound";
         else {
             D3DINDEXBUFFER_DESC desc{};
@@ -742,7 +744,14 @@ void CaptureBuffered(std::ostream& out, CaptureState& s, IDirect3DDevice8* devic
         }
     }
 
-    out << ",\"buffer_data\":{\"source\":\"application_lock_shadow\",\"vertex\":{";
+    out << ",\"buffer_data\":{\"source\":\"application_lock_shadow\"";
+    if (!observer.valid && observer.failure_status && observer.failure_cause) {
+        out << ",\"window_failure\":{\"status\":\"" << observer.failure_status
+            << "\",\"cause\":\"" << observer.failure_cause << "\",\"source_line\":";
+        if (observer.failure_line) out << observer.failure_line; else out << "null";
+        out << '}';
+    }
+    out << ",\"vertex\":{";
     BytesJson(out, vertex);
     out << ",\"resource\":"; Id(out, vb);
     out << ",\"stream\":0,\"first_vertex\":";

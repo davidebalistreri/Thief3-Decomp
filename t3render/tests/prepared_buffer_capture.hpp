@@ -15,6 +15,12 @@ public:
         const DWORD error = GetLastError();
         bindings_.device = device;
         observer_ = {this, draw != 0, ReadVertex, ReadIndex};
+        if (device && !draw) {
+            const auto failure = manager.DescribeDrawFailure(device);
+            observer_.failure_status = failure.status;
+            observer_.failure_cause = failure.cause;
+            observer_.failure_line = failure.source_line;
+        }
         if (device && draw) {
             bindings_.vertex_result = device->GetStreamSource(0, &bindings_.vertex, &bindings_.stride);
             if (SUCCEEDED(bindings_.vertex_result) && bindings_.vertex)

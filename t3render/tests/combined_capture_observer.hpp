@@ -60,14 +60,14 @@ public:
         else { WriterScope scope; CaptureReset(native_, presentation, hr); }
         SetLastError(before);
     }
-    void Unsupported() noexcept {
+    void Unsupported(buffers::InvalidationCause cause = buffers::InvalidationCause::Explicit) noexcept {
         const DWORD before = GetLastError();
         if (writer_active_) {
             shaders_.MarkUnsafe(device_);
             deferred_abandon_ = true;
         } else {
             Invalidate();
-            buffers_.InvalidateDevice(native_);
+            buffers_.InvalidateDevice(native_, cause);
 #ifndef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
             WriterScope scope;
             CaptureAbandonDevice(native_);
@@ -97,7 +97,7 @@ public:
             }
         }
         const auto ticket = allowed ? shaders_.BeginSet(device_) : ir::ShaderTicket{};
-        if (!ticket) Unsupported();
+        if (!ticket) Unsupported(buffers::InvalidationCause::StateBlock);
         SetLastError(before);
         return ticket;
     }
@@ -118,7 +118,7 @@ public:
             std::lock_guard<std::mutex> lock(state_blocks_mutex_);
             accepted = state_blocks_.erase(token) == 1;
         }
-        if (!accepted) Unsupported();
+        if (!accepted) Unsupported(buffers::InvalidationCause::StateBlock);
         SetLastError(before);
     }
 

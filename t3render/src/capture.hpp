@@ -21,6 +21,9 @@ struct BufferObserver {
     bool valid = false;
     bool (*read_vertex)(void*, IDirect3DDevice8*, IDirect3DVertexBuffer8*, std::size_t, void*, std::size_t) = nullptr;
     bool (*read_index)(void*, IDirect3DDevice8*, IDirect3DIndexBuffer8*, std::size_t, void*, std::size_t) = nullptr;
+    const char* failure_status = nullptr; // optional static diagnostic strings
+    const char* failure_cause = nullptr;
+    unsigned failure_line = 0;
 };
 
 // Optional getter results sampled outside the writer mutex. The caller owns

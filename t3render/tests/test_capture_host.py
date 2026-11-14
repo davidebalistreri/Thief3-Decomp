@@ -409,7 +409,7 @@ class CaptureHostTests(unittest.TestCase):
         events = self.records()
         draws = [event for event in events if event["event"] == "draw"]
         results = {event["op_id"]: event for event in events if event["event"] == "draw_result"}
-        self.assertEqual(len(draws), 3)
+        self.assertEqual(len(draws), 4)
         first = draws[0]
         self.assertEqual(bytes.fromhex(first["buffer_data"]["vertex"]["data"]), bytes(range(160, 256)))
         self.assertEqual(bytes.fromhex(first["buffer_data"]["index"]["data"]), b"\x02\x00\x03\x00\x04\x00")
@@ -418,10 +418,16 @@ class CaptureHostTests(unittest.TestCase):
         self.assertEqual(first["vertex_constants"]["bits"], [0x3f800000, 0, 0, 0])
         self.assertTrue(results[first["op_id"]]["shader_stable"])
         self.assertTrue(results[first["op_id"]]["buffer_stable"])
-        for draw in draws[1:]:
+        for draw in draws[1:3]:
             for component in ("vertex", "index"):
                 self.assertEqual(draw["buffer_data"][component]["status"], "getter_failed")
                 self.assertIsNone(draw["buffer_data"][component]["data"])
+        self.assertEqual(draws[3]["buffer_data"]["window_failure"],
+                         {"status": "device_unsafe", "cause": "state_block", "source_line": 123})
+        self.assertFalse(results[draws[3]["op_id"]]["buffer_stable"])
+        for component in ("vertex", "index"):
+            self.assertEqual(draws[3]["buffer_data"][component]["status"], "window_unavailable")
+            self.assertIsNone(draws[3]["buffer_data"][component]["data"])
 
     def test_buffered_observations_preserve_exact_ranges_and_result_stability(self):
         self.run_capture("buffered", frame="1")

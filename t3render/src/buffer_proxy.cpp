@@ -13,6 +13,22 @@
 
 namespace t3render::buffers {
 namespace {
+#if defined(__GNUC__) || defined(__clang__)
+#define T3RENDER_CALL_LINE __builtin_LINE()
+#else
+#define T3RENDER_CALL_LINE 0u
+#endif
+
+const char* CauseName(InvalidationCause cause) noexcept {
+    switch (cause) {
+    case InvalidationCause::Internal: return "internal";
+    case InvalidationCause::Explicit: return "explicit";
+    case InvalidationCause::StateBlock: return "state_block";
+    case InvalidationCause::ProcessVertices: return "process_vertices";
+    case InvalidationCause::ExternalPrivateData: return "external_private_data";
+    }
+    return "unknown";
+}
 struct LastError final {
     DWORD value = GetLastError();
     ~LastError() { SetLastError(value); }
@@ -52,6 +68,8 @@ struct PersistentShadow {
 };
 struct DeviceState {
     bool unsafe = false;
+    unsigned poison_line = 0;
+    InvalidationCause poison_cause = InvalidationCause::Internal;
     bool closing = false;
     bool reset_recovery = false;
     std::uint64_t draw = 0, mutation = 0, reset = 0;
@@ -81,6 +99,7 @@ struct BufferProxy::State {
     std::unordered_map<IDirect3DDevice8*, DeviceState> devices;
     std::uint64_t next_operation = 1, next_draw = 1, next_reset = 1;
     bool global_unsafe = false;
+    unsigned global_poison_line = 0;
 
     void ClearLockLocked(Control* item) noexcept {
         if (item->counted_lock) {
@@ -103,9 +122,10 @@ struct BufferProxy::State {
         shadows.Abandon(item->token);
         ClearLockLocked(item);
     }
-    void PoisonAllLocked() noexcept {
+    void PoisonAllLocked(unsigned line = T3RENDER_CALL_LINE) noexcept {
         if (global_unsafe) return;
         global_unsafe = true;
+        global_poison_line = line;
         for (auto& entry : wrappers) AbandonLocked(entry.second);
         for (auto& entry : devices) {
             entry.second.unsafe = true; entry.second.draw = 0;
@@ -123,10 +143,12 @@ struct BufferProxy::State {
         try { return &devices.emplace(owner, DeviceState{}).first->second; }
         catch (...) { PoisonAllLocked(); return nullptr; }
     }
-    void PoisonLocked(IDirect3DDevice8* owner) noexcept {
+    void PoisonLocked(IDirect3DDevice8* owner, unsigned line = T3RENDER_CALL_LINE,
+                      InvalidationCause cause = InvalidationCause::Internal) noexcept {
         auto* device = DeviceLocked(owner);
         if (!device || device->unsafe) return;
-        device->unsafe = true; device->draw = 0; device->mutation = 0;
+        device->unsafe = true; device->poison_line = line; device->poison_cause = cause;
+        device->draw = 0; device->mutation = 0;
         device->reset = 0; device->reset_recovery = false;
         for (const auto& shadow : device->persistent) shadows.Abandon(shadow.second.token);
         for (auto& entry : wrappers)
@@ -304,7 +326,7 @@ public:
                     if (!marker_enabled || !marker || !data) return E_NOTIMPL;
                     {
                         std::lock_guard<std::mutex> lock(state_->mutex);
-                        state_->PoisonLocked(owner);
+                        state_->PoisonLocked(owner, __LINE__, InvalidationCause::ExternalPrivateData);
                     }
                     // The facade may also be observing shader or other state;
                     // notify it outside the buffer mutex before forwarding an
@@ -1020,11 +1042,11 @@ void BufferProxy::StopObservation() noexcept {
     std::lock_guard<std::mutex> lock(state_->mutex);
     state_->PoisonAllLocked();
 }
-void BufferProxy::InvalidateDevice(IDirect3DDevice8* owner) noexcept {
+void BufferProxy::InvalidateDevice(IDirect3DDevice8* owner, InvalidationCause cause) noexcept {
     LastError error;
     if (!state_) return;
     std::lock_guard<std::mutex> lock(state_->mutex);
-    state_->PoisonLocked(owner);
+    state_->PoisonLocked(owner, __LINE__, cause);
 }
 void BufferProxy::InvalidateVertex(IDirect3DDevice8* owner, IDirect3DVertexBuffer8* input) noexcept {
     LastError error;
@@ -1060,6 +1082,17 @@ std::uint64_t BufferProxy::BeginDraw(IDirect3DDevice8* owner) noexcept {
     }
     device->draw = state_->next_draw++;
     return device->draw;
+}
+DrawFailure BufferProxy::DescribeDrawFailure(IDirect3DDevice8* owner) noexcept {
+    LastError error;
+    if (!state_) return {"manager_unavailable", "unknown", 0};
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (state_->global_unsafe) return {"global_unsafe", "internal", state_->global_poison_line};
+    const auto device = state_->devices.find(owner);
+    if (device == state_->devices.end()) return {"device_unknown", "unknown", 0};
+    if (device->second.unsafe)
+        return {"device_unsafe", CauseName(device->second.poison_cause), device->second.poison_line};
+    return {"window_unavailable", "unknown", 0};
 }
 bool BufferProxy::EndDraw(IDirect3DDevice8* owner, std::uint64_t token) noexcept {
     LastError error;

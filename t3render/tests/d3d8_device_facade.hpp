@@ -97,7 +97,7 @@ public:
     void ExternalObserved() noexcept override {
         const DWORD error = GetLastError();
 #ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
-        if (observer_) observer_->Unsupported();
+        if (observer_) observer_->Unsupported(t3render::buffers::InvalidationCause::ExternalPrivateData);
         else buffers_->InvalidateDevice(native_);
 #else
         buffers_->InvalidateDevice(native_);
@@ -721,7 +721,7 @@ public:
     }
     HRESULT STDMETHODCALLTYPE ProcessVertices(UINT SrcStartIndex,UINT DestIndex,UINT VertexCount,IDirect3DVertexBuffer8 * pDestBuffer,DWORD Flags) override {
 #ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
-        if (combined_observer_) combined_observer_->Unsupported();
+        if (combined_observer_) combined_observer_->Unsupported(t3render::buffers::InvalidationCause::ProcessVertices);
 #endif
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
         if (buffers_) {

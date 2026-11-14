@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "tds_bedroom_experimental_combined_observer",
+  "status": "PARTIAL",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86 virtual desktop",
+  "scene": "SouthQuarter1_int1, Garrett's Building save, bedroom",
+  "proxy_commit": "c7f63c12",
+  "proxy_sha256": "81ca5287aa368c734d857fe26a6d939c82ca3d448d6c0f5001c7dd2435eadf95",
+  "temporary_proxy_removed": true,
+  "capture": {
+    "frames": 1,
+    "frame": 1287,
+    "present_hresult": 0,
+    "draws": 444,
+    "successful_draws": 444,
+    "indexed_draws": 435,
+    "up_draws": 9,
+    "viewport_and_view_projection_observed": 444,
+    "render_states_observed": 444,
+    "shader_stable": 444,
+    "declaration_candidates": 422,
+    "vertex_program_candidates": 86,
+    "vertex_program_unsupported_version": 336,
+    "vertex_constant_samples": 444,
+    "up_vertex_payloads": 9,
+    "indexed_buffer_windows_stable": 0,
+    "indexed_vertex_and_index_payloads": 0,
+    "draws_with_all_required_components": 0,
+    "texture_content_captured": false,
+    "raw_trace_sha256": "500c419c67be9399558dce72e5fb84335c42c72940c75a9b34d70ed7b3bf300e",
+    "partial_ir_sha256": "b535c16ebdc83251425643b75ed509ddbf449865dc7c8ab868d63f08e2e25b4e"
+  },
+  "observations": [
+    "The user reported truncated menu text; a controlled native-versus-facade comparison has not established the cause.",
+    "The independent D3D8 stream and index binding getters succeeded for all 435 indexed draws.",
+    "The buffer-data getter_failed status can also mean that a draw ticket was unavailable and prepared getters were never attempted. Independent binding getters succeeded; the trace does not distinguish these cases.",
+    "No first-invalidation cause was recorded in this version; do not infer one from the incomplete buffer evidence.",
+    "Shader declarations and programs are application-memory candidates, not proof of GPU input. The scanner accepts vs_1_1 only."
+  ],
+  "limitations": [
+    "No DX12 replay or synchronized image comparison of this TDS frame.",
+    "No claim of COM, gameplay, stealth, texture-content, native Windows or concurrent-call parity."
+  ],
+  "local_results": "build/t3render-captures/bedroom-combined-20261114"
+}

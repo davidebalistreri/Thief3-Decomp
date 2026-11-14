@@ -586,13 +586,13 @@ int main(int argc, char** argv) {
         call.min_vertex_index = 2; call.num_vertices = 3;
         call.start_index = 1; call.primitive_count = 1;
         call.buffer_observer = &observer; call.buffer_bindings = &bindings; call.shader_snapshot = &shader;
-        auto emit = [&]() {
+        auto emit = [&](bool stable = true) {
             const auto stream_calls = device.stream_getters, index_calls = device.index_getters;
             const auto token = t3render::CaptureDraw(&device, call);
             // General state enumeration still observes two streams and the
             // indices. Buffered data must reuse the prepared getter results.
             if (!token || device.stream_getters - stream_calls != 2 || device.index_getters - index_calls != 1) return false;
-            t3render::CaptureShaderDrawResult(&device, token, S_OK, 1, true);
+            t3render::CaptureShaderDrawResult(&device, token, S_OK, stable ? 1 : 0, true);
             return true;
         };
         if (!emit()) return 8;
@@ -600,6 +600,9 @@ int main(int argc, char** argv) {
         if (!emit()) return 8;
         bindings.device = &device; bindings.vertex_result = E_FAIL; bindings.index_result = E_FAIL;
         if (!emit()) return 8;
+        observer.valid = false; observer.failure_status = "device_unsafe";
+        observer.failure_cause = "state_block"; observer.failure_line = 123;
+        if (!emit(false)) return 8;
         bindings.vertex->Release(); bindings.index->Release();
         if (state.vertex_reads != 1 || state.index_reads != 1) return 8;
         t3render::CapturePresent(&device, S_OK);

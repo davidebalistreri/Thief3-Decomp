@@ -309,6 +309,12 @@ void BindingMutationWindows() {
         const auto mutation = proxy->BeginBindingMutation(Owner());
         assert(mutation);
         assert(proxy->BeginDraw(Owner()) == 0); // Set started first; GPU draw overlaps.
+        const auto failure = proxy->DescribeDrawFailure(Owner());
+        assert(!std::strcmp(failure.status, "device_unsafe"));
+        assert(!std::strcmp(failure.cause, "internal"));
+#if defined(__GNUC__) || defined(__clang__)
+        assert(failure.source_line != 0);
+#endif
         proxy->EndBindingMutation(Owner(), mutation);
         assert(proxy->ReadVertex(Owner(), &raw, 0, out, 2) == RegistryResult::Unavailable);
         assert(buffer->Release() == 0);
@@ -1546,7 +1552,14 @@ void ResetProcessAndFailures() {
     proxy->InvalidateVertex(Owner(), v);
     assert(proxy->ReadVertex(Owner(), &vb, 0, out, 2) == RegistryResult::Unavailable);
     assert(proxy->ReadIndex(Owner(), &ib, 0, out, 2) == RegistryResult::Ok);
-    proxy->InvalidateDevice(Owner());
+    proxy->InvalidateDevice(Owner(), InvalidationCause::StateBlock);
+    auto failure_reason = proxy->DescribeDrawFailure(Owner());
+    assert(!std::strcmp(failure_reason.status, "device_unsafe"));
+    assert(!std::strcmp(failure_reason.cause, "state_block"));
+    assert(failure_reason.source_line != 0);
+    proxy->InvalidateDevice(Owner(), InvalidationCause::ProcessVertices);
+    failure_reason = proxy->DescribeDrawFailure(Owner());
+    assert(!std::strcmp(failure_reason.cause, "state_block")); // preserve the first cause
     assert(proxy->ReadIndex(Owner(), &ib, 0, out, 2) == RegistryResult::Unavailable);
     Vertex fresh;
     assert(proxy->AdoptVertex(Owner(), &fresh, 8, true) == &fresh);

@@ -60,6 +60,15 @@ Neither synthetic result establishes TDS compatibility or room replay.
 The [Highball result](benchmarks/d3d8/2026-11-14-experimental-combined-proxy/result.json)
 records the tested binary and matching RGB hashes.
 
+A subsequent [TDS bedroom capture](benchmarks/runtime/2026-11-14-tds-combined-observer/result.json)
+completed one frame but had no stable VB/IB windows. The earlier trace labeled
+prepared getters `getter_failed` even if a missing draw ticket meant they were
+never attempted; independent native binding getters succeeded. New traces mark that case
+`window_unavailable` and record the first known buffer invalidation site and
+cause, without restoring or trusting invalidated observations. A user also
+reported truncated menu labels with the experimental facade; its cause remains
+unverified. The temporary DLL was removed after the test.
+
 Add `-DT3RENDER_BUILD_SMOKE_TEST=ON` at configuration time to build a
 standalone D3D8 program in the `smoke/` subdirectory. It draws four synthetic
 triangles, checks one pixel of each and prints a backbuffer hash. Compare that

@@ -64,6 +64,19 @@ class CaptureHostTests(unittest.TestCase):
     def records(self):
         return [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines()]
 
+    def test_image_is_associated_once_with_each_selected_frame_before_present(self):
+        self.run_capture("frame_image", frame="1", extra={"T3RENDER_CAPTURE_SCREENSHOTS": "1",
+                                                            "T3RENDER_CAPTURE_FRAMES": "2"})
+        records = self.records()
+        images = [record for record in records if record["event"] == "frame_image"]
+        self.assertEqual([record["frame"] for record in images], [1, 2])
+        self.assertTrue(all(record["status"] == "captured" for record in images))
+        for image in images:
+            index = records.index(image)
+            self.assertEqual(records[index + 1]["event"], "frame_end")
+            self.assertEqual(records[index + 1]["frame"], image["frame"])
+        self.assertEqual(trace_summary.summarize(self.path)["frame_count"], 2)
+
     def test_frame_trigger_records_actual_snapshots_and_balances_references(self):
         output = self.run_capture(frame="1")
         self.assertIn("configured=1", output)

@@ -51,6 +51,8 @@ PROJECTION = b"1.8 0 0 0 0 1.8 0 0 0 0 1.06666667 1 0 0 -0.53333336 0\n"
 CAMERA_VERTICES = b"-0.7 0.8 0 4294901760\n0.8 0 0.2 4294901760\n-0.7 -0.8 0.1 4294901760\n"
 DIAGNOSTIC = (b"T3R_DIAGNOSTIC_XYZ_V1\n1024 768\n0 0.5\n4278190080\n" + WORLD + VIEW + PROJECTION +
               CAMERA_VERTICES + CAMERA_VERTICES)
+RECONSTRUCTION = (b"T3R_RECONSTRUCTION_XYZ_V1\n1024 768\n0 0.5\n4278190080\n" + WORLD + VIEW + PROJECTION +
+                  b"2\n" + CAMERA_VERTICES + CAMERA_VERTICES)
 
 
 class D3D12ReplayParserTests(unittest.TestCase):
@@ -79,6 +81,15 @@ class D3D12ReplayParserTests(unittest.TestCase):
         result = self.parse(data)
         self.assertEqual(result.returncode, 2, result.stderr.decode(errors="replace"))
         self.assertEqual(result.stdout, b"")
+
+    def test_reconstruction_triangle_count_is_bounded_and_exact(self):
+        self.assertEqual(self.parse(RECONSTRUCTION).returncode, 0)
+        for data in (RECONSTRUCTION.replace(b"\n2\n", b"\n0\n"),
+                     RECONSTRUCTION.replace(b"\n2\n", b"\n4097\n"),
+                     RECONSTRUCTION.replace(b"\n2\n", b"\n3\n"),
+                     RECONSTRUCTION + CAMERA_VERTICES):
+            with self.subTest(data=data[:100]):
+                self.assert_rejected(data)
 
     def test_valid_input_preserves_fields(self):
         for data in (HEADER + VERTICES, (HEADER + VERTICES).replace(b"\n", b"\r\n"),

@@ -12,6 +12,24 @@ enum class ShadowReadStatus {
     TooLarge, AllocationFailed, Busy, InvalidRange, Unavailable, Other
 };
 
+// Bounded observer history, sampled during a draw; no resource bytes or COM
+// identities are retained. Counts cover intercepted calls since the latest
+// accepted Reset attempt (or creation when no subsequent Reset was observed).
+struct BufferProvenance {
+    const char* lookup = nullptr;
+    const char* last_reset = "not_observed";
+    bool history_known = false;
+    std::uint64_t reset_attempts = 0;
+    std::uint64_t reset_successes = 0, reset_failures = 0;
+    std::uint64_t resets_since_creation = 0;
+    std::uint64_t lock_attempts = 0;
+    std::uint64_t successful_locks = 0;
+    std::uint64_t successful_write_unlocks = 0;
+    bool last_lock_known = false, last_lock_result_known = false;
+    std::uint32_t last_lock_offset = 0, last_lock_bytes = 0, last_lock_flags = 0;
+    std::int32_t last_lock_hr = 0;
+};
+
 struct UnlockFailure {
     bool present = false;
     bool vertex = false;

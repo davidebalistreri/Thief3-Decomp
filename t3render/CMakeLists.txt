@@ -94,7 +94,7 @@ set_target_properties(t3render PROPERTIES OUTPUT_NAME d3d8 PREFIX "")
 option(T3RENDER_BUILD_EXPERIMENTAL_COMBINED_PROXY "Build the experimental combined facade proxy" OFF)
 if(T3RENDER_BUILD_EXPERIMENTAL_COMBINED_PROXY)
   add_library(t3render_experimental_combined_proxy SHARED
-    src/proxy.cpp src/buffer_proxy.cpp src/vtable_layout.c src/capture.cpp ${t3render_exports})
+    src/proxy.cpp src/buffer_proxy.cpp src/vtable_layout.c src/capture.cpp src/frame_image.cpp ${t3render_exports})
   target_compile_features(t3render_experimental_combined_proxy PRIVATE cxx_std_17)
   target_compile_definitions(t3render_experimental_combined_proxy PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
     T3RENDER_EXPERIMENTAL_COMBINED_PROXY)
@@ -242,7 +242,7 @@ endif()
 
 option(T3RENDER_BUILD_D3D8_RESOURCE_FACADE_FIXTURE "Build the isolated D3D8 resource facade experiment" OFF)
 if(T3RENDER_BUILD_D3D8_RESOURCE_FACADE_FIXTURE)
-  add_executable(t3render_d3d8_resource_facade_fixture tests/d3d8_resource_facade_wine.cpp src/buffer_proxy.cpp src/capture.cpp)
+  add_executable(t3render_d3d8_resource_facade_fixture tests/d3d8_resource_facade_wine.cpp src/buffer_proxy.cpp src/capture.cpp src/frame_image.cpp)
   target_compile_features(t3render_d3d8_resource_facade_fixture PRIVATE cxx_std_17)
   target_compile_definitions(t3render_d3d8_resource_facade_fixture PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(t3render_d3d8_resource_facade_fixture PRIVATE d3d8 dxguid user32 t3render_ir)

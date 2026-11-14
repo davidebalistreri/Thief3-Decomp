@@ -26,8 +26,9 @@
 namespace {
 constexpr std::uint32_t kWidth = 256;
 constexpr std::uint32_t kHeight = 256;
-constexpr std::size_t kMaxInputBytes = 65536;
+constexpr std::size_t kMaxInputBytes = 1024 * 1024;
 constexpr std::uint32_t kMaxSceneDraws = 32;
+constexpr std::uint32_t kMaxOfflineTriangles = 4096;
 #ifndef T3RENDER_REPLAY_PARSER_TEST
 constexpr DWORD kFenceTimeoutMs = 10000;
 constexpr DXGI_FORMAT kFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -64,6 +65,7 @@ struct Frame {
     std::uint32_t width = kWidth, height = kHeight;
     float min_depth = 0.0f, max_depth = 1.0f;
     bool diagnostic = false;
+    bool offline_mesh = false;
     Vertex vertices[3]{};
     bool camera = false;
     float matrices[3][16]{}; // D3D8 row-major WORLD, VIEW, PROJECTION
@@ -136,7 +138,7 @@ bool ParseFrameBytes(const char* bytes, std::size_t size, Frame& frame) {
     std::string lines[9];
     if (!std::getline(stream, lines[0])) { std::fprintf(stderr, "missing header\n"); return false; }
     if (!lines[0].empty() && lines[0].back() == '\r') lines[0].pop_back();
-    if (lines[0] == "T3R_DIAGNOSTIC_XYZ_V1") {
+    if (lines[0] == "T3R_DIAGNOSTIC_XYZ_V1" || lines[0] == "T3R_RECONSTRUCTION_XYZ_V1") {
         // Exactly two expanded triangles, one viewport and one set of
         // observed transforms. No assertion of game-frame equivalence.
         std::string viewport_line, depth_line, clear_line, width, height, clear;
@@ -167,7 +169,17 @@ bool ParseFrameBytes(const char* bytes, std::size_t size, Frame& frame) {
             }
             if (!AtEnd(line)) return false;
         }
-        for (unsigned triangle = 0; triangle < 2; ++triangle) {
+        const bool offline = lines[0] == "T3R_RECONSTRUCTION_XYZ_V1";
+        std::uint32_t triangle_count = 2;
+        if (offline) {
+            std::string count_line, count;
+            if (!std::getline(stream, count_line)) return false;
+            auto line = Line(count_line);
+            if (!(line >> count) || !AtEnd(line) || !DecimalU32(count, triangle_count) ||
+                !triangle_count || triangle_count > kMaxOfflineTriangles) return false;
+        }
+        parsed.scene.reserve(triangle_count);
+        for (std::uint32_t triangle = 0; triangle < triangle_count; ++triangle) {
             SceneDraw draw;
             std::memcpy(draw.matrices, parsed.matrices, sizeof(draw.matrices));
             for (auto& vertex : draw.vertices) {
@@ -190,6 +202,7 @@ bool ParseFrameBytes(const char* bytes, std::size_t size, Frame& frame) {
         }
         if (!AtEnd(stream)) return false;
         parsed.camera = parsed.diagnostic = true;
+        parsed.offline_mesh = offline;
         frame = std::move(parsed);
         return true;
     }
@@ -308,12 +321,12 @@ bool ParseFrameBytes(const char* bytes, std::size_t size, Frame& frame) {
 bool ReadFrame(const wchar_t* path, Frame& frame) {
     FILE* input = _wfopen(path, L"rb");
     if (!input) { std::fprintf(stderr, "cannot open input file\n"); return false; }
-    char bytes[kMaxInputBytes + 1];
-    const std::size_t size = std::fread(bytes, 1, sizeof(bytes), input);
+    std::vector<char> bytes(kMaxInputBytes + 1);
+    const std::size_t size = std::fread(bytes.data(), 1, bytes.size(), input);
     const bool read_error = std::ferror(input) != 0;
     const bool close_error = std::fclose(input) != 0;
     if (read_error || close_error) { std::fprintf(stderr, "failed to read input file\n"); return false; }
-    return ParseFrameBytes(bytes, size, frame);
+    return ParseFrameBytes(bytes.data(), size, frame);
 }
 
 std::string Utf8(const wchar_t* text) {
@@ -483,6 +496,23 @@ int Replay(const Frame& frame, const wchar_t* output) {
             D3D12_RESOURCE_STATE_RENDER_TARGET, &clear, IID_PPV_ARGS(target.put())), "CreateRenderTarget")) return 1;
     const D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
     device->CreateRenderTargetView(target.value, nullptr, rtv);
+    ComPtr<ID3D12DescriptorHeap> dsv_heap;
+    ComPtr<ID3D12Resource> depth_buffer;
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv{};
+    if (frame.offline_mesh) {
+        D3D12_DESCRIPTOR_HEAP_DESC dsv_desc{};
+        dsv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; dsv_desc.NumDescriptors = 1;
+        if (!Check(device->CreateDescriptorHeap(&dsv_desc, IID_PPV_ARGS(dsv_heap.put())), "CreateDepthHeap")) return 1;
+        D3D12_RESOURCE_DESC depth_desc = target_desc;
+        depth_desc.Format = DXGI_FORMAT_D32_FLOAT;
+        depth_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        D3D12_CLEAR_VALUE depth_clear{};
+        depth_clear.Format = DXGI_FORMAT_D32_FLOAT; depth_clear.DepthStencil.Depth = 1.0f;
+        if (!Check(device->CreateCommittedResource(&target_heap, D3D12_HEAP_FLAG_NONE, &depth_desc,
+                D3D12_RESOURCE_STATE_DEPTH_WRITE, &depth_clear, IID_PPV_ARGS(depth_buffer.put())), "CreateDepthBuffer")) return 1;
+        dsv = dsv_heap->GetCPUDescriptorHandleForHeapStart();
+        device->CreateDepthStencilView(depth_buffer.value, nullptr, dsv);
+    }
 
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     UINT rows = 0; UINT64 row_size = 0, total_size = 0;
@@ -556,10 +586,15 @@ int Replay(const Frame& frame, const wchar_t* output) {
         blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     }
     pso.SampleMask = UINT_MAX;
-    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID; pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    // The reconstruction's selected draws report D3DCULL_CCW: under the
+    // Direct3D clockwise-front convention, cull counterclockwise back faces.
+    pso.RasterizerState.CullMode = frame.offline_mesh ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
     pso.RasterizerState.DepthClipEnable = TRUE;
-    pso.DepthStencilState.DepthEnable = FALSE; pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-    pso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS; pso.DepthStencilState.StencilEnable = FALSE;
+    pso.DepthStencilState.DepthEnable = frame.offline_mesh ? TRUE : FALSE;
+    pso.DepthStencilState.DepthWriteMask = frame.offline_mesh ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+    pso.DepthStencilState.DepthFunc = frame.offline_mesh ? D3D12_COMPARISON_FUNC_LESS : D3D12_COMPARISON_FUNC_ALWAYS;
+    pso.DepthStencilState.StencilEnable = FALSE;
     pso.DepthStencilState.StencilReadMask = D3D12_DEFAULT_STENCIL_READ_MASK;
     pso.DepthStencilState.StencilWriteMask = D3D12_DEFAULT_STENCIL_WRITE_MASK;
     pso.DepthStencilState.FrontFace = {D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP,
@@ -567,6 +602,7 @@ int Replay(const Frame& frame, const wchar_t* output) {
     pso.DepthStencilState.BackFace = pso.DepthStencilState.FrontFace;
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pso.NumRenderTargets = 1; pso.RTVFormats[0] = kFormat; pso.SampleDesc.Count = 1;
+    if (frame.offline_mesh) pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     ComPtr<ID3D12PipelineState> pipeline;
     if (!Check(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(pipeline.put())), "CreateGraphicsPipelineState")) return 1;
     ComPtr<ID3D12GraphicsCommandList> list;
@@ -579,8 +615,9 @@ int Replay(const Frame& frame, const wchar_t* output) {
                                   frame.min_depth, frame.max_depth};
     const D3D12_RECT scissor{0, 0, static_cast<LONG>(frame.width), static_cast<LONG>(frame.height)};
     list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &scissor);
-    list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    list->OMSetRenderTargets(1, &rtv, FALSE, frame.offline_mesh ? &dsv : nullptr);
     list->ClearRenderTargetView(rtv, clear.Color, 0, nullptr);
+    if (frame.offline_mesh) list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
     const D3D12_VERTEX_BUFFER_VIEW view{vertices->GetGPUVirtualAddress(), static_cast<UINT>(vertex_bytes), sizeof(Vertex)};
     list->IASetVertexBuffers(0, 1, &view);
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -649,7 +686,7 @@ int Replay(const Frame& frame, const wchar_t* output) {
     }
     if (!output_ok) return 1;
     std::printf("replay=%s viewport=%ux%u pitch=%u changed_pixels=%zu fnv1a64=%016llx\n",
-                frame.diagnostic ? "T3R_DIAGNOSTIC_XYZ_V1" : !frame.scene.empty() ? "T3R_MULTI_XYZ_V1" : frame.camera ? "T3R_XYZ_V1" : "T3R_UP_V1", frame.width, frame.height,
+                frame.offline_mesh ? "T3R_RECONSTRUCTION_XYZ_V1" : frame.diagnostic ? "T3R_DIAGNOSTIC_XYZ_V1" : !frame.scene.empty() ? "T3R_MULTI_XYZ_V1" : frame.camera ? "T3R_XYZ_V1" : "T3R_UP_V1", frame.width, frame.height,
                 footprint.Footprint.RowPitch, changed_rgb, static_cast<unsigned long long>(hash));
     std::printf("pixel_centers=D3D8_integer_plus_0.5_to_DX12 (assumption); output=RGBA8\n");
     std::printf(frame.diagnostic ? "result=DIAGNOSTIC; partial geometry only, no D3D8 parity claimed\n"

@@ -51,6 +51,48 @@ def payload_reason(part):
     return ":".join(str(item) for item in (status, reason, cause) if item is not None)
 
 
+def provenance_group(part):
+    if part.get("shadow_reason") != "unknown_resource":
+        return None
+    value = obj(part.get("shadow_provenance"))
+    if not value:
+        return None
+    lookup = named(value.get("lookup"), {"live_tracked", "live_wrapper_mismatch", "live_reset_invalidated",
+        "live_untracked", "native_not_found", "identity_unavailable", "retired_reset_invalidated",
+        "retired_marker_untracked", "identity_not_tracked", "retired_tracked"})
+    last_reset = named(value.get("last_reset"), {"not_observed", "pending", "succeeded", "failed"})
+    known = value.get("history_known") is True
+    last_lock = obj(value.get("last_lock")) if known else {}
+    hr = last_lock.get("hr")
+    hr = hr if type(hr) is int and -(1 << 31) <= hr < (1 << 31) else None
+    return (lookup, last_reset, *(uint(value.get(key), 64) for key in
+            ("reset_attempts", "reset_successes", "reset_failures")), known,
+            *(uint(value.get(key), 64) if known else None for key in
+              ("resets_since_creation", "lock_attempts", "successful_locks", "successful_write_unlocks")),
+            *(uint(last_lock.get(key), 32) for key in ("offset", "requested_bytes", "flags")), hr)
+
+
+def image_result(trace, event):
+    """Validate the exact PPM generated for this frame; never accept a stale or partial file."""
+    result = {k: event[k] for k in ("status", "stage", "hr", "width", "height", "format",
+                                    "present_source_rect", "present_dest_rect")}
+    if result["status"] != "captured":
+        return result
+    path = Path(str(trace) + ".frame-" + str(event["frame"]) + ".ppm")
+    header = f"P6\n{result['width']} {result['height']}\n255\n".encode("ascii")
+    try:
+        if path.is_symlink() or path.stat().st_size != len(header) + result["width"] * result["height"] * 3:
+            raise ValueError("size or path")
+        with path.open("rb") as image:
+            if image.read(len(header)) != header:
+                raise ValueError("header")
+        result["file"] = path.name
+        result["sha256"] = digest(path)
+    except (OSError, ValueError):
+        result["status"] = "file_missing_or_invalid"
+    return result
+
+
 def analyze(path):
     framing = trace_summary.summarize(path)
     # The converter rejects every payload in a frame if its aggregate budget
@@ -92,7 +134,10 @@ def analyze(path):
                            "declarations_after_reset_attempt": 0,
                            "reset_event_recorded": False,
                            "vertex_payloads": Counter(), "index_payloads": Counter(),
-                           "buffer_window_failures": Counter(), "lock_failures": Counter()}
+                           "buffer_window_failures": Counter(), "lock_failures": Counter(),
+                           "_unknown_provenance": {}}
+                if obj(header.get("frame_images")).get("requested") is True:
+                    current["frame_image"] = {"status": "not_recorded"}
                 pending = {}
             elif kind == "draw" and current is not None:
                 current["draws"] += 1
@@ -109,6 +154,14 @@ def analyze(path):
                     current["indexed_draws"] += 1
                     current["vertex_payloads"][payload_reason(vertex)] += 1
                     current["index_payloads"][payload_reason(index)] += 1
+                    for resource, part in (("vertex", vertex), ("index", index)):
+                        group = provenance_group(part)
+                        if group is not None:
+                            item = current["_unknown_provenance"].setdefault((resource, *group), [0, set()])
+                            item[0] += 1
+                            pointer = part.get("resource")
+                            if isinstance(pointer, str) and len(pointer) <= 32:
+                                item[1].add(pointer)
                     failure = obj(buffered.get("window_failure"))
                     if failure:
                         # Deliberately exclude resource addresses and raw memory.
@@ -172,6 +225,8 @@ def analyze(path):
                     current["post_repeat_index_payloads"] += bool(index.get("status") == "captured" and index.get("shadow_observation") == "post_repeated_unlock_write")
             elif kind == "reset" and current is not None:
                 current["reset_event_recorded"] = True
+            elif kind == "frame_image" and current is not None:
+                current["frame_image"] = image_result(path, event)
             elif kind == "frame_end" and current is not None:
                 current["present_hr"] = event.get("present_hr")
                 current["reset_during_frame"] = event.get("had_reset") if type(event.get("had_reset")) is bool else None
@@ -186,6 +241,12 @@ def analyze(path):
                          "normalized_bytes", "buffer_size", "flags")
                 current["lock_failures"] = [{**dict(zip(names, fields)), "draw_observations": count}
                     for fields, count in sorted(current["lock_failures"].items(), key=lambda item: repr(item[0]))]
+                names = ("resource", "lookup", "last_reset", "reset_attempts", "reset_successes", "reset_failures",
+                         "history_known", "resets_since_creation", "lock_attempts", "successful_locks",
+                         "successful_write_unlocks", "last_lock_offset", "last_lock_requested_bytes", "last_lock_flags", "last_lock_hr")
+                current["unknown_resource_provenance"] = [
+                    {**dict(zip(names, fields)), "draw_observations": observations, "distinct_resource_pointers": len(pointers)}
+                    for fields, (observations, pointers) in sorted(current.pop("_unknown_provenance").items(), key=lambda item: repr(item[0]))]
                 frames.append(current)
                 current = None
     facade = obj(header.get("experimental_facade"))
@@ -204,7 +265,9 @@ def analyze(path):
             "limitations": ["The bedroom and camera are not identified by the capture; user confirmation is required.",
                             "Buffer and shader candidates are structurally checked, but do not establish GPU inputs or visible draws.",
                             "Payload-reason and reset-attempt counts are reported trace statuses, not validated GPU state.",
-                            "Texture contents, pixel shaders and a synchronized D3D8 image are not captured.",
+                            "Buffer provenance counts only intercepted operations; pointers are grouped within each frame and are not proof of distinct COM identities.",
+                            "Texture contents and pixel shaders are not captured.",
+                            "An optional image is a pre-Present backbuffer; presentation transforms and concurrent Present calls are not validated.",
                             "No full TDS-to-DX12 replay or pixel parity is established."]}
 
 

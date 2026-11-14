@@ -26,6 +26,13 @@ std::array<BYTE, 256 * 1024> fake_vertex{};
 std::array<BYTE, 64> fake_index{};
 std::array<D3DRECT, 2> fake_rectangles{{{-5, 2, 31, 42}, {50, 60, 70, 80}}};
 unsigned memory_reads = 0;
+unsigned image_calls = 0;
+
+t3render::FrameImageResult FakeFrameImage(IDirect3DDevice8*, const std::wstring& path, std::uint64_t frame) {
+    ++image_calls;
+    if (path.empty() || frame != image_calls) return {};
+    return {"captured", "complete", S_OK, 2, 1, 21};
+}
 
 std::string Narrow(const wchar_t* source) {
     std::string result;
@@ -338,7 +345,18 @@ int main(int argc, char** argv) {
     fake_index[32] = 3; fake_index[36] = 4; fake_index[40] = 5;
 
     bool second_used = false;
-    if (scenario == "shader_abandon" || scenario == "shader_abandon_all") {
+    if (scenario == "frame_image") {
+        t3render::CaptureFrameImage(&unrelated, FakeFrameImage, false, false);
+        t3render::CaptureFrameImage(&device, FakeFrameImage, false, false); // frame 0 is not selected
+        t3render::CapturePresent(&device, S_OK);
+        for (unsigned i = 0; i < 2; ++i) {
+            SimulatedDraw(&device, draw);
+            t3render::CaptureFrameImage(&device, FakeFrameImage, false, false);
+            t3render::CaptureFrameImage(&device, FakeFrameImage, false, false); // once per frame
+            t3render::CapturePresent(&device, S_OK);
+        }
+        if (image_calls != 2) return 8;
+    } else if (scenario == "shader_abandon" || scenario == "shader_abandon_all") {
         t3render::CapturePresent(&device, S_OK);
         const auto token = t3render::CaptureDraw(&device, draw);
         if (!token) return 8;

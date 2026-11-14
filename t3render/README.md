@@ -301,6 +301,15 @@ Without a valid path and trigger no frame is captured. Capturing a frame can
 be expensive: it queries D3D8 state on every draw and writes a potentially
 large file. The trace is local game-derived data and is not to be committed.
 
+For the experimental combined proxy, `T3RENDER_CAPTURE_SCREENSHOTS=1` adds
+an optional full-backbuffer PPM immediately before each selected Present,
+named `<capture-path>.frame-<frame>.ppm`. The trace records its status and
+dimensions; the later `frame_end` records the Present result. Unsupported
+formats, multisampling, readback or file failures are reported as unavailable.
+This is not a screenshot after presentation, and concurrent Present calls or
+source/destination rectangles can invalidate a visual comparison. The
+[bedroom batch](tools/README_tds_bedroom_batch.md) enables it automatically.
+
 ### Experimental vertex-declaration observation
 
 `T3RENDER_CAPTURE_DECLARATIONS=1` independently enables candidate declaration

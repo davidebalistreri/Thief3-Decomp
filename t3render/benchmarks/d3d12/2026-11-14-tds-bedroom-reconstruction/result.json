@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "test": "tds_bedroom_partial_trace_reconstruction",
+  "status": "DIAGNOSTIC",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, x86 Wine D3D12/vkd3d, Vulkan, MoltenVK and Metal",
+  "scene": "Bedroom facing the bed, confirmed by visual inspection of the frame 3377 backbuffer; map identity is not independently established by the trace.",
+  "frame": 3377,
+  "trace_sha256": "d869dd24450daf4553845cae7aa85b96856c5125eea5fdb094b0b944f75bc818",
+  "d3d8_pre_present_ppm_sha256": "05e4204853644fe91ef4bf5ca27064a932d190ce5a8aa76e2eae10bec32db2a2",
+  "packet_sha256": "ac67bedebe3d7cc2cd6f44758e9df8be84b2f442852686fd8c8f607ca6b35ba5",
+  "dx12_ppm_sha256": "d537d5b56cc888187a0106b3259859fc6ec98df3209c3877e5df54abb841b15b",
+  "comparison_png_sha256": "0db615cf8bc8e4ae0ba4d2acc7b2f161a7fd43f7846060f68a6a56cd6fa8a7ac",
+  "frame_observation": {
+    "width": 1024,
+    "height": 768,
+    "draws": 340,
+    "present_hr": 0,
+    "reset_during_frame": false,
+    "recorded_draw_clear_overlap": false,
+    "image": "full backbuffer immediately before Present; no source or destination rectangle"
+  },
+  "reconstruction": {
+    "selected_draws": 35,
+    "triangles": 3932,
+    "reference_draw_op": 8,
+    "depth": "new D32_FLOAT surface, clear 1, LESS test and write; viewport depth 0..0.5",
+    "culling": "CCW backfaces, selected draws report D3DCULL_CCW; winding parity not independently verified",
+    "materials": "diagnostic flat palette and synthetic per-triangle directional shading",
+    "excluded_draws_by_first_rejection": {
+      "unavailable_buffer_bytes": 10,
+      "unsupported_render_state": 281,
+      "different_camera_or_viewport": 5,
+      "unsupported_topology": 9
+    }
+  },
+  "visual_comparison": [
+    "Bed silhouette, floor, doorway and viewpoint are recognizable in both images; no pixel-level alignment or complete geometric equivalence is claimed.",
+    "Texture, realistic lighting and shadows are absent in the DX12 reconstruction; the flat doorway background differs from the original.",
+    "The candle, distant target and character, HUD, and other draw passes are not reproduced."
+  ],
+  "limitations": [
+    "The trace contains bounded application-lock shadow data and shader candidates, not verified GPU-consumed inputs.",
+    "The 35 selected draws are only one subset of the frame; unsupported states, render targets, occluders and depth history can change the result.",
+    "The original pixel shaders, textures, blending, lighting and postprocessing are not reproduced; colors are invented diagnostics.",
+    "D32_FLOAT and the D3D8-to-DX12 winding and pixel-center assumptions are not proved equivalent to the game's depth format or rasterizer.",
+    "Pre-Present readback is not proof of the final displayed pixels; concurrent Present operations are not fully observed.",
+    "This is a recognizable partial reconstruction, not a faithful legacy replay, pixel parity, native Windows validation or Scene IR runtime snapshot."
+  ]
+}

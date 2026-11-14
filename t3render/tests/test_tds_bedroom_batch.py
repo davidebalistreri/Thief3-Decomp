@@ -153,6 +153,26 @@ class CaptureBatchTests(unittest.TestCase):
         self.assertNotIn(marker, json.dumps(summary))
         self.assertIsNone(summary["experimental_facade"]["identity_verified"])
 
+    def test_unknown_provenance_summarizes_reset_and_pre_frame_writes_without_addresses(self):
+        events = trace_events(1)
+        vertex = events[2]["buffer_data"]["vertex"]
+        vertex.update(status="unknown", data=None, shadow_reason="unknown_resource", shadow_provenance={
+            "lookup": "retired_reset_invalidated", "last_reset": "succeeded", "reset_attempts": 1,
+            "reset_successes": 1, "reset_failures": 0,
+            "history_known": True, "resets_since_creation": 1, "lock_attempts": 2,
+            "successful_locks": 2, "successful_write_unlocks": 2,
+            "last_lock": {"offset": 4, "requested_bytes": 12, "flags": 0, "hr": 0}})
+        trace = self.root / "provenance.jsonl"
+        trace.write_text("\n".join(json.dumps(item) for item in events) + "\n")
+        result = analyze_tds_capture.analyze(trace)
+        self.assertEqual(result["frames"][0]["unknown_resource_provenance"], [{
+            "resource": "vertex", "lookup": "retired_reset_invalidated", "last_reset": "succeeded",
+            "reset_attempts": 1, "reset_successes": 1, "reset_failures": 0, "history_known": True, "resets_since_creation": 1,
+            "lock_attempts": 2, "successful_locks": 2, "successful_write_unlocks": 2,
+            "last_lock_offset": 4, "last_lock_requested_bytes": 12, "last_lock_flags": 0, "last_lock_hr": 0,
+            "draw_observations": 1, "distinct_resource_pointers": 1}])
+        self.assertNotIn("0xdeadbeef", json.dumps(result))
+
     def test_lock_registry_failure_is_actionable_without_resource_addresses(self):
         events = trace_events(1)
         events[2]["buffer_data"]["window_failure"] = {"status": "device_unsafe", "cause": "lock_registry",

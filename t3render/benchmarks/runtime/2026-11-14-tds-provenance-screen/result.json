@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "tds_bedroom_buffer_provenance_and_synchronized_backbuffer",
+  "status": "PARTIAL",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86 virtual desktop",
+  "scene": "Bedroom facing the bed, confirmed by visual inspection of the frame 3377 backbuffer; the trace does not identify the map or camera independently.",
+  "proxy_sha256": "922cf0d6af097e722b98d45e59df05508c17e0243af992eb6c884dd12bfe3174",
+  "temporary_proxy_removed": true,
+  "temporary_proxy_absent_after_cleanup": true,
+  "capture": {
+    "frames": [3377, 3378, 3379],
+    "present_hresult": 0,
+    "draws_per_frame": 340,
+    "indexed_draws_per_frame": 331,
+    "stable_successful_indexed_draws_per_frame": 331,
+    "indexed_draws_with_both_buffer_payloads_per_frame": 251,
+    "color_indexed_draws_with_both_buffer_payloads_per_frame": 199,
+    "indexed_draws_with_buffer_shader_and_constant_candidates_per_frame": 243,
+    "color_indexed_draws_with_buffer_shader_and_constant_candidates_per_frame": 191,
+    "vertex_payloads_unknown_resource_per_frame": 0,
+    "index_payloads_unknown_resource_per_frame": 0,
+    "indexed_draws_with_unknown_vertex_data_and_repeated_unlock_abandoned_index_per_frame": 80,
+    "reset_attempts_in_observed_device_history": 0,
+    "reset_recorded_during_frame": false,
+    "raw_trace_sha256": "d869dd24450daf4553845cae7aa85b96856c5125eea5fdb094b0b944f75bc818",
+    "frame_3377_backbuffer": {
+      "status": "captured_before_present",
+      "width": 1024,
+      "height": 768,
+      "sha256": "05e4204853644fe91ef4bf5ca27064a932d190ce5a8aa76e2eae10bec32db2a2"
+    }
+  },
+  "previous_batch_comparison": {
+    "frame": 2245,
+    "declaration_history_observations_with_prior_reset_success_and_rebind": 318,
+    "prior_reset_hresult": 0,
+    "prior_reset_epoch": 762,
+    "indexed_draws_with_that_history_and_stable_successful_buffer_windows": 317,
+    "of_those_indexed_draws_with_unknown_index_resource": 317,
+    "of_those_indexed_draws_with_unknown_vertex_resource": 283,
+    "source": "benchmarks/runtime/2026-11-14-tds-bedroom-batch/result.json"
+  },
+  "observations": [
+    "In frame 3377 all 331 successful, stable indexed draws used VB and IB wrappers reported live_tracked, with observed creation history and no accepted Reset attempt in the device observer history since startup.",
+    "The 80 missing vertex windows share one observed managed WRITEONLY buffer pointer of 2,621,440 bytes. Its history records 674 successful Lock calls and 674 successful write Unlock calls; the requested windows remain unknown_data.",
+    "The 80 missing index windows correspond to 11 observed managed WRITEONLY pointer values. Each recorded one successful Lock and write Unlock, followed by shadow abandonment attributed to the experimental repeated Unlock policy.",
+    "No unknown_resource occurred in this session. The absence of an observed Reset is consistent with, but does not prove, the proposed Reset-related explanation for the previous batch.",
+    "In the previous batch, 318 frame-2245 declaration-history records report Reset HRESULT 0 and a subsequent rebind; 317 are indexed draws with stable successful buffer windows, all with unknown index resources and 283 also with unknown vertex resources. The declaration data remains a pre-Reset hypothesis, not proof of the active GPU shader.",
+    "The proxy deployment record reports successful removal, and the installed System/d3d8.dll path was independently checked to be absent after cleanup."
+  ],
+  "limitations": [
+    "The observer reports intercepted calls and accepted Reset attempts, not unobserved aliases or native GPU inputs. Counts of pointer values are not guaranteed to represent distinct COM identities.",
+    "The frame image is the backbuffer captured immediately before its corresponding Present, not a validation of presentation transforms or concurrent Present calls.",
+    "The earlier shader history indicates a prior successful Reset, but cannot prove that any particular buffer survived it or that the Reset caused each missing token. The repeated Unlock diagnosis describes observer policy, not the driver's actual index-buffer contents.",
+    "The buffer, shader and constant observations are candidates. Textures and pixel shaders are incomplete, and no recognizable full DX12 room replay or pixel parity is established.",
+    "Game-derived trace and backbuffer images remain local and are not committed."
+  ],
+  "local_trace": "build/t3render-captures/bedroom-provenance-20261114-001/bedroom.jsonl",
+  "local_frame_3377_backbuffer": "build/t3render-captures/bedroom-provenance-20261114-001/bedroom.jsonl.frame-3377.ppm",
+  "local_summary": "build/t3render-captures/bedroom-provenance-20261114-001/summary.json"
+}

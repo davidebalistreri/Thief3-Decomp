@@ -4,6 +4,7 @@
 // built opt-in proxy. The device boundary and runtime concurrency are not
 // proven; an experimental capture is diagnostic and may be incomplete.
 #include "prepared_buffer_capture.hpp"
+#include "../src/frame_image.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -195,6 +196,9 @@ public:
             const DWORD before = GetLastError(); Unsupported(); SetLastError(before);
             return native_->Present(source, dest, window, dirty);
         }
+        const DWORD before = GetLastError();
+        { WriterScope scope; CaptureFrameImage(native_, ReadFrameImage, source != nullptr, dest != nullptr); }
+        SetLastError(before);
         const HRESULT hr = native_->Present(source, dest, window, dirty);
         const DWORD after = GetLastError();
         { WriterScope scope; CapturePresent(native_, hr); }

@@ -5,6 +5,13 @@ primo backend previsto, non il suo modello di dati. Vulkan è un backend futuro
 per Windows/Linux/SteamOS; Metal nativo resta un'opzione successiva. Nessun
 backend aggiuntivo è attualmente implementato o garantito.
 
+La [campagna successiva](benchmarks/runtime/2026-11-14-tds-provenance-screen/result.json)
+ha prodotto un backbuffer D3D8 sincronizzato e una ricostruzione DX12 parziale
+con bedroom riconoscibile, geometria e camera della stessa trace. Le differenze
+restano esplicite: materiali e illuminazione diagnostici, pass mancanti e
+nessuna parità completa. La [ricerca bridge](T3SCENEBRIDGE_RESEARCH.md)
+identifica una raccolta candidata pre-draw, ancora da verificare runtime.
+
 ## Obiettivo e confine tra i due percorsi
 
 Il checkpoint corrente rimane un **frame reale della bedroom catturato da TDS,

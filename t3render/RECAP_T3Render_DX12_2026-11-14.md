@@ -5,6 +5,35 @@ DX12 multi-draw e facade D3D8 sperimentale; RGB sintetico coincidente; 171 test
 passati» e sostituisce il precedente recap diagnostico dove descrive la facade
 come non integrata o gli observer come necessariamente separati.
 
+## Aggiornamento: cattura sincronizzata e ricerca bridge
+
+La successiva [campagna mirata](benchmarks/runtime/2026-11-14-tds-provenance-screen/result.json)
+ha acquisito tre frame reali, con una immagine del backbuffer immediatamente
+prima di ciascun `Present`. Il frame 3377 mostra la bedroom e il letto: 251
+draw indicizzate su 331 hanno entrambe le shadow VB/IB e 243 hanno anche
+declaration, programma vertex e costanti candidati. Nessun `unknown_resource`
+o Reset è stato osservato in questa sessione. Restano 80 draw con dati vertex
+ignoti e index abbandonati dalla policy dopo `Unlock` ripetute. Non è provato
+che il Reset spieghi individualmente le risorse ignote della sessione precedente.
+Il proxy temporaneo è stato rimosso. Trace e immagini di gioco restano locali.
+
+Una [ricostruzione geometrica DX12 parziale](benchmarks/d3d12/2026-11-14-tds-bedroom-reconstruction/result.json)
+del frame 3377 usa 35 draw e
+3.932 triangoli dalle shadow catturate, con camera e costanti osservate: letto,
+pareti e apertura sono riconoscibili nel confronto con il backbuffer dello
+stesso frame. Applica depth `LESS`, culling ricostruito e colori diagnostici;
+texture, illuminazione legacy, molti pass e HUD non sono riprodotti. La
+ricostruzione dimostra il checkpoint visivo circoscritto, non parità GPU o
+completezza della scena.
+
+La [ricerca statica del bridge](T3SCENEBRIDGE_RESEARCH.md) segue la catena
+da `0x109fcf10` fino a `0x10926800` e individua una raccolta candidata prima
+di chiamate virtuali associate al contatore `Objects rendered`. Camera di
+culling e camera corrente possono essere distinte: stesso pass, frame e
+identità degli elementi restano da dimostrare con un probe runtime read-only.
+Un confronto dell'export offline con le draw ha inoltre identificato un
+candidato per il letto, non un'identità di actor runtime.
+
 ## Nuova direzione architetturale
 
 T3Render è il futuro renderer API-neutral di T3: D3D12 è il primo backend;
@@ -29,10 +58,9 @@ D3D8 sincronizzata per il confronto. Geometria/camera vengono prima di PBR,
 replacement, lighting e GI. Godot rimane una golden reference; non serve
 continuare il pass visivo lì. Lo stealth model originale deve restare separato.
 
-**La bedroom non è ancora ricostruita in DX12.** Il progetto ha superato
-diversi ostacoli di cattura, ma nessuna delle catture reali contiene dati
-sufficienti a riprodurre l'inquadratura. Non esistono ancora uno screenshot
-D3D8 sincronizzato o un confronto pixel-to-pixel del frame TDS.
+**La bedroom è riconoscibile in una ricostruzione DX12 parziale.** Lo
+screenshot D3D8 è sincronizzato con la trace, ma la cattura non garantisce
+una riproduzione fedele o un confronto pixel-to-pixel del frame TDS.
 
 Repository: https://github.com/davidebalistreri/Thief3-Decomp, branch
 `remaster/vertical-slice`. La base pubblicata prima dell'automazione era
@@ -119,7 +147,8 @@ proxy rimosso. La traccia non identifica autonomamente la scena.
 Per ciascun frame: 334 draw, 325 indicizzati con finestre stabili, ma soltanto
 un draw con entrambi i buffer e nessuno con tutti i componenti osservati;
 283 osservazioni vertex e 324 index risultano `unknown_resource`. Le dichiarazioni/programmi pre-Reset
-restano ipotesi. Texture, pixel shader e screenshot D3D8 sincronizzato mancano.
+restano ipotesi. In quel batch texture, pixel shader e screenshot D3D8
+sincronizzato mancavano.
 La sessione conferma il limite precedente, non ricostruisce la bedroom. Il
 desktop Wine è meno invasivo del fullscreen diretto.
 

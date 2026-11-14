@@ -64,6 +64,7 @@ public:
     class PreparedVertex final {
     public:
         bool valid() const noexcept { return state_ && token_.identity && token_.generation && draw_; }
+        const BufferProvenance& provenance() const noexcept { return provenance_; }
         ir::RegistryResult Read(IDirect3DDevice8* owner, IDirect3DVertexBuffer8* native,
                                 std::size_t offset, void* destination, std::size_t length) const noexcept;
         ShadowReadStatus ReadDetailed(IDirect3DDevice8* owner, IDirect3DVertexBuffer8* native,
@@ -74,11 +75,13 @@ public:
         IDirect3DDevice8* owner_ = nullptr;
         IDirect3DVertexBuffer8* native_ = nullptr;
         ir::BufferToken token_{};
+        BufferProvenance provenance_{};
         std::uint64_t draw_ = 0;
     };
     class PreparedIndex final {
     public:
         bool valid() const noexcept { return state_ && token_.identity && token_.generation && draw_; }
+        const BufferProvenance& provenance() const noexcept { return provenance_; }
         ir::RegistryResult Read(IDirect3DDevice8* owner, IDirect3DIndexBuffer8* native,
                                 std::size_t offset, void* destination, std::size_t length) const noexcept;
         ShadowReadStatus ReadDetailed(IDirect3DDevice8* owner, IDirect3DIndexBuffer8* native,
@@ -89,6 +92,7 @@ public:
         IDirect3DDevice8* owner_ = nullptr;
         IDirect3DIndexBuffer8* native_ = nullptr;
         ir::BufferToken token_{};
+        BufferProvenance provenance_{};
         std::uint64_t draw_ = 0;
     };
 

@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <array>
+#include <string>
 
 #include "../ir/vertex_declaration_registry.hpp"
 #include "buffer_diagnostics.hpp"
@@ -29,6 +30,8 @@ struct BufferObserver {
     buffers::LockFailure failure_lock{};
     bool repeated_unlock_policy = false;
     std::uint64_t repeated_unlocks = 0;
+    buffers::BufferProvenance vertex_provenance{};
+    buffers::BufferProvenance index_provenance{};
     // Optional detailed reads replace the corresponding boolean callback. The
     // returned status is diagnostic only; all failed reads still fail closed.
     buffers::ShadowReadStatus (*read_vertex_detailed)(void*, IDirect3DDevice8*, IDirect3DVertexBuffer8*, std::size_t, void*, std::size_t) = nullptr;
@@ -78,6 +81,16 @@ struct DrawCall {
     const ShaderSnapshot* shader_snapshot = nullptr;
 };
 
+// A single backbuffer observation, recorded before the corresponding Present.
+// `stage` and `status` are static strings supplied by the screenshot helper.
+struct FrameImageResult {
+    const char* status = "unavailable";
+    const char* stage = "not_started";
+    HRESULT hr = E_FAIL;
+    std::uint32_t width = 0, height = 0, format = 0;
+};
+using FrameImageCallback = FrameImageResult (*)(IDirect3DDevice8*, const std::wstring&, std::uint64_t);
+
 bool CaptureConfigured();
 // Configuration only. History is never a post-reset program candidate.
 bool CaptureDeclarationHistoryRequested();
@@ -104,6 +117,7 @@ void CaptureBufferedDrawResult(IDirect3DDevice8*, std::uint64_t, HRESULT, bool s
 void CaptureShaderDrawResult(IDirect3DDevice8*, std::uint64_t, HRESULT, int buffer_stable, bool shader_stable);
 std::uint64_t CaptureClear(IDirect3DDevice8*, DWORD, const D3DRECT*, DWORD, D3DCOLOR, float, DWORD);
 void CaptureClearResult(IDirect3DDevice8*, std::uint64_t, HRESULT);
+void CaptureFrameImage(IDirect3DDevice8*, FrameImageCallback, bool source_rect, bool dest_rect);
 void CapturePresent(IDirect3DDevice8*, HRESULT);
 void CaptureReset(IDirect3DDevice8*, const D3DPRESENT_PARAMETERS*, HRESULT);
 

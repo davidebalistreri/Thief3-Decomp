@@ -141,6 +141,7 @@ def env_for(engine, bottle, output, frames):
     capture = {"T3RENDER_CAPTURE_PATH": windows_path(output / "bedroom.jsonl"),
                "T3RENDER_CAPTURE_TRIGGER_PATH": windows_path(output / "capture.ready"),
                "T3RENDER_CAPTURE_FRAMES": str(frames), "T3RENDER_CAPTURE_BUFFERS": "1",
+               "T3RENDER_CAPTURE_SCREENSHOTS": "1",
                "T3RENDER_CAPTURE_DECLARATIONS": "1", "T3RENDER_CAPTURE_DECLARATION_HISTORY": "1",
                "T3RENDER_CAPTURE_VERTEX_PROGRAMS": "1", "T3RENDER_CAPTURE_VERTEX_CONSTANTS": "1",
                "T3RENDER_EXPERIMENTAL_COMBINED": "1", "T3RENDER_EXPERIMENTAL_REPEATED_UNLOCK": "1",
@@ -249,7 +250,7 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
                 result = subprocess.run([sys.executable, "-B", str(root / "t3render/tools/run_d3d8_device_facade.py"),
                     "--engine", str(engine), "--bottle", str(bottle), "--fixture", str(fixture),
                     "--output-dir", str(output / "synthetic-fixture"), "--resource-facade",
-                    "--dx12-replay", str(replay)], cwd=root, stdout=log, stderr=subprocess.STDOUT,
+                    "--dx12-replay", str(replay), "--frame-image"], cwd=root, stdout=log, stderr=subprocess.STDOUT,
                     timeout=180, check=False)
             if result.returncode != 0:
                 raise BatchError("synthetic Highball preflight failed; TDS was not launched")
@@ -325,7 +326,8 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
                   "temporary_proxy_removed": deployment["temporary_proxy_removed"],
                   "limitations": ["Three consecutive frames use one experimental configuration, not an A/B comparison.",
                                   "The trace does not prove the map or camera; confirm them separately.",
-                                  "No TDS screenshot, full room replay or pixel parity is produced."]}
+                                  "Images, if captured, are pre-Present backbuffers; presentation transformations and concurrent Present calls are not validated.",
+                                  "No full room replay or pixel parity is produced."]}
         (output / "batch.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     if reason:
         raise BatchError(f"{reason}; diagnostics: {output}")

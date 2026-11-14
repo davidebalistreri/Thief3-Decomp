@@ -4,8 +4,9 @@ This tool runs optional offline/synthetic checks, opens TDS once in the Wine
 virtual desktop, and captures **three consecutive frames of one experimental
 configuration** after a countdown. It then validates the trace and writes a
 payload-free summary of the buffer, shader, Reset and draw observations. It
-does not capture multiple proxy configurations, identify the map or camera,
-take a synchronized TDS screenshot, or render the room in DX12. Pre-Reset
+also requests a backbuffer image immediately before each recorded Present.
+It does not capture multiple proxy configurations, identify the map or camera,
+or render the room in DX12. Pre-Reset
 shader history is explicitly a hypothesis, not the active program.
 
 The countdown starts when the first TDS process appears. Load the Garrett's
@@ -40,7 +41,8 @@ python3 -B t3render/tools/run_tds_bedroom_batch.py run \
 
 `--preflight` runs the host test suite before the game starts. The paired
 `--fixture`/`--dx12-replay` options run the existing synthetic Highball test
-before TDS starts; their RGB match is not evidence of game-frame parity. Omit
+before TDS starts, including a comparison of the new pre-Present readback with
+the fixture's direct D3D8 image; its RGB match is not evidence of game-frame parity. Omit
 these options for a faster run. Increase `--delay` if loading the save needs
 more time; `--timeout` must exceed it. With `--terminate-after-capture`, the
 runner terminates TDS only if the process at capture time is still the same;
@@ -59,7 +61,18 @@ python3 -B t3render/tools/run_tds_bedroom_batch.py cleanup "$T3RENDER_OUTPUT/dep
 The runner refuses to remove a changed DLL, a symlink, or a DLL while TDS is
 running. `batch.json` records completion and cleanup; `summary.json` contains
 frame counts and structural observations without game payloads or resource
-addresses. `bedroom.jsonl` and `wine.log` remain local under the output folder.
+addresses. The files `bedroom.jsonl.frame-N.ppm` correspond to trace frame `N`;
+the `frame_image` event records success or its failing stage, dimensions,
+format and whether Present used source/destination rectangles. `summary.json`
+checks each file's PPM header and size and records its SHA-256. A failed
+readback is not an image and an incomplete file may remain. Only non-multisampled
+32-bit X8R8G8B8/A8R8G8B8 backbuffers within the configured size limit are
+supported. A successful `Present` must also be checked in that frame's
+`frame_end`. This is the full pre-Present backbuffer, not proof of the final
+display pixels after source/destination rectangles, presentation effects or
+concurrent Present calls. The trace and image share a frame number but do not
+independently establish the map or camera. `bedroom.jsonl`, images and `wine.log`
+remain local under the output folder.
 The raw trace contains game-derived data and transient process addresses: do
 not publish it without reviewing it. An optional offline IR can be produced
 later with `trace_to_ir.py`; neither the summary nor IR makes a trace replayable.
@@ -70,5 +83,10 @@ The analyzer was checked against prior single-frame captures and the runner
 was exercised with a simulated process. A [live TDS batch](../benchmarks/runtime/2026-11-14-tds-bedroom-batch/result.json)
 subsequently completed three partial frames and removed the temporary proxy.
 The user confirmed that run was in the bedroom; the trace cannot identify the
-scene itself and the frames do not establish replay parity. The experimental proxy's menu text truncation and general COM/gameplay
-parity remain unresolved.
+scene itself and the frames do not establish replay parity. A
+[subsequent live capture](../benchmarks/runtime/2026-11-14-tds-provenance-screen/result.json)
+recorded synchronized pre-Present images and buffer provenance. A
+[partial DX12 reconstruction](README_trace_reconstruction.md) of its frame
+3377 makes the room recognizable, with substantial documented differences.
+The experimental proxy's menu text truncation and general COM/gameplay parity
+remain unresolved.

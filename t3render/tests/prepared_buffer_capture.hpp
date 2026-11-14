@@ -39,6 +39,8 @@ public:
                 if (SUCCEEDED(bindings_.index_result) && bindings_.index)
                     index_ = manager.PrepareIndexGetter(device, bindings_.index, draw);
             }
+            observer_.vertex_provenance = vertex_.provenance();
+            observer_.index_provenance = index_.provenance();
         }
         SetLastError(error);
     }

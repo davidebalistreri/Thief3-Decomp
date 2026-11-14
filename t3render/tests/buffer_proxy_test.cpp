@@ -1005,9 +1005,30 @@ void PersistentEagerBufferShadows() {
     assert(proxy->ReadVertexFromGetter(&native, &vb, 0, observed, sizeof(observed)) == RegistryResult::UnknownResource);
     assert(reset_reentered && proxy->ReadIndexFromGetter(&native, &ib, 0, observed, sizeof(observed)) == RegistryResult::UnknownResource);
     vb.on_query = {};
+    draw = proxy->BeginDraw(&native);
+    assert(draw);
+    auto lost = proxy->PrepareVertexGetter(&native, &vb, draw);
+    assert(!lost.valid() && lost.provenance().history_known &&
+           !std::strcmp(lost.provenance().lookup, "retired_reset_invalidated") &&
+           !std::strcmp(lost.provenance().last_reset, "succeeded") &&
+           lost.provenance().reset_attempts == 1 && lost.provenance().resets_since_creation == 1 &&
+           lost.provenance().reset_successes == 1 && lost.provenance().reset_failures == 0 &&
+           lost.provenance().lock_attempts == 0 && lost.provenance().successful_locks == 0);
+    assert(proxy->EndDraw(&native, draw));
     vb.AddRef();
     vertex = proxy->AdoptVertexForFacade(&native, &facade, &vb, 8, false);
     assert(vertex && proxy->ReadVertex(&native, &vb, 0, observed, sizeof(observed)) == RegistryResult::UnknownResource);
+    Fill(vertex, 0, data, sizeof(data));
+    draw = proxy->BeginDraw(&native);
+    assert(draw);
+    auto reacquired = proxy->PrepareVertexGetter(&native, &vb, draw);
+    assert(!reacquired.valid() && reacquired.provenance().history_known &&
+           !std::strcmp(reacquired.provenance().lookup, "live_reset_invalidated") &&
+           reacquired.provenance().lock_attempts == 1 && reacquired.provenance().successful_locks == 1 &&
+           reacquired.provenance().successful_write_unlocks == 1 && reacquired.provenance().last_lock_known &&
+           reacquired.provenance().last_lock_offset == 0 && reacquired.provenance().last_lock_bytes == sizeof(data) &&
+           reacquired.provenance().last_lock_result_known && reacquired.provenance().last_lock_hr == S_OK);
+    assert(proxy->EndDraw(&native, draw));
     blob_size = sizeof(retrieved);
     assert(vertex->GetPrivateData(kAlias, retrieved, &blob_size) == S_OK);
     assert(vertex->Release() == 0 && proxy->CloseFacadeDevice(&native, &facade));
@@ -1219,6 +1240,11 @@ void ClosedFacadeResetEpochs() {
         auto* new_wrapper = proxy->AdoptVertexForFacade(&native_device, &facade, &fresh, 8, true);
         Fill(new_wrapper, 0, bytes, 3);
         const auto draw = proxy->BeginDraw(&native_device);
+        const auto lost = proxy->PrepareVertexGetter(&native_device, &old, draw);
+        assert(!lost.valid() && lost.provenance().history_known &&
+               !std::strcmp(lost.provenance().lookup, "live_reset_invalidated") &&
+               lost.provenance().resets_since_creation == 1 && lost.provenance().successful_locks == 1 &&
+               lost.provenance().successful_write_unlocks == 1);
         assert(draw && proxy->ReadVertex(&native_device, &fresh, 0, observed, 3) == RegistryResult::Ok);
         assert(std::memcmp(observed, bytes, 3) == 0 && proxy->EndDraw(&native_device, draw));
         assert(old_wrapper->Release() == 0 && new_wrapper->Release() == 0);
@@ -1237,6 +1263,11 @@ void ClosedFacadeResetEpochs() {
         auto* buffer = proxy->AdoptVertexForFacade(&native_device, &facade, &raw, 8, true);
         Fill(buffer, 0, bytes, 3);
         assert(proxy->ReadVertex(&native_device, &raw, 0, observed, 3) == RegistryResult::Ok);
+        const auto draw = proxy->BeginDraw(&native_device);
+        const auto prepared = proxy->PrepareVertexGetter(&native_device, &raw, draw);
+        assert(draw && prepared.valid() && prepared.provenance().reset_attempts == 2 &&
+               prepared.provenance().reset_successes == 1 && prepared.provenance().reset_failures == 1 &&
+               !std::strcmp(prepared.provenance().last_reset, "succeeded") && proxy->EndDraw(&native_device, draw));
         assert(buffer->Release() == 0 && proxy->CloseFacadeDevice(&native_device, &facade) && raw.destroyed);
         assert(facade.Release() == 0 && native_device.Release() == 0);
     }

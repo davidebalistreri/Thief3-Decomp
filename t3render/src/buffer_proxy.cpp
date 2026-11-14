@@ -49,6 +49,18 @@ struct LastError final {
     void capture() { value = GetLastError(); }
 };
 
+struct BufferLifecycle {
+    std::uint64_t created_epoch = 0, count_epoch = 0;
+    std::uint64_t lock_attempts = 0, successful_locks = 0, successful_write_unlocks = 0;
+    bool last_lock_known = false, last_lock_result_known = false;
+    std::uint32_t last_lock_offset = 0, last_lock_bytes = 0, last_lock_flags = 0;
+    std::int32_t last_lock_hr = 0;
+};
+
+void Increment(std::uint64_t& value) noexcept {
+    if (value != std::numeric_limits<std::uint64_t>::max()) ++value;
+}
+
 struct Control {
     IDirect3DDevice8* owner = nullptr; // address only; the native resource owns any device ref
     IDirect3DDevice8* facade = nullptr; // owned +1 only in the isolated facade experiment
@@ -60,6 +72,7 @@ struct Control {
     bool marker_enabled = false;
     t3render::markers::PrivateMarker* marker = nullptr; // owned by the wrapper
     ir::BufferToken token{};
+    std::shared_ptr<BufferLifecycle> lifecycle;
     bool pending_lock = false, locked = false, pending_unlock = false, read_only = false;
     bool counted_lock = false;
     bool matched_unlock_completed = false, repeated_unlock_pending = false;
@@ -92,6 +105,9 @@ struct DeviceState {
     bool closing = false;
     bool reset_recovery = false;
     std::uint64_t draw = 0, mutation = 0, reset = 0;
+    std::uint64_t reset_epoch = 0;
+    std::uint64_t reset_successes = 0, reset_failures = 0;
+    bool last_reset_known = false, last_reset_success = false;
     std::size_t active_locks = 0;
     std::uint64_t repeated_unlocks = 0;
     IDirect3DDevice8* private_facade = nullptr; // borrowed; live buffer keeps it alive
@@ -208,6 +224,7 @@ struct BufferLease final {
     IDirect3DDevice8* owner = nullptr;
     ir::BufferToken token{};
     bool vertex = false;
+    std::shared_ptr<BufferLifecycle> lifecycle;
     ~BufferLease() {
         auto shared = state.lock();
         if (!shared || !token.identity || !token.generation) return;
@@ -568,6 +585,19 @@ private:
             }
         }
         operation = state_->next_operation++;
+        if (lifecycle) {
+            if (lifecycle->count_epoch != device->reset_epoch) {
+                lifecycle->count_epoch = device->reset_epoch;
+                lifecycle->lock_attempts = lifecycle->successful_locks = lifecycle->successful_write_unlocks = 0;
+                lifecycle->last_lock_known = lifecycle->last_lock_result_known = false;
+            }
+            Increment(lifecycle->lock_attempts);
+            lifecycle->last_lock_known = true;
+            lifecycle->last_lock_result_known = false;
+            lifecycle->last_lock_offset = offset;
+            lifecycle->last_lock_bytes = bytes;
+            lifecycle->last_lock_flags = flags;
+        }
         matched_unlock_completed = false;
         pending_lock = true; read_only = kind == ir::BufferLock::ReadOnly; length = length_;
         counted_lock = true; ++device->active_locks;
@@ -579,6 +609,11 @@ private:
         if (operation != id || !pending_lock) return;
         last_lock_known = true;
         last_lock_hr = static_cast<std::int32_t>(hr);
+        if (lifecycle) {
+            lifecycle->last_lock_result_known = true;
+            lifecycle->last_lock_hr = static_cast<std::int32_t>(hr);
+        }
+        if (SUCCEEDED(hr) && lifecycle) Increment(lifecycle->successful_locks);
         if (FAILED(hr)) { state_->AbandonLocked(this); return; }
         // A successful native Lock remains open even if its returned pointer
         // is inaccessible to the observer. Do not report later draws stable.
@@ -661,6 +696,7 @@ private:
             return;
         }
         if (FAILED(hr)) { state_->PoisonLocked(owner); return; }
+        if (!read_only && lifecycle) Increment(lifecycle->successful_write_unlocks);
         if (token.identity && token.generation) state_->shadows.EndUnlock(token, true);
         state_->ClearLockLocked(this);
         matched_unlock_completed = true;
@@ -714,6 +750,9 @@ Buffer* Adopt(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8
     Wrapper<Buffer>* candidate = nullptr;
     if (fresh || closed) {
         candidate = new (std::nothrow) Wrapper<Buffer>(state, owner, facade, native, identity, size);
+        if (fresh && candidate) {
+            try { candidate->lifecycle = std::make_shared<BufferLifecycle>(); } catch (...) {}
+        }
     }
     std::shared_ptr<BufferLease> lease;
     if (candidate) {
@@ -724,6 +763,7 @@ Buffer* Adopt(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8
             try {
                 lease = std::make_shared<BufferLease>();
                 lease->state = state; lease->owner = owner; lease->vertex = Traits<Buffer>::kVertex;
+                lease->lifecycle = candidate->lifecycle;
             } catch (...) {}
         }
     }
@@ -752,6 +792,8 @@ Buffer* Adopt(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8
             const bool can_track = device && !device->unsafe && !state->global_unsafe && fresh;
             bool registered = false;
             if (can_track) {
+                if (candidate->lifecycle)
+                    candidate->lifecycle->created_epoch = candidate->lifecycle->count_epoch = device->reset_epoch;
                 ir::BufferAvailability availability{};
                 registered = state->shadows.Register(reinterpret_cast<std::uintptr_t>(identity), size,
                                                       candidate->token, availability) == ir::RegistryResult::Ok;
@@ -771,6 +813,8 @@ Buffer* Adopt(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8
                 if (previous) {
                     const auto expected = device->persistent.find(identity);
                     const auto previous_state = previous->state.lock();
+                    if (previous_state == state && previous->owner == owner && previous->vertex == Traits<Buffer>::kVertex)
+                        candidate->lifecycle = previous->lifecycle;
                     ir::BufferAvailability availability{};
                     if (previous_state == state && previous->owner != owner) {
                         state->PoisonLocked(owner);
@@ -951,6 +995,8 @@ std::uint64_t BufferProxy::BeginFacadeReset(IDirect3DDevice8* owner, IDirect3DDe
         }
         ticket = state_->next_reset++;
         device->reset = ticket;
+        Increment(device->reset_epoch);
+        device->last_reset_known = false;
         state_->ClearPersistentLocked(*device);
         for (auto it = state_->wrappers.begin(); it != state_->wrappers.end();) {
             Control* item = (it++)->second;
@@ -981,6 +1027,9 @@ bool BufferProxy::EndFacadeReset(IDirect3DDevice8* owner, std::uint64_t ticket, 
     if (device->second.reset != ticket) { state_->PoisonLocked(owner); return false; }
     device->second.reset = 0;
     device->second.reset_recovery = !succeeded;
+    device->second.last_reset_known = true;
+    device->second.last_reset_success = succeeded;
+    Increment(succeeded ? device->second.reset_successes : device->second.reset_failures);
     return true;
 }
 
@@ -1016,31 +1065,76 @@ IUnknown* Unwrap(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevi
 
 thread_local bool persistent_identity_query = false;
 
+void PopulateProvenance(BufferProvenance& out, const DeviceState& device,
+                        const std::shared_ptr<BufferLifecycle>& history) noexcept {
+    out.reset_attempts = device.reset_epoch;
+    out.reset_successes = device.reset_successes;
+    out.reset_failures = device.reset_failures;
+    out.last_reset = !device.reset_epoch ? "not_observed" : !device.last_reset_known ? "pending" :
+                     device.last_reset_success ? "succeeded" : "failed";
+    if (!history || history->created_epoch > device.reset_epoch) return;
+    out.history_known = true;
+    out.resets_since_creation = device.reset_epoch - history->created_epoch;
+    if (history->count_epoch == device.reset_epoch) {
+        out.lock_attempts = history->lock_attempts;
+        out.successful_locks = history->successful_locks;
+        out.successful_write_unlocks = history->successful_write_unlocks;
+        out.last_lock_known = history->last_lock_known;
+        out.last_lock_result_known = history->last_lock_result_known;
+        out.last_lock_offset = history->last_lock_offset;
+        out.last_lock_bytes = history->last_lock_bytes;
+        out.last_lock_flags = history->last_lock_flags;
+        out.last_lock_hr = history->last_lock_hr;
+    }
+}
+
 template<class Buffer>
 ir::BufferToken PrepareGetterToken(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8* owner,
-                                   Buffer* native, std::uint64_t draw) noexcept {
+                                   Buffer* native, std::uint64_t draw, BufferProvenance& provenance) noexcept {
     if (!state || !owner || !native || !draw) return {};
+    // Release a possibly last marker lease only after dropping the state lock.
+    std::shared_ptr<BufferLease> lease;
     std::unique_lock<std::mutex> lock(state->mutex);
     auto device = state->devices.find(owner);
     if (state->global_unsafe || device == state->devices.end() || device->second.unsafe ||
         device->second.reset || device->second.reset_recovery || device->second.draw != draw) return {};
     const auto found = state->native.find(native);
     if (found != state->native.end()) {
-        if (found->second->owner != owner || found->second->vertex != Traits<Buffer>::kVertex) return {};
+        if (found->second->owner != owner || found->second->vertex != Traits<Buffer>::kVertex) {
+            provenance.lookup = "live_wrapper_mismatch";
+            return {};
+        }
+        PopulateProvenance(provenance, device->second, found->second->lifecycle);
+        provenance.lookup = found->second->token.identity && found->second->token.generation ? "live_tracked" :
+            provenance.history_known && provenance.resets_since_creation ? "live_reset_invalidated" : "live_untracked";
         return found->second->token;
     }
-    if (device->second.persistent.empty() || persistent_identity_query) return {};
+    PopulateProvenance(provenance, device->second, {});
+    provenance.lookup = "native_not_found";
+    auto markers = device->second.markers.lock();
+    if ((device->second.persistent.empty() && !markers) || persistent_identity_query) return {};
     lock.unlock();
     struct QueryScope { QueryScope() { persistent_identity_query = true; } ~QueryScope() { persistent_identity_query = false; } } scope;
     void* identity = nullptr;
     try { identity = Canonical(native); } catch (...) {}
-    if (!identity) return {};
+    if (!identity) { provenance.lookup = "identity_unavailable"; return {}; }
+    auto* marker = markers ? markers->Acquire(identity, native, false) : nullptr;
+    if (marker) {
+        lease = std::static_pointer_cast<BufferLease>(marker->BufferPayload());
+        marker->Release();
+    }
     lock.lock();
     device = state->devices.find(owner);
     if (state->global_unsafe || device == state->devices.end() || device->second.unsafe ||
         device->second.reset || device->second.reset_recovery || device->second.draw != draw) return {};
+    if (lease && lease->state.lock() == state && lease->owner == owner && lease->vertex == Traits<Buffer>::kVertex) {
+        PopulateProvenance(provenance, device->second, lease->lifecycle);
+        provenance.lookup = provenance.history_known && provenance.resets_since_creation ? "retired_reset_invalidated" :
+                            "retired_marker_untracked";
+    } else provenance.lookup = "identity_not_tracked";
     const auto shadow = device->second.persistent.find(identity);
     if (shadow == device->second.persistent.end() || shadow->second.vertex != Traits<Buffer>::kVertex) return {};
+    provenance.lookup = "retired_tracked";
     return shadow->second.token;
 }
 
@@ -1324,7 +1418,7 @@ BufferProxy::PreparedVertex BufferProxy::PrepareVertexGetter(IDirect3DDevice8* o
                                                              std::uint64_t draw) noexcept {
     LastError error;
     PreparedVertex result;
-    result.token_ = PrepareGetterToken(state_, owner, native, draw);
+    result.token_ = PrepareGetterToken(state_, owner, native, draw, result.provenance_);
     if (result.token_.identity && result.token_.generation) {
         result.state_ = state_; result.owner_ = owner; result.native_ = native; result.draw_ = draw;
     }
@@ -1334,7 +1428,7 @@ BufferProxy::PreparedIndex BufferProxy::PrepareIndexGetter(IDirect3DDevice8* own
                                                            std::uint64_t draw) noexcept {
     LastError error;
     PreparedIndex result;
-    result.token_ = PrepareGetterToken(state_, owner, native, draw);
+    result.token_ = PrepareGetterToken(state_, owner, native, draw, result.provenance_);
     if (result.token_.identity && result.token_.generation) {
         result.state_ = state_; result.owner_ = owner; result.native_ = native; result.draw_ = draw;
     }

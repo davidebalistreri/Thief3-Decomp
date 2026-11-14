@@ -44,6 +44,7 @@ def summarize(path):
     header_seen = False
     capture_ended = False
     operation_results = False
+    frame_images = False
     clear_rect_limit = None
     requested_frames = None
     lines = 0
@@ -81,6 +82,10 @@ def summarize(path):
                         if not _is_int(clear_rect_limit) or clear_rect_limit <= 0:
                             raise TraceError(f"line {lines}: clear_rect_limit must be a positive integer")
                         operation_results = True
+                    if "frame_images" in item:
+                        if item["frame_images"] != {"requested": True, "timing": "before_present"}:
+                            raise TraceError(f"line {lines}: invalid frame image capability")
+                        frame_images = True
                     header_seen = True
                 elif event == "header":
                     raise TraceError(f"line {lines}: duplicate header")
@@ -109,7 +114,28 @@ def summarize(path):
                         if frames and frame != frames[-1]["frame"] + 1:
                             raise TraceError(f"line {lines}: requested capture frames are not consecutive")
                     current = {"frame": frame, "draws": 0, "calls": Counter(), "pending": {},
-                               "last_op": 0, "overlap": False}
+                               "last_op": 0, "overlap": False, "image_seen": False}
+                elif event == "frame_image":
+                    if not frame_images or current is None or item.get("frame") != current["frame"] or current["image_seen"]:
+                        raise TraceError(f"line {lines}: image must appear once in its matching frame")
+                    if current["pending"]:
+                        raise TraceError(f"line {lines}: image overlaps an operation")
+                    stages = {"complete", "not_started", "pending_operations", "get_backbuffer", "get_description",
+                              "unsupported_format_or_size", "create_image_surface", "copy_backbuffer", "lock_image",
+                              "unlock_image", "invalid_pitch", "create_file", "write_file", "exception"}
+                    if item.get("status") not in ("captured", "unavailable") or item.get("stage") not in stages:
+                        raise TraceError(f"line {lines}: invalid image result")
+                    if not _is_int(item.get("hr")) or any(not _is_int(item.get(k)) or item[k] < 0
+                        for k in ("width", "height", "format")) or any(type(item.get(k)) is not bool
+                        for k in ("present_source_rect", "present_dest_rect")):
+                        raise TraceError(f"line {lines}: invalid image metadata")
+                    if item["status"] == "captured" and (item["stage"] != "complete" or item["hr"] != 0 or
+                        not 0 < item["width"] <= 8192 or not 0 < item["height"] <= 8192 or
+                        item["width"] * item["height"] > 16777216 or item["format"] not in (21, 22)):
+                        raise TraceError(f"line {lines}: invalid captured image metadata")
+                    current["image_seen"] = True
+                elif event == "reset" and current is not None and current["image_seen"]:
+                    raise TraceError(f"line {lines}: Reset observed after the frame image")
                 elif event in ("draw", "draw_result", "clear", "clear_result", "frame_end"):
                     if current is None:
                         raise TraceError(f"line {lines}: {event} outside a frame")
@@ -121,6 +147,8 @@ def summarize(path):
                             f"line {lines}: frame {frame} does not match active frame {current['frame']}"
                         )
                     if event in ("draw", "clear"):
+                        if current["image_seen"]:
+                            raise TraceError(f"line {lines}: operation observed after the frame image")
                         has_buffer_data = event == "draw" and "buffer_data" in item
                         has_declaration = event == "draw" and "vertex_declaration" in item
                         if has_buffer_data and not isinstance(item["buffer_data"], dict):
@@ -216,6 +244,7 @@ def summarize(path):
                         del current["pending"]
                         del current["last_op"]
                         del current["overlap"]
+                        del current["image_seen"]
                         frames.append(current)
                         current = None
                 events[event] += 1

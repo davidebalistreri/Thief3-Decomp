@@ -59,6 +59,8 @@ struct CaptureState {
     bool history_requested = false;
     bool vertex_programs_requested = false;
     bool vertex_constants_requested = false;
+    bool frame_images_requested = false;
+    bool frame_image_attempted = false;
     bool experimental_facade = false;
     bool experimental_repeated_unlock = false;
     bool experimental_repeat_recovery = false;
@@ -167,6 +169,7 @@ void Initialize(CaptureState& s) {
     s.history_requested = Environment(L"T3RENDER_CAPTURE_DECLARATION_HISTORY") == L"1";
     s.vertex_programs_requested = Environment(L"T3RENDER_CAPTURE_VERTEX_PROGRAMS") == L"1";
     s.vertex_constants_requested = Environment(L"T3RENDER_CAPTURE_VERTEX_CONSTANTS") == L"1";
+    s.frame_images_requested = Environment(L"T3RENDER_CAPTURE_SCREENSHOTS") == L"1";
     // Missing means the legacy single frame; an explicitly empty, truncated,
     // or malformed value must not silently start a capture.
     wchar_t frames[2]{};
@@ -233,6 +236,7 @@ bool Open(CaptureState& s) {
         << kProgramObservationWords << ",\"words_per_frame\":" << kProgramFrameWords << '}';
     if (s.vertex_constants_requested) out << ",\"vertex_constant_capture\":{\"requested\":true,\"registers_per_observation\":"
         << kVertexConstantRegisters << ",\"words_per_frame\":" << kVertexConstantFrameWords << '}';
+    if (s.frame_images_requested) out << ",\"frame_images\":{\"requested\":true,\"timing\":\"before_present\"}";
     if (s.experimental_facade) {
         out << ",\"experimental_facade\":{\"enabled\":true,\"identity_verified\":false,\"concurrency_verified\":false";
         if (s.experimental_repeated_unlock) out << ",\"repeated_unlock_resource_discard\":true";
@@ -534,6 +538,7 @@ struct UpBytes {
     const char* shadow_reason = nullptr;
     const char* shadow_abandon_cause = nullptr;
     const char* shadow_observation = nullptr;
+    const buffers::BufferProvenance* provenance = nullptr;
     uint64_t byte_count = 0;
     bool byte_count_known = false;
     std::string hex;
@@ -637,6 +642,25 @@ void BytesJson(std::ostream& out, const UpBytes& data) {
     if (data.shadow_reason) out << ",\"shadow_reason\":\"" << data.shadow_reason << '\"';
     if (data.shadow_abandon_cause) out << ",\"shadow_abandon_cause\":\"" << data.shadow_abandon_cause << '\"';
     if (data.shadow_observation) out << ",\"shadow_observation\":\"" << data.shadow_observation << '\"';
+    if (data.provenance && data.provenance->lookup) {
+        const auto& p = *data.provenance;
+        out << ",\"shadow_provenance\":{\"lookup\":\"" << p.lookup << "\",\"reset_attempts\":"
+            << p.reset_attempts << ",\"reset_successes\":" << p.reset_successes << ",\"reset_failures\":"
+            << p.reset_failures << ",\"last_reset\":\"" << p.last_reset << "\",\"history_known\":"
+            << (p.history_known ? "true" : "false");
+        if (p.history_known) {
+            out << ",\"resets_since_creation\":" << p.resets_since_creation
+                << ",\"lock_attempts\":" << p.lock_attempts << ",\"successful_locks\":" << p.successful_locks
+                << ",\"successful_write_unlocks\":" << p.successful_write_unlocks;
+            if (p.last_lock_known) {
+                out << ",\"last_lock\":{\"offset\":" << p.last_lock_offset << ",\"requested_bytes\":"
+                    << p.last_lock_bytes << ",\"flags\":" << p.last_lock_flags << ",\"hr\":";
+                if (p.last_lock_result_known) out << p.last_lock_hr; else out << "null";
+                out << '}';
+            }
+        }
+        out << '}';
+    }
 }
 
 const char* ShadowReason(buffers::ShadowReadStatus status) noexcept {
@@ -743,6 +767,7 @@ void CaptureBuffered(std::ostream& out, CaptureState& s, IDirect3DDevice8* devic
     const bool offset_known = first_known && stride_known && Product(first, stride, vertex_offset);
     const bool vertex_size_known = vertex_count_known && stride_known && Product(vertex_count, stride, vertex_size);
     UpBytes vertex;
+    vertex.provenance = &observer.vertex_provenance;
     if (draw.buffer_bindings && !observer.valid) vertex.status = "window_unavailable";
     else if (FAILED(vertex_hr)) vertex.status = "getter_failed";
     else if (!vb) vertex.status = "unbound";
@@ -757,6 +782,7 @@ void CaptureBuffered(std::ostream& out, CaptureState& s, IDirect3DDevice8* devic
             vertex.status = "out_of_bounds";
         else vertex = ReadShadow(s, observer, device, vb, observer.read_vertex, observer.read_vertex_detailed, vertex_offset, vertex_size);
     }
+    vertex.provenance = &observer.vertex_provenance;
 
     uint64_t index_offset = 0, index_size = 0;
     bool index_offset_known = false;
@@ -787,6 +813,7 @@ void CaptureBuffered(std::ostream& out, CaptureState& s, IDirect3DDevice8* devic
             }
         }
     }
+    index.provenance = &observer.index_provenance;
 
     out << ",\"buffer_data\":{\"source\":\"application_lock_shadow\"";
     if (observer.repeated_unlock_policy)
@@ -1471,6 +1498,30 @@ void CaptureClearResult(IDirect3DDevice8* device, uint64_t token, HRESULT result
     FinishOperation(device, token, result, OperationKind::Clear);
 }
 
+void CaptureFrameImage(IDirect3DDevice8* device, FrameImageCallback callback, bool source_rect, bool dest_rect) {
+    try {
+        auto& s = State();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (!s.enabled || s.complete || !s.frame_images_requested || s.frame_image_attempted || !callback || !device ||
+            device != s.device || !s.triggered || s.frame != s.target) return;
+        Begin(s);
+        if (!s.enabled) return;
+        s.frame_image_attempted = true;
+        FrameImageResult result;
+        if (s.pending_operations.empty()) result = callback(device, s.path, s.frame);
+        else result.stage = "pending_operations";
+        auto out = Json();
+        out << "{\"event\":\"frame_image\",\"frame\":" << s.frame
+            << ",\"status\":\"" << result.status << "\",\"stage\":\"" << result.stage
+            << "\",\"hr\":" << static_cast<int32_t>(result.hr)
+            << ",\"width\":" << result.width << ",\"height\":" << result.height
+            << ",\"format\":" << result.format
+            << ",\"present_source_rect\":" << (source_rect ? "true" : "false")
+            << ",\"present_dest_rect\":" << (dest_rect ? "true" : "false") << "}\n";
+        Write(s, out.str());
+    } catch (...) { Fail(); }
+}
+
 void CapturePresent(IDirect3DDevice8* device, HRESULT result) {
     try {
         auto& s = State();
@@ -1513,6 +1564,7 @@ void CapturePresent(IDirect3DDevice8* device, HRESULT result) {
             s.vertex_constant_words = 0;
             s.had_reset = false;
             s.concurrent_operations = false;
+            s.frame_image_attempted = false;
             ++s.frame;
             s.target = s.frame;
             return;

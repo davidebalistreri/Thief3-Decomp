@@ -17,6 +17,7 @@ import sys
 
 from run_synthetic_up_replay import RunError, check_pe32, run_stage, sha256, valid_path, windows_path
 import trace_to_up_packet
+import trace_summary
 
 
 HEADER = b"P6\n256 256\n255\n"
@@ -344,11 +345,17 @@ def read_ppm(path, resource_facade=False):
     return data
 
 
-def inspect_prepared_trace(path):
+def inspect_prepared_trace(path, frame_image=False):
     try:
         records = [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines()]
     except (OSError, ValueError) as exc:
         raise RunError(f"invalid prepared buffer trace: {exc}") from exc
+    if frame_image:
+        trace_summary.summarize(path)
+        images = [record for record in records if record.get("event") == "frame_image"]
+        if len(images) != 1 or images[0].get("frame") != 1 or images[0].get("status") != "captured":
+            raise RunError("the fixture's pre-Present image was not captured")
+        records = [record for record in records if record.get("event") != "frame_image"]
     inspect_prepared_records(records)
 
 
@@ -462,11 +469,13 @@ def inspect_prepared_image(path):
         raise RunError("combined capture image is missing the green shader pixel")
 
 
-def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resource_facade=False, dx12_replay=None):
+def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resource_facade=False, dx12_replay=None, frame_image=False):
     engine, bottle, fixture, output = map(valid_path, (engine, bottle, fixture, output))
     replay = valid_path(dx12_replay) if dx12_replay else None
     if replay and not resource_facade:
         raise RunError("DX12 replay is supported only for the resource fixture")
+    if frame_image and not resource_facade:
+        raise RunError("frame image verification requires the resource fixture")
     wine, server, frameworks = engine / "engine/bin/wine", engine / "engine/bin/wineserver", engine / "frameworks"
     if not all(path.is_file() and os.access(path, os.X_OK) for path in (wine, server)) or not frameworks.is_dir():
         raise RunError(f"invalid Highball engine: {engine}")
@@ -493,6 +502,8 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
                 "DYLD_FALLBACK_LIBRARY_PATH": f"{frameworks}:{frameworks}/GStreamer.framework/Versions/1.0/lib",
                 "DYLD_FALLBACK_FRAMEWORK_PATH": str(frameworks), "WINEDEBUG": "-all",
                 "WINEDLLOVERRIDES": "d3d8=b;nvapi64,nvngx=n,b;winemenubuilder.exe=d"})
+    if frame_image:
+        env["T3RENDER_CAPTURE_SCREENSHOTS"] = "1"
     test = "synthetic_d3d8_resource_facade" if resource_facade else (
         "synthetic_d3d8_buffer_facade" if buffer_facade else "synthetic_d3d8_device_facade")
     result = {"schema": 1, "test": test, "status": "FAIL",
@@ -544,9 +555,16 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
                     log.read_text(encoding="utf-8", errors="replace").splitlines(), stage)
             if resource_facade and stage == "facade":
                 trace = Path(str(ppm) + ".trace.jsonl")
-                inspect_prepared_trace(trace)
+                inspect_prepared_trace(trace, frame_image)
                 trace_image = Path(str(trace) + ".ppm")
                 inspect_prepared_image(trace_image)
+                if frame_image:
+                    captured_image = Path(str(trace) + ".frame-1.ppm")
+                    inspect_prepared_image(captured_image)
+                    if captured_image.read_bytes() != trace_image.read_bytes():
+                        raise RunError("pre-Present screenshot differs from the fixture's direct readback")
+                    result["runs"][stage]["frame_image"] = captured_image.name
+                    result["runs"][stage]["frame_image_sha256"] = sha256(captured_image)
                 result["runs"][stage]["prepared_trace"] = trace.name
                 result["runs"][stage]["prepared_trace_sha256"] = sha256(trace)
                 result["runs"][stage]["prepared_image"] = trace_image.name
@@ -575,6 +593,8 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
         if replay:
             stage = "prepared_dx12_replay"
             records = trace_to_up_packet.validated_records(trace)
+            if frame_image:
+                records = [record for record in records if record.get("event") != "frame_image"]
             packet = output / "prepared-replay.txt"
             with packet.open("x", encoding="ascii", newline="\n") as destination:
                 destination.write(prepared_replay_packet(records, synthetic_fixture=True))
@@ -610,13 +630,14 @@ def main(argv=None):
     parser.add_argument("--output-dir", required=True, help="new absolute output directory")
     parser.add_argument("--timeout", type=float, default=45)
     parser.add_argument("--dx12-replay", help="absolute path to the synthetic DX12 replay executable")
+    parser.add_argument("--frame-image", action="store_true", help="verify the pre-Present screenshot against the fixture's direct readback")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--buffer-facade", action="store_true", help="validate the separate buffer facade fixture")
     group.add_argument("--resource-facade", action="store_true", help="validate the separate combined resource fixture")
     args = parser.parse_args(argv)
     try:
         result = execute(args.engine, args.bottle, args.fixture, args.output_dir, args.timeout,
-                         args.buffer_facade, args.resource_facade, args.dx12_replay)
+                         args.buffer_facade, args.resource_facade, args.dx12_replay, args.frame_image)
     except RunError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -114,7 +114,8 @@ Il timer consente all'utente di caricare il save e restare nel gioco; la scena
 non viene riconosciuta automaticamente e va confermata. I tre frame usano la
 **stessa configurazione**, non sono un A/B tra facade diverse. Il runner è stato
 provato anche in una [sessione TDS reale](benchmarks/runtime/2026-11-14-tds-bedroom-batch/result.json):
-tre frame acquisiti, proxy rimosso, scena non identificabile dalla traccia.
+tre frame acquisiti nella bedroom davanti al letto, confermata dall'utente;
+proxy rimosso. La traccia non identifica autonomamente la scena.
 Per ciascun frame: 334 draw, 325 indicizzati con finestre stabili, ma soltanto
 un draw con entrambi i buffer e nessuno con tutti i componenti osservati;
 283 osservazioni vertex e 324 index risultano `unknown_resource`. Le dichiarazioni/programmi pre-Reset

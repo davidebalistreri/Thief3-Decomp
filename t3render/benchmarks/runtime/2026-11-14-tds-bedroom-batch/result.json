@@ -4,7 +4,7 @@
   "test": "tds_three_frame_timed_batch",
   "status": "PARTIAL",
   "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86 virtual desktop",
-  "scene": "Unconfirmed: user was asked to load Garrett's Building and face the bed; trace does not identify the scene",
+  "scene": "Garrett's Building save, bedroom facing the bed; confirmed by user after the run",
   "proxy_commit": "edb007a5",
   "proxy_sha256": "370070c69c85cb68fc31b0333f25bbed549251a314ccdbb36a46dd2e2f38c5f7",
   "temporary_proxy_removed": true,
@@ -141,9 +141,10 @@
     "No post-repeated-Unlock-write payload was recovered; this batch does not explain why the resources are unknown."
   ],
   "limitations": [
-    "The frame cannot establish the scene, actual GPU inputs, visual replay or pixel parity.",
+    "The trace itself does not identify the scene or prove actual GPU inputs, visual replay or pixel parity.",
     "The game-derived trace and log remain local and are not committed.",
     "The pre-existing experimental facade menu text regression and gameplay parity remain unresolved."
   ],
-  "local_trace": "build/t3render-captures/bedroom-batch-20261114-224853/bedroom.jsonl"
+  "local_trace": "build/t3render-captures/bedroom-batch-20261114-224853/bedroom.jsonl",
+  "scene_confirmation": "user_confirmed"
 }

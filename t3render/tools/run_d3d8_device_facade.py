@@ -163,6 +163,8 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
                       "persistent_eager_buffer=PASS shadow=not_observed provenance=preserved reset=not_observed")
         if [line for line in lines if line.startswith("persistent_eager_buffer=")] != [persistent]:
             raise RunError("persistent eager buffer observation is missing or conflicting")
+        if [line for line in lines if line.startswith("private_cross_device_cycle=")] != ["private_cross_device_cycle=PASS"]:
+            raise RunError("cross-device private-data observation is missing or conflicting")
         for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                        "resource_facade_volume_roundtrips=PASS",
                        "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
@@ -280,9 +282,9 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
     if resource_facade:
         result["limitations"] = ["Fixture only: not integrated with the proxy or TDS.",
                                  "Only selected 2D, cube, volume, surface, swapchain and buffer paths were exercised; other interfaces remain unverified.",
-                                 "Only known same-device buffer/resource IUnknown values are translated; external COM values and unknown interfaces fail closed.",
+                                 "The default retaining facade rejects external COM values; the separate persistent eager experiment forwards them and invalidates capture evidence.",
                                  "One diagnostic intentionally stores a wrapped IUnknown on a borrowed native texture, then breaks the cycle; this is not an application path.",
-                                 "Another diagnostic deliberately stores an external COM object holding the facade device in a borrowed native texture, then breaks its cycle.",
+                                 "One retaining-policy diagnostic deliberately stores an external COM object holding the facade device in a borrowed native texture, then breaks its cycle.",
                                  "The separate eager-retirement diagnostic attaches a reserved-GUID marker to native resources; it is not production-transparent.",
                                  "The eager-buffer diagnostic loses WRITEONLY shadow bytes and private-data provenance after wrapper retirement.",
                                  "The separate persistent-buffer diagnostic retains shadows across selected state-block reacquisition but invalidates them on reset.",

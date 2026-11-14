@@ -299,8 +299,20 @@ public:
                 LastError error;
                 auto bridge = PrivateBridge();
                 PrivateObjectPin pin;
-                if (!bridge || !bridge->Pin(data, pin) || !pin.native || !pin.guard ||
-                    pin.kind == PrivateDataKind::Blob) return E_NOTIMPL;
+                if (!bridge) return E_NOTIMPL;
+                if (!bridge->Pin(data, pin)) {
+                    if (!marker_enabled || !marker || !data) return E_NOTIMPL;
+                    {
+                        std::lock_guard<std::mutex> lock(state_->mutex);
+                        state_->PoisonLocked(owner);
+                    }
+                    error.restore();
+                    const HRESULT hr = PrivateState().SetTyped(key, PrivateDataKind::ExternalUnknown,
+                        [&] { return real_->SetPrivateData(key, data, size, flags); });
+                    error.capture();
+                    return hr;
+                }
+                if (!pin.native || !pin.guard || pin.kind == PrivateDataKind::Blob) return E_NOTIMPL;
                 error.restore();
                 const HRESULT hr = PrivateState().SetTyped(key, pin.kind,
                     [&] { return real_->SetPrivateData(key, pin.native, size, flags); });
@@ -322,6 +334,7 @@ public:
             if (marker_enabled && IsEqualIID(key, t3render::markers::kPrivateMarkerGuid)) return E_NOTIMPL;
             return PrivateState().GetTyped(key, [&](PrivateDataKind kind) {
                 if (kind == PrivateDataKind::Blob) return real_->GetPrivateData(key, data, size);
+                if (kind == PrivateDataKind::ExternalUnknown) return real_->GetPrivateData(key, data, size);
                 auto bridge = PrivateBridge();
                 if (!bridge) return E_NOTIMPL;
                 IUnknown* native = nullptr;

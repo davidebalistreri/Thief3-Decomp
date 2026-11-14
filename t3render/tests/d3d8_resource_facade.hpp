@@ -264,8 +264,18 @@ public:
             PrivateObjectPin pin;
             bool recognized = PinPrivateResource(this->state_, data, pin);
             if (!recognized && this->state_->bridge) recognized = this->state_->bridge->Pin(data, pin);
-            if (!recognized || !pin.native || !pin.guard || pin.kind == t3render::buffers::PrivateDataKind::Blob)
-                return E_NOTIMPL;
+            if (!recognized) {
+                if (this->state_->retain_dormant || !this->state_->bridge || !data) return E_NOTIMPL;
+                auto* provenance = PrivateState(true);
+                if (!provenance) return E_NOTIMPL;
+                this->state_->bridge->ExternalObserved();
+                error.restore();
+                const HRESULT hr = provenance->SetTyped(key, t3render::buffers::PrivateDataKind::ExternalUnknown,
+                    [&] { return this->real_->SetPrivateData(key, data, size, flags); });
+                error.capture();
+                return hr;
+            }
+            if (!pin.native || !pin.guard || pin.kind == t3render::buffers::PrivateDataKind::Blob) return E_NOTIMPL;
             auto* provenance = PrivateState(true);
             if (!provenance) return E_NOTIMPL;
             error.restore();
@@ -291,6 +301,8 @@ public:
         outer_error.restore();
         const HRESULT result = provenance->GetTyped(key, [&](t3render::buffers::PrivateDataKind kind) {
             if (kind == t3render::buffers::PrivateDataKind::Blob)
+                return this->real_->GetPrivateData(key, data, size);
+            if (kind == t3render::buffers::PrivateDataKind::ExternalUnknown)
                 return this->real_->GetPrivateData(key, data, size);
             const IID* resource_iid = PrivateResourceIid(kind);
             if (!resource_iid && !this->state_->bridge) return E_NOTIMPL;

@@ -67,6 +67,8 @@ int main() {
     assert(kind_is(PrivateDataKind::VertexBuffer) == S_OK);
     assert(typed.SetTyped(first, PrivateDataKind::IndexBuffer, success) == S_OK);
     assert(kind_is(PrivateDataKind::IndexBuffer) == S_OK);
+    assert(typed.SetTyped(first, PrivateDataKind::ExternalUnknown, success) == S_OK);
+    assert(kind_is(PrivateDataKind::ExternalUnknown) == S_OK);
     assert(typed.Get(first, success) == E_NOTIMPL); // never expose a native object as a blob
     assert(typed.Set(first, 0, success) == S_OK && kind_is(PrivateDataKind::Blob) == S_OK);
     assert(typed.SetTyped(first, PrivateDataKind::VertexBuffer, failure) == E_FAIL);

@@ -980,6 +980,50 @@ void PersistentEagerBufferShadows() {
     assert(cross->CloseFacadeDevice(&first_device, &first_facade) && cross->CloseFacadeDevice(&second_device, &second_facade));
     assert(!cross_marker && first_device.Release() == 0 && first_facade.Release() == 0 &&
            second_device.Release() == 0 && second_facade.Release() == 0);
+
+    auto external_proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+    FakeDevice external_device, external_facade, external_object;
+    auto external_markers = std::make_shared<t3render::markers::PrivateMarkerStore>(8);
+    assert(external_proxy->InstallFacadePrivateBridge(&external_device, &external_facade, bridge, false, external_markers));
+    Vertex external_raw; external_raw.device = &external_device;
+    IUnknown *external_marker = nullptr, *stored_object = nullptr;
+    external_raw.on_private_get = [&](REFGUID key, void* output, DWORD* size) {
+        if (IsEqualIID(key, t3render::markers::kPrivateMarkerGuid)) return external_marker ? S_OK : D3DERR_NOTFOUND;
+        if (!stored_object || !output || !size || *size < sizeof(stored_object)) return E_FAIL;
+        stored_object->AddRef(); std::memcpy(output, &stored_object, sizeof(stored_object));
+        *size = sizeof(stored_object); SetLastError(702); return S_OK;
+    };
+    external_raw.on_private_set = [&](REFGUID key, const void* input, DWORD size, DWORD flags) {
+        assert(size == sizeof(IUnknown*) && flags == D3DSPD_IUNKNOWN);
+        auto* object = const_cast<IUnknown*>(static_cast<const IUnknown*>(input));
+        if (IsEqualIID(key, t3render::markers::kPrivateMarkerGuid)) { external_marker = object; object->AddRef(); return S_OK; }
+        BYTE check = 0;
+        assert(input == &external_object &&
+               external_proxy->ReadVertex(&external_device, &external_raw, 0, &check, 1) == RegistryResult::Unavailable);
+        stored_object = object; object->AddRef(); SetLastError(701); return S_OK;
+    };
+    external_raw.on_release = [&] {
+        if (!external_raw.refs) {
+            if (stored_object) { stored_object->Release(); stored_object = nullptr; }
+            if (external_marker) { external_marker->Release(); external_marker = nullptr; }
+        }
+    };
+    auto* external_wrapper = external_proxy->AdoptVertexForFacade(&external_device, &external_facade, &external_raw, 8, true);
+    assert(external_wrapper && external_marker);
+    Fill(external_wrapper, 0, data, sizeof(data));
+    assert(external_wrapper->SetPrivateData(kAlias, &external_object, sizeof(IUnknown*), D3DSPD_IUNKNOWN) == S_OK &&
+           GetLastError() == 701 && external_object.refs == 2);
+    assert(external_proxy->ReadVertex(&external_device, &external_raw, 0, observed, sizeof(observed)) == RegistryResult::Unavailable);
+    external_raw.AddRef(); external_wrapper->Release();
+    external_raw.AddRef();
+    external_wrapper = external_proxy->AdoptVertexForFacade(&external_device, &external_facade, &external_raw, 8, false);
+    IUnknown* external_returned = nullptr; DWORD external_size = sizeof(external_returned);
+    assert(external_wrapper && external_wrapper->GetPrivateData(kAlias, &external_returned, &external_size) == S_OK &&
+           external_returned == &external_object && external_object.refs == 3 && GetLastError() == 702);
+    external_returned->Release(); external_wrapper->Release(); external_raw.Release();
+    assert(!stored_object && !external_marker && external_object.refs == 1);
+    assert(external_proxy->CloseFacadeDevice(&external_device, &external_facade));
+    assert(external_device.Release() == 0 && external_facade.Release() == 0 && external_object.Release() == 0);
 }
 
 void ClosedFacadeRetirement() {

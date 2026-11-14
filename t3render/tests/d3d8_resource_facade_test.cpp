@@ -796,6 +796,57 @@ void EagerResourceRetirement() {
         assert(raw.Release() == 0 && native.Release() == 0 && facade.Release() == 0);
     }
 }
+
+void EagerExternalPrivateData() {
+    struct Bridge final : PrivateObjectBridge {
+        unsigned observed = 0;
+        bool Pin(const void*, PrivateObjectPin&) noexcept override { return false; }
+        IUnknown* Adopt(t3render::buffers::PrivateDataKind, IUnknown* native) noexcept override {
+            if (native) native->Release();
+            return nullptr;
+        }
+        void ExternalObserved() noexcept override { ++observed; SetLastError(999); }
+    };
+    Device native, facade, external;
+    Texture raw; raw.device = &native;
+    auto bridge = std::make_shared<Bridge>();
+    auto router = Router::Create(&native, &facade, 8, bridge, false);
+    auto* wrapped = router->AdoptTexture(&raw);
+    IUnknown* marker = nullptr;
+    IUnknown* object = nullptr;
+    bool nested_rejected = false;
+    raw.on_private_get = [&](REFGUID key, void* data, DWORD* size) {
+        if (IsEqualIID(key, kPrivateMarkerGuid)) return marker ? S_OK : D3DERR_NOTFOUND;
+        if (!object || !data || !size || *size < sizeof(object)) return E_FAIL;
+        object->AddRef(); std::memcpy(data, &object, sizeof(object)); *size = sizeof(object);
+        SetLastError(502); return S_OK;
+    };
+    raw.on_private_set = [&](REFGUID key, const void* data, DWORD size, DWORD flags) {
+        assert(size == sizeof(IUnknown*) && flags == D3DSPD_IUNKNOWN);
+        if (IsEqualIID(key, kPrivateMarkerGuid)) {
+            marker = const_cast<IUnknown*>(static_cast<const IUnknown*>(data)); marker->AddRef(); return S_OK;
+        }
+        assert(data == &external && bridge->observed == 1);
+        DWORD nested_size = 0;
+        nested_rejected = wrapped->GetPrivateData(kExtra, nullptr, &nested_size) == E_NOTIMPL;
+        object = const_cast<IUnknown*>(static_cast<const IUnknown*>(data)); object->AddRef();
+        SetLastError(501); return S_OK;
+    };
+    raw.on_release = [&] {
+        if (raw.destroyed) {
+            if (object) { object->Release(); object = nullptr; }
+            if (marker) { marker->Release(); marker = nullptr; }
+        }
+    };
+    SetLastError(500);
+    assert(wrapped->SetPrivateData(kExtra, &external, sizeof(IUnknown*), D3DSPD_IUNKNOWN) == S_OK && GetLastError() == 501);
+    assert(nested_rejected && bridge->observed == 1 && external.refs == 2 && marker);
+    IUnknown* found = nullptr; DWORD size = sizeof(found);
+    assert(wrapped->GetPrivateData(kExtra, &found, &size) == S_OK && found == &external && GetLastError() == 502);
+    assert(external.refs == 3); found->Release();
+    assert(wrapped->Release() == 0 && raw.destroyed && external.refs == 1 && !object && !marker);
+    assert(router->Close() && native.Release() == 0 && facade.Release() == 0 && external.Release() == 0);
+}
 } // namespace
 
 int main() {
@@ -812,4 +863,5 @@ int main() {
     PrivateVertexTranslation();
     PrivateResourceTranslation();
     EagerResourceRetirement();
+    EagerExternalPrivateData();
 }

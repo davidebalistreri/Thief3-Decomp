@@ -87,6 +87,7 @@ public:
                                IDirect3DDevice8* native, IDirect3DDevice8* facade) noexcept
         : buffers_(std::move(buffers)), native_(native), facade_(facade) {}
     void Attach(const std::shared_ptr<t3render::resource_fixture::Router>& router) noexcept { resources_ = router; }
+    void ExternalObserved() noexcept override { buffers_->InvalidateDevice(native_); }
     bool Pin(const void* candidate, t3render::resource_fixture::PrivateObjectPin& pin) noexcept override {
         bool vertex = false;
         pin.guard = buffers_->PinPrivateBuffer(native_, facade_, candidate, &pin.native, &vertex);

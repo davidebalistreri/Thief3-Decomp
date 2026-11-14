@@ -29,7 +29,7 @@
 namespace t3render::buffers {
 
 enum class PrivateDataKind {
-    Blob, VertexBuffer, IndexBuffer, Surface, Texture, Cube, VolumeTexture, Volume, SwapChain
+    Blob, VertexBuffer, IndexBuffer, Surface, Texture, Cube, VolumeTexture, Volume, SwapChain, ExternalUnknown
 };
 
 struct PrivateObjectPin final {
@@ -49,6 +49,9 @@ struct PrivateObjectPin final {
 struct PrivateObjectBridge {
     virtual bool Pin(const void* candidate, PrivateObjectPin& pin) noexcept = 0;
     virtual IUnknown* Adopt(PrivateDataKind kind, IUnknown* native) noexcept = 0;
+    // Unknown external objects can hide native aliases. Capture must not
+    // retain buffer evidence after forwarding one.
+    virtual void ExternalObserved() noexcept {}
     virtual ~PrivateObjectBridge() = default;
 };
 

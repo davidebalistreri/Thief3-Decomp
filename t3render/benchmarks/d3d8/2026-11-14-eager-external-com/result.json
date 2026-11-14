@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_eager_external_com",
+  "date": "2026-11-14",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "c9b34ac9769c8b6756885c5b7dba85656bd97378d435e305509c1c93c8ed5c21",
+    "t3render/src/buffer_proxy.cpp": "a51f6e9d610c61cac76501376cad2890d56ace22f3277cd419aba6302ca7d0b1",
+    "t3render/src/buffer_proxy.hpp": "542eb88a0c86e5dc21e4cf6ddef2c67c28f2ddaf257a5f1fe434fd36b3c988f0",
+    "t3render/src/private_blob.hpp": "a17b40ffde3785f9544540eb082149e1b6c6937bc4f8aa68f98565b59a9ea664",
+    "t3render/src/private_marker.hpp": "37b58cc95fb7227556570b3ed5956ac66d7a24ca7733f0cc7f4adedc2b70857a",
+    "t3render/ir/buffer_registry.cpp": "9e24931212d54e0ee58b7be7313a85510e9fc867f3a3b20297eff3e1f6138b84",
+    "t3render/ir/buffer_shadow.cpp": "9cfed54a6fcf4718e80fd1d8301a8afa5f84852ac70b428938b06d1e64cddafe",
+    "t3render/tests/d3d8_resource_facade.hpp": "7c94e2bef1bb843be2b8d35df7ad509f0ad2946c46dbc648f77feb95ac6e5ed9",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "21bdd67358220b05c452d35c84f105ef2a599328490784fe9eeba56d71ce9b54",
+    "t3render/tests/d3d8_device_facade.hpp": "b30e5890ef91d26e1480dd600cb0ae65744146fa35423bfd28bf3a4879b5993d",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "6bd32b704185496157b0a14817e97727ae67c3635b7030984049520b9b639c0b",
+    "t3render/tests/buffer_proxy_test.cpp": "61db412057bf2e82bb3da2dd46cc7959d67225c053a5f6da4fe8132ccbc9551c",
+    "t3render/tests/d3d8_resource_facade_test.cpp": "9490d8187fd2c541e096d7c5949f9f6d8083728f5823de093381f38a512f2970",
+    "t3render/tests/private_blob_test.cpp": "639a66a51c47e09cfd8536ec0c6cb4f9d21e0ebfb58398145fc0b4ffbd21852d",
+    "t3render/tests/test_d3d8_device_facade_runner.py": "4597a9c9c1f4d0920cf42adeb868cbb022057c7cd0f1fa1400b09b6c197dd21b",
+    "t3render/tools/run_d3d8_device_facade.py": "90d18bcccc3c0ad36da74a50b3c08248f3f3f368746216b244ca17faa58ba694"
+  },
+  "fixture_sha256": "441def626a9184b9a3bde1c9029b5fc51bb4430ccce2f702699817bba317b7a4",
+  "result": {
+    "external_unknown_texture_and_vb_roundtrip": true,
+    "external_unknown_survives_source_reacquisition": true,
+    "external_size_and_short_buffer": true,
+    "external_replaced_with_blob": true,
+    "cross_device_resource_cycle_identity_parent_and_explicit_free": true,
+    "holder_of_source_device_released_without_artificial_cycle": true,
+    "unknown_external_write_invalidates_buffer_evidence": true,
+    "parity_records_each_default_fixture": 159,
+    "rgb_ppm_sha256_both_default_fixture": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+    "baseline_log_sha256": "eeec5f4aec7514bc2beeb1782199a998f78a4920cafed137122387efe2c9fc8d",
+    "facade_log_sha256": "bb17868692d5a48680a84e087e3823c4d33b3cb984e4bcd39b515b92d622d8a6"
+  },
+  "limitations": [
+    "Persistent eager facade fixture only; not integrated into the proxy or TDS.",
+    "Unknown external COM writes invalidate buffer evidence; hidden native device aliases may also affect shader/state observation.",
+    "Native private-data marker uses a reserved GUID; collisions and reentrant/overlapping calls fail closed.",
+    "The RGB/state comparison uses the default policy; eager external-object checks are separate.",
+    "One Wine runtime and selected lifetime graphs; native Windows, TDS and runtime concurrency remain untested."
+  ]
+}

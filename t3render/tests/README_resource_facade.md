@@ -25,8 +25,10 @@ from the same device. The combined fixture shares its bridge with VB/IB
 facades; the separate buffer-only fixture continues to reject COM values. The bridge pins the
 facade during Set, stores the native object in the native resource, and maps a
 native Get back to the facade using the registries. It never stores the
-wrapper in native private data. External `IUnknown` values, unknown GUIDs and
-cross-device or unknown inputs return `E_NOTIMPL`. The wrapper tracks at most
+wrapper in native private data. The default retaining fixture rejects external
+`IUnknown`; the separate persistent eager fixture forwards external values and
+invalidates buffer capture evidence because those objects can hide native
+aliases. Unknown GUIDs still return `E_NOTIMPL`. The wrapper tracks at most
 64 GUIDs and refuses overlapping or
 reentrant private-data calls. Failed writes or frees discard provenance. Reset
 retirement can discard a source wrapper's provenance even if the native
@@ -209,9 +211,21 @@ rejects unknown pointers without dereferencing them. After Reset, old shadow
 bytes remain unknown. Host tests cover address reuse, marker collisions,
 getter/final-Release races, reentrancy, reset and hazard invalidation. This is
 still opt-in and fixture-only: the reserved GUID changes native private data,
-external COM values are rejected, the capture observer is not unified and
+the capture observer is not unified and
 neither TDS nor native Windows have been validated. Logs and PPMs are under
 `build/t3render-captures/2026-11-14-persistent-eager-buffers-v6/`.
+
+The [eager external COM experiment](../benchmarks/d3d8/2026-11-14-eager-external-com/result.json)
+forwards unknown application `IUnknown` values only in the persistent eager
+variant. Texture and VB sources round-tripped the same external pointer after
+wrapper reacquisition; size queries, short buffers, replacement with a blob and
+cleanup were checked. A cross-device texture/VB cycle preserved identities and
+parents and was explicitly broken. A holder retaining its source device was
+released without the artificial dormant-wrapper cycle. On any external write,
+buffer evidence is invalidated conservatively; future capture must also account
+for possible hidden device aliases. Reentrant/overlapping private-data calls,
+reserved-GUID collisions, native Windows and TDS parity remain unresolved.
+Logs and PPMs are under `build/t3render-captures/2026-11-14-eager-external-com-v4/`.
 
 The later [state-block observation](../benchmarks/d3d8/2026-11-13-stateblock-facade/result.json)
 exercised Create, Capture, Begin/End, Apply and Delete on the combined facade.

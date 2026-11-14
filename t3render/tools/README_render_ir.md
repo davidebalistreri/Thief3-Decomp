@@ -167,8 +167,11 @@ layout. It describes XYZ or XYZRHW positions, normals, point size, colors and
 up to eight texture coordinate sets. Blended vertices and unsupported FVF bits
 remain unavailable. Indexed draws are rebased by the declared minimum vertex
 onto the captured vertex window, including nonzero base vertices. It validates
-the index range, stride and finite float attributes; missing or inconsistent
-observations remain unavailable with a reason.
+the index range, stride and finite float attributes. Indexed draws validate
+only vertices actually referenced by the observed indices; non-indexed draws
+validate every vertex. `vertex_validation` records that scope and the count,
+while the original captured range, including unreferenced bytes, is preserved.
+Missing or inconsistent observations remain unavailable with a reason.
 
 The numeric vertex-shader value may also be a programmable shader handle, so
 the layout is explicitly a candidate. The output retains the original state,

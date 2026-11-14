@@ -39,6 +39,7 @@
   },
   "observations": [
     "All 144 draws with the full candidate set have color writes disabled and stencil enabled, consistent with stencil shadow-volume work; they cannot alone produce the visible room.",
+    "FVF geometry validation finds one color-writing buffered quad and eight immediate-mode candidates when indexed draws validate only referenced vertices. The FVF interpretation and actual GPU inputs remain unverified.",
     "The 539 draws with unavailable vertex payloads reference one captured resource identity; the reason for each unavailable shadow is not established.",
     "The user reported truncated menu labels with the experimental facade and repeated-Unlock flag enabled.",
     "The bounded repeated-Unlock policy was enabled and recorded; the affected shadow was discarded, not recovered."

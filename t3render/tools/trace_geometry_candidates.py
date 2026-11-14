@@ -115,15 +115,8 @@ def geometry_candidate(command, mesh, result, frame_end, up_component_limit, up_
         require(len(raw_vertices) == count * stride, "vertex byte count differs from range")
         if source == "immediate":
             require(len(raw_vertices) <= up_component_limit, "immediate vertex component exceeds the capture limit")
-        for n in range(count):
-            for attribute in layout["attributes"]:
-                if attribute["encoding"] == "float32":
-                    values = struct.unpack_from("<" + "f" * attribute["components"], raw_vertices,
-                                                n * stride + attribute["offset_bytes"])
-                    require(all(math.isfinite(v) for v in values), "non-finite vertex attribute")
-                    if attribute["semantic"] == "position" and layout["position_kind"] == "xyzrhw":
-                        require(values[3] > 0, "invalid reciprocal homogeneous coordinate")
         index_output = None
+        referenced = None
         if indexed:
             part = data.get("index")
             require(isinstance(part, dict) and part.get("status") == "captured" and
@@ -143,15 +136,32 @@ def geometry_candidate(command, mesh, result, frame_end, up_component_limit, up_
             minimum = command.get("parameters", {}).get("minimum_vertex")
             require(type(minimum) is int and minimum >= 0, "minimum vertex is unknown")
             normalized = bytearray()
+            referenced = set()
             for (index,) in struct.iter_unpack(fmt, raw_indices):
                 require(minimum <= index < minimum + count, "index is outside the observed vertex window")
-                normalized.extend(struct.pack(fmt, index - minimum))
+                offset = index - minimum
+                referenced.add(offset)
+                normalized.extend(struct.pack(fmt, offset))
             index_output = {"index_format": part["index_format"], "index_count": part["index_count"],
                             "encoding": "hex", "data": normalized.hex(),
                             "normalization": "observed index minus declared minimum vertex"}
+        # Indexed draws consume only referenced vertices. Captured ranges may
+        # contain unused padding or stale bytes, which do not describe inputs
+        # to this draw and must not invalidate otherwise coherent geometry.
+        validated_vertices = referenced if indexed else range(count)
+        for n in validated_vertices:
+            for attribute in layout["attributes"]:
+                if attribute["encoding"] == "float32":
+                    values = struct.unpack_from("<" + "f" * attribute["components"], raw_vertices,
+                                                n * stride + attribute["offset_bytes"])
+                    require(all(math.isfinite(v) for v in values), "non-finite vertex attribute")
+                    if attribute["semantic"] == "position" and layout["position_kind"] == "xyzrhw":
+                        require(values[3] > 0, "invalid reciprocal homogeneous coordinate")
         return {"status": "candidate", "source": source, "layout": layout,
                 "vertex_count": count, "vertices": {"encoding": "hex", "data": vertex["data"]},
-                "indices": index_output}
+                "indices": index_output,
+                "vertex_validation": {"scope": "referenced" if indexed else "all",
+                                      "count": len(validated_vertices)}}
     except (GeometryError, KeyError, TypeError, ValueError, struct.error, OverflowError) as exc:
         return {"status": "unavailable", "reason": str(exc)}
 

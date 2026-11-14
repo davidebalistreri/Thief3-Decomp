@@ -83,6 +83,22 @@ class GeometryCandidateTests(unittest.TestCase):
         self.assertIsNone(candidate["indices"])
         self.assertEqual(ir["frames"][0]["commands"][0]["mesh"], ir["meshes"][0]["id"])
 
+    def test_indexed_draw_checks_only_referenced_vertex_attributes(self):
+        events = buffered_events()
+        draw = events[2]
+        draw["num_vertices"] = 4
+        raw = vertices() + struct.pack("<4fI", float("nan"), 0, 0, 1, 0xffffffff)
+        draw["buffer_data"]["vertex"].update(vertex_count=4, byte_count=len(raw), data=raw.hex())
+        candidate = self.convert(events)["meshes"][0]["geometry_candidate"]
+        self.assertEqual(candidate["status"], "candidate")
+        self.assertEqual(candidate["vertex_validation"], {"scope": "referenced", "count": 3})
+        self.assertEqual(bytes.fromhex(candidate["vertices"]["data"]), raw)
+        # Referencing that same invalid vertex must fail closed.
+        draw["buffer_data"]["index"]["data"] = struct.pack("<3H", 5, 2, 3).hex()
+        candidate = self.convert(events)["meshes"][0]["geometry_candidate"]
+        self.assertEqual(candidate["status"], "unavailable")
+        self.assertEqual(candidate["reason"], "non-finite vertex attribute")
+
     def test_fvf_layout_normal_color_and_nonstandard_texture_dimensions(self):
         fvf = 0x002 | 0x010 | 0x040 | 0x200 | (3 << 16) | (1 << 18)
         layout = geometry.fvf_layout(fvf, 48)

@@ -163,6 +163,12 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
                       "persistent_eager_buffer=PASS shadow=not_observed provenance=preserved reset=not_observed")
         if [line for line in lines if line.startswith("persistent_eager_buffer=")] != [persistent]:
             raise RunError("persistent eager buffer observation is missing or conflicting")
+        prepared = ["prepared_eager_buffer=PASS"] if mode == "facade" else []
+        if [line for line in lines if line.startswith("prepared_eager_buffer=")] != prepared:
+            raise RunError("prepared getter observation is missing or conflicting")
+        capture = ["prepared_capture_draw=PASS"] if mode == "facade" else []
+        if [line for line in lines if line.startswith("prepared_capture_draw=")] != capture:
+            raise RunError("prepared capture observation is missing or conflicting")
         if [line for line in lines if line.startswith("private_cross_device_cycle=")] != ["private_cross_device_cycle=PASS"]:
             raise RunError("cross-device private-data observation is missing or conflicting")
         for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
@@ -239,6 +245,33 @@ def read_ppm(path, resource_facade=False):
     return data
 
 
+def inspect_prepared_trace(path):
+    try:
+        records = [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines()]
+        if [record["event"] for record in records] != ["header", "frame_begin", "draw", "draw_result", "frame_end", "capture_end"]:
+            raise ValueError("incomplete or unexpected event sequence")
+        header, begin, draw, result, end, _ = records
+        if (header.get("replayable") is not False or header.get("buffer_capture", {}).get("requested") is not True or
+            begin.get("frame") != 1 or draw.get("frame") != 1 or
+            draw.get("call") != "DrawIndexedPrimitive" or result.get("frame") != 1 or
+            result.get("op_id") != draw.get("op_id") or not draw.get("op_id") or result.get("hr") != 0 or
+            result.get("buffer_stable") is not True or end.get("frame") != 1 or end.get("present_hr") != 0 or
+            end.get("draws") != 1 or end.get("replayable") is not False):
+            raise ValueError("invalid draw, result or frame")
+        data = draw["buffer_data"]
+        vertex, index = data["vertex"], data["index"]
+        expected_vertex = b"".join(struct.pack("<ffffI", x, y, 0.5, 1.0, 0xffe43b3b)
+                                   for x, y in ((12, 12), (116, 12), (12, 116)))
+        if (data.get("source") != "application_lock_shadow" or vertex.get("status") != "captured" or
+            vertex.get("data") != expected_vertex.hex() or vertex.get("byte_count") != len(expected_vertex) or
+            (vertex.get("first_vertex"), vertex.get("vertex_count"), vertex.get("stride"), vertex.get("byte_offset")) != (0, 3, 20, 0) or
+            index.get("status") != "captured" or index.get("data") != struct.pack("<3H", 0, 1, 2).hex() or
+            (index.get("byte_count"), index.get("index_count"), index.get("index_format"), index.get("byte_offset")) != (6, 3, 101, 0)):
+            raise ValueError("buffer snapshot differs from fixture data")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise RunError(f"invalid prepared buffer trace: {exc}") from exc
+
+
 def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resource_facade=False):
     engine, bottle, fixture, output = map(valid_path, (engine, bottle, fixture, output))
     wine, server, frameworks = engine / "engine/bin/wine", engine / "engine/bin/wineserver", engine / "frameworks"
@@ -302,6 +335,11 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
             images[stage] = read_ppm(ppm, resource_facade)
             result["runs"][stage] = {"log": log.name, "log_sha256": sha256(log), "ppm": ppm.name,
                                      "ppm_sha256": sha256(ppm), "parity_records": len(observations[stage])}
+            if resource_facade and stage == "facade":
+                trace = Path(str(ppm) + ".trace.jsonl")
+                inspect_prepared_trace(trace)
+                result["runs"][stage]["prepared_trace"] = trace.name
+                result["runs"][stage]["prepared_trace_sha256"] = sha256(trace)
         stage = "compare"
         if observations["baseline"] != observations["facade"]:
             raise RunError("native and facade HRESULT/state observations differ")

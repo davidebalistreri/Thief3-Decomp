@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "test": "synthetic_prepared_buffer_capture",
+  "date": "2026-11-14",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "d95ac05704c5786316b703eaf3b72a24920bd1b6c2aaadfebf3d3a7cdd9e8227",
+    "t3render/src/buffer_proxy.cpp": "0ba4ac2e2cfde24a94bafcf420b326a7f9c71452323f676eff28b4d084b91c36",
+    "t3render/src/buffer_proxy.hpp": "c344ea074767aa0fcfd743c262de0438e2e89c63d43a21500e9958eba98ee916",
+    "t3render/src/capture.cpp": "2e5e2e58f86f6a7adb35d0fc0b644c06d1e54ab80ab38918063b4842777b3ae8",
+    "t3render/src/capture.hpp": "0ac95eb75d6684ba5bae1c393c2fc83d733a9d313438d101eef1be7208f63b6e",
+    "t3render/tests/prepared_buffer_capture.hpp": "d729a5e1ce04f3a043e0a93ea7a3984bf4cdcda3227a88299e83bcfcc488dc6d",
+    "t3render/tests/buffer_proxy_test.cpp": "b08e962ae6b160405cced22475c705ca05e6e15c56f2debe1dd26734c9a11bb5",
+    "t3render/tests/capture_fake.cpp": "deaa026392b01f1d820cbec4f9deb96ae7d28fa4af6f32493ea9cc242ea1e01f",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "7c37762dd8eb5c58073d7636ffda56479f83770dd7bb54afb9f9125615d6e72d",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "c7015f5e0a3a999bf593e8a2aa44fb94977eec322393b9c5d4450f88c4760392",
+    "t3render/tests/test_capture_host.py": "eb68d0037c7fb10400b56a3eb1cb2d61c7d2eac54af9584a5385da0bc8f41d46",
+    "t3render/tests/test_d3d8_device_facade_runner.py": "8592a92eed2c31c2f92b6676fed77d7a2c109cb098e90d826750ad1064ec12af",
+    "t3render/tools/run_d3d8_device_facade.py": "a798a4a397f70a43dad8ecc19316d3fd4e0e046b0aa7a4acc6766b5bc8489957"
+  },
+  "fixture_sha256": "9d42ec08045d7dc88d6e82049ed03bffd3d9b75d19bb41d23aa5330e07c68e31",
+  "result": {
+    "stateblock_reacquired_writeonly_vertex_bytes": 60,
+    "stateblock_reacquired_writeonly_index_bytes": 6,
+    "indexed_draw_stable_and_present_succeeded": true,
+    "trace_sha256": "a9b69ecf73e46431e3a02c5857ba9cdc276d5294fdca53123748f41b963f7fd9",
+    "trace_replayable": false,
+    "trace_ir_extraction_complete": false,
+    "default_fixture_parity_records_each": 159,
+    "default_fixture_ppm_sha256_both": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+    "baseline_log_sha256": "44f6cf4e6db90b50284a7db976a0db9f624f39ff1bf26b1a0e7818f33d442000",
+    "facade_log_sha256": "337e12e9bf80bcb70da6719bfbb4fb46bcd81c93f19644dd2c411941dd6a3632"
+  },
+  "limitations": [
+    "Persistent eager resource facade fixture only; not integrated into the game proxy or TDS.",
+    "The captured draw used fixed-function FVF; shader declaration/program/constants were not observed in this Wine trace.",
+    "Host writer test serializes pre-supplied shader candidates with buffers; it is not a simultaneous runtime observer.",
+    "Texture bytes remain unavailable; the offline IR is incomplete and not replayable.",
+    "Default RGB comparison concerns a separate synthetic rendering, not a synchronized reference for the captured draw.",
+    "Native Windows, TDS, hidden aliases and full concurrency remain unverified."
+  ]
+}

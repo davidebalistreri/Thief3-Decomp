@@ -660,36 +660,55 @@ UpBytes ReadShadow(CaptureState& s, const BufferObserver& observer, IDirect3DDev
 void CaptureBuffered(std::ostream& out, CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw) {
     const BufferObserver& observer = *draw.buffer_observer;
     const bool indexed = draw.kind == DrawKind::IndexedPrimitive;
-    ComRef<IDirect3DVertexBuffer8> vb;
-    ComRef<IDirect3DIndexBuffer8> ib;
+    ComRef<IDirect3DVertexBuffer8> owned_vb;
+    ComRef<IDirect3DIndexBuffer8> owned_ib;
+    IDirect3DVertexBuffer8* vb = nullptr;
+    IDirect3DIndexBuffer8* ib = nullptr;
     UINT stride = 0, base = 0;
-    const HRESULT vertex_hr = device->GetStreamSource(0, &vb.value, &stride);
-    HRESULT index_hr = E_FAIL;
-    if (indexed) index_hr = device->GetIndices(&ib.value, &base);
+    HRESULT vertex_hr = E_FAIL, index_hr = E_FAIL;
+    if (draw.buffer_bindings) {
+        if (draw.buffer_bindings->device == device) {
+            vertex_hr = draw.buffer_bindings->vertex_result;
+            vb = draw.buffer_bindings->vertex;
+            stride = draw.buffer_bindings->stride;
+            if (indexed) {
+                index_hr = draw.buffer_bindings->index_result;
+                ib = draw.buffer_bindings->index;
+                base = draw.buffer_bindings->base;
+            }
+        }
+    } else {
+        vertex_hr = device->GetStreamSource(0, &owned_vb.value, &stride);
+        vb = owned_vb.value;
+        if (indexed) {
+            index_hr = device->GetIndices(&owned_ib.value, &base);
+            ib = owned_ib.value;
+        }
+    }
 
     uint64_t elements = 0;
     const bool elements_known = PrimitiveElements(draw.primitive_type, draw.primitive_count, elements);
     uint64_t first = 0, vertex_count = 0, vertex_offset = 0, vertex_size = 0;
-    const bool first_known = !indexed || (SUCCEEDED(index_hr) && ib.value);
+    const bool first_known = !indexed || (SUCCEEDED(index_hr) && ib);
     if (first_known) first = indexed ? uint64_t(base) + draw.min_vertex_index : draw.start_vertex;
     const bool vertex_count_known = indexed || elements_known;
     if (vertex_count_known) vertex_count = indexed ? (draw.primitive_count ? draw.num_vertices : 0) : elements;
-    const bool stride_known = SUCCEEDED(vertex_hr) && vb.value;
+    const bool stride_known = SUCCEEDED(vertex_hr) && vb;
     const bool offset_known = first_known && stride_known && Product(first, stride, vertex_offset);
     const bool vertex_size_known = vertex_count_known && stride_known && Product(vertex_count, stride, vertex_size);
     UpBytes vertex;
     if (FAILED(vertex_hr)) vertex.status = "getter_failed";
-    else if (!vb.value) vertex.status = "unbound";
+    else if (!vb) vertex.status = "unbound";
     else if (!first_known || !vertex_count_known) vertex.status = "unknown_range";
     else if (!offset_known || !vertex_size_known || first > UINT64_C(0xffffffff) ||
              vertex_count > UINT64_C(0x100000000) - first) vertex.status = "overflow";
     else if (vertex_count && !stride) vertex.status = "invalid_stride";
     else {
         D3DVERTEXBUFFER_DESC desc{};
-        if (FAILED(vb.value->GetDesc(&desc))) vertex.status = "descriptor_failed";
+        if (FAILED(vb->GetDesc(&desc))) vertex.status = "descriptor_failed";
         else if (vertex_offset > desc.Size || vertex_size > uint64_t(desc.Size) - vertex_offset)
             vertex.status = "out_of_bounds";
-        else vertex = ReadShadow(s, observer, device, vb.value, observer.read_vertex, vertex_offset, vertex_size);
+        else vertex = ReadShadow(s, observer, device, vb, observer.read_vertex, vertex_offset, vertex_size);
     }
 
     uint64_t index_offset = 0, index_size = 0;
@@ -699,10 +718,10 @@ void CaptureBuffered(std::ostream& out, CaptureState& s, IDirect3DDevice8* devic
     UpBytes index;
     if (indexed) {
         if (FAILED(index_hr)) index.status = "getter_failed";
-        else if (!ib.value) index.status = "unbound";
+        else if (!ib) index.status = "unbound";
         else {
             D3DINDEXBUFFER_DESC desc{};
-            if (FAILED(ib.value->GetDesc(&desc))) index.status = "descriptor_failed";
+            if (FAILED(ib->GetDesc(&desc))) index.status = "descriptor_failed";
             else {
                 index_format = static_cast<unsigned>(desc.Format);
                 index_format_known = true;
@@ -715,7 +734,7 @@ void CaptureBuffered(std::ostream& out, CaptureState& s, IDirect3DDevice8* devic
                     index_offset_known = true;
                     if (index_offset > desc.Size || index_size > uint64_t(desc.Size) - index_offset)
                         index.status = "out_of_bounds";
-                    else index = ReadShadow(s, observer, device, ib.value, observer.read_index, index_offset, index_size);
+                    else index = ReadShadow(s, observer, device, ib, observer.read_index, index_offset, index_size);
                 }
             }
         }
@@ -723,7 +742,7 @@ void CaptureBuffered(std::ostream& out, CaptureState& s, IDirect3DDevice8* devic
 
     out << ",\"buffer_data\":{\"source\":\"application_lock_shadow\",\"vertex\":{";
     BytesJson(out, vertex);
-    out << ",\"resource\":"; Id(out, vb.value);
+    out << ",\"resource\":"; Id(out, vb);
     out << ",\"stream\":0,\"first_vertex\":";
     if (first_known) out << first; else out << "null";
     out << ",\"vertex_count\":";
@@ -736,7 +755,7 @@ void CaptureBuffered(std::ostream& out, CaptureState& s, IDirect3DDevice8* devic
     if (!indexed) out << "null";
     else {
         out << '{'; BytesJson(out, index);
-        out << ",\"resource\":"; Id(out, ib.value);
+        out << ",\"resource\":"; Id(out, ib);
         out << ",\"index_count\":";
         if (elements_known) out << elements; else out << "null";
         out << ",\"index_format\":";

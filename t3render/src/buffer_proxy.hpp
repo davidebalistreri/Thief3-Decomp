@@ -57,6 +57,36 @@ public:
         IUnknown* guard_ = nullptr;
     };
 
+    // Prepared outside the capture-writer mutex, using a caller-owned native
+    // getter reference and an active draw window. Read never calls COM. The
+    // caller must keep that native +1 and device alive until the draw ends.
+    class PreparedVertex final {
+    public:
+        bool valid() const noexcept { return state_ && token_.identity && token_.generation && draw_; }
+        ir::RegistryResult Read(IDirect3DDevice8* owner, IDirect3DVertexBuffer8* native,
+                                std::size_t offset, void* destination, std::size_t length) const noexcept;
+    private:
+        friend class BufferProxy;
+        std::shared_ptr<State> state_;
+        IDirect3DDevice8* owner_ = nullptr;
+        IDirect3DVertexBuffer8* native_ = nullptr;
+        ir::BufferToken token_{};
+        std::uint64_t draw_ = 0;
+    };
+    class PreparedIndex final {
+    public:
+        bool valid() const noexcept { return state_ && token_.identity && token_.generation && draw_; }
+        ir::RegistryResult Read(IDirect3DDevice8* owner, IDirect3DIndexBuffer8* native,
+                                std::size_t offset, void* destination, std::size_t length) const noexcept;
+    private:
+        friend class BufferProxy;
+        std::shared_ptr<State> state_;
+        IDirect3DDevice8* owner_ = nullptr;
+        IDirect3DIndexBuffer8* native_ = nullptr;
+        ir::BufferToken token_{};
+        std::uint64_t draw_ = 0;
+    };
+
     // All wrappers share a single byte and resource budget. Reader must be
     // fault-safe, return true only on a complete copy, and never re-enter this
     // object or a D3D method. Its context must outlive all emitted wrappers.
@@ -163,6 +193,10 @@ public:
                                             std::size_t offset, void* destination, std::size_t length) noexcept;
     ir::RegistryResult ReadIndexFromGetter(IDirect3DDevice8* owner, IDirect3DIndexBuffer8* native,
                                            std::size_t offset, void* destination, std::size_t length) noexcept;
+    PreparedVertex PrepareVertexGetter(IDirect3DDevice8* owner, IDirect3DVertexBuffer8* native,
+                                       std::uint64_t draw) noexcept;
+    PreparedIndex PrepareIndexGetter(IDirect3DDevice8* owner, IDirect3DIndexBuffer8* native,
+                                     std::uint64_t draw) noexcept;
 
 private:
     explicit BufferProxy(std::shared_ptr<State> state) noexcept : state_(std::move(state)) {}

@@ -23,6 +23,19 @@ struct BufferObserver {
     bool (*read_index)(void*, IDirect3DDevice8*, IDirect3DIndexBuffer8*, std::size_t, void*, std::size_t) = nullptr;
 };
 
+// Optional getter results sampled outside the writer mutex. The caller owns
+// the successful native +1 references through CaptureDraw and must prepare
+// any COM identity lookups before calling it. A different owner fails closed.
+struct BufferBindingSnapshot {
+    IDirect3DDevice8* device = nullptr;
+    HRESULT vertex_result = E_FAIL;
+    IDirect3DVertexBuffer8* vertex = nullptr;
+    UINT stride = 0;
+    HRESULT index_result = E_FAIL;
+    IDirect3DIndexBuffer8* index = nullptr;
+    UINT base = 0;
+};
+
 // Candidate sampled outside the capture mutex. Its numeric match is not proof
 // of shader identity or of bytes consumed by the driver.
 struct ShaderSnapshot {
@@ -49,6 +62,7 @@ struct DrawCall {
     const void* vertex_data = nullptr;
     const void* index_data = nullptr;
     const BufferObserver* buffer_observer = nullptr;
+    const BufferBindingSnapshot* buffer_bindings = nullptr;
     const ShaderSnapshot* shader_snapshot = nullptr;
 };
 

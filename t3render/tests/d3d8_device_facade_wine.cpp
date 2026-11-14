@@ -12,6 +12,7 @@
 #include <cwchar>
 #include <limits>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace {
@@ -866,6 +867,46 @@ bool ObserveExternalPrivateLifetime(HWND window, bool facade_mode, bool eager = 
     return true;
 }
 
+bool CapturePreparedBufferDraw(IDirect3DDevice8* device, IDirect3DDevice8* native,
+                               t3render::buffers::BufferProxy& buffers, D3DPRESENT_PARAMETERS& pp) {
+    if (!t3render::CaptureConfigured()) return false;
+    if (FAILED(device->SetVertexShader(kFvf)) || FAILED(device->SetPixelShader(0)) ||
+        FAILED(device->SetRenderState(D3DRS_LIGHTING, FALSE)) || FAILED(device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE)) ||
+        FAILED(device->SetRenderState(D3DRS_ZENABLE, FALSE)) || FAILED(device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE)) ||
+        FAILED(device->SetTexture(0, nullptr)) || FAILED(device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1)) ||
+        FAILED(device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE)) ||
+        FAILED(device->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE)) ||
+        FAILED(device->Clear(0, nullptr, D3DCLEAR_TARGET, kClear, 1, 0))) return false;
+    t3render::CaptureDevice(native, &pp);
+    const HRESULT first_present = device->Present(nullptr, nullptr, nullptr, nullptr);
+    t3render::CapturePresent(native, first_present);
+    if (FAILED(first_present) || FAILED(device->BeginScene())) return false;
+    const auto ticket = buffers.BeginDraw(native);
+    if (!ticket) return false;
+    HRESULT draw_result = E_FAIL;
+    std::uint64_t token = 0;
+    bool stable = false;
+    {
+        t3render::fixture::PreparedBufferCapture prepared(buffers, native, ticket, true);
+        t3render::DrawCall call{};
+        call.kind = t3render::DrawKind::IndexedPrimitive;
+        call.primitive_type = D3DPT_TRIANGLELIST;
+        call.num_vertices = 3; call.primitive_count = 1;
+        prepared.Attach(call);
+        token = t3render::CaptureDraw(native, call);
+        if (token) draw_result = device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 3, 0, 1);
+        stable = buffers.EndDraw(native, ticket);
+    }
+    t3render::CaptureBufferedDrawResult(native, token, draw_result, stable);
+    if (!token || !stable || FAILED(draw_result) || FAILED(device->EndScene())) return false;
+    const HRESULT last_present = device->Present(nullptr, nullptr, nullptr, nullptr);
+    t3render::CapturePresent(native, last_present);
+    t3render::CaptureDeviceReleased(native);
+    if (FAILED(last_present)) return false;
+    std::printf("prepared_capture_draw=PASS\n");
+    return true;
+}
+
 bool ObserveEagerBufferLifetime(HWND window, bool facade_mode, bool persistent = false) {
     ComPtr<IDirect3D8> native_factory;
     native_factory.value = Direct3DCreate8(D3D_SDK_VERSION);
@@ -936,8 +977,22 @@ bool ObserveEagerBufferLifetime(HWND window, bool facade_mode, bool persistent =
             std::memcmp(observed, vertices, sizeof(vertices)) ||
             buffers->ReadIndexFromGetter(native, native_index.value, 0, observed_indices, sizeof(observed_indices)) != t3render::ir::RegistryResult::Ok ||
             std::memcmp(observed_indices, indices, sizeof(indices))) return false;
+        const auto ticket = buffers->BeginDraw(native);
+        if (!ticket) return false;
+        const auto prepared_vertex = buffers->PrepareVertexGetter(native, native_vertex.value, ticket);
+        const auto prepared_index = buffers->PrepareIndexGetter(native, native_index.value, ticket);
+        if (!prepared_vertex.valid() || !prepared_index.valid() ||
+            prepared_vertex.Read(native, native_vertex.value, 0, observed, sizeof(observed)) != t3render::ir::RegistryResult::Ok ||
+            std::memcmp(observed, vertices, sizeof(vertices)) ||
+            prepared_index.Read(native, native_index.value, 0, observed_indices, sizeof(observed_indices)) != t3render::ir::RegistryResult::Ok ||
+            std::memcmp(observed_indices, indices, sizeof(indices)) || !buffers->EndDraw(native, ticket) ||
+            prepared_vertex.Read(native, native_vertex.value, 0, observed, sizeof(observed)) != t3render::ir::RegistryResult::Unavailable ||
+            prepared_index.Read(native, native_index.value, 0, observed_indices, sizeof(observed_indices)) != t3render::ir::RegistryResult::Unavailable) return false;
+        std::printf("prepared_eager_buffer=PASS\n");
     }
-    if (FAILED(device->ApplyStateBlock(block)) || FAILED(device->GetStreamSource(0, vertex.put(), &stride)) ||
+    if (FAILED(device->ApplyStateBlock(block))) return false;
+    if (facade_mode && persistent && !CapturePreparedBufferDraw(device.value, native, *buffers, pp)) return false;
+    if (FAILED(device->GetStreamSource(0, vertex.put(), &stride)) ||
         !vertex.value || stride != sizeof(Vertex) || FAILED(device->GetIndices(index.put(), &base)) || !index.value || base != 0) return false;
     BYTE copied[sizeof(blob)]{}; DWORD copied_size = sizeof(copied);
     const HRESULT read = vertex->GetPrivateData(blob_key, copied, &copied_size);
@@ -1822,6 +1877,14 @@ int wmain(int argc, wchar_t** argv) {
         std::fprintf(stderr, "usage: fixture (--baseline|--facade) new-output.ppm\n"); return 2;
     }
     const bool facade_mode = std::wcscmp(argv[1], L"--facade") == 0;
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+    if (facade_mode) {
+        const std::wstring trace_path = std::wstring(argv[2]) + L".trace.jsonl";
+        if (!SetEnvironmentVariableW(L"T3RENDER_CAPTURE_PATH", trace_path.c_str()) ||
+            !SetEnvironmentVariableW(L"T3RENDER_CAPTURE_FRAME", L"1") ||
+            !SetEnvironmentVariableW(L"T3RENDER_CAPTURE_BUFFERS", L"1")) return 1;
+    }
+#endif
     const HINSTANCE instance = GetModuleHandleW(nullptr);
     const wchar_t* name = L"T3RenderD3D8DeviceFacadeFixture";
     WNDCLASSW cls{}; cls.lpfnWndProc = DefWindowProcW; cls.hInstance = instance; cls.lpszClassName = name;

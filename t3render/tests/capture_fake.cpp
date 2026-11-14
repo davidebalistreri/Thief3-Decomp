@@ -75,6 +75,7 @@ struct Device : IDirect3DDevice8 {
     unsigned getters = 0;
     DWORD render_state = 42;
     unsigned vertex_shader_getters = 0;
+    unsigned stream_getters = 0, index_getters = 0;
     DWORD vertex_shader = 444;
     DWORD pixel_shader = 555;
     UINT stream_stride = 32, index_base = 3;
@@ -129,13 +130,13 @@ struct Device : IDirect3DDevice8 {
     HRESULT GetVertexShader(DWORD* out) override { ++getters; ++vertex_shader_getters; *out = vertex_shader; return S_OK; }
     HRESULT GetPixelShader(DWORD* out) override { ++getters; *out = pixel_shader; return S_OK; }
     HRESULT GetStreamSource(UINT stream, IDirect3DVertexBuffer8** out, UINT* stride) override {
-        ++getters; *out = nullptr; *stride = 0;
+        ++getters; ++stream_getters; *out = nullptr; *stride = 0;
         if (vertex_get_failure) return E_FAIL;
         if (stream == 0 && !vertex_unbound) { ++vertex.refs; *out = &vertex; *stride = stream_stride; }
         return S_OK;
     }
     HRESULT GetIndices(IDirect3DIndexBuffer8** out, UINT* base) override {
-        ++getters; *out = nullptr; *base = 0;
+        ++getters; ++index_getters; *out = nullptr; *base = 0;
         if (index_get_failure) return E_FAIL;
         if (!index_unbound) { ++index.refs; *out = &index; *base = index_base; }
         return S_OK;
@@ -561,6 +562,46 @@ int main(int argc, char** argv) {
                 }
             }
         }
+    } else if (scenario == "prepared_buffers") {
+        t3render::CapturePresent(&device, S_OK);
+        ObserverState state{&device};
+        t3render::BufferObserver observer{&state, true, ReadObservedVertex, ReadObservedIndex};
+        t3render::BufferBindingSnapshot bindings;
+        bindings.device = &device;
+        bindings.vertex_result = device.GetStreamSource(0, &bindings.vertex, &bindings.stride);
+        bindings.index_result = device.GetIndices(&bindings.index, &bindings.base);
+        if (FAILED(bindings.vertex_result) || FAILED(bindings.index_result)) return 8;
+        t3render::ShaderSnapshot shader;
+        shader.getter_result = S_OK; shader.value = 0xf0000001u;
+        shader.declaration.status = t3render::ir::ShaderObservationStatus::Candidate;
+        shader.declaration.generation = 7;
+        shader.declaration.words = {0x20000000u, 0xffffffffu};
+        shader.declaration.program_status = t3render::ir::ShaderProgramStatus::Complete;
+        shader.declaration.program_words = {0xfffe0101u, 1u, 0xc00f0000u, 0x90e40000u, 0x0000ffffu};
+        shader.constants_requested = true; shader.constants_count = 1;
+        shader.constants_result = shader.constants_verify_result = S_OK;
+        shader.constants_match = true; shader.constant_bits[0] = 0x3f800000u;
+        auto call = indexed;
+        call.min_vertex_index = 2; call.num_vertices = 3;
+        call.start_index = 1; call.primitive_count = 1;
+        call.buffer_observer = &observer; call.buffer_bindings = &bindings; call.shader_snapshot = &shader;
+        auto emit = [&]() {
+            const auto stream_calls = device.stream_getters, index_calls = device.index_getters;
+            const auto token = t3render::CaptureDraw(&device, call);
+            // General state enumeration still observes two streams and the
+            // indices. Buffered data must reuse the prepared getter results.
+            if (!token || device.stream_getters - stream_calls != 2 || device.index_getters - index_calls != 1) return false;
+            t3render::CaptureShaderDrawResult(&device, token, S_OK, 1, true);
+            return true;
+        };
+        if (!emit()) return 8;
+        bindings.device = &unrelated;
+        if (!emit()) return 8;
+        bindings.device = &device; bindings.vertex_result = E_FAIL; bindings.index_result = E_FAIL;
+        if (!emit()) return 8;
+        bindings.vertex->Release(); bindings.index->Release();
+        if (state.vertex_reads != 1 || state.index_reads != 1) return 8;
+        t3render::CapturePresent(&device, S_OK);
     } else if (scenario == "buffered" || scenario == "buffer_budget" || scenario == "buffer_budget_fail" ||
         scenario == "buffer_budget_mixed") {
         t3render::CapturePresent(&device, S_OK);  // target frame 1

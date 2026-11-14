@@ -227,6 +227,26 @@ for possible hidden device aliases. Reentrant/overlapping private-data calls,
 reserved-GUID collisions, native Windows and TDS parity remain unresolved.
 Logs and PPMs are under `build/t3render-captures/2026-11-14-eager-external-com-v4/`.
 
+The [prepared-buffer capture experiment](../benchmarks/d3d8/2026-11-14-prepared-buffer-capture/result.json)
+resolves native VB/IB identity before entering the trace writer, while holding
+native getter references. A prepared reader only reads its registered shadow
+and cannot call COM; it becomes unavailable when its draw ticket ends or is
+invalidated. In the persistent eager fixture, a managed `WRITEONLY` VB/IB pair
+was released by the application, restored through a state block, and captured
+in one actual indexed D3D8 draw on Highball. The trace contains the exact 60
+vertex and 6 index bytes with a successful, stable paired draw and Present.
+The runner validates those bytes and the event sequence. A host writer test
+also serializes pre-supplied declaration/program/constant candidates alongside
+buffer bytes, and checks foreign-owner and failed getter snapshots fail closed.
+That host test does not demonstrate simultaneous real observation. The 159
+native/facade state comparisons and equal RGB images come from the separate
+default fixture run, not from a synchronized image of this captured draw.
+The offline converter still reports this trace as incomplete and not replayable.
+Shader instrumentation, texture content, full alias safety, concurrency,
+native Windows and TDS remain unverified. This is not a unified game facade;
+do not enable it in TDS. Full local logs, images and the synthetic trace are
+under `build/t3render-captures/2026-11-14-prepared-capture-verified/`.
+
 The later [state-block observation](../benchmarks/d3d8/2026-11-13-stateblock-facade/result.json)
 exercised Create, Capture, Begin/End, Apply and Delete on the combined facade.
 After VB/IB wrappers became dormant and were reacquired, their `WRITEONLY`

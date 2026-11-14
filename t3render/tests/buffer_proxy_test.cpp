@@ -833,6 +833,24 @@ void PersistentEagerBufferShadows() {
     assert(vertex && index && vertex_marker && index_marker);
     const BYTE data[]{1, 4, 9}; BYTE observed[sizeof(data)]{};
     Fill(vertex, 0, data, sizeof(data)); Fill(index, 0, data, sizeof(data));
+    auto draw = proxy->BeginDraw(&native);
+    assert(draw);
+    auto live_vertex = proxy->PrepareVertexGetter(&native, &vb, draw);
+    auto live_index = proxy->PrepareIndexGetter(&native, &ib, draw);
+    assert(live_vertex.valid() && live_index.valid());
+    const auto vertex_queries = vb.queries, index_queries = ib.queries;
+    SetLastError(36);
+    assert(live_vertex.Read(&native, &vb, 0, observed, sizeof(observed)) == RegistryResult::Ok &&
+           !std::memcmp(observed, data, sizeof(data)) && GetLastError() == 36);
+    assert(live_index.Read(&native, &ib, 0, observed, sizeof(observed)) == RegistryResult::Ok &&
+           !std::memcmp(observed, data, sizeof(data)) && GetLastError() == 36);
+    assert(vb.queries == vertex_queries && ib.queries == index_queries);
+    assert(live_vertex.Read(&facade, &vb, 0, observed, sizeof(observed)) == RegistryResult::UnknownResource);
+    Vertex foreign_vertex;
+    assert(live_vertex.Read(&native, &foreign_vertex, 0, observed, sizeof(observed)) == RegistryResult::UnknownResource);
+    assert(proxy->EndDraw(&native, draw));
+    assert(live_vertex.Read(&native, &vb, 0, observed, sizeof(observed)) == RegistryResult::Unavailable);
+    assert(foreign_vertex.Release() == 0);
     assert(vertex->SetPrivateData(kAlias, blob, sizeof(blob), 0) == S_OK);
     assert(vertex->SetPrivateData(t3render::markers::kPrivateMarkerGuid, blob, sizeof(blob), 0) == E_NOTIMPL);
     vb.AddRef(); ib.AddRef(); // native state block retains both
@@ -854,6 +872,41 @@ void PersistentEagerBufferShadows() {
     assert(proxy->ReadVertexFromGetter(&native, &alias, 0, observed, sizeof(observed)) == RegistryResult::Ok &&
            reentered && GetLastError() == 37 && !std::memcmp(observed, data, sizeof(data)));
     vb.on_query = {};
+    // Getter references outlive the preparations and the active draw. Alias
+    // identity is resolved before serialization; reads themselves never call COM.
+    draw = proxy->BeginDraw(&native);
+    assert(draw && !proxy->PrepareVertexGetter(&native, &vb, 0).valid());
+    bool prepare_reentered = false;
+    vb.on_query = [&] {
+        prepare_reentered = true;
+        assert(!proxy->PrepareVertexGetter(&native, &alias, draw).valid());
+    };
+    SetLastError(38);
+    auto prepared_vertex = proxy->PrepareVertexGetter(&native, &alias, draw);
+    auto prepared_index = proxy->PrepareIndexGetter(&native, &ib, draw);
+    assert(prepared_vertex.valid() && prepared_index.valid() && prepare_reentered && GetLastError() == 38);
+    vb.on_query = [] { assert(false && "prepared read must not call COM"); };
+    ib.on_query = vb.on_query;
+    assert(prepared_vertex.Read(&native, &alias, 0, observed, sizeof(observed)) == RegistryResult::Ok &&
+           !std::memcmp(observed, data, sizeof(data)));
+    assert(prepared_index.Read(&native, &ib, 0, observed, sizeof(observed)) == RegistryResult::Ok &&
+           !std::memcmp(observed, data, sizeof(data)));
+    assert(prepared_vertex.Read(&native, &vb, 0, observed, sizeof(observed)) == RegistryResult::UnknownResource);
+    assert(proxy->EndDraw(&native, draw));
+    assert(prepared_vertex.Read(&native, &alias, 0, observed, sizeof(observed)) == RegistryResult::Unavailable);
+    vb.on_query = {}; ib.on_query = {};
+    draw = proxy->BeginDraw(&native);
+    assert(draw && prepared_vertex.Read(&native, &alias, 0, observed, sizeof(observed)) == RegistryResult::Unavailable);
+    // A reentrant end/restart makes a preparation stale even at the same address.
+    vb.on_query = [&] {
+        assert(proxy->EndDraw(&native, draw));
+        draw = proxy->BeginDraw(&native);
+        assert(draw);
+    };
+    const auto obsolete_draw = draw;
+    assert(!proxy->PrepareVertexGetter(&native, &alias, obsolete_draw).valid());
+    vb.on_query = {};
+    assert(proxy->EndDraw(&native, draw));
     vb.AddRef(); ib.AddRef();
     vertex = proxy->AdoptVertexForFacade(&native, &facade, &vb, 8, false);
     index = proxy->AdoptIndexForFacade(&native, &facade, &ib, 8, false);
@@ -951,9 +1004,14 @@ void PersistentEagerBufferShadows() {
     assert(dormant_wrapper && active_wrapper && dormant_marker && active_marker);
     Fill(dormant_wrapper, 0, data, sizeof(data));
     dormant.AddRef(); dormant_wrapper->Release();
+    const auto hazardous_draw = hazardous->BeginDraw(&native2);
+    const auto hazardous_prepared = hazardous->PrepareVertexGetter(&native2, &dormant, hazardous_draw);
+    assert(hazardous_draw && hazardous_prepared.valid() &&
+           hazardous_prepared.Read(&native2, &dormant, 0, observed, sizeof(observed)) == RegistryResult::Ok);
     BYTE* mapped = nullptr;
     assert(active_wrapper->Lock(0, 2, &mapped, 0) == S_OK && mapped);
-    assert(hazardous->BeginDraw(&native2) == 0 &&
+    assert(hazardous_prepared.Read(&native2, &dormant, 0, observed, sizeof(observed)) == RegistryResult::Unavailable &&
+           !hazardous->EndDraw(&native2, hazardous_draw) && hazardous->BeginDraw(&native2) == 0 &&
            hazardous->ReadVertexFromGetter(&native2, &dormant, 0, observed, sizeof(observed)) == RegistryResult::Unavailable);
     assert(active_wrapper->Unlock() == S_OK && active_wrapper->Release() == 0 && dormant.Release() == 0);
     assert(hazardous->CloseFacadeDevice(&native2, &facade2) && !dormant_marker && !active_marker);

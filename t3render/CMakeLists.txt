@@ -219,7 +219,7 @@ endif()
 
 option(T3RENDER_BUILD_D3D8_RESOURCE_FACADE_FIXTURE "Build the isolated D3D8 resource facade experiment" OFF)
 if(T3RENDER_BUILD_D3D8_RESOURCE_FACADE_FIXTURE)
-  add_executable(t3render_d3d8_resource_facade_fixture tests/d3d8_resource_facade_wine.cpp src/buffer_proxy.cpp)
+  add_executable(t3render_d3d8_resource_facade_fixture tests/d3d8_resource_facade_wine.cpp src/buffer_proxy.cpp src/capture.cpp)
   target_compile_features(t3render_d3d8_resource_facade_fixture PRIVATE cxx_std_17)
   target_compile_definitions(t3render_d3d8_resource_facade_fixture PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(t3render_d3d8_resource_facade_fixture PRIVATE d3d8 dxguid user32 t3render_ir)

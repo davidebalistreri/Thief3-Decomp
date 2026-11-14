@@ -857,6 +857,49 @@ IUnknown* Unwrap(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevi
 thread_local bool persistent_identity_query = false;
 
 template<class Buffer>
+ir::BufferToken PrepareGetterToken(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8* owner,
+                                   Buffer* native, std::uint64_t draw) noexcept {
+    if (!state || !owner || !native || !draw) return {};
+    std::unique_lock<std::mutex> lock(state->mutex);
+    auto device = state->devices.find(owner);
+    if (state->global_unsafe || device == state->devices.end() || device->second.unsafe ||
+        device->second.reset || device->second.reset_recovery || device->second.draw != draw) return {};
+    const auto found = state->native.find(native);
+    if (found != state->native.end()) {
+        if (found->second->owner != owner || found->second->vertex != Traits<Buffer>::kVertex) return {};
+        return found->second->token;
+    }
+    if (device->second.persistent.empty() || persistent_identity_query) return {};
+    lock.unlock();
+    struct QueryScope { QueryScope() { persistent_identity_query = true; } ~QueryScope() { persistent_identity_query = false; } } scope;
+    void* identity = nullptr;
+    try { identity = Canonical(native); } catch (...) {}
+    if (!identity) return {};
+    lock.lock();
+    device = state->devices.find(owner);
+    if (state->global_unsafe || device == state->devices.end() || device->second.unsafe ||
+        device->second.reset || device->second.reset_recovery || device->second.draw != draw) return {};
+    const auto shadow = device->second.persistent.find(identity);
+    if (shadow == device->second.persistent.end() || shadow->second.vertex != Traits<Buffer>::kVertex) return {};
+    return shadow->second.token;
+}
+
+template<class Buffer>
+ir::RegistryResult ReadPrepared(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8* expected_owner,
+                                Buffer* expected_native, ir::BufferToken token, std::uint64_t draw,
+                                IDirect3DDevice8* owner, Buffer* native, std::size_t offset,
+                                void* destination, std::size_t length) noexcept {
+    if (!state || !owner || owner != expected_owner || !native || native != expected_native ||
+        !token.identity || !token.generation || !draw) return ir::RegistryResult::UnknownResource;
+    std::lock_guard<std::mutex> lock(state->mutex);
+    const auto device = state->devices.find(owner);
+    if (state->global_unsafe || device == state->devices.end() || device->second.unsafe ||
+        device->second.reset || device->second.reset_recovery || device->second.draw != draw)
+        return ir::RegistryResult::Unavailable;
+    return state->shadows.Read(token, offset, destination, length);
+}
+
+template<class Buffer>
 ir::RegistryResult Read(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8* owner,
                         Buffer* native, std::size_t offset, void* destination, std::size_t length,
                         bool trusted_getter) noexcept {
@@ -1065,6 +1108,36 @@ ir::RegistryResult BufferProxy::ReadIndexFromGetter(IDirect3DDevice8* owner, IDi
                                                     std::size_t offset, void* destination, std::size_t length) noexcept {
     LastError error;
     return Read(state_, owner, native, offset, destination, length, true);
+}
+BufferProxy::PreparedVertex BufferProxy::PrepareVertexGetter(IDirect3DDevice8* owner, IDirect3DVertexBuffer8* native,
+                                                             std::uint64_t draw) noexcept {
+    LastError error;
+    PreparedVertex result;
+    result.token_ = PrepareGetterToken(state_, owner, native, draw);
+    if (result.token_.identity && result.token_.generation) {
+        result.state_ = state_; result.owner_ = owner; result.native_ = native; result.draw_ = draw;
+    }
+    return result;
+}
+BufferProxy::PreparedIndex BufferProxy::PrepareIndexGetter(IDirect3DDevice8* owner, IDirect3DIndexBuffer8* native,
+                                                           std::uint64_t draw) noexcept {
+    LastError error;
+    PreparedIndex result;
+    result.token_ = PrepareGetterToken(state_, owner, native, draw);
+    if (result.token_.identity && result.token_.generation) {
+        result.state_ = state_; result.owner_ = owner; result.native_ = native; result.draw_ = draw;
+    }
+    return result;
+}
+ir::RegistryResult BufferProxy::PreparedVertex::Read(IDirect3DDevice8* owner, IDirect3DVertexBuffer8* native,
+                                                     std::size_t offset, void* destination, std::size_t length) const noexcept {
+    LastError error;
+    return ReadPrepared(state_, owner_, native_, token_, draw_, owner, native, offset, destination, length);
+}
+ir::RegistryResult BufferProxy::PreparedIndex::Read(IDirect3DDevice8* owner, IDirect3DIndexBuffer8* native,
+                                                    std::size_t offset, void* destination, std::size_t length) const noexcept {
+    LastError error;
+    return ReadPrepared(state_, owner_, native_, token_, draw_, owner, native, offset, destination, length);
 }
 
 }  // namespace t3render::buffers

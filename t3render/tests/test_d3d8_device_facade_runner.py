@@ -1,5 +1,8 @@
 """Host validation for the synthetic device-facade comparison runner."""
 from pathlib import Path
+import copy
+import json
+import struct
 import sys
 import tempfile
 import unittest
@@ -43,6 +46,9 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
                      "eager_buffer_lifetime=PASS shadow=not_observed provenance=preserved")
         lines.append("persistent_eager_buffer=PASS shadow=preserved provenance=preserved reset=unknown" if mode == "facade" else
                      "persistent_eager_buffer=PASS shadow=not_observed provenance=preserved reset=not_observed")
+        if mode == "facade":
+            lines.append("prepared_eager_buffer=PASS")
+            lines.append("prepared_capture_draw=PASS")
         lines.append("private_cross_device_cycle=PASS")
         lines.extend(("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                       "resource_facade_volume_roundtrips=PASS",
@@ -94,6 +100,36 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
         self.log = Path(self.directory.name) / "fixture.log"
         self.ppm = Path(self.directory.name) / "fixture.ppm"
 
+    def test_prepared_trace_checks_bytes_and_paired_stability(self):
+        vertices = b"".join(struct.pack("<ffffI", x, y, 0.5, 1, 0xffe43b3b)
+                            for x, y in ((12, 12), (116, 12), (12, 116)))
+        records = [{"event": "header", "replayable": False, "buffer_capture": {"requested": True}},
+                   {"event": "frame_begin", "frame": 1},
+                   {"event": "draw", "frame": 1, "op_id": 1, "call": "DrawIndexedPrimitive",
+                    "buffer_data": {"source": "application_lock_shadow",
+                        "vertex": {"status": "captured", "data": vertices.hex(), "byte_count": 60,
+                                   "first_vertex": 0, "vertex_count": 3, "stride": 20, "byte_offset": 0},
+                        "index": {"status": "captured", "data": struct.pack("<3H", 0, 1, 2).hex(),
+                                  "byte_count": 6, "index_count": 3, "index_format": 101, "byte_offset": 0}}},
+                   {"event": "draw_result", "frame": 1, "op_id": 1, "hr": 0, "buffer_stable": True},
+                   {"event": "frame_end", "frame": 1, "present_hr": 0, "draws": 1, "replayable": False},
+                   {"event": "capture_end"}]
+        path = Path(self.directory.name) / "trace.jsonl"
+        def inspect(value):
+            path.write_text("".join(json.dumps(record) + "\n" for record in value), encoding="utf-8")
+            probe.inspect_prepared_trace(path)
+        inspect(records)
+        for change in ("missing", "vertex", "index", "stable", "result", "frame", "replayable"):
+            bad = copy.deepcopy(records)
+            if change == "missing": bad.pop()
+            if change == "vertex": bad[2]["buffer_data"]["vertex"]["data"] = "00" * 60
+            if change == "index": bad[2]["buffer_data"]["index"]["data"] = "000000000000"
+            if change == "stable": bad[3]["buffer_stable"] = False
+            if change == "result": bad[3]["op_id"] = 2
+            if change == "frame": bad[4]["present_hr"] = -1
+            if change == "replayable": bad[0]["replayable"] = True
+            with self.subTest(change=change), self.assertRaises(probe.RunError):
+                inspect(bad)
     def inspect(self, lines, mode="facade", buffer_facade=False, resource_facade=False):
         self.log.write_text("noise from Wine\n" + "\n".join(lines) + "\n", encoding="utf-8")
         return probe.inspect_log(self.log, mode, buffer_facade, resource_facade)
@@ -170,6 +206,16 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
                             [line.replace(persistent, persistent + "bad") for line in original]):
                 with self.subTest(mode=mode), self.assertRaises(probe.RunError):
                     self.inspect(changed, mode, resource_facade=True)
+            if mode == "facade":
+                for prepared in ("prepared_eager_buffer=PASS", "prepared_capture_draw=PASS"):
+                    for changed in ([line for line in original if line != prepared], original + [prepared],
+                                    [line.replace(prepared, prepared + "bad") for line in original]):
+                        with self.subTest(mode=mode), self.assertRaises(probe.RunError):
+                            self.inspect(changed, mode, resource_facade=True)
+            else:
+                for prepared in ("prepared_eager_buffer=PASS", "prepared_capture_draw=PASS"):
+                    with self.subTest(mode=mode), self.assertRaises(probe.RunError):
+                        self.inspect(original + [prepared], mode, resource_facade=True)
             cross_device = "private_cross_device_cycle=PASS"
             for changed in ([line for line in original if line != cross_device], original + [cross_device],
                             [line.replace(cross_device, "private_cross_device_cycle=FAIL") for line in original]):

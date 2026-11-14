@@ -395,6 +395,27 @@ class CaptureHostTests(unittest.TestCase):
             for key, value in stage["states"].items():
                 self.assertEqual(value, stage["stage"] * 1000 + int(key))
 
+    def test_prepared_bindings_serialize_buffers_and_shader_together(self):
+        self.run_capture("prepared_buffers", frame="1", extra={
+            "T3RENDER_CAPTURE_DECLARATIONS": "1", "T3RENDER_CAPTURE_VERTEX_PROGRAMS": "1",
+            "T3RENDER_CAPTURE_VERTEX_CONSTANTS": "1"})
+        events = self.records()
+        draws = [event for event in events if event["event"] == "draw"]
+        results = {event["op_id"]: event for event in events if event["event"] == "draw_result"}
+        self.assertEqual(len(draws), 3)
+        first = draws[0]
+        self.assertEqual(bytes.fromhex(first["buffer_data"]["vertex"]["data"]), bytes(range(160, 256)))
+        self.assertEqual(bytes.fromhex(first["buffer_data"]["index"]["data"]), b"\x02\x00\x03\x00\x04\x00")
+        self.assertEqual(first["vertex_declaration"]["words"], [0x20000000, 0xffffffff])
+        self.assertEqual(first["vertex_program"]["words"], [0xfffe0101, 1, 0xc00f0000, 0x90e40000, 0xffff])
+        self.assertEqual(first["vertex_constants"]["bits"], [0x3f800000, 0, 0, 0])
+        self.assertTrue(results[first["op_id"]]["shader_stable"])
+        self.assertTrue(results[first["op_id"]]["buffer_stable"])
+        for draw in draws[1:]:
+            for component in ("vertex", "index"):
+                self.assertEqual(draw["buffer_data"][component]["status"], "getter_failed")
+                self.assertIsNone(draw["buffer_data"][component]["data"])
+
     def test_buffered_observations_preserve_exact_ranges_and_result_stability(self):
         self.run_capture("buffered", frame="1")
         events = self.records()

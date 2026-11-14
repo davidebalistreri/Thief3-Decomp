@@ -99,7 +99,9 @@ policy and recovered payloads carry `shadow_observation` set to
 unknown. These observations are not proof of GPU input. The [synthetic
 Highball fixture](benchmarks/d3d8/2026-11-14-repeat-write-recovery/result.json)
 checks partial and full rewrites; it does not establish whether TDS rewrites
-the missing ranges.
+the missing ranges. An initial [TDS test](benchmarks/runtime/2026-11-14-tds-repeat-write-recovery/result.json)
+instead invalidated the buffer observation before the frame; its rejected lock
+parameters and registry result were not captured.
 The header and per-draw counter explicitly identify this policy. Its
 [Highball fixture](benchmarks/d3d8/2026-11-14-repeated-unlock-policy/result.json)
 checks this restricted sequence; unobserved native aliases, general TDS

@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "tds_bedroom_post_repeated_unlock_write_recovery",
+  "status": "PARTIAL",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86 virtual desktop",
+  "scene": "SouthQuarter1_int1, Garrett's Building save; user confirmed bedroom oriented toward bed",
+  "proxy_commit": "645f2e9",
+  "proxy_sha256": "00a0d312c85207561b1b7b60afaf7deb9de0d05bacdbedaeef49d5e99edff061",
+  "temporary_proxy_removed": true,
+  "capture": {
+    "frames": 1,
+    "frame": 971,
+    "present_hresult": 0,
+    "draws": 744,
+    "indexed_draws": 735,
+    "indexed_draws_with_stable_buffer_windows": 0,
+    "indexed_draws_with_buffer_window_unavailable": 735,
+    "repeated_unlocks_completed_before_draws": 422,
+    "first_buffer_failure": {"status": "device_unsafe", "cause": "internal", "source_line": 539},
+    "raw_trace_sha256": "b499d9562fd45df7c2ee32ef73746486ef964460f3dd64211fbef592cc900e1f",
+    "partial_ir_sha256": "52697a4ae49cdadb206039d3d468bac672a151ee8d23ce8cbfb7f8f8833904d6"
+  },
+  "observations": [
+    "The recovery policy was enabled in the trace header, but the buffer observer had already become unsafe at the BeginLock registry-result check before the captured frame.",
+    "The trace does not record the rejected result or lock parameters, so it does not establish why the check failed or whether the new recovery could cover the room buffer."
+  ],
+  "limitations": [
+    "All indexed buffer payloads were unavailable; this is not a room replay or GPU input comparison.",
+    "Texture contents, pixel shader programs and a synchronized D3D8 image are absent.",
+    "The previously reported menu text truncation remains unverified in this run.",
+    "The game-derived trace and partial IR remain local and are not committed."
+  ],
+  "local_trace": "build/t3render-captures/2026-11-14-tds-repeat-write-recovery/bedroom.jsonl",
+  "local_partial_ir": "build/t3render-captures/2026-11-14-tds-repeat-write-recovery/bedroom-ir.json"
+}

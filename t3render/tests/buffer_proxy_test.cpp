@@ -609,6 +609,17 @@ void ClosedFacadeBufferBoundary() {
         assert(resource->FreePrivateData(kAlias) == E_NOTIMPL);
     }
     assert(proxy->ReadIndex(&native_device, &ib, 0, observed, 3) == RegistryResult::Ok);
+    IDirect3DVertexBuffer8* pinned_native = nullptr;
+    SetLastError(31);
+    IUnknown* guard = proxy->PinPrivateVertex(&native_device, &facade, vertex, &pinned_native);
+    assert(guard == vertex && pinned_native == &vb && GetLastError() == 31);
+    assert(guard->Release() == 1);
+    pinned_native = reinterpret_cast<IDirect3DVertexBuffer8*>(1);
+    assert(!proxy->PinPrivateVertex(&native_device, &facade, index, &pinned_native) && !pinned_native);
+    assert(!proxy->PinPrivateVertex(&native_device, &facade, &vb, &pinned_native) && !pinned_native);
+    FakeDevice other;
+    assert(!proxy->PinPrivateVertex(&native_device, &other, vertex, &pinned_native) && !pinned_native);
+    assert(proxy->ReadVertex(&native_device, &vb, 0, observed, 3) == RegistryResult::Ok);
     vb.AddRef();
     auto* same = proxy->AdoptVertexForFacade(&native_device, &facade, &vb, 0, false);
     assert(same == vertex && vb.refs == 1);

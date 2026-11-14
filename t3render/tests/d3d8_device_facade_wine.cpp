@@ -275,7 +275,8 @@ bool CheckFailedStateBlock(IDirect3DDevice8* device, IDirect3DDevice8* native,
 
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
 // Characterize private-data semantics separately from image parity. The
-// facade accepts observed opaque bytes and rejects unknown/COM provenance.
+// facade accepts observed opaque bytes and the separately bridged vertex
+// buffer case; unknown/external COM provenance is still rejected.
 class PrivateUnknown final : public IUnknown {
 public:
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
@@ -377,8 +378,90 @@ bool ObservePrivateDataResources(IDirect3DDevice8* device, IDirect3DVertexBuffer
     const auto code = [](HRESULT hr) { return static_cast<unsigned long>(static_cast<std::uint32_t>(hr)); };
     std::printf("private_data_alias set=0x%08lx get=0x%08lx same=%u parent=%u free=0x%08lx\n",
                 code(set), code(get), same ? 1u : 0u, parent ? 1u : 0u, code(freed));
-    if (facade_mode) return set == E_NOTIMPL && get == E_NOTIMPL && freed == E_NOTIMPL && !same && !parent;
     return SUCCEEDED(set) && SUCCEEDED(get) && SUCCEEDED(freed) && same && parent;
+}
+
+bool ObserveTranslatedPrivateLifetime(HWND window, bool facade_mode) {
+    ComPtr<IDirect3D8> native_factory;
+    native_factory.value = Direct3DCreate8(D3D_SDK_VERSION);
+    if (!native_factory.value) return false;
+    D3DDISPLAYMODE display{};
+    if (FAILED(native_factory->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &display))) return false;
+    ComPtr<IDirect3D8> facade_factory;
+    auto buffers = t3render::buffers::BufferProxy::Create(ReadFixtureMemory, nullptr);
+    if (!buffers) return false;
+    IDirect3D8* selected = native_factory.value;
+    if (facade_mode) {
+        native_factory->AddRef();
+        facade_factory.value = t3render::fixture::CreateBufferDeviceFacadeFactory(native_factory.value, buffers);
+        if (!facade_factory.value) { native_factory->Release(); return false; }
+        selected = facade_factory.value;
+    }
+    D3DPRESENT_PARAMETERS pp{};
+    pp.BackBufferWidth = kWidth; pp.BackBufferHeight = kHeight; pp.BackBufferFormat = display.Format;
+    pp.BackBufferCount = 1; pp.SwapEffect = D3DSWAPEFFECT_DISCARD; pp.hDeviceWindow = window; pp.Windowed = TRUE;
+    ComPtr<IDirect3DDevice8> device;
+    if (FAILED(selected->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, window,
+        D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, device.put())) || !device.value) return false;
+    ComPtr<IDirect3DTexture8> texture;
+    ComPtr<IDirect3DVertexBuffer8> vertex;
+    if (FAILED(device->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, texture.put())) || !texture.value ||
+        FAILED(device->CreateVertexBuffer(sizeof(Vertex), D3DUSAGE_WRITEONLY, kFvf, D3DPOOL_MANAGED, vertex.put())) ||
+        !vertex.value) return false;
+    const GUID key{0x3ee22a96, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
+    if (FAILED(texture->SetPrivateData(key, vertex.value, sizeof(IUnknown*), D3DSPD_IUNKNOWN))) return false;
+    DWORD query_size = 0;
+    if (FAILED(texture->GetPrivateData(key, nullptr, &query_size)) || query_size != sizeof(IUnknown*)) return false;
+    IUnknown* untouched = reinterpret_cast<IUnknown*>(1);
+    DWORD small_size = 1;
+    if (SUCCEEDED(texture->GetPrivateData(key, &untouched, &small_size)) ||
+        untouched != reinterpret_cast<IUnknown*>(1) || small_size != sizeof(IUnknown*)) return false;
+    IUnknown* const original = vertex.value; // compared only while its dormant facade is retained
+    const ULONG remaining = vertex->Release();
+    vertex.value = nullptr;
+    if (facade_mode && remaining != 0) return false;
+    ComPtr<IUnknown> value;
+    DWORD size = sizeof(value.value);
+    if (FAILED(texture->GetPrivateData(key, value.put(), &size)) || !value.value || size != sizeof(value.value) ||
+        (facade_mode && value.value != original)) return false;
+    ComPtr<IDirect3DVertexBuffer8> recovered;
+    ComPtr<IDirect3DDevice8> parent;
+    if (FAILED(value->QueryInterface(IID_IDirect3DVertexBuffer8, reinterpret_cast<void**>(recovered.put()))) ||
+        !recovered.value || FAILED(recovered->GetDevice(parent.put())) || !EqualIdentity(parent.value, device.value)) return false;
+    parent->Release(); parent.value = nullptr;
+    recovered->Release(); recovered.value = nullptr;
+    value->Release(); value.value = nullptr;
+    // Reset retires the dormant vertex facade; the live managed texture's
+    // private data must reacquire it without exposing the native interface.
+    if (FAILED(device->Reset(&pp))) return false;
+    size = sizeof(value.value);
+    if (FAILED(texture->GetPrivateData(key, value.put(), &size)) || !value.value || size != sizeof(value.value) ||
+        FAILED(value->QueryInterface(IID_IDirect3DVertexBuffer8, reinterpret_cast<void**>(recovered.put()))) ||
+        !recovered.value || FAILED(recovered->GetDevice(parent.put())) || !EqualIdentity(parent.value, device.value)) return false;
+    const BYTE blob[]{0x24, 0x68, 0xac};
+    BYTE read_blob[sizeof(blob)]{};
+    DWORD blob_size = sizeof(read_blob);
+    if (FAILED(texture->SetPrivateData(key, blob, sizeof(blob), 0)) ||
+        FAILED(texture->GetPrivateData(key, read_blob, &blob_size)) || blob_size != sizeof(blob) ||
+        std::memcmp(blob, read_blob, sizeof(blob)) ||
+        FAILED(texture->SetPrivateData(key, recovered.value, sizeof(IUnknown*), D3DSPD_IUNKNOWN))) return false;
+    ComPtr<IUnknown> restored;
+    size = sizeof(restored.value);
+    if (FAILED(texture->GetPrivateData(key, restored.put(), &size)) || !restored.value ||
+        !EqualIdentity(restored.value, recovered.value)) return false;
+    restored->Release(); restored.value = nullptr;
+    parent->Release(); parent.value = nullptr;
+    recovered->Release(); recovered.value = nullptr;
+    value->Release(); value.value = nullptr;
+    const unsigned resources_closed = t3render::fixture::resource_facade_close_successes.load();
+    const unsigned buffers_closed = t3render::fixture::buffer_facade_close_successes.load();
+    const ULONG texture_remaining = texture->Release(); texture.value = nullptr;
+    const ULONG device_remaining = device->Release(); device.value = nullptr;
+    if (facade_mode && (texture_remaining != 0 || device_remaining != 0 ||
+        t3render::fixture::resource_facade_close_successes != resources_closed + 1 ||
+        t3render::fixture::buffer_facade_close_successes != buffers_closed + 1)) return false;
+    std::printf("private_translated_lifetime=PASS\n");
+    return true;
 }
 
 bool ObservePrivateResourceLifetime(HWND window, bool facade_mode) {
@@ -1184,12 +1267,13 @@ int wmain(int argc, wchar_t** argv) {
     if (ok) ok = CheckReset(window, facade_mode);
     if (ok) ok = CheckResetWithLiveResources(window, facade_mode);
     if (ok) ok = ObservePrivateResourceLifetime(window, facade_mode);
+    if (ok) ok = ObserveTranslatedPrivateLifetime(window, facade_mode);
 #endif
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
     if (facade_mode) {
         ok = ok && t3render::fixture::buffer_facade_close_successes ==
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
-             4 &&
+             5 &&
 #else
              1 &&
 #endif
@@ -1198,7 +1282,7 @@ int wmain(int argc, wchar_t** argv) {
     }
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
     if (facade_mode) {
-        ok = ok && t3render::fixture::resource_facade_close_successes == 4 &&
+        ok = ok && t3render::fixture::resource_facade_close_successes == 5 &&
              t3render::fixture::resource_facade_close_failures == 0;
         if (ok) std::printf("resource_facade_final_close=PASS\n");
     }

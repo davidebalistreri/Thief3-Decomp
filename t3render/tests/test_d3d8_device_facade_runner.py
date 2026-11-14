@@ -25,10 +25,10 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
                           "object_free=0x80004001 refs=1,1,1,1")
         private = native_private if mode == "baseline" else facade_private
         lines.extend(f"private_data kind={kind} {private}" for kind in probe.PRIVATE_KINDS)
-        lines.append("private_data_alias set=0x00000000 get=0x00000000 same=1 parent=1 free=0x00000000" if mode == "baseline" else
-                     "private_data_alias set=0x80004001 get=0x80004001 same=0 parent=0 free=0x80004001")
+        lines.append("private_data_alias set=0x00000000 get=0x00000000 same=1 parent=1 free=0x00000000")
         lines.append("private_lifetime_native_dependent_release=PASS" if mode == "baseline" else
                      "private_lifetime_naive_cycle_and_cleanup=PASS")
+        lines.append("private_translated_lifetime=PASS")
         lines.extend(("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                       "resource_facade_volume_roundtrips=PASS",
                       "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
@@ -104,6 +104,11 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
             lifetime = next(line for line in original if line.startswith("private_lifetime_"))
             for changed in ([line for line in original if line != lifetime], original + [lifetime],
                             [line.replace(lifetime, lifetime.replace("=PASS", "=FAIL")) for line in original]):
+                with self.subTest(mode=mode), self.assertRaises(probe.RunError):
+                    self.inspect(changed, mode, resource_facade=True)
+            translated = "private_translated_lifetime=PASS"
+            for changed in ([line for line in original if line != translated], original + [translated],
+                            [line.replace(translated, "private_translated_lifetime=FAIL") for line in original]):
                 with self.subTest(mode=mode), self.assertRaises(probe.RunError):
                     self.inspect(changed, mode, resource_facade=True)
 

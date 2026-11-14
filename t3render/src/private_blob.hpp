@@ -1,9 +1,7 @@
 #pragma once
 
-// Fixture-only private-data subset. A native Get is allowed only for GUIDs
-// successfully written as opaque bytes through this wrapper. IUnknown and
-// unknown provenance remain unsupported: returning a native COM interface
-// could escape the facade. Never hold the mutex while calling the runtime.
+// Fixture-only private-data provenance. Never hold the mutex while calling
+// the runtime or an identity mapper. Unobserved provenance fails closed.
 #include <windows.h>
 
 #ifdef max
@@ -30,28 +28,47 @@
 
 namespace t3render::buffers {
 
+enum class PrivateDataKind { Blob, VertexBuffer };
+
 class PrivateBlobState final {
 public:
     template<class Call>
     HRESULT Set(REFGUID guid, DWORD flags, Call call) noexcept {
+        if (flags != 0) return E_NOTIMPL;
+        return SetTyped(guid, PrivateDataKind::Blob, call);
+    }
+
+    // The caller must verify and pin an issued facade object before invoking
+    // this, and must never forward the facade pointer into native private data.
+    template<class Call>
+    HRESULT SetTyped(REFGUID guid, PrivateDataKind kind, Call call) noexcept {
         const DWORD before = GetLastError();
-        if (flags != 0 || !Begin(guid, true)) { SetLastError(before); return E_NOTIMPL; }
+        PrivateDataKind previous{};
+        if (!Begin(guid, true, previous)) { SetLastError(before); return E_NOTIMPL; }
         SetLastError(before);
         const HRESULT hr = call();
         const DWORD after = GetLastError();
-        End(guid, FAILED(hr));
+        End(guid, FAILED(hr), &kind);
         SetLastError(after);
         return hr;
     }
 
     template<class Call>
     HRESULT Get(REFGUID guid, Call call) noexcept {
+        return GetTyped(guid, [&](PrivateDataKind kind) {
+            return kind == PrivateDataKind::Blob ? call() : E_NOTIMPL;
+        });
+    }
+
+    template<class Call>
+    HRESULT GetTyped(REFGUID guid, Call call) noexcept {
         const DWORD before = GetLastError();
-        if (!Begin(guid, false)) { SetLastError(before); return E_NOTIMPL; }
+        PrivateDataKind kind{};
+        if (!Begin(guid, false, kind)) { SetLastError(before); return E_NOTIMPL; }
         SetLastError(before);
-        const HRESULT hr = call();
+        const HRESULT hr = call(kind);
         const DWORD after = GetLastError();
-        End(guid, false);
+        End(guid, false, nullptr);
         SetLastError(after);
         return hr;
     }
@@ -59,44 +76,47 @@ public:
     template<class Call>
     HRESULT Free(REFGUID guid, Call call) noexcept {
         const DWORD before = GetLastError();
-        if (!Begin(guid, false)) { SetLastError(before); return E_NOTIMPL; }
+        PrivateDataKind kind{};
+        if (!Begin(guid, false, kind)) { SetLastError(before); return E_NOTIMPL; }
         SetLastError(before);
         const HRESULT hr = call();
         const DWORD after = GetLastError();
         // A successful free establishes that the GUID is absent; retaining the
         // entry permits a subsequent native NOTFOUND result. A failed call may
         // have changed the value, so its provenance becomes unknown.
-        End(guid, FAILED(hr));
+        End(guid, FAILED(hr), nullptr);
         SetLastError(after);
         return hr;
     }
 
 private:
     static constexpr std::size_t kMaximumKeys = 64;
+    struct Entry { GUID guid; PrivateDataKind kind; };
     std::mutex mutex_;
-    std::vector<GUID> keys_;
+    std::vector<Entry> keys_;
     bool busy_ = false;
 
-    bool Begin(REFGUID guid, bool create) noexcept {
+    bool Begin(REFGUID guid, bool create, PrivateDataKind& kind) noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
         if (busy_) return false;
-        const auto found = std::find_if(keys_.begin(), keys_.end(),
-                                        [&](const GUID& item) { return IsEqualIID(item, guid); });
+        auto found = std::find_if(keys_.begin(), keys_.end(),
+                                  [&](const Entry& item) { return IsEqualIID(item.guid, guid); });
         if (found == keys_.end()) {
             if (!create || keys_.size() >= kMaximumKeys) return false;
-            try { keys_.push_back(guid); } catch (...) { return false; }
+            try { keys_.push_back({guid, PrivateDataKind::Blob}); } catch (...) { return false; }
+            found = keys_.end() - 1;
         }
+        kind = found->kind;
         busy_ = true;
         return true;
     }
 
-    void End(REFGUID guid, bool forget) noexcept {
+    void End(REFGUID guid, bool forget, const PrivateDataKind* replacement) noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (forget) {
-            const auto found = std::find_if(keys_.begin(), keys_.end(),
-                                            [&](const GUID& item) { return IsEqualIID(item, guid); });
-            if (found != keys_.end()) keys_.erase(found);
-        }
+        const auto found = std::find_if(keys_.begin(), keys_.end(),
+                                        [&](const Entry& item) { return IsEqualIID(item.guid, guid); });
+        if (found != keys_.end() && forget) keys_.erase(found);
+        else if (found != keys_.end() && replacement) found->kind = *replacement;
         busy_ = false;
     }
 };

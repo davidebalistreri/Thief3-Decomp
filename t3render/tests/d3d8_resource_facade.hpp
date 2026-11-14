@@ -1,7 +1,7 @@
 #pragma once
 
 // Isolated COM experiment. This is not a complete device/resource boundary
-// and must not be installed in TDS. Unknown private-data provenance, COM
+// and must not be installed in TDS. Unknown private-data provenance, most COM
 // private data and unknown IIDs fail closed.
 #include <windows.h>
 #include <d3d8.h>
@@ -19,6 +19,7 @@
 #endif
 #include <atomic>
 #include <cstddef>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -41,6 +42,24 @@ struct LastError final {
     ~LastError() { SetLastError(value); }
     void restore() const { SetLastError(value); }
     void capture() { value = GetLastError(); }
+};
+
+struct PrivateVertexPin final {
+    IUnknown* native = nullptr; // borrowed; kept alive by guard
+    IUnknown* guard = nullptr; // owned facade reference
+    ~PrivateVertexPin() { if (guard) { LastError error; guard->Release(); } }
+    PrivateVertexPin() = default;
+    PrivateVertexPin(const PrivateVertexPin&) = delete;
+    PrivateVertexPin& operator=(const PrivateVertexPin&) = delete;
+};
+
+// Only a deliberately recognized vertex-buffer facade can cross this bridge.
+// No callback is invoked with the private-data or router mutex held.
+struct PrivateVertexBridge {
+    virtual bool Pin(const void* candidate, PrivateVertexPin& pin) noexcept = 0;
+    // Consumes a successful native GetPrivateData +1, including on failure.
+    virtual IUnknown* Adopt(IUnknown* native) noexcept = 0;
+    virtual ~PrivateVertexBridge() = default;
 };
 
 inline void* Identity(IUnknown* value) {
@@ -81,12 +100,14 @@ protected:
 };
 
 struct State {
-    State(IDirect3DDevice8* owner_, IDirect3DDevice8* facade_, std::size_t maximum_) noexcept
-        : owner(owner_), facade(facade_), maximum(maximum_) {}
+    State(IDirect3DDevice8* owner_, IDirect3DDevice8* facade_, std::size_t maximum_,
+          std::shared_ptr<PrivateVertexBridge> bridge_) noexcept
+        : owner(owner_), facade(facade_), maximum(maximum_), bridge(std::move(bridge_)) {}
     std::mutex mutex;
     IDirect3DDevice8* const owner; // facade must retain this native device
     IDirect3DDevice8* const facade;
     const std::size_t maximum;
+    const std::shared_ptr<PrivateVertexBridge> bridge;
     bool closing = false;
     std::unordered_map<void*, Entry*> identities;
     std::unordered_map<void*, Entry*> wrappers;
@@ -191,11 +212,39 @@ public:
     }
     HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID guid, const void* data, DWORD size, DWORD flags) override {
         const GUID key = guid;
+        if (flags == D3DSPD_IUNKNOWN && size == sizeof(IUnknown*) && this->state_->bridge) {
+            LastError error;
+            PrivateVertexPin pin;
+            if (!this->state_->bridge->Pin(data, pin) || !pin.native || !pin.guard) return E_NOTIMPL;
+            error.restore();
+            const HRESULT hr = private_blobs_.SetTyped(key, t3render::buffers::PrivateDataKind::VertexBuffer,
+                [&] { return this->real_->SetPrivateData(key, pin.native, size, flags); });
+            error.capture();
+            return hr;
+        }
         return private_blobs_.Set(key, flags, [&] { return this->real_->SetPrivateData(key, data, size, flags); });
     }
     HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID guid, void* data, DWORD* size) override {
         const GUID key = guid;
-        return private_blobs_.Get(key, [&] { return this->real_->GetPrivateData(key, data, size); });
+        return private_blobs_.GetTyped(key, [&](t3render::buffers::PrivateDataKind kind) {
+            if (kind == t3render::buffers::PrivateDataKind::Blob)
+                return this->real_->GetPrivateData(key, data, size);
+            if (!this->state_->bridge) return E_NOTIMPL;
+            // A native resource pointer must never be exposed to the caller.
+            // Use local storage even for short buffers or a null size pointer.
+            IUnknown* native = nullptr;
+            const HRESULT hr = this->real_->GetPrivateData(key, data ? &native : nullptr, size);
+            LastError error;
+            if (FAILED(hr) || !data) return hr;
+            if (!native || !size || *size != sizeof(IUnknown*)) {
+                if (native) native->Release();
+                return E_FAIL;
+            }
+            IUnknown* mapped = this->state_->bridge->Adopt(native);
+            if (!mapped) return E_FAIL;
+            std::memcpy(data, &mapped, sizeof(mapped));
+            return hr;
+        });
     }
     HRESULT STDMETHODCALLTYPE FreePrivateData(REFGUID guid) override {
         const GUID key = guid;
@@ -515,10 +564,11 @@ public:
         IUnknown* guard_ = nullptr;
     };
     static std::shared_ptr<Router> Create(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
-                                         std::size_t maximum = 4096) noexcept {
+                                         std::size_t maximum = 4096,
+                                         std::shared_ptr<PrivateVertexBridge> bridge = {}) noexcept {
         LastError error;
         if (!owner || !facade || !maximum) return {};
-        try { return std::shared_ptr<Router>(new Router(std::make_shared<State>(owner, facade, maximum))); }
+        try { return std::shared_ptr<Router>(new Router(std::make_shared<State>(owner, facade, maximum, std::move(bridge)))); }
         catch (...) { return {}; }
     }
     IDirect3DSurface8* AdoptSurface(IDirect3DSurface8* native) noexcept { return Adopt(state_, native, Kind::Surface); }

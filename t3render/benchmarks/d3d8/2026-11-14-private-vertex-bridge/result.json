@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_private_vertex_bridge",
+  "date": "2026-11-14",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "c9b34ac9769c8b6756885c5b7dba85656bd97378d435e305509c1c93c8ed5c21",
+    "t3render/src/buffer_proxy.cpp": "4588b3812fdda7195513804453173ac226ae0b50fdcaf5719b0795ac5ef83187",
+    "t3render/src/buffer_proxy.hpp": "4597003b78df4ad5f975e621325774b74cb1136139149749a72fa576b9f8dd6f",
+    "t3render/src/private_blob.hpp": "1f46f5d86af4a29c9a99ca0da1cf84519f7751cc5f4f55eb142298a50091ad6a",
+    "t3render/ir/buffer_registry.cpp": "9e24931212d54e0ee58b7be7313a85510e9fc867f3a3b20297eff3e1f6138b84",
+    "t3render/ir/buffer_shadow.cpp": "9cfed54a6fcf4718e80fd1d8301a8afa5f84852ac70b428938b06d1e64cddafe",
+    "t3render/tests/d3d8_resource_facade.hpp": "2e5a6294dd53bf0ea9a6fa1583a19139a6aa504b57e92c3ecb4fde9da675cd13",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "21bdd67358220b05c452d35c84f105ef2a599328490784fe9eeba56d71ce9b54",
+    "t3render/tests/d3d8_device_facade.hpp": "0aab3a5d927ff86c6017947232b887ebad1a19ed3c1a33ba23e4bd5c143746b5",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "49ea576b463f723643862e750b675f94fb35258a550f76d4a35c35ae56a7cad2",
+    "t3render/tests/d3d8_resource_facade_test.cpp": "1d4307487c6e9a23fdafd19fad27bd05b98d6d7d6f1d1984e7ed5d9813b49484",
+    "t3render/tests/buffer_proxy_test.cpp": "f076e256c792afaf0cd2ac03831bb03eb72a31ed0844c744a296e42c80cb0dbc",
+    "t3render/tests/private_blob_test.cpp": "723d9b38238987dc3738fcba585c2a4c662caa8cb49101d036ef282ef6542a9d",
+    "t3render/tests/test_d3d8_device_facade_runner.py": "6c13984900a79b6046bf86136fa7d5b6a05b7cf70009c1d38c77c59d54747234",
+    "t3render/tools/run_d3d8_device_facade.py": "bec36dc3767eca7c4ea4eeb77f8acd049155d7145c7bd138a64428fd5df75fb6"
+  },
+  "fixture_sha256": "6f5c58eece60150af2e15fda96c1f439f50599c147bb187b3e689127a15077e9",
+  "result": {
+    "texture_vertex_alias_and_parent": true,
+    "dormant_buffer_reacquired": true,
+    "reset_reacquisition": true,
+    "object_size_and_short_buffer": true,
+    "overwrite_object_blob_object": true,
+    "close_without_free": true,
+    "parity_records_each": 159,
+    "rgb_ppm_sha256_both": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+    "baseline_log_sha256": "6e800e60ea38b3dd281b9eac090cbe7d2d5627ae6653dedf59fa4aa7a986cbff",
+    "facade_log_sha256": "173e4dfdde2488b98461cabdbfaa7f2ea4ddd482ff317961d9abe93f9f458767"
+  },
+  "limitations": [
+    "Isolated fixture only; not integrated into the proxy or TDS.",
+    "Only known vertex buffers stored on non-buffer resource facades are translated; external IUnknown, self, cross-device and other resource references are unsupported.",
+    "Dormant source retirement may lose private-data provenance; unknown GUIDs and overlapping calls fail closed.",
+    "Dormant native resources can outlive their native-only counterparts.",
+    "One Wine runtime; native Windows, TDS, and runtime concurrency remain untested.",
+    "RGB parity covers selected synthetic fixed-function draws only; no alpha or gameplay parity."
+  ]
+}

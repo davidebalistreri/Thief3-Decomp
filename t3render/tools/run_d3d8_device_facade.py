@@ -88,8 +88,7 @@ def inspect_private_data(lines, mode):
         for key in ("set", "query", "query_size", "small", "small_size", "get", "match", "free", "after_free"):
             observations.append((f"PrivateBlob.{record['kind']}.{key}", record[key].lower()))
     aliases = [line for line in lines if line.startswith("private_data_alias ")]
-    expected = ("private_data_alias set=0x80004001 get=0x80004001 same=0 parent=0 free=0x80004001" if mode == "facade" else
-                "private_data_alias set=0x00000000 get=0x00000000 same=1 parent=1 free=0x00000000")
+    expected = "private_data_alias set=0x00000000 get=0x00000000 same=1 parent=1 free=0x00000000"
     if aliases != [expected]:
         raise RunError("private-data resource-alias observation is missing or unexpected")
     return observations
@@ -130,6 +129,8 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
                     "private_lifetime_native_dependent_release=PASS")
         if [line for line in lines if line.startswith("private_lifetime_")] != [lifetime]:
             raise RunError("private-data resource lifetime observation is missing or conflicting")
+        if [line for line in lines if line.startswith("private_translated_lifetime=")] != ["private_translated_lifetime=PASS"]:
+            raise RunError("translated private-data lifetime observation is missing or conflicting")
         for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                        "resource_facade_volume_roundtrips=PASS",
                        "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
@@ -247,7 +248,7 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
     if resource_facade:
         result["limitations"] = ["Fixture only: not integrated with the proxy or TDS.",
                                  "Only selected 2D, cube, volume, surface, swapchain and buffer paths were exercised; other interfaces remain unverified.",
-                                 "Unknown private-data provenance, IUnknown data and unknown resource interfaces fail closed; this differs from native behavior.",
+                                 "Only known vertex-buffer IUnknown values from non-buffer resource facades are translated; other COM private data and unknown interfaces fail closed.",
                                  "One diagnostic intentionally stores a wrapped IUnknown on a borrowed native texture, then breaks the cycle; this is not an application path.",
                                  "Two reset scenarios were exercised; runtime concurrency and comprehensive state-block behavior remain untested.",
                                  "Six synthetic triangles and selected fixed-function states only; no gameplay parity."]

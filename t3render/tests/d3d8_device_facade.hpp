@@ -80,6 +80,45 @@ private:
     std::atomic<ULONG> refs_{1};
 };
 
+#ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+class FixturePrivateVertexBridge final : public t3render::resource_fixture::PrivateVertexBridge {
+public:
+    FixturePrivateVertexBridge(std::shared_ptr<t3render::buffers::BufferProxy> buffers,
+                               IDirect3DDevice8* native, IDirect3DDevice8* facade) noexcept
+        : buffers_(std::move(buffers)), native_(native), facade_(facade) {}
+    bool Pin(const void* candidate, t3render::resource_fixture::PrivateVertexPin& pin) noexcept override {
+        IDirect3DVertexBuffer8* native = nullptr;
+        pin.guard = buffers_->PinPrivateVertex(native_, facade_, candidate, &native);
+        pin.native = native;
+        return pin.guard && pin.native;
+    }
+    IUnknown* Adopt(IUnknown* native) noexcept override {
+        if (!native) return nullptr;
+        // Verify the returned interface and identity before entering the buffer
+        // registry. No raw native pointer is ever returned to the caller.
+        void* typed = nullptr;
+        const HRESULT hr = native->QueryInterface(IID_IDirect3DVertexBuffer8, &typed);
+        void* original_identity = nullptr;
+        void* typed_identity = nullptr;
+        if (!FAILED(hr) && typed) {
+            original_identity = t3render::resource_fixture::Identity(native);
+            typed_identity = t3render::resource_fixture::Identity(static_cast<IUnknown*>(typed));
+        }
+        const bool same = original_identity && original_identity == typed_identity;
+        native->Release();
+        if (FAILED(hr) || !typed) return nullptr;
+        auto* vertex = static_cast<IDirect3DVertexBuffer8*>(typed);
+        D3DVERTEXBUFFER_DESC desc{};
+        if (!same || FAILED(vertex->GetDesc(&desc))) { vertex->Release(); return nullptr; }
+        return buffers_->AdoptVertexForFacade(native_, facade_, vertex, desc.Size, false);
+    }
+private:
+    std::shared_ptr<t3render::buffers::BufferProxy> buffers_;
+    IDirect3DDevice8* const native_; // borrowed, kept alive by the device facade
+    IDirect3DDevice8* const facade_;
+};
+#endif
+
 class DeviceFixtureFactory;
 
 class DeviceFixture final : public IDirect3DDevice8 {
@@ -733,7 +772,10 @@ private:
         : native_(native), factory_(factory), native_factory_(native_factory), buffers_(std::move(buffers)) {
         factory_->AddRef();
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
-        resources_ = t3render::resource_fixture::Router::Create(native_, this);
+        try {
+            auto bridge = std::make_shared<FixturePrivateVertexBridge>(buffers_, native_, this);
+            resources_ = t3render::resource_fixture::Router::Create(native_, this, 4096, std::move(bridge));
+        } catch (...) {}
 #endif
     }
     void InvalidateBuffers() noexcept {

@@ -2,7 +2,10 @@
 
 #include <atomic>
 #include <cassert>
+#include <condition_variable>
+#include <cstring>
 #include <functional>
+#include <mutex>
 #include <thread>
 #include <type_traits>
 
@@ -85,6 +88,9 @@ struct TextureBase : Interface {
     bool fail_typed_query = false;
     IUnknown* wrong_typed_identity = nullptr;
     std::function<void()> on_release;
+    std::function<HRESULT(REFGUID, const void*, DWORD, DWORD)> on_private_set;
+    std::function<HRESULT(REFGUID, void*, DWORD*)> on_private_get;
+    std::function<HRESULT(REFGUID)> on_private_free;
     HRESULT QueryInterface(REFIID iid, void** out) override {
         if (!out) return E_POINTER;
         *out = nullptr;
@@ -106,9 +112,13 @@ struct TextureBase : Interface {
         if (!out) return E_POINTER;
         *out = device; if (device) device->AddRef(); SetLastError(73); return S_OK;
     }
-    HRESULT SetPrivateData(REFGUID, const void*, DWORD, DWORD) override { return S_OK; }
-    HRESULT GetPrivateData(REFGUID, void*, DWORD*) override { return S_OK; }
-    HRESULT FreePrivateData(REFGUID) override { return S_OK; }
+    HRESULT SetPrivateData(REFGUID key, const void* data, DWORD size, DWORD flags) override {
+        return on_private_set ? on_private_set(key, data, size, flags) : S_OK;
+    }
+    HRESULT GetPrivateData(REFGUID key, void* data, DWORD* size) override {
+        return on_private_get ? on_private_get(key, data, size) : S_OK;
+    }
+    HRESULT FreePrivateData(REFGUID key) override { return on_private_free ? on_private_free(key) : S_OK; }
     DWORD SetPriority(DWORD value) override { return value; }
     DWORD GetPriority() override { return 9; }
     void PreLoad() override {}
@@ -504,6 +514,106 @@ void ConcurrentReacquisition() {
         assert(native.Release() == 0 && facade.Release() == 0);
     }
 }
+
+void PrivateVertexTranslation() {
+    struct Bridge final : PrivateVertexBridge {
+        Device* target_native;
+        Device* target_facade;
+        bool fail_adopt = false;
+        Bridge(Device* native, Device* facade) : target_native(native), target_facade(facade) {}
+        bool Pin(const void* candidate, PrivateVertexPin& pin) noexcept override {
+            if (candidate != target_facade) return false;
+            target_facade->AddRef(); pin.guard = target_facade; pin.native = target_native; return true;
+        }
+        IUnknown* Adopt(IUnknown* native) noexcept override {
+            assert(native == target_native);
+            native->Release();
+            if (fail_adopt) return nullptr;
+            target_facade->AddRef(); return target_facade;
+        }
+    };
+    Device native, facade, target_native, target_facade;
+    Texture texture; texture.device = &native;
+    auto bridge = std::make_shared<Bridge>(&target_native, &target_facade);
+    auto router = Router::Create(&native, &facade, 8, bridge);
+    auto* wrapped = router->AdoptTexture(&texture);
+    assert(wrapped);
+    IUnknown* stored = nullptr;
+    texture.on_private_set = [&](REFGUID, const void* data, DWORD size, DWORD flags) {
+        assert(data == &target_native && size == sizeof(IUnknown*) && flags == D3DSPD_IUNKNOWN);
+        DWORD nested_size = 0;
+        SetLastError(201);
+        assert(wrapped->GetPrivateData(kExtra, nullptr, &nested_size) == E_NOTIMPL && GetLastError() == 201);
+        auto* value = const_cast<IUnknown*>(static_cast<const IUnknown*>(data));
+        value->AddRef(); if (stored) stored->Release(); stored = value;
+        SetLastError(202); return S_OK;
+    };
+    texture.on_private_get = [&](REFGUID, void* data, DWORD* size) {
+        if (!size || !stored) return E_FAIL;
+        const DWORD available = *size;
+        *size = sizeof(IUnknown*);
+        if (!data) { SetLastError(203); return S_OK; }
+        if (available < sizeof(IUnknown*)) { SetLastError(204); return E_FAIL; }
+        stored->AddRef(); std::memcpy(data, &stored, sizeof(stored)); SetLastError(205); return S_OK;
+    };
+    texture.on_private_free = [&](REFGUID) {
+        if (!stored) return E_FAIL;
+        stored->Release(); stored = nullptr; SetLastError(206); return S_OK;
+    };
+    assert(wrapped->SetPrivateData(kExtra, &target_facade, sizeof(IUnknown*), D3DSPD_IUNKNOWN) == S_OK);
+    assert(GetLastError() == 202 && target_native.refs == 2 && target_facade.refs == 1);
+    assert(wrapped->SetPrivateData(kExtra, &target_native, sizeof(IUnknown*), D3DSPD_IUNKNOWN) == E_NOTIMPL);
+    assert(wrapped->SetPrivateData(kExtra, &target_facade, 1, D3DSPD_IUNKNOWN) == E_NOTIMPL);
+    DWORD size = 0;
+    assert(wrapped->GetPrivateData(kExtra, nullptr, &size) == S_OK && size == sizeof(IUnknown*) && GetLastError() == 203);
+    IUnknown* result = reinterpret_cast<IUnknown*>(1);
+    size = 1;
+    assert(wrapped->GetPrivateData(kExtra, &result, &size) == E_FAIL && result == reinterpret_cast<IUnknown*>(1));
+    assert(size == sizeof(IUnknown*) && GetLastError() == 204 && target_native.refs == 2);
+    size = sizeof(result);
+    assert(wrapped->GetPrivateData(kExtra, &result, &size) == S_OK && result == &target_facade && GetLastError() == 205);
+    assert(target_native.refs == 2 && target_facade.refs == 2);
+    result->Release();
+    bridge->fail_adopt = true;
+    result = reinterpret_cast<IUnknown*>(1); size = sizeof(result);
+    assert(wrapped->GetPrivateData(kExtra, &result, &size) == E_FAIL && result == reinterpret_cast<IUnknown*>(1));
+    assert(target_native.refs == 2 && target_facade.refs == 1 && GetLastError() == 205);
+    bridge->fail_adopt = false;
+    assert(wrapped->FreePrivateData(kExtra) == S_OK && target_native.refs == 1 && GetLastError() == 206);
+    size = sizeof(result);
+    assert(wrapped->GetPrivateData(kExtra, &result, &size) == E_FAIL);
+
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool entered = false, proceed = false;
+    const auto original_set = texture.on_private_set;
+    texture.on_private_set = [&](REFGUID key, const void* data, DWORD count, DWORD flags) {
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            entered = true; condition.notify_one();
+            condition.wait(lock, [&] { return proceed; });
+        }
+        return original_set(key, data, count, flags);
+    };
+    std::thread writer([&] {
+        assert(wrapped->SetPrivateData(kExtra, &target_facade, sizeof(IUnknown*), D3DSPD_IUNKNOWN) == S_OK);
+    });
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        condition.wait(lock, [&] { return entered; });
+    }
+    size = sizeof(result);
+    assert(wrapped->GetPrivateData(kExtra, &result, &size) == E_NOTIMPL);
+    assert(wrapped->FreePrivateData(kExtra) == E_NOTIMPL);
+    {
+        std::lock_guard<std::mutex> lock(mutex); proceed = true;
+    }
+    condition.notify_one(); writer.join();
+    assert(target_facade.refs == 1 && target_native.refs == 2);
+    assert(wrapped->FreePrivateData(kExtra) == S_OK && target_native.refs == 1);
+    assert(wrapped->Release() == 0 && router->Close() && texture.destroyed);
+    assert(native.Release() == 0 && facade.Release() == 0 && target_native.Release() == 0 && target_facade.Release() == 0);
+}
 } // namespace
 
 int main() {
@@ -517,4 +627,5 @@ int main() {
     FailClosedAndLifetime();
     ResetRetiresDormantAndReconstructsParent();
     ConcurrentReacquisition();
+    PrivateVertexTranslation();
 }

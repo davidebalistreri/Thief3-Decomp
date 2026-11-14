@@ -6,6 +6,7 @@
 #include <thread>
 
 using t3render::buffers::PrivateBlobState;
+using t3render::buffers::PrivateDataKind;
 
 int main() {
     PrivateBlobState state;
@@ -55,6 +56,21 @@ int main() {
     }
     condition.notify_one(); worker.join();
     assert(state.Get(second, success) == S_OK);
+
+    PrivateBlobState typed;
+    auto kind_is = [&](PrivateDataKind expected) {
+        return typed.GetTyped(first, [&](PrivateDataKind actual) {
+            assert(actual == expected); return S_OK;
+        });
+    };
+    assert(typed.SetTyped(first, PrivateDataKind::VertexBuffer, success) == S_OK);
+    assert(kind_is(PrivateDataKind::VertexBuffer) == S_OK);
+    assert(typed.Get(first, success) == E_NOTIMPL); // never expose a native object as a blob
+    assert(typed.Set(first, 0, success) == S_OK && kind_is(PrivateDataKind::Blob) == S_OK);
+    assert(typed.SetTyped(first, PrivateDataKind::VertexBuffer, failure) == E_FAIL);
+    assert(typed.GetTyped(first, [&](PrivateDataKind) { return S_OK; }) == E_NOTIMPL);
+    assert(typed.SetTyped(first, PrivateDataKind::VertexBuffer, success) == S_OK);
+    assert(typed.Free(first, success) == S_OK && kind_is(PrivateDataKind::VertexBuffer) == S_OK);
 
     PrivateBlobState bounded;
     for (int n = 0; n != 64; ++n) assert(bounded.Set(GUID{n}, 0, success) == S_OK);

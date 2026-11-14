@@ -20,12 +20,17 @@ They do not retain the facade while dormant, and the facade closes the router
 at final release. Unsupported IIDs return `E_NOINTERFACE`, and failures can
 differ from native COM behavior.
 
-Private data are forwarded only for opaque blobs written through a live
-wrapper. Unknown GUIDs and `IUnknown` values return `E_NOTIMPL`; the wrapper
-tracks at most 64 GUIDs and refuses overlapping or reentrant private-data
-calls. Failed writes or frees discard provenance. Reset retirement can discard
-that provenance, even if the native resource survives. This subset assumes the
-fixture's closed boundary and is not a complete COM implementation.
+Private data support opaque blobs and, on non-buffer resource facades, a
+recognized live vertex-buffer facade from the same device. The bridge pins the
+facade during Set, stores the native VB in the native resource, and maps a
+native Get back to the facade using the buffer registry. It never stores the
+wrapper in native private data. Other `IUnknown` values, unknown GUIDs and
+unknown inputs return `E_NOTIMPL`. Buffer facades themselves still accept only
+opaque blobs. The wrapper tracks at most 64 GUIDs and refuses overlapping or
+reentrant private-data calls. Failed writes or frees discard provenance. Reset
+retirement can discard a source wrapper's provenance even if the native
+resource survives. This subset assumes the fixture's closed boundary and is
+not a complete COM implementation.
 Before `Reset`, the fixture discards existing buffer shadows and retires dormant
 resource and buffer wrappers, releasing their native references. After a
 stable successful reset, newly created buffers can be tracked again. Surviving
@@ -91,10 +96,10 @@ cross-resource lifetime nor unknown external interfaces were fully tested.
 Full local logs and PPMs are under
 `build/t3render-captures/2026-11-13-private-data-alias-final/`.
 
-The later [opaque-blob observation](../benchmarks/d3d8/2026-11-13-private-blobs/result.json)
+The earlier [opaque-blob observation](../benchmarks/d3d8/2026-11-13-private-blobs/result.json)
 compares native and facade results for those eight resource types, including
-size queries, short buffers and reads after free. The `IUnknown` and unknown
-GUID cases still differ, and are checked separately. Its full local logs and
+size queries, short buffers and reads after free. Its `IUnknown` and unknown
+GUID cases differed, and were checked separately. Its full local logs and
 PPMs are under `build/t3render-captures/2026-11-13-private-blobs-verified/`.
 
 The [private-resource lifetime observation](../benchmarks/d3d8/2026-11-13-private-lifetime/result.json)
@@ -103,8 +108,20 @@ vertex buffer until the texture is released, while deliberately storing a
 wrapped vertex buffer in the fixture's native texture keeps the facade device
 alive after external releases. The test breaks that cycle and confirms final
 cleanup. It uses a test-only borrowed native resource and is not an application
-path. A solution must retain native COM identity and lifetime without creating
-that facade ownership cycle.
+path.
+
+The [vertex private-data bridge observation](../benchmarks/d3d8/2026-11-14-private-vertex-bridge/result.json)
+now covers this specific texture-to-VB reference. The native and facade runs
+both recovered the vertex interface and its parent after the VB wrapper became
+dormant, then after a successful Reset retired that wrapper. Size queries,
+short buffers, replacement with a blob and replacement back to the VB were
+checked. The facade device and both registries closed with the texture's
+private reference still present. The 159 recorded state observations and RGB
+images also matched. Host fakes exercise rejected values, failures, reentrancy
+and overlapping calls. This does not solve external `IUnknown`, other resource
+types, cross-device or self references, runtime concurrency, native Windows,
+or the longer retention of dormant native resources. Full local logs and PPMs
+are under `build/t3render-captures/2026-11-14-private-vertex-bridge-v4/`.
 
 The later [state-block observation](../benchmarks/d3d8/2026-11-13-stateblock-facade/result.json)
 exercised Create, Capture, Begin/End, Apply and Delete on the combined facade.

@@ -33,6 +33,8 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
                      "private_lifetime_naive_cycle_and_cleanup=PASS")
         lines.append("private_translated_lifetime=PASS")
         lines.append("private_buffer_sources_reset=PASS")
+        lines.append("private_external_naive_cycle_and_cleanup=PASS" if mode == "facade" else
+                     "private_external_native_dependent_release=PASS")
         lines.extend(("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                       "resource_facade_volume_roundtrips=PASS",
                       "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
@@ -133,6 +135,11 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
             buffer_reset = "private_buffer_sources_reset=PASS"
             for changed in ([line for line in original if line != buffer_reset], original + [buffer_reset],
                             [line.replace(buffer_reset, "private_buffer_sources_reset=FAIL") for line in original]):
+                with self.subTest(mode=mode), self.assertRaises(probe.RunError):
+                    self.inspect(changed, mode, resource_facade=True)
+            external = next(line for line in original if line.startswith("private_external_"))
+            for changed in ([line for line in original if line != external], original + [external],
+                            [line.replace(external, external.replace("=PASS", "=FAIL")) for line in original]):
                 with self.subTest(mode=mode), self.assertRaises(probe.RunError):
                     self.inspect(changed, mode, resource_facade=True)
 

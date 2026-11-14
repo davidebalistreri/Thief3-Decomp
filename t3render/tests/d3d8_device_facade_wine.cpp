@@ -4,12 +4,14 @@
 // buffers are passed to that escaped device. This is not a TDS test.
 #include "d3d8_device_facade.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
 #include <limits>
+#include <memory>
 #include <vector>
 
 namespace {
@@ -292,6 +294,35 @@ public:
         return remaining;
     }
     ULONG refs = 1;
+};
+
+class PrivateDeviceHolder final : public IUnknown {
+public:
+    PrivateDeviceHolder(IDirect3DDevice8* device, std::shared_ptr<std::atomic<bool>> destroyed)
+        : device_(device), destroyed_(std::move(destroyed)) {
+        device_->AddRef();
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        if (!IsEqualIID(iid, IID_IUnknown)) return E_NOINTERFACE;
+        AddRef(); *out = this; return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG remaining = --refs_;
+        if (!remaining) {
+            IDirect3DDevice8* device = device_;
+            destroyed_->store(true);
+            delete this;
+            device->Release();
+        }
+        return remaining;
+    }
+private:
+    IDirect3DDevice8* device_;
+    std::shared_ptr<std::atomic<bool>> destroyed_;
+    ULONG refs_ = 1;
 };
 
 template<class Resource>
@@ -675,6 +706,75 @@ bool ObservePrivateResourceLifetime(HWND window, bool facade_mode) {
     if (FAILED(freed) || t3render::fixture::resource_facade_close_successes != resource_closes + 1 ||
         t3render::fixture::buffer_facade_close_successes != buffer_closes + 1) return false;
     std::printf("private_lifetime_naive_cycle_and_cleanup=PASS\n");
+    return true;
+}
+
+bool ObserveExternalPrivateLifetime(HWND window, bool facade_mode) {
+    ComPtr<IDirect3D8> native_factory;
+    native_factory.value = Direct3DCreate8(D3D_SDK_VERSION);
+    if (!native_factory.value) return false;
+    D3DDISPLAYMODE display{};
+    if (FAILED(native_factory->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &display))) return false;
+    ComPtr<IDirect3D8> facade_factory;
+    auto buffers = t3render::buffers::BufferProxy::Create(ReadFixtureMemory, nullptr);
+    if (!buffers) return false;
+    IDirect3D8* selected = native_factory.value;
+    if (facade_mode) {
+        native_factory->AddRef();
+        facade_factory.value = t3render::fixture::CreateBufferDeviceFacadeFactory(native_factory.value, buffers);
+        if (!facade_factory.value) { native_factory->Release(); return false; }
+        selected = facade_factory.value;
+    }
+    D3DPRESENT_PARAMETERS pp{};
+    pp.BackBufferWidth = kWidth; pp.BackBufferHeight = kHeight; pp.BackBufferFormat = display.Format;
+    pp.BackBufferCount = 1; pp.SwapEffect = D3DSWAPEFFECT_DISCARD; pp.hDeviceWindow = window; pp.Windowed = TRUE;
+    ComPtr<IDirect3DDevice8> device;
+    if (FAILED(selected->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, window,
+        D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, device.put())) || !device.value) return false;
+    ComPtr<IDirect3DTexture8> texture;
+    if (FAILED(device->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, texture.put())) || !texture.value)
+        return false;
+    auto destroyed = std::make_shared<std::atomic<bool>>(false);
+    auto* holder = new (std::nothrow) PrivateDeviceHolder(device.value, destroyed);
+    if (!holder) return false;
+    const GUID key{0x3ee22a9b, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
+    if (!facade_mode) {
+        const HRESULT set = texture->SetPrivateData(key, holder, sizeof(IUnknown*), D3DSPD_IUNKNOWN);
+        holder->Release();
+        if (FAILED(set)) return false;
+        texture->Release(); texture.value = nullptr;
+        if (!destroyed->load()) return false;
+        device->Release(); device.value = nullptr;
+        std::printf("private_external_native_dependent_release=PASS\n");
+        return true;
+    }
+    // Direct forwarding is intentionally simulated on a borrowed native
+    // resource, after checking that the real facade still rejects it.
+    if (texture->SetPrivateData(key, holder, sizeof(IUnknown*), D3DSPD_IUNKNOWN) != E_NOTIMPL ||
+        FAILED(device->SetTexture(0, texture.value))) { holder->Release(); return false; }
+    auto* native = static_cast<t3render::fixture::DeviceFixture*>(device.value)->NativeForFixture();
+    ComPtr<IDirect3DBaseTexture8> native_texture;
+    if (!native || FAILED(native->GetTexture(0, native_texture.put())) || !native_texture.value ||
+        FAILED(device->SetTexture(0, nullptr)) ||
+        FAILED(native_texture->SetPrivateData(key, holder, sizeof(IUnknown*), D3DSPD_IUNKNOWN))) {
+        holder->Release(); return false;
+    }
+    holder->Release();
+    const ULONG texture_remaining = texture->Release(); texture.value = nullptr;
+    if (texture_remaining != 0) return false;
+    auto* borrowed = native_texture.value;
+    native_texture->Release(); native_texture.value = nullptr;
+    if (destroyed->load()) return false;
+    const ULONG device_remaining = device->Release(); device.value = nullptr;
+    if (device_remaining != 1) return false;
+    const unsigned resources_closed = t3render::fixture::resource_facade_close_successes.load();
+    const unsigned buffers_closed = t3render::fixture::buffer_facade_close_successes.load();
+    borrowed->AddRef(); // device teardown may release the dormant wrapper during FreePrivateData
+    const HRESULT freed = borrowed->FreePrivateData(key);
+    borrowed->Release();
+    if (FAILED(freed) || !destroyed->load() || t3render::fixture::resource_facade_close_successes != resources_closed + 1 ||
+        t3render::fixture::buffer_facade_close_successes != buffers_closed + 1) return false;
+    std::printf("private_external_naive_cycle_and_cleanup=PASS\n");
     return true;
 }
 
@@ -1403,12 +1503,13 @@ int wmain(int argc, wchar_t** argv) {
     if (ok) ok = CheckResetWithLiveResources(window, facade_mode);
     if (ok) ok = ObservePrivateResourceLifetime(window, facade_mode);
     if (ok) ok = ObserveTranslatedPrivateLifetime(window, facade_mode);
+    if (ok) ok = ObserveExternalPrivateLifetime(window, facade_mode);
 #endif
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
     if (facade_mode) {
         ok = ok && t3render::fixture::buffer_facade_close_successes ==
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
-             5 &&
+             6 &&
 #else
              1 &&
 #endif
@@ -1417,7 +1518,7 @@ int wmain(int argc, wchar_t** argv) {
     }
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
     if (facade_mode) {
-        ok = ok && t3render::fixture::resource_facade_close_successes == 5 &&
+        ok = ok && t3render::fixture::resource_facade_close_successes == 6 &&
              t3render::fixture::resource_facade_close_failures == 0;
         if (ok) std::printf("resource_facade_final_close=PASS\n");
     }

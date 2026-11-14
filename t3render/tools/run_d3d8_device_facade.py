@@ -141,6 +141,10 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
             raise RunError("translated private-data lifetime observation is missing or conflicting")
         if [line for line in lines if line.startswith("private_buffer_sources_reset=")] != ["private_buffer_sources_reset=PASS"]:
             raise RunError("buffer private-data reset observation is missing or conflicting")
+        external = ("private_external_naive_cycle_and_cleanup=PASS" if mode == "facade" else
+                    "private_external_native_dependent_release=PASS")
+        if [line for line in lines if line.startswith("private_external_")] != [external]:
+            raise RunError("external private-data lifetime observation is missing or conflicting")
         for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                        "resource_facade_volume_roundtrips=PASS",
                        "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
@@ -260,6 +264,7 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
                                  "Only selected 2D, cube, volume, surface, swapchain and buffer paths were exercised; other interfaces remain unverified.",
                                  "Only known same-device buffer/resource IUnknown values are translated; external COM values and unknown interfaces fail closed.",
                                  "One diagnostic intentionally stores a wrapped IUnknown on a borrowed native texture, then breaks the cycle; this is not an application path.",
+                                 "Another diagnostic deliberately stores an external COM object holding the facade device in a borrowed native texture, then breaks its cycle.",
                                  "Two reset scenarios were exercised; runtime concurrency and comprehensive state-block behavior remain untested.",
                                  "Six synthetic triangles and selected fixed-function states only; no gameplay parity."]
     stage = "setup"

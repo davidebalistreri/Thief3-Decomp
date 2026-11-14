@@ -150,6 +150,16 @@ Reset. If a source wrapper itself is retired, its private-data provenance is
 still lost and subsequent access fails closed. Full local logs and PPMs are
 under `build/t3render-captures/2026-11-14-private-buffer-sources-v2/`.
 
+The [external-object lifetime observation](../benchmarks/d3d8/2026-11-14-private-external-lifetime/result.json)
+tests an application `IUnknown` that retains its device. Native D3D8 released
+the object when its texture was released. The facade rejected it, as intended;
+the test then deliberately stored it through a borrowed native texture. The
+dormant texture wrapper kept that native texture alive, and the object kept
+the facade device alive in a cycle. The test broke the cycle and verified both
+registries closed. Translating known buffer/resource pointers does not solve
+this case: blindly forwarding external objects is unsafe. Full local logs and
+PPMs are under `build/t3render-captures/2026-11-14-private-external-lifetime-v2/`.
+
 The later [state-block observation](../benchmarks/d3d8/2026-11-13-stateblock-facade/result.json)
 exercised Create, Capture, Begin/End, Apply and Delete on the combined facade.
 After VB/IB wrappers became dormant and were reacquired, their `WRITEONLY`

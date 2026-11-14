@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "test": "synthetic_combined_known_stateblock_epoch",
+  "date": "2026-11-14",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/src/buffer_proxy.cpp": "df70b6085a55bf489d5a90201b271fb2c220a1a2e442ff6ffa0fdaa91f00eda1",
+    "t3render/src/capture.cpp": "2e5e2e58f86f6a7adb35d0fc0b644c06d1e54ab80ab38918063b4842777b3ae8",
+    "t3render/ir/vertex_declaration_registry.cpp": "69341205f6bf272a18eeebee72d8804f603754d2106467f486250a66821742f4",
+    "t3render/tests/combined_capture_observer.hpp": "9eb37a1fd9aa75561d99eebbb5a8dca3a0d4c9e821651626fd1f5675bedd0fbf",
+    "t3render/tests/d3d8_device_facade.hpp": "f49e3af40497d841c0657eb5352431928be5999d37387cc6c0112b7b7a7fd981",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "c46607935c36eea86a3cae729e91d8426208e25060773c95ab8b7ea639f25c5d",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "4848dbb7cb2b3c5b25b22547a95596c864519e682737c810e7288bbd1d18231b",
+    "t3render/tests/test_d3d8_device_facade_runner.py": "c2b54049b227d257b4efbdddd2a21384f251f87b67f21efd4deef49411e58412",
+    "t3render/tools/run_d3d8_device_facade.py": "d077c19b138b019bbc5fcc70c772960f35dd7bf60ec79a6df6977672de6c05e2"
+  },
+  "fixture_sha256": "138c19699ae7e940c4595a68957827e0e33396f7d7f0a3bbd6b47459f5950b89",
+  "result": {
+    "attested_all_stateblock_create_capture_apply_delete": true,
+    "reacquired_managed_writeonly_vertex_shadow": true,
+    "known_shader_candidate_after_apply": true,
+    "shader_deletion_invalidates_before_forwarding": true,
+    "unknown_token_other_type_and_begin_end_invalidate": true,
+    "shader_stateblock_lifetime_baseline": {
+      "delete": "0x00000000",
+      "create": "0x00000000",
+      "apply": "0x00000000",
+      "get": "0x00000000",
+      "same_handle": true,
+      "bound_old": true,
+      "bound_new": true,
+      "function_hr": "0x00000000",
+      "function": "replacement",
+      "before_draw": true,
+      "before_pixel": "0xe43b3b",
+      "draw": true,
+      "pixel": "0x00ff00"
+    },
+    "shader_stateblock_lifetime_facade": {
+      "delete": "0x00000000",
+      "create": "0x00000000",
+      "apply": "0x00000000",
+      "get": "0x00000000",
+      "same_handle": true,
+      "bound_old": true,
+      "bound_new": true,
+      "function_hr": "0x00000000",
+      "function": "replacement",
+      "before_draw": true,
+      "before_pixel": "0xe43b3b",
+      "draw": true,
+      "pixel": "0x00ff00"
+    },
+    "bound_shader_deletion_baseline": {
+      "delete": "0x00000000",
+      "create": "0x00000000",
+      "get": "0x00000000",
+      "same_handle": true,
+      "bound_new": false,
+      "retained_draw": false,
+      "retained_pixel": "0x000000",
+      "replacement_draw": true,
+      "replacement_pixel": "0xe43b3b"
+    },
+    "bound_shader_deletion_facade": {
+      "delete": "0x00000000",
+      "create": "0x00000000",
+      "get": "0x00000000",
+      "same_handle": true,
+      "bound_new": false,
+      "retained_draw": false,
+      "retained_pixel": "0x000000",
+      "replacement_draw": true,
+      "replacement_pixel": "0xe43b3b"
+    },
+    "synchronized_synthetic_d3d8_dx12_rgb_identical": true,
+    "synchronized_rgb_ppm_sha256": "5f46fcdfe5237797a1425f91d3abc19689c225e67e38b5ecbf7f25b39db16c85",
+    "trace_sha256": "90107d92e3b52834afee542015d99d7c67367d6ac5c632bd5400da9342dd745d",
+    "facade_log_sha256": "7228ca09085e829998914d69a9764b36663268f104304e3eb8457477b889d0f4"
+  },
+  "limitations": [
+    "Fixture only: an explicitly attested, fully observed shader and state-block epoch; not integrated into the proxy or TDS.",
+    "Only selected sequential D3DSBT_ALL paths are observed; shader deletion, unknown tokens, other types and Begin/End abandon observation.",
+    "The state-block test and synchronized D3D8/DX12 replay are separate draws; texture content is absent.",
+    "Native Windows, TDS, external alias closure, arbitrary reentrancy and concurrent calls remain unverified.",
+    "The DX12 replay recognizes one exact synthetic shader; no general renderer or gameplay parity is established."
+  ]
+}

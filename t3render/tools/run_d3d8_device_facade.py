@@ -28,6 +28,10 @@ SHADER_STATEBLOCK = re.compile(
     r"bound_old=([01]) bound_new=([01]) function_hr=(0x[0-9a-fA-F]{8}) "
     r"function=(unavailable|original|replacement|other) before_draw=([01]) before_pixel=(0x[0-9a-fA-F]{6}) "
     r"draw=([01]) pixel=(0x[0-9a-fA-F]{6}) cleanup=PASS\Z")
+SHADER_BOUND_DELETION = re.compile(
+    r"shader_bound_deletion delete=(0x[0-9a-fA-F]{8}) create=(0x[0-9a-fA-F]{8}) get=(0x[0-9a-fA-F]{8}) "
+    r"same_handle=([01]) bound_new=([01]) retained_draw=([01]) retained_pixel=(0x[0-9a-fA-F]{6}) "
+    r"replacement_draw=([01]) replacement_pixel=(0x[0-9a-fA-F]{6}) cleanup=PASS\Z")
 PRIVATE_KINDS = ("vertex", "index", "texture", "backbuffer", "surface_level", "cube", "volume_texture", "volume")
 PRIVATE_RECORD = re.compile(
     r"private_data kind=(?P<kind>[a-z_]+) "
@@ -89,6 +93,20 @@ def inspect_shader_stateblock(lines):
             "same_handle": same == "1", "bound_old": old == "1", "bound_new": new == "1",
             "function_hr": function_hr.lower(), "function": function, "before_draw": before_draw == "1",
             "before_pixel": before_pixel.lower(), "draw": draw == "1", "pixel": pixel.lower()}
+
+
+def inspect_bound_shader_deletion(lines):
+    matches = [SHADER_BOUND_DELETION.fullmatch(line) for line in lines if line.startswith("shader_bound_deletion ")]
+    if len(matches) != 1 or matches[0] is None:
+        raise RunError("bound shader deletion observation is missing or malformed")
+    delete, create, get, same, bound, retained, old_pixel, drawn, new_pixel = matches[0].groups()
+    if ((same == "1" or bound == "1" or drawn == "1") and not successful_hresult(create) or
+        bound == "1" and not successful_hresult(get) or retained == "1" and bound != "1" or
+        retained == "0" and old_pixel != "0x000000" or drawn == "0" and new_pixel != "0x000000"):
+        raise RunError("bound shader deletion observation is inconsistent")
+    return {"delete": delete.lower(), "create": create.lower(), "get": get.lower(), "same_handle": same == "1",
+            "bound_new": bound == "1", "retained_draw": retained == "1", "retained_pixel": old_pixel.lower(),
+            "replacement_draw": drawn == "1", "replacement_pixel": new_pixel.lower()}
 
 
 def inspect_private_data(lines, mode):
@@ -155,6 +173,7 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
         raise RunError("COM identity or fixture completion marker is missing")
     if resource_facade:
         inspect_shader_stateblock(lines)
+        inspect_bound_shader_deletion(lines)
         # Compare observed blob operations; unknown/COM results intentionally
         # differ and are validated separately as a compatibility gap.
         actual.extend(inspect_private_data(lines, mode))
@@ -203,6 +222,15 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
         reset_epoch = ["combined_reset_shader_and_fresh_buffer_epoch=PASS"] if mode == "facade" else []
         if [line for line in lines if line.startswith("combined_reset_shader_and_fresh_buffer_epoch=")] != reset_epoch:
             raise RunError("combined observer reset epoch is missing or conflicting")
+        stateblock = ["combined_stateblock_shader_buffer_reacquisition=PASS"] if mode == "facade" else []
+        if [line for line in lines if line.startswith("combined_stateblock_shader_buffer_reacquisition=")] != stateblock:
+            raise RunError("combined observer state-block reacquisition is missing or conflicting")
+        reuse = ["combined_stateblock_shader_reuse_invalidates=PASS"] if mode == "facade" else []
+        if [line for line in lines if line.startswith("combined_stateblock_shader_reuse_invalidates=")] != reuse:
+            raise RunError("combined observer shader-reuse invalidation is missing or conflicting")
+        unknown = ["combined_unknown_stateblocks_invalidate=PASS"] if mode == "facade" else []
+        if [line for line in lines if line.startswith("combined_unknown_stateblocks_invalidate=")] != unknown:
+            raise RunError("combined observer unknown state-block invalidation is missing or conflicting")
         if [line for line in lines if line.startswith("private_cross_device_cycle=")] != ["private_cross_device_cycle=PASS"]:
             raise RunError("cross-device private-data observation is missing or conflicting")
         for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
@@ -471,6 +499,8 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
             if resource_facade:
                 result["runs"][stage]["shader_stateblock"] = inspect_shader_stateblock(
                     log.read_text(encoding="utf-8", errors="replace").splitlines())
+                result["runs"][stage]["shader_bound_deletion"] = inspect_bound_shader_deletion(
+                    log.read_text(encoding="utf-8", errors="replace").splitlines())
             if resource_facade and stage == "facade":
                 trace = Path(str(ppm) + ".trace.jsonl")
                 inspect_prepared_trace(trace)
@@ -494,6 +524,13 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
                 raise RunError("native and facade shader state-block sample pixels differ")
             if before["before_draw"] and after["before_draw"] and before["before_pixel"] != after["before_pixel"]:
                 raise RunError("native and facade replacement shader sample pixels differ")
+            before = result["runs"]["baseline"]["shader_bound_deletion"]
+            after = result["runs"]["facade"]["shader_bound_deletion"]
+            if any(before[name] != after[name] for name in ("delete", "create", "get")):
+                raise RunError("native and facade bound shader deletion HRESULTs differ")
+            for flag, pixel in (("retained_draw", "retained_pixel"), ("replacement_draw", "replacement_pixel")):
+                if before[flag] and after[flag] and before[pixel] != after[pixel]:
+                    raise RunError("native and facade bound shader deletion pixels differ")
         if replay:
             stage = "prepared_dx12_replay"
             records = trace_to_up_packet.validated_records(trace)

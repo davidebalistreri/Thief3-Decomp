@@ -5,11 +5,13 @@
 #include "prepared_buffer_capture.hpp"
 #include <algorithm>
 #include <array>
+#include <unordered_map>
 
 namespace t3render::fixture {
 
 class CombinedCaptureObserver final {
 public:
+    enum class StateBlockAction { Unsupported, Create, Apply, Capture, Delete };
     CombinedCaptureObserver(IDirect3DDevice8* native, buffers::BufferProxy& buffers,
                             const D3DPRESENT_PARAMETERS& presentation) noexcept
         : native_(native), buffers_(buffers), device_(shaders_.OpenDevice()) {
@@ -35,6 +37,8 @@ public:
     }
     ir::ShaderTicket BeginReset() noexcept {
         const DWORD before = GetLastError();
+        state_blocks_.clear();
+        state_blocks_enabled_ = false;
         const auto ticket = shaders_.BeginReset(device_);
         SetLastError(before);
         return ticket;
@@ -51,6 +55,42 @@ public:
         Invalidate();
         buffers_.InvalidateDevice(native_);
         CaptureAbandonDevice(native_);
+        SetLastError(before);
+    }
+    // Explicit fixture attestation: prior shader and state-block identities
+    // were retired before this fully observed device epoch. Not a game API.
+    bool EnableFixtureStateBlocks() noexcept {
+        if (!valid() || reset_recovery_ || state_blocks_enabled_ || !state_blocks_.empty()) return false;
+        state_blocks_enabled_ = true;
+        return true;
+    }
+    ir::ShaderTicket BeginStateBlock(StateBlockAction action, DWORD token, D3DSTATEBLOCKTYPE type) noexcept {
+        const DWORD before = GetLastError();
+        bool allowed = state_blocks_enabled_ && !reset_recovery_ && action != StateBlockAction::Unsupported;
+        if (action == StateBlockAction::Create) allowed = allowed && type == D3DSBT_ALL;
+        else {
+            const auto found = state_blocks_.find(token);
+            allowed = allowed && found != state_blocks_.end() && found->second == shader_epoch_;
+        }
+        const auto ticket = allowed ? shaders_.BeginSet(device_) : ir::ShaderTicket{};
+        if (!ticket) Unsupported();
+        SetLastError(before);
+        return ticket;
+    }
+    void EndStateBlock(ir::ShaderTicket ticket, StateBlockAction action, DWORD token, DWORD* output, HRESULT hr) noexcept {
+        const DWORD before = GetLastError();
+        bool accepted = ticket && shaders_.EndSet(ticket, static_cast<std::uint32_t>(hr), 0) && SUCCEEDED(hr);
+        if (accepted && action == StateBlockAction::Create) {
+            std::uint32_t value = 0;
+            accepted = ReadMemory(nullptr, reinterpret_cast<std::uintptr_t>(output), &value, sizeof(value)) && value;
+            if (accepted) {
+                try { accepted = state_blocks_.size() < 64 && state_blocks_.emplace(value, shader_epoch_).second; }
+                catch (...) { accepted = false; }
+            }
+        } else if (accepted && action == StateBlockAction::Delete) {
+            accepted = state_blocks_.erase(token) == 1;
+        }
+        if (!accepted) Unsupported();
         SetLastError(before);
     }
 
@@ -80,6 +120,9 @@ public:
     }
     HRESULT DeleteVertexShader(DWORD value) noexcept {
         const DWORD before = GetLastError();
+        // A deleted shader can remain reachable through a block or the
+        // current binding. Do not trust later handle reuse in this epoch.
+        if (state_blocks_enabled_) { ++shader_epoch_; Unsupported(); }
         const auto ticket = shaders_.BeginDelete(device_, value);
         SetLastError(before);
         const HRESULT hr = native_->DeleteVertexShader(value);
@@ -180,6 +223,9 @@ private:
     ir::VertexDeclarationRegistry shaders_;
     std::uint64_t device_;
     bool reset_recovery_ = false; // sequential fixture only
+    bool state_blocks_enabled_ = false;
+    std::uint64_t shader_epoch_ = 1;
+    std::unordered_map<DWORD, std::uint64_t> state_blocks_;
 };
 
 }  // namespace t3render::fixture

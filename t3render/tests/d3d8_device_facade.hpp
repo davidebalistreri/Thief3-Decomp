@@ -585,7 +585,11 @@ public:
     }
     HRESULT STDMETHODCALLTYPE ApplyStateBlock(DWORD Token) override {
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        return StateBlockCall([&] { return native_->ApplyStateBlock(Token); }, CombinedCaptureObserver::StateBlockAction::Apply, Token);
+#else
         return StateBlockCall([&] { return native_->ApplyStateBlock(Token); });
+#endif
 #elif defined(T3RENDER_BUFFER_FACADE_FIXTURE)
         InvalidateBuffers();
 #endif
@@ -593,7 +597,11 @@ public:
     }
     HRESULT STDMETHODCALLTYPE CaptureStateBlock(DWORD Token) override {
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        return StateBlockCall([&] { return native_->CaptureStateBlock(Token); }, CombinedCaptureObserver::StateBlockAction::Capture, Token);
+#else
         return StateBlockCall([&] { return native_->CaptureStateBlock(Token); });
+#endif
 #elif defined(T3RENDER_BUFFER_FACADE_FIXTURE)
         InvalidateBuffers();
 #endif
@@ -601,7 +609,11 @@ public:
     }
     HRESULT STDMETHODCALLTYPE DeleteStateBlock(DWORD Token) override {
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        return StateBlockCall([&] { return native_->DeleteStateBlock(Token); }, CombinedCaptureObserver::StateBlockAction::Delete, Token);
+#else
         return StateBlockCall([&] { return native_->DeleteStateBlock(Token); });
+#endif
 #elif defined(T3RENDER_BUFFER_FACADE_FIXTURE)
         InvalidateBuffers();
 #endif
@@ -609,7 +621,11 @@ public:
     }
     HRESULT STDMETHODCALLTYPE CreateStateBlock(D3DSTATEBLOCKTYPE Type,DWORD * pToken) override {
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        return StateBlockCall([&] { return native_->CreateStateBlock(Type, pToken); }, CombinedCaptureObserver::StateBlockAction::Create, 0, pToken, Type);
+#else
         return StateBlockCall([&] { return native_->CreateStateBlock(Type, pToken); });
+#endif
 #elif defined(T3RENDER_BUFFER_FACADE_FIXTURE)
         InvalidateBuffers();
 #endif
@@ -891,16 +907,30 @@ private:
 #endif
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
     template<class Call>
-    HRESULT StateBlockCall(Call call) {
+    HRESULT StateBlockCall(Call call
 #ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
-        if (combined_observer_) combined_observer_->Unsupported();
+        , CombinedCaptureObserver::StateBlockAction action = CombinedCaptureObserver::StateBlockAction::Unsupported,
+        DWORD token = 0, DWORD* output = nullptr, D3DSTATEBLOCKTYPE type = D3DSBT_ALL
 #endif
-        if (!buffers_) return call();
+    ) {
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        auto* observer = combined_observer_;
+        const auto shader_ticket = observer ? observer->BeginStateBlock(action, token, type) : t3render::ir::ShaderTicket{};
+#endif
+        if (!buffers_) {
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+            if (observer) observer->Unsupported();
+#endif
+            return call();
+        }
         FixtureBufferOperation operation(buffers_.get(), native_);
         const HRESULT hr = call();
         const DWORD error = GetLastError();
         // The native failure may have partially changed bindings or recording.
         if (FAILED(hr)) buffers_->InvalidateDevice(native_);
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        if (observer) observer->EndStateBlock(shader_ticket, action, token, output, hr);
+#endif
         SetLastError(error);
         return hr;
     }

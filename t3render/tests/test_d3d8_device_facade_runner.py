@@ -52,10 +52,15 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
             lines.append("combined_capture_shader_pixel=PASS")
             lines.append("combined_external_shader_invalidation=PASS")
             lines.append("combined_reset_shader_and_fresh_buffer_epoch=PASS")
+            lines.append("combined_stateblock_shader_buffer_reacquisition=PASS")
+            lines.append("combined_stateblock_shader_reuse_invalidates=PASS")
+            lines.append("combined_unknown_stateblocks_invalidate=PASS")
         lines.append("private_cross_device_cycle=PASS")
         lines.append("shader_stateblock_lifetime delete=0x00000000 create=0x00000000 apply=0x00000000 get=0x00000000 "
                      "same_handle=1 bound_old=1 bound_new=1 function_hr=0x00000000 function=replacement "
                      "before_draw=1 before_pixel=0xe43b3b draw=1 pixel=0x00ff00 cleanup=PASS")
+        lines.append("shader_bound_deletion delete=0x00000000 create=0x00000000 get=0x00000000 same_handle=1 "
+                     "bound_new=1 retained_draw=1 retained_pixel=0x00ff00 replacement_draw=1 replacement_pixel=0xe43b3b cleanup=PASS")
         lines.extend(("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                       "resource_facade_volume_roundtrips=PASS",
                       "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
@@ -207,6 +212,16 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
             with self.subTest(lines=lines), self.assertRaises(probe.RunError):
                 probe.inspect_shader_stateblock(lines)
 
+    def test_bound_shader_deletion_requires_consistent_record(self):
+        valid = next(line for line in fixture_log("facade", resource_facade=True)
+                     if line.startswith("shader_bound_deletion "))
+        self.assertEqual(probe.inspect_bound_shader_deletion([valid])["replacement_pixel"], "0xe43b3b")
+        for lines in ([], [valid, valid], [valid.replace("cleanup=PASS", "cleanup=FAIL")],
+                      [valid.replace("bound_new=1", "bound_new=0")],
+                      [valid.replace("retained_draw=1", "retained_draw=0")]):
+            with self.subTest(lines=lines), self.assertRaises(probe.RunError):
+                probe.inspect_bound_shader_deletion(lines)
+
     def test_private_data_gap_requires_ordered_native_and_facade_evidence(self):
         for mode in ("baseline", "facade"):
             original = fixture_log(mode, resource_facade=True)
@@ -281,14 +296,18 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
                     self.inspect(changed, mode, resource_facade=True)
             if mode == "facade":
                 for prepared in ("prepared_eager_buffer=PASS", "prepared_capture_draw=PASS", "combined_capture_shader_pixel=PASS",
-                                 "combined_external_shader_invalidation=PASS", "combined_reset_shader_and_fresh_buffer_epoch=PASS"):
+                                 "combined_external_shader_invalidation=PASS", "combined_reset_shader_and_fresh_buffer_epoch=PASS",
+                                 "combined_stateblock_shader_buffer_reacquisition=PASS", "combined_stateblock_shader_reuse_invalidates=PASS",
+                                 "combined_unknown_stateblocks_invalidate=PASS"):
                     for changed in ([line for line in original if line != prepared], original + [prepared],
                                     [line.replace(prepared, prepared + "bad") for line in original]):
                         with self.subTest(mode=mode), self.assertRaises(probe.RunError):
                             self.inspect(changed, mode, resource_facade=True)
             else:
                 for prepared in ("prepared_eager_buffer=PASS", "prepared_capture_draw=PASS", "combined_capture_shader_pixel=PASS",
-                                 "combined_external_shader_invalidation=PASS", "combined_reset_shader_and_fresh_buffer_epoch=PASS"):
+                                 "combined_external_shader_invalidation=PASS", "combined_reset_shader_and_fresh_buffer_epoch=PASS",
+                                 "combined_stateblock_shader_buffer_reacquisition=PASS", "combined_stateblock_shader_reuse_invalidates=PASS",
+                                 "combined_unknown_stateblocks_invalidate=PASS"):
                     with self.subTest(mode=mode), self.assertRaises(probe.RunError):
                         self.inspect(original + [prepared], mode, resource_facade=True)
             cross_device = "private_cross_device_cycle=PASS"

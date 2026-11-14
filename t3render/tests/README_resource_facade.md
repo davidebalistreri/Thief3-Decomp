@@ -266,8 +266,8 @@ fixture's 159 native/facade observations and RGB comparison are not that draw.
 The converter rejects unsupported states and requires fixture attestation.
 
 In that experiment the single-threaded observer was attached after the state
-block was applied and detached before Reset. A sequential state-block call or
-unsupported draw while attached abandons capture. It is not a complete
+block was applied and detached before Reset. In that version, a state-block
+call or unsupported draw while attached abandoned capture. It is not a complete
 facade or a transparent game observer: native alias escapes, other resource
 operations, concurrency and reentrancy remain open, and texture contents are not captured.
 The offline diagnostic IR is still incomplete and marks the frame unreplayable.
@@ -307,6 +307,21 @@ implementation. The proxy continues to invalidate shader evidence at state
 blocks; a host regression test covers handle reuse followed by an apply. The
 local evidence is under
 `build/t3render-captures/2026-11-14-shader-stateblock-before-after/`.
+
+The [bounded combined state-block experiment](../benchmarks/d3d8/2026-11-14-combined-stateblock-epoch/result.json)
+enables a fixture-only policy after an explicitly attested fresh shader/state-block
+epoch. A known `D3DSBT_ALL` block was created, captured and applied; a released
+managed `WRITEONLY` VB was reacquired with its shadow intact and the shader
+remained a candidate. A shader deletion invalidates the observation before
+forwarding, and unknown tokens, other block types and Begin/End recording also
+invalidate it. A separate bound-shader deletion check on this Highball runtime
+found the handle was reused but no longer bound; the new shader rendered red
+when explicitly bound. This does not relax the production proxy's conservative
+state-block behavior. The attestation, sequential calls, lifetime and reset
+assumptions are not established for TDS, native Windows or concurrent/reentrant
+applications. The paired capture and replay still concern a different synthetic
+draw and contain no textures. Local results are under
+`build/t3render-captures/2026-11-14-combined-stateblock-verified/`.
 
 The later [state-block observation](../benchmarks/d3d8/2026-11-13-stateblock-facade/result.json)
 exercised Create, Capture, Begin/End, Apply and Delete on the combined facade.

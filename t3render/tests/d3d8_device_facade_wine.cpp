@@ -941,6 +941,13 @@ const DWORD kCombinedProgram[] = {
     D3DSIO_MOV, 0x80000000u | D3DSPR_ATTROUT | D3DSP_WRITEMASK_ALL,
     0x80000000u | D3DSPR_CONST | D3DSP_NOSWIZZLE, D3DSIO_END
 };
+const DWORD kReplacementProgram[] = {
+    D3DVS_VERSION(1, 1), D3DSIO_MOV,
+    0x80000000u | D3DSPR_RASTOUT | D3DSP_WRITEMASK_ALL | D3DSRO_POSITION,
+    0x80000000u | D3DSPR_INPUT | D3DSP_NOSWIZZLE | D3DVSDE_POSITION,
+    D3DSIO_MOV, 0x80000000u | D3DSPR_ATTROUT | D3DSP_WRITEMASK_ALL,
+    0x80000000u | D3DSPR_INPUT | D3DSP_NOSWIZZLE | D3DVSDE_DIFFUSE, D3DSIO_END
+};
 
 bool SampleShaderColor(IDirect3DDevice8* device, DWORD& pixel) {
     const Vertex triangle[] = {{-0.8f, 0.8f, 0.5f, 1, 0xffe43b3b}, {0.8f, 0.8f, 0.5f, 1, 0xffe43b3b},
@@ -965,13 +972,6 @@ bool SampleShaderColor(IDirect3DDevice8* device, DWORD& pixel) {
 // A state block may restore a shader after its handle was deleted and reused;
 // the outcome must be observed rather than assumed from its numeric value.
 bool ObserveShaderStateBlockLifetime(IDirect3DDevice8* device) {
-    const DWORD replacement_program[] = {
-        D3DVS_VERSION(1, 1), D3DSIO_MOV,
-        0x80000000u | D3DSPR_RASTOUT | D3DSP_WRITEMASK_ALL | D3DSRO_POSITION,
-        0x80000000u | D3DSPR_INPUT | D3DSP_NOSWIZZLE | D3DVSDE_POSITION,
-        D3DSIO_MOV, 0x80000000u | D3DSPR_ATTROUT | D3DSP_WRITEMASK_ALL,
-        0x80000000u | D3DSPR_INPUT | D3DSP_NOSWIZZLE | D3DVSDE_DIFFUSE, D3DSIO_END
-    };
     DWORD original = 0, replacement = 0, block = 0, bound = 0;
     const float green[4]{0, 1, 0, 1};
     if (FAILED(device->CreateVertexShader(kCombinedDeclaration, kCombinedProgram, &original, D3DUSAGE_SOFTWAREPROCESSING)) ||
@@ -979,7 +979,7 @@ bool ObserveShaderStateBlockLifetime(IDirect3DDevice8* device) {
         FAILED(device->CreateStateBlock(D3DSBT_ALL, &block)) ||
         FAILED(device->SetVertexShader(kFvf))) return false;
     const HRESULT removed = device->DeleteVertexShader(original);
-    const HRESULT created = device->CreateVertexShader(kCombinedDeclaration, replacement_program, &replacement, D3DUSAGE_SOFTWAREPROCESSING);
+    const HRESULT created = device->CreateVertexShader(kCombinedDeclaration, kReplacementProgram, &replacement, D3DUSAGE_SOFTWAREPROCESSING);
     DWORD before_pixel = 0;
     const bool before_drawn = SUCCEEDED(created) && replacement && SUCCEEDED(device->SetVertexShader(replacement)) &&
                               SampleShaderColor(device, before_pixel);
@@ -993,8 +993,8 @@ bool ObserveShaderStateBlockLifetime(IDirect3DDevice8* device) {
         if (SUCCEEDED(function_hr) && size <= 1024 && size % sizeof(DWORD) == 0) {
             std::vector<DWORD> words(size / sizeof(DWORD));
             function_hr = device->GetVertexShaderFunction(bound, words.data(), &size);
-            if (SUCCEEDED(function_hr) && size == sizeof(replacement_program) &&
-                std::memcmp(words.data(), replacement_program, size) == 0) function = "replacement";
+            if (SUCCEEDED(function_hr) && size == sizeof(kReplacementProgram) &&
+                std::memcmp(words.data(), kReplacementProgram, size) == 0) function = "replacement";
             else if (SUCCEEDED(function_hr) && size == sizeof(kCombinedProgram) &&
                      std::memcmp(words.data(), kCombinedProgram, size) == 0) function = "original";
             else if (SUCCEEDED(function_hr)) function = "other";
@@ -1019,6 +1019,34 @@ bool ObserveShaderStateBlockLifetime(IDirect3DDevice8* device) {
                 static_cast<unsigned long>(static_cast<std::uint32_t>(function_hr)), function,
                 static_cast<unsigned>(before_drawn), static_cast<unsigned long>(before_pixel),
                 static_cast<unsigned>(drawn), static_cast<unsigned long>(pixel), cleanup ? "PASS" : "FAIL");
+    return cleanup;
+}
+
+bool ObserveBoundShaderDeletion(IDirect3DDevice8* device) {
+    DWORD original = 0, replacement = 0, bound = 0;
+    const float green[4]{0, 1, 0, 1};
+    if (FAILED(device->CreateVertexShader(kCombinedDeclaration, kCombinedProgram, &original, D3DUSAGE_SOFTWAREPROCESSING)) ||
+        !original || FAILED(device->SetVertexShader(original)) || FAILED(device->SetVertexShaderConstant(0, green, 1))) return false;
+    const HRESULT removed = device->DeleteVertexShader(original);
+    const HRESULT created = device->CreateVertexShader(kCombinedDeclaration, kReplacementProgram, &replacement, D3DUSAGE_SOFTWAREPROCESSING);
+    const HRESULT got = device->GetVertexShader(&bound);
+    DWORD retained_pixel = 0, replacement_pixel = 0;
+    const bool retained = SUCCEEDED(created) && replacement && SUCCEEDED(got) && bound == replacement &&
+                          SampleShaderColor(device, retained_pixel);
+    const bool replacement_draw = SUCCEEDED(created) && replacement && SUCCEEDED(device->SetVertexShader(replacement)) &&
+                                  SampleShaderColor(device, replacement_pixel);
+    const bool cleanup = SUCCEEDED(device->SetVertexShader(kFvf)) &&
+        (FAILED(removed) ? SUCCEEDED(device->DeleteVertexShader(original)) : true) &&
+        (SUCCEEDED(created) && replacement ? SUCCEEDED(device->DeleteVertexShader(replacement)) : true);
+    std::printf("shader_bound_deletion delete=0x%08lx create=0x%08lx get=0x%08lx same_handle=%u bound_new=%u "
+                "retained_draw=%u retained_pixel=0x%06lx replacement_draw=%u replacement_pixel=0x%06lx cleanup=%s\n",
+                static_cast<unsigned long>(static_cast<std::uint32_t>(removed)),
+                static_cast<unsigned long>(static_cast<std::uint32_t>(created)),
+                static_cast<unsigned long>(static_cast<std::uint32_t>(got)),
+                static_cast<unsigned>(SUCCEEDED(created) && replacement && replacement == original),
+                static_cast<unsigned>(SUCCEEDED(got) && SUCCEEDED(created) && replacement && bound == replacement),
+                static_cast<unsigned>(retained), static_cast<unsigned long>(retained_pixel),
+                static_cast<unsigned>(replacement_draw), static_cast<unsigned long>(replacement_pixel), cleanup ? "PASS" : "FAIL");
     return cleanup;
 }
 
@@ -1070,6 +1098,9 @@ bool ObserveCombinedResetEpoch(IDirect3DDevice8* device, IDirect3DDevice8* nativ
         FAILED(device->Reset(&pp)) || !observer.ShaderWindowAvailableForFixture() ||
         observer.ShaderStatusForFixture(old_shader) != t3render::ir::ShaderObservationStatus::Unavailable ||
         FAILED(device->SetVertexShader(kFvf)) || FAILED(device->DeleteVertexShader(old_shader))) return false;
+    // All earlier state blocks were deleted before this reset and the old
+    // shader has just been retired; this isolated epoch is fully observed.
+    if (!observer.EnableFixtureStateBlocks()) return false;
     DWORD fresh_shader = 0;
     if (FAILED(device->CreateVertexShader(kCombinedDeclaration, kCombinedProgram, &fresh_shader, D3DUSAGE_SOFTWAREPROCESSING)) ||
         !fresh_shader || observer.ShaderStatusForFixture(fresh_shader) != t3render::ir::ShaderObservationStatus::Candidate)
@@ -1081,10 +1112,31 @@ bool ObserveCombinedResetEpoch(IDirect3DDevice8* device, IDirect3DDevice8* nativ
     if (FAILED(fresh->Lock(0, 4, &mapped, 0)) || !mapped) return false;
     std::memset(mapped, 0x39, 4);
     if (FAILED(fresh->Unlock())) return false;
-    auto pin = buffers.UnwrapVertex(native, fresh.value);
     BYTE observed[4]{};
-    if (!pin.wrapped() || buffers.ReadVertex(native, pin.native(), 0, observed, sizeof(observed)) != t3render::ir::RegistryResult::Ok ||
-        observed[0] != 0x39 || FAILED(device->DeleteVertexShader(fresh_shader))) return false;
+    {
+        auto pin = buffers.UnwrapVertex(native, fresh.value);
+        if (!pin.wrapped() || buffers.ReadVertex(native, pin.native(), 0, observed, sizeof(observed)) != t3render::ir::RegistryResult::Ok ||
+            observed[0] != 0x39) return false;
+    }
+    DWORD block = 0, selected = 0;
+    if (FAILED(device->SetVertexShader(fresh_shader)) || FAILED(device->SetStreamSource(0, fresh.value, 4)) ||
+        FAILED(device->CreateStateBlock(D3DSBT_ALL, &block)) || !block || FAILED(device->CaptureStateBlock(block)) ||
+        FAILED(device->SetStreamSource(0, nullptr, 0))) return false;
+    fresh->Release(); fresh.value = nullptr;
+    UINT stride = 0;
+    if (FAILED(device->ApplyStateBlock(block)) || FAILED(device->GetStreamSource(0, fresh.put(), &stride)) ||
+        !fresh.value || stride != 4 || FAILED(device->GetVertexShader(&selected)) || selected != fresh_shader ||
+        observer.ShaderStatusForFixture(fresh_shader) != t3render::ir::ShaderObservationStatus::Candidate) return false;
+    {
+        auto pin = buffers.UnwrapVertex(native, fresh.value);
+        if (!pin.wrapped() || buffers.ReadVertex(native, pin.native(), 0, observed, sizeof(observed)) != t3render::ir::RegistryResult::Ok ||
+            observed[0] != 0x39) return false;
+    }
+    if (FAILED(device->DeleteStateBlock(block)) || FAILED(device->SetStreamSource(0, nullptr, 0)) ||
+        FAILED(device->SetVertexShader(kFvf))) return false;
+    facade->SetCombinedObserver(nullptr);
+    if (FAILED(device->DeleteVertexShader(fresh_shader))) return false;
+    std::printf("combined_stateblock_shader_buffer_reacquisition=PASS\n");
     std::printf("combined_reset_shader_and_fresh_buffer_epoch=PASS\n");
     return true;
 }
@@ -1124,6 +1176,48 @@ bool ObserveCombinedExternalHazards(IDirect3DDevice8* device, IDirect3DDevice8* 
         if (FAILED(hr) || FAILED(freed) || !invalidated) return false;
     }
     std::printf("combined_external_shader_invalidation=PASS\n");
+    return true;
+}
+
+bool ObserveCombinedStateBlockReuseHazard(IDirect3DDevice8* device, IDirect3DDevice8* native,
+                                         t3render::buffers::BufferProxy& buffers, D3DPRESENT_PARAMETERS& pp) {
+    t3render::fixture::CombinedCaptureObserver observer(native, buffers, pp);
+    if (!observer.valid() || !observer.EnableFixtureStateBlocks()) return false;
+    auto* facade = static_cast<t3render::fixture::DeviceFixture*>(device);
+    facade->SetCombinedObserver(&observer);
+    struct Detach { t3render::fixture::DeviceFixture* facade; ~Detach() { facade->SetCombinedObserver(nullptr); } } detach{facade};
+    DWORD original = 0, replacement = 0, block = 0;
+    if (FAILED(device->CreateVertexShader(kCombinedDeclaration, kCombinedProgram, &original, D3DUSAGE_SOFTWAREPROCESSING)) ||
+        !original || FAILED(device->SetVertexShader(original)) || FAILED(device->CreateStateBlock(D3DSBT_ALL, &block)) ||
+        !block || FAILED(device->SetVertexShader(kFvf)) || FAILED(device->DeleteVertexShader(original)) ||
+        observer.ShaderWindowAvailableForFixture() ||
+        FAILED(device->CreateVertexShader(kCombinedDeclaration, kCombinedProgram, &replacement, D3DUSAGE_SOFTWAREPROCESSING)) ||
+        !replacement || FAILED(device->ApplyStateBlock(block)) || observer.ShaderWindowAvailableForFixture() ||
+        FAILED(device->DeleteStateBlock(block)) || FAILED(device->SetVertexShader(kFvf)) ||
+        FAILED(device->DeleteVertexShader(replacement))) return false;
+    std::printf("combined_stateblock_shader_reuse_invalidates=PASS\n");
+    return true;
+}
+
+bool ObserveCombinedUnknownStateBlocks(IDirect3DDevice8* device, IDirect3DDevice8* native,
+                                       t3render::buffers::BufferProxy& buffers, D3DPRESENT_PARAMETERS& pp) {
+    auto* facade = static_cast<t3render::fixture::DeviceFixture*>(device);
+    for (unsigned kind = 0; kind < 3; ++kind) {
+        t3render::fixture::CombinedCaptureObserver observer(native, buffers, pp);
+        if (!observer.valid() || !observer.EnableFixtureStateBlocks() || !observer.ShaderWindowAvailableForFixture()) return false;
+        facade->SetCombinedObserver(&observer);
+        struct Detach { t3render::fixture::DeviceFixture* facade; ~Detach() { facade->SetCombinedObserver(nullptr); } } detach{facade};
+        DWORD token = 0;
+        if (kind == 0) {
+            if (SUCCEEDED(device->ApplyStateBlock(0xfedcba98u))) return false;
+        } else if (kind == 1) {
+            if (FAILED(device->BeginStateBlock()) || FAILED(device->EndStateBlock(&token)) || !token) return false;
+        } else if (FAILED(device->CreateStateBlock(D3DSBT_VERTEXSTATE, &token)) || !token) return false;
+        if (observer.ShaderWindowAvailableForFixture()) return false;
+        facade->SetCombinedObserver(nullptr);
+        if (token && FAILED(device->DeleteStateBlock(token))) return false;
+    }
+    std::printf("combined_unknown_stateblocks_invalidate=PASS\n");
     return true;
 }
 
@@ -1254,6 +1348,8 @@ bool ObserveEagerBufferLifetime(HWND window, bool facade_mode, bool persistent =
     }
 
     if (facade_mode && persistent && !ObserveCombinedExternalHazards(device.value, native, *buffers, pp, vertex.value)) return false;
+    if (facade_mode && persistent && !ObserveCombinedStateBlockReuseHazard(device.value, native, *buffers, pp)) return false;
+    if (facade_mode && persistent && !ObserveCombinedUnknownStateBlocks(device.value, native, *buffers, pp)) return false;
     auto destroyed = std::make_shared<std::atomic<bool>>(false);
     auto* holder = new (std::nothrow) PrivateDeviceHolder(device.value, destroyed);
     if (!holder) return false;
@@ -2090,6 +2186,7 @@ bool Render(HWND window, bool facade_mode, const wchar_t* output) {
     if (!CheckTextureStateBlock(draw_device) || !CheckSurfaceTransfers(draw_device, facade_mode)) return false;
     if (facade_mode && !CheckFailedStateBlock(draw_device, native_owner, buffers)) return false;
     if (!ObserveShaderStateBlockLifetime(draw_device)) return false;
+    if (!ObserveBoundShaderDeletion(draw_device)) return false;
 #endif
     return true;
 }

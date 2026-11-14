@@ -120,9 +120,11 @@ public:
                                const void* input, IUnknown** native, bool* vertex) noexcept;
 
     // Fixture-only: the device owns the bridge; the buffer registry retains
-    // it weakly, avoiding a bridge/registry ownership cycle.
+    // it weakly, avoiding a bridge/registry ownership cycle. With eager
+    // retirement, a reacquired buffer's previous shadow is unknown.
     bool InstallFacadePrivateBridge(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
-                                    const std::shared_ptr<PrivateObjectBridge>& bridge) noexcept;
+                                    const std::shared_ptr<PrivateObjectBridge>& bridge,
+                                    bool retain_buffers = true) noexcept;
 
     // Conservative invalidation. Once a device escapes, its data remains
     // unavailable; wrappers already issued must still be unwrapped normally.

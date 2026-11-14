@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_eager_buffer_lifetime",
+  "date": "2026-11-14",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "c9b34ac9769c8b6756885c5b7dba85656bd97378d435e305509c1c93c8ed5c21",
+    "t3render/src/buffer_proxy.cpp": "a4fe676cf8272c48d75c91e8d3f915ac91b2b1f32aa0bd94702e0131f5389bfa",
+    "t3render/src/buffer_proxy.hpp": "d59d2cdd6914d0f530c4f3e62955e636d31404ef350679b91d21f6685c8c952f",
+    "t3render/src/private_blob.hpp": "aff906733cbfbc136ec7b72aa9f65f1905b246db193e9f8b370688186ee47bfb",
+    "t3render/ir/buffer_registry.cpp": "9e24931212d54e0ee58b7be7313a85510e9fc867f3a3b20297eff3e1f6138b84",
+    "t3render/ir/buffer_shadow.cpp": "9cfed54a6fcf4718e80fd1d8301a8afa5f84852ac70b428938b06d1e64cddafe",
+    "t3render/tests/d3d8_private_marker.hpp": "bf061eea2ad345274b5a11c2dab08a336ec737a8486e75cca12f4e1f2a381ad8",
+    "t3render/tests/d3d8_resource_facade.hpp": "49ddb2195775e7c1059413b0e0326c1caa8dce8ff4127a0e3f0c9266e27a388e",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "21bdd67358220b05c452d35c84f105ef2a599328490784fe9eeba56d71ce9b54",
+    "t3render/tests/d3d8_device_facade.hpp": "df6778e4aa9eeec24f1c5ccc214c140c33a3749595f20ba231e3257e75bb7644",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "c15c9d335fe4e7dcb71782b8dc5ede050d52ffe68f2bf161d1ba866bc1acfa28",
+    "t3render/tests/buffer_proxy_test.cpp": "67d1d488a10187fd7e4b1e9f41fd6eb88bff03aacbf0f7de63c17414a0ac4a10",
+    "t3render/tests/test_d3d8_device_facade_runner.py": "06cd1102922308dbcb4857eba3089d6d26cbf079037c71ae21815e7bebfa758a",
+    "t3render/tools/run_d3d8_device_facade.py": "629e383386fad6add9217ef777aa6ad8e294f5959f77f7c353f777715da88ac6"
+  },
+  "fixture_sha256": "4e14d76f397ef6a33a079dc670b7263f0f4cd48fce9ebba67ed709bd2c8e8ab0",
+  "result": {
+    "managed_writeonly_vb_shadow_before_retirement": "known",
+    "stateblock_reacquires_buffer": true,
+    "eager_shadow_after_reacquisition": "unknown",
+    "eager_private_blob_after_reacquisition": "unknown",
+    "native_private_blob_after_reacquisition": "preserved",
+    "eager_external_holder_released_without_cycle": true,
+    "parity_records_each_default_fixture": 159,
+    "rgb_ppm_sha256_both_default_fixture": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+    "baseline_log_sha256": "62384c38be877edb3af69fe9922d3e00d61144fa1b4aa2b82c5dc4dd02dc7558",
+    "facade_log_sha256": "d8dfd510b27adefca87e7b25c2aaf080b7f53b8c016f4c9f82017b3505e86142"
+  },
+  "limitations": [
+    "Opt-in isolated fixture experiment only; not integrated into the proxy or TDS.",
+    "External IUnknown forwarding is simulated on a borrowed native VB; the facade rejects external COM values.",
+    "Eager buffer retirement loses WRITEONLY shadow bytes and source private-data provenance.",
+    "The RGB/state comparison runs the default retaining policy; the eager buffer test is a separate lifetime experiment.",
+    "Only a vertex buffer and one state-block path were exercised on one Wine runtime; native Windows and TDS remain untested."
+  ]
+}

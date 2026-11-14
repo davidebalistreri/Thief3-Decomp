@@ -838,6 +838,87 @@ bool ObserveExternalPrivateLifetime(HWND window, bool facade_mode, bool eager = 
     return true;
 }
 
+bool ObserveEagerBufferLifetime(HWND window, bool facade_mode) {
+    ComPtr<IDirect3D8> native_factory;
+    native_factory.value = Direct3DCreate8(D3D_SDK_VERSION);
+    if (!native_factory.value) return false;
+    D3DDISPLAYMODE display{};
+    if (FAILED(native_factory->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &display))) return false;
+    ComPtr<IDirect3D8> facade_factory;
+    auto buffers = t3render::buffers::BufferProxy::Create(ReadFixtureMemory, nullptr);
+    if (!buffers) return false;
+    IDirect3D8* selected = native_factory.value;
+    if (facade_mode) {
+        native_factory->AddRef();
+        facade_factory.value = t3render::fixture::CreateEagerAllFacadeFactory(native_factory.value, buffers);
+        if (!facade_factory.value) { native_factory->Release(); return false; }
+        selected = facade_factory.value;
+    }
+    D3DPRESENT_PARAMETERS pp{};
+    pp.BackBufferWidth = kWidth; pp.BackBufferHeight = kHeight; pp.BackBufferFormat = display.Format;
+    pp.BackBufferCount = 1; pp.SwapEffect = D3DSWAPEFFECT_DISCARD; pp.hDeviceWindow = window; pp.Windowed = TRUE;
+    ComPtr<IDirect3DDevice8> device;
+    if (FAILED(selected->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, window,
+        D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, device.put())) || !device.value) return false;
+    const Vertex vertices[] = {{12, 12, 0.5f, 1, 0xffe43b3b}, {116, 12, 0.5f, 1, 0xffe43b3b},
+                               {12, 116, 0.5f, 1, 0xffe43b3b}};
+    ComPtr<IDirect3DVertexBuffer8> vertex;
+    if (FAILED(device->CreateVertexBuffer(sizeof(vertices), D3DUSAGE_WRITEONLY, kFvf, D3DPOOL_MANAGED, vertex.put())) ||
+        !vertex.value) return false;
+    BYTE* mapped = nullptr;
+    if (FAILED(vertex->Lock(0, sizeof(vertices), &mapped, 0)) || !mapped) return false;
+    std::memcpy(mapped, vertices, sizeof(vertices));
+    const GUID blob_key{0x3ee22a9e, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
+    const BYTE blob[]{0x18, 0x42};
+    if (FAILED(vertex->Unlock()) || FAILED(vertex->SetPrivateData(blob_key, blob, sizeof(blob), 0)) ||
+        FAILED(device->SetStreamSource(0, vertex.value, sizeof(Vertex)))) return false;
+    IDirect3DDevice8* native = facade_mode ?
+        static_cast<t3render::fixture::DeviceFixture*>(device.value)->NativeForFixture() : device.value;
+    ComPtr<IDirect3DVertexBuffer8> native_vertex;
+    UINT stride = 0;
+    if (!native || FAILED(native->GetStreamSource(0, native_vertex.put(), &stride)) || !native_vertex.value ||
+        stride != sizeof(Vertex)) return false;
+    if (facade_mode) {
+        Vertex observed[3]{};
+        if (buffers->ReadVertex(native, native_vertex.value, 0, observed, sizeof(observed)) != t3render::ir::RegistryResult::Ok ||
+            std::memcmp(observed, vertices, sizeof(vertices))) return false;
+    }
+    DWORD block = 0;
+    if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &block)) || FAILED(device->SetStreamSource(0, nullptr, 0))) return false;
+    vertex->Release(); vertex.value = nullptr;
+    if (FAILED(device->ApplyStateBlock(block)) || FAILED(device->GetStreamSource(0, vertex.put(), &stride)) ||
+        !vertex.value || stride != sizeof(Vertex)) return false;
+    BYTE copied[sizeof(blob)]{}; DWORD copied_size = sizeof(copied);
+    const HRESULT read = vertex->GetPrivateData(blob_key, copied, &copied_size);
+    if (facade_mode) {
+        Vertex observed[3]{};
+        if (read != E_NOTIMPL || buffers->ReadVertex(native, native_vertex.value, 0, observed, sizeof(observed)) !=
+                                  t3render::ir::RegistryResult::UnknownResource) return false;
+    } else if (FAILED(read) || copied_size != sizeof(blob) || std::memcmp(copied, blob, sizeof(blob))) return false;
+
+    auto destroyed = std::make_shared<std::atomic<bool>>(false);
+    auto* holder = new (std::nothrow) PrivateDeviceHolder(device.value, destroyed);
+    if (!holder) return false;
+    const GUID holder_key{0x3ee22a9f, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
+    if (facade_mode && vertex->SetPrivateData(holder_key, holder, sizeof(IUnknown*), D3DSPD_IUNKNOWN) != E_NOTIMPL) {
+        holder->Release(); return false;
+    }
+    const HRESULT stored = native_vertex->SetPrivateData(holder_key, holder, sizeof(IUnknown*), D3DSPD_IUNKNOWN);
+    holder->Release();
+    if (FAILED(stored) || FAILED(device->SetStreamSource(0, nullptr, 0)) || FAILED(device->DeleteStateBlock(block))) return false;
+    native_vertex->Release(); native_vertex.value = nullptr;
+    vertex->Release(); vertex.value = nullptr;
+    if (!destroyed->load()) return false;
+    const unsigned resources_closed = t3render::fixture::resource_facade_close_successes.load();
+    const unsigned buffers_closed = t3render::fixture::buffer_facade_close_successes.load();
+    const ULONG device_remaining = device->Release(); device.value = nullptr;
+    if (facade_mode && (device_remaining != 0 || t3render::fixture::resource_facade_close_successes != resources_closed + 1 ||
+        t3render::fixture::buffer_facade_close_successes != buffers_closed + 1)) return false;
+    std::printf("eager_buffer_lifetime=PASS shadow=%s provenance=%s\n",
+                facade_mode ? "unavailable" : "not_observed", facade_mode ? "unavailable" : "preserved");
+    return true;
+}
+
 bool DrawTexturedSamples(IDirect3DDevice8* device) {
     struct Vertex2 { float x, y, z, rhw, u, v; };
     struct Vertex3 { float x, y, z, rhw, xcoord, ycoord, zcoord; };
@@ -1565,12 +1646,13 @@ int wmain(int argc, wchar_t** argv) {
     if (ok) ok = ObserveTranslatedPrivateLifetime(window, facade_mode);
     if (ok) ok = ObserveExternalPrivateLifetime(window, facade_mode);
     if (ok) ok = ObserveExternalPrivateLifetime(window, facade_mode, true);
+    if (ok) ok = ObserveEagerBufferLifetime(window, facade_mode);
 #endif
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
     if (facade_mode) {
         ok = ok && t3render::fixture::buffer_facade_close_successes ==
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
-             7 &&
+             8 &&
 #else
              1 &&
 #endif
@@ -1579,7 +1661,7 @@ int wmain(int argc, wchar_t** argv) {
     }
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
     if (facade_mode) {
-        ok = ok && t3render::fixture::resource_facade_close_successes == 7 &&
+        ok = ok && t3render::fixture::resource_facade_close_successes == 8 &&
              t3render::fixture::resource_facade_close_failures == 0;
         if (ok) std::printf("resource_facade_final_close=PASS\n");
     }

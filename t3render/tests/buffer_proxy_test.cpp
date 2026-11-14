@@ -745,6 +745,46 @@ void ClosedFacadeBufferPrivateData() {
            resource_native.Release() == 0 && resource_facade.Release() == 0);
 }
 
+void EagerFacadeBufferRetirement() {
+    struct EmptyBridge final : PrivateObjectBridge {
+        bool Pin(const void*, PrivateObjectPin&) noexcept override { return false; }
+        IUnknown* Adopt(PrivateDataKind, IUnknown* native) noexcept override {
+            if (native) native->Release();
+            return nullptr;
+        }
+    };
+    for (unsigned n = 0; n < 200; ++n) {
+        Reader reader;
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        FakeDevice native, facade;
+        auto bridge = std::make_shared<EmptyBridge>();
+        assert(proxy->InstallFacadePrivateBridge(&native, &facade, bridge, false));
+        Vertex raw; raw.device = &native;
+        auto* wrapped = proxy->AdoptVertexForFacade(&native, &facade, &raw, 8, true);
+        const BYTE bytes[]{4, 2}; BYTE observed[sizeof(bytes)]{};
+        Fill(wrapped, 0, bytes, sizeof(bytes));
+        raw.AddRef(); // independent native binding
+        std::atomic<bool> go{false};
+        std::thread getter([&] {
+            while (!go.load()) std::this_thread::yield();
+            raw.AddRef();
+            auto* found = proxy->AdoptVertexForFacade(&native, &facade, &raw, 8, false);
+            assert(found);
+            found->Release();
+        });
+        go = true;
+        wrapped->Release();
+        getter.join();
+        assert(raw.refs == 1 && facade.refs == 1);
+        assert(proxy->ReadVertex(&native, &raw, 0, observed, sizeof(observed)) == RegistryResult::UnknownResource);
+        raw.AddRef();
+        auto* recovered = proxy->AdoptVertexForFacade(&native, &facade, &raw, 8, false);
+        assert(recovered && proxy->ReadVertex(&native, &raw, 0, observed, sizeof(observed)) == RegistryResult::UnknownResource);
+        assert(recovered->Release() == 0 && proxy->CloseFacadeDevice(&native, &facade));
+        assert(raw.Release() == 0 && facade.Release() == 0 && native.Release() == 0);
+    }
+}
+
 void ClosedFacadeRetirement() {
     Reader reader;
     for (bool stop : {false, true}) {
@@ -1229,6 +1269,7 @@ int main() {
     ClosedFacadeBufferBoundary();
     ClosedFacadeReacquiresDormantBuffers();
     ClosedFacadeBufferPrivateData();
+    EagerFacadeBufferRetirement();
     ClosedFacadeRetirement();
     ClosedFacadeResetRetiresDormantBuffers();
     ClosedFacadeResetEpochs();

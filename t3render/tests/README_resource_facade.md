@@ -188,6 +188,17 @@ buffer ownership, reset variants, concurrency in the runtime, Windows and TDS
 remain unverified. Logs and PPMs are under
 `build/t3render-captures/2026-11-14-eager-private-marker-v3/`.
 
+The [eager-buffer retirement experiment](../benchmarks/d3d8/2026-11-14-eager-buffer-lifetime/result.json)
+also retires VB/IB wrappers at their last external Release. For a managed
+`WRITEONLY` VB held by a state block, the facade reacquired the native buffer
+and an external holder of the device was released without a facade cycle.
+However the previous shadow bytes and VB private-data provenance became
+unknown; native D3D8 still returned the private blob. This is not sufficient
+for a complete frame capture. The default fixture still retains dormant
+buffers; the eager policy is isolated and must not be used in TDS. Host fakes
+also exercise a getter racing final Release. Logs and PPMs are under
+`build/t3render-captures/2026-11-14-eager-buffer-lifetime-v2/`.
+
 The later [state-block observation](../benchmarks/d3d8/2026-11-13-stateblock-facade/result.json)
 exercised Create, Capture, Begin/End, Apply and Delete on the combined facade.
 After VB/IB wrappers became dormant and were reacquired, their `WRITEONLY`

@@ -50,6 +50,7 @@ struct DeviceState {
     std::size_t active_locks = 0;
     IDirect3DDevice8* private_facade = nullptr; // borrowed; live buffer keeps it alive
     std::weak_ptr<PrivateObjectBridge> private_bridge;
+    bool retain_buffers = true;
 };
 }  // namespace
 
@@ -344,6 +345,7 @@ private:
     ULONG ReleaseFacade() {
         LastError error;
         bool final = false;
+        bool retire = false;
         ULONG result = 0;
         IDirect3DDevice8* parent = nullptr;
         {
@@ -359,7 +361,18 @@ private:
             const auto device = state_->devices.find(owner);
             if (final && device != state_->devices.end() && device->second.reset) state_->PoisonLocked(owner);
             if (final && counted_lock) state_->PoisonLocked(owner);
-            if (final) parent = facade;
+            if (final) {
+                parent = facade;
+                if (device != state_->devices.end() && !device->second.retain_buffers) {
+                    state_->DetachLocked(this);
+                    retire = true;
+                }
+            }
+        }
+        if (retire) {
+            Buffer* real = real_;
+            delete this;
+            real->Release();
         }
         // Parent final Release may call CloseFacadeDevice and delete this.
         if (parent) parent->Release();
@@ -797,7 +810,8 @@ IUnknown* BufferProxy::PinPrivateBuffer(IDirect3DDevice8* owner, IDirect3DDevice
     return item->Unknown(); // owned wrapper reference, released outside the lock
 }
 bool BufferProxy::InstallFacadePrivateBridge(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
-                                              const std::shared_ptr<PrivateObjectBridge>& bridge) noexcept {
+                                              const std::shared_ptr<PrivateObjectBridge>& bridge,
+                                              bool retain_buffers) noexcept {
     LastError error;
     if (!state_ || !owner || !facade || !bridge) return false;
     std::lock_guard<std::mutex> lock(state_->mutex);
@@ -805,6 +819,7 @@ bool BufferProxy::InstallFacadePrivateBridge(IDirect3DDevice8* owner, IDirect3DD
     if (!device || device->closing || device->private_facade) return false;
     device->private_facade = facade;
     device->private_bridge = bridge;
+    device->retain_buffers = retain_buffers;
     return true;
 }
 void BufferProxy::StopObservation() noexcept {

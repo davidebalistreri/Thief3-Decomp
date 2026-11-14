@@ -95,8 +95,10 @@ checks this restricted sequence; unobserved native aliases, general TDS
 compatibility and the menu text regression remain unverified. A later
 [TDS bedroom test](benchmarks/runtime/2026-11-14-tds-repeated-unlock-policy/result.json)
 used this flag and obtained 144 indexed draws with VB, IB, declaration,
-program and constants candidates in the same record. The frame remains partial
-and non-replayable; the user reported truncated menu text in that run.
+program and constants candidates in the same record. All 144 have color writes
+disabled and stencil enabled; they are not sufficient for the visible room.
+The frame remains partial and non-replayable; the user reported truncated menu
+text in that run.
 
 Add `-DT3RENDER_BUILD_SMOKE_TEST=ON` at configuration time to build a
 standalone D3D8 program in the `smoke/` subdirectory. It draws four synthetic

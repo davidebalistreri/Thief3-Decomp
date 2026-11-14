@@ -23,6 +23,10 @@
     "draws_with_both_vertex_and_index_payloads": 196,
     "draws_with_vb_ib_declaration_program_and_constants": 144,
     "draws_with_same_components_after_ir_validation": 144,
+    "complete_component_draws_with_color_writes_disabled_and_stencil_enabled": 144,
+    "color_writing_draws_with_both_buffer_payloads": 52,
+    "color_writing_buffered_draws_with_unsupported_program_version": 28,
+    "color_writing_buffered_draws_without_program_observation": 24,
     "viewport_view_projection_and_render_states_observed": 744,
     "texture_bindings_observed": 520,
     "declaration_candidates": 712,
@@ -34,6 +38,7 @@
     "partial_ir_sha256": "63e1f356cda1f85ae12f8de32021b315c01856a0729daf4443d5aff259946d4d"
   },
   "observations": [
+    "All 144 draws with the full candidate set have color writes disabled and stencil enabled, consistent with stencil shadow-volume work; they cannot alone produce the visible room.",
     "The 539 draws with unavailable vertex payloads reference one captured resource identity; the reason for each unavailable shadow is not established.",
     "The user reported truncated menu labels with the experimental facade and repeated-Unlock flag enabled.",
     "The bounded repeated-Unlock policy was enabled and recorded; the affected shadow was discarded, not recovered."

@@ -307,6 +307,7 @@ int main(int argc, char** argv) {
     presentation.Windowed = TRUE;
     const bool configured = t3render::CaptureConfigured();
     if (scenario == "experimental_header") t3render::CaptureExperimentalFacade();
+    if (scenario == "experimental_repeated_header") t3render::CaptureExperimentalFacade(true);
     t3render::CaptureDevice(&device, &presentation);
     t3render::CaptureDevice(&unrelated, &presentation);
     const auto draw = MakeDraw(t3render::DrawKind::Primitive);
@@ -605,6 +606,7 @@ int main(int argc, char** argv) {
         observer.failure_unlock.present = true; observer.failure_unlock.vertex = true;
         observer.failure_unlock.last_lock_known = true; observer.failure_unlock.last_lock_hr = E_FAIL;
         observer.failure_unlock.unlock_result_known = true; observer.failure_unlock.unlock_hr_candidate = S_OK;
+        observer.repeated_unlock_policy = true; observer.repeated_unlocks = 2;
         if (!emit(false)) return 8;
         bindings.vertex->Release(); bindings.index->Release();
         if (state.vertex_reads != 1 || state.index_reads != 1) return 8;

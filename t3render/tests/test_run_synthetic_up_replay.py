@@ -29,6 +29,7 @@ print(json.dumps({{"kind": kind, "cwd": os.getcwd(), "args": args,
  "capture_key": os.environ.get("T3RENDER_CAPTURE_KEY"), "frame": os.environ.get("T3RENDER_CAPTURE_FRAME"),
  "buffers": os.environ.get("T3RENDER_CAPTURE_BUFFERS"),
  "combined": os.environ.get("T3RENDER_EXPERIMENTAL_COMBINED"),
+ "repeated": os.environ.get("T3RENDER_EXPERIMENTAL_REPEATED_UNLOCK"),
  "constants": os.environ.get("T3RENDER_CAPTURE_VERTEX_CONSTANTS")}}), flush=True)
 if os.environ.get("FAKE_TIMEOUT") == kind:
     time.sleep(30)
@@ -162,7 +163,8 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
 
     def run_runner(self, *, output=None, extra_env=None, timeout="5", engine=None, bottle=None, build=None,
                    camera=False, buffered=False, verify_buffer_readback=False, replay_buffer_snapshot=False,
-                   wrapped_buffers=False, proxy_buffer_replay=False, multi_camera=False, experimental_combined=False):
+                   wrapped_buffers=False, proxy_buffer_replay=False, multi_camera=False, experimental_combined=False,
+                   experimental_repeated_unlock=False):
         env = os.environ.copy()
         env.update({"FAKE_TRACE": str(self.trace), "FAKE_TRACE_CAMERA": str(self.camera_trace),
                     "FAKE_TRACE_MULTI": str(self.multi_trace),
@@ -173,7 +175,8 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
                     "WINEDLLPATH_PREPEND": "poison/dxmt", "DYLD_LIBRARY_PATH": "poison",
                     "DYLD_FRAMEWORK_PATH": "poison", "T3RENDER_CAPTURE_KEY": "F11",
                     "T3RENDER_CAPTURE_FRAME": "12", "T3RENDER_CAPTURE_PATH": "poison",
-                    "T3RENDER_CAPTURE_BUFFERS": "poison", "T3RENDER_EXPERIMENTAL_COMBINED": "poison"})
+                    "T3RENDER_CAPTURE_BUFFERS": "poison", "T3RENDER_EXPERIMENTAL_COMBINED": "poison",
+                    "T3RENDER_EXPERIMENTAL_REPEATED_UNLOCK": "poison"})
         env.update(extra_env or {})
         args = [sys.executable, "-B", str(RUNNER), "--engine", str(engine or self.engine),
                                "--bottle", str(bottle or self.bottle), "--build-dir", str(build or self.build),
@@ -194,6 +197,8 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
             args.append("--proxy-buffer-replay")
         if experimental_combined:
             args.append("--experimental-combined")
+        if experimental_repeated_unlock:
+            args.append("--experimental-repeated-unlock")
         return subprocess.run(args, env=env, text=True, capture_output=True, timeout=20)
 
     def manifest(self):
@@ -271,6 +276,16 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
         self.assertEqual(self.log("capture")["constants"], "1")
         self.assertIsNone(self.log("replay")["combined"])
         self.assertIn("--hidden", self.log("capture")["args"])
+        self.assertIsNone(self.log("capture")["repeated"])
+        events[0]["experimental_facade"]["repeated_unlock_resource_discard"] = True
+        events[4]["buffer_data"]["repeated_unlocks_completed"] = 0
+        self.proxy_trace.write_text("".join(json.dumps(e) + "\n" for e in events))
+        repeat_output = self.root / "repeated-combined"
+        result = self.run_runner(buffered=True, proxy_buffer_replay=True, experimental_combined=True,
+                                 experimental_repeated_unlock=True, output=repeat_output)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        log = json.loads((repeat_output / "capture.log").read_text().splitlines()[1])
+        self.assertEqual(log["repeated"], "1")
         events[5]["shader_stable"] = False
         self.proxy_trace.write_text("".join(json.dumps(e) + "\n" for e in events))
         output = self.root / "unstable-combined"

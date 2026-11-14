@@ -15,6 +15,11 @@ public:
         const DWORD error = GetLastError();
         bindings_.device = device;
         observer_ = {this, draw != 0, ReadVertex, ReadIndex};
+        if (device) {
+            const auto stats = manager.GetRepeatedUnlockStats(device);
+            observer_.repeated_unlock_policy = stats.enabled;
+            observer_.repeated_unlocks = stats.completed;
+        }
         if (device && !draw) {
             const auto failure = manager.DescribeDrawFailure(device);
             observer_.failure_status = failure.status;

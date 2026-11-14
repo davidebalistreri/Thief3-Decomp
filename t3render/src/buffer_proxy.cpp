@@ -50,6 +50,7 @@ struct Control {
     ir::BufferToken token{};
     bool pending_lock = false, locked = false, pending_unlock = false, read_only = false;
     bool counted_lock = false;
+    bool matched_unlock_completed = false, repeated_unlock_pending = false;
     bool last_lock_known = false;
     std::int32_t last_lock_hr = 0;
     Control* retirement_next = nullptr;
@@ -79,6 +80,7 @@ struct DeviceState {
     bool reset_recovery = false;
     std::uint64_t draw = 0, mutation = 0, reset = 0;
     std::size_t active_locks = 0;
+    std::uint64_t repeated_unlocks = 0;
     IDirect3DDevice8* private_facade = nullptr; // borrowed; live buffer keeps it alive
     std::weak_ptr<PrivateObjectBridge> private_bridge;
     bool retain_buffers = true;
@@ -104,6 +106,7 @@ struct BufferProxy::State {
     std::unordered_map<IDirect3DDevice8*, DeviceState> devices;
     std::uint64_t next_operation = 1, next_draw = 1, next_reset = 1;
     bool global_unsafe = false;
+    bool allow_repeated_unlock = false;
     unsigned global_poison_line = 0;
 
     void ClearLockLocked(Control* item) noexcept {
@@ -121,6 +124,7 @@ struct BufferProxy::State {
             }
         }
         item->pending_lock = false; item->locked = false; item->pending_unlock = false;
+        item->matched_unlock_completed = false; item->repeated_unlock_pending = false;
         item->data = nullptr; item->length = 0; item->operation = 0;
     }
     void AbandonLocked(Control* item) noexcept {
@@ -519,11 +523,18 @@ private:
         const std::size_t length_ = bytes ? bytes : (offset == 0 ? size_ : 0);
         const auto kind = flags & D3DLOCK_READONLY ? ir::BufferLock::ReadOnly :
                           flags & D3DLOCK_DISCARD ? ir::BufferLock::Discard : ir::BufferLock::Write;
-        if (token.identity && token.generation &&
-            state_->shadows.BeginLock(token, offset, length_, kind) != ir::RegistryResult::Ok) {
-            state_->PoisonLocked(owner); return 0;
+        if (token.identity && token.generation) {
+            const auto result = state_->shadows.BeginLock(token, offset, length_, kind);
+            ir::BufferAvailability availability{};
+            const bool discarded = state_->allow_repeated_unlock && result == ir::RegistryResult::Unavailable &&
+                state_->shadows.Availability(token, availability) == ir::RegistryResult::Ok &&
+                availability == ir::BufferAvailability::Abandoned;
+            if (result != ir::RegistryResult::Ok && !discarded) {
+                state_->PoisonLocked(owner); return 0;
+            }
         }
         operation = state_->next_operation++;
+        matched_unlock_completed = false;
         pending_lock = true; read_only = kind == ir::BufferLock::ReadOnly; length = length_;
         counted_lock = true; ++device->active_locks;
         return operation;
@@ -548,6 +559,20 @@ private:
             state_->PoisonLocked(owner); return 0;
         }
         if (pending_lock || !locked || pending_unlock || !state_->next_operation) {
+            if (state_->allow_repeated_unlock && facade && matched_unlock_completed && last_lock_known &&
+                last_lock_hr >= 0 && !pending_lock && !locked && !pending_unlock && state_->next_operation &&
+                !device->active_locks && device->repeated_unlocks != std::numeric_limits<std::uint64_t>::max()) {
+                // The repeated call can touch the source resource, so discard
+                // its bytes before forwarding. The mutation ticket detects
+                // observed overlaps; uncaptured draws are not bracketed.
+                state_->AbandonLocked(this);
+                operation = state_->next_operation++;
+                pending_unlock = true;
+                repeated_unlock_pending = true;
+                matched_unlock_completed = false;
+                device->mutation = operation;
+                return operation;
+            }
             UnlockFailure diagnostic;
             diagnostic.present = true;
             diagnostic.vertex = vertex;
@@ -587,9 +612,24 @@ private:
         }
         std::lock_guard<std::mutex> lock(state_->mutex);
         if (operation != id || !pending_unlock) return;
+        if (repeated_unlock_pending) {
+            const auto device = state_->devices.find(owner);
+            if (device == state_->devices.end() || device->second.unsafe || state_->global_unsafe ||
+                device->second.mutation != id || FAILED(hr)) {
+                state_->PoisonLocked(owner);
+                return;
+            }
+            device->second.mutation = 0;
+            ++device->second.repeated_unlocks;
+            pending_unlock = false;
+            repeated_unlock_pending = false;
+            operation = 0;
+            return;
+        }
         if (FAILED(hr)) { state_->PoisonLocked(owner); return; }
         if (token.identity && token.generation) state_->shadows.EndUnlock(token, true);
         state_->ClearLockLocked(this);
+        matched_unlock_completed = true;
     }
 
     ~Wrapper() { if (marker) marker->Release(); }
@@ -755,6 +795,24 @@ std::shared_ptr<BufferProxy> BufferProxy::Create(SnapshotReader reader, void* co
         auto state = std::make_shared<State>(reader, context, budget, max_resources);
         return std::shared_ptr<BufferProxy>(new BufferProxy(std::move(state)));
     } catch (...) { return {}; }
+}
+
+bool BufferProxy::EnableRepeatedUnlockExperiment() noexcept {
+    LastError error;
+    if (!state_) return false;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (state_->global_unsafe || !state_->devices.empty() || !state_->wrappers.empty() || state_->allow_repeated_unlock)
+        return false;
+    state_->allow_repeated_unlock = true;
+    return true;
+}
+
+BufferProxy::RepeatedUnlockStats BufferProxy::GetRepeatedUnlockStats(IDirect3DDevice8* owner) noexcept {
+    LastError error;
+    if (!state_) return {};
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    const auto device = state_->devices.find(owner);
+    return {state_->allow_repeated_unlock, device == state_->devices.end() ? 0 : device->second.repeated_unlocks};
 }
 
 IDirect3DVertexBuffer8* BufferProxy::AdoptVertex(IDirect3DDevice8* owner, IDirect3DVertexBuffer8* native,

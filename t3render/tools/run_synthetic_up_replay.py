@@ -257,7 +257,8 @@ def validate_buffered_trace(path, wrapped_buffers=False):
 
 def execute(engine, bottle, build, output, timeout, camera=False, buffered=False,
             verify_buffer_readback=False, replay_buffer_snapshot=False, wrapped_buffers=False,
-            proxy_buffer_replay=False, multi_camera=False, experimental_combined=False):
+            proxy_buffer_replay=False, multi_camera=False, experimental_combined=False,
+            experimental_repeated_unlock=False):
     if sum((camera, buffered, multi_camera)) > 1:
         raise RunError("camera, multi-camera and buffered are exclusive")
     if verify_buffer_readback and not buffered:
@@ -270,6 +271,8 @@ def execute(engine, bottle, build, output, timeout, camera=False, buffered=False
         raise RunError("proxy buffer replay requires buffered mode and excludes fixture buffer methods")
     if experimental_combined and not proxy_buffer_replay:
         raise RunError("experimental combined proxy requires proxy buffer replay")
+    if experimental_repeated_unlock and not experimental_combined:
+        raise RunError("repeated Unlock experiment requires the combined proxy")
     if replay_buffer_snapshot and not (buffered and (verify_buffer_readback or wrapped_buffers)):
         raise RunError("buffer snapshot replay requires buffered mode and either buffer readback verification or wrapped buffers")
     needs_replay = not buffered or replay_buffer_snapshot or proxy_buffer_replay
@@ -338,6 +341,8 @@ def execute(engine, bottle, build, output, timeout, camera=False, buffered=False
     if experimental_combined:
         result["experimental_combined"] = True
         result["limitations"].append("The opt-in facade and FVF fixture do not establish programmable shader or TDS parity.")
+    if experimental_repeated_unlock:
+        result["experimental_repeated_unlock"] = True
     if wrapped_buffers:
         result["wrapped_buffers"] = {"requested": True, "baseline": "not_verified", "capture": "not_verified"}
         result["limitations"].append(
@@ -368,8 +373,7 @@ def execute(engine, bottle, build, output, timeout, camera=False, buffered=False
         if result["sha256"]["fixture_exe"] != sha256(captured_exe):
             raise RunError("baseline and captured fixture copies differ")
 
-        env = {k: v for k, v in os.environ.items() if not k.startswith("T3RENDER_CAPTURE_")
-               and k != "T3RENDER_EXPERIMENTAL_COMBINED"}
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("T3RENDER_CAPTURE_", "T3RENDER_EXPERIMENTAL_"))}
         for key in ("WINEDLLPATH", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH"):
             env.pop(key, None)
         frameworks = engine / "frameworks"
@@ -412,6 +416,8 @@ def execute(engine, bottle, build, output, timeout, camera=False, buffered=False
                                 "T3RENDER_CAPTURE_DECLARATIONS": "1",
                                 "T3RENDER_CAPTURE_VERTEX_PROGRAMS": "1",
                                 "T3RENDER_CAPTURE_VERTEX_CONSTANTS": "1"})
+        if experimental_repeated_unlock:
+            capture_env["T3RENDER_EXPERIMENTAL_REPEATED_UNLOCK"] = "1"
         stage = "capture"
         capture_args = fixture_args + (["--buffer-snapshot", windows_path(buffer_snapshot)] if replay_buffer_snapshot else [])
         run_stage(stage, [wine, captured_exe, *capture_args, "--output", windows_path(captured_ppm)], captured,
@@ -433,6 +439,10 @@ def execute(engine, bottle, build, output, timeout, camera=False, buffered=False
                         header.get("replayable") is not False or draw_result.get("shader_stable") is not True or
                         draw.get("vertex_constants", {}).get("status") != "sampled"):
                     raise RunError("experimental facade, shader window or constants observation is missing")
+                if experimental_repeated_unlock and (
+                        header.get("experimental_facade", {}).get("repeated_unlock_resource_discard") is not True or
+                        draw.get("buffer_data", {}).get("repeated_unlocks_completed") != 0):
+                    raise RunError("repeated Unlock experiment was not explicitly reported")
             result["stages"].append(stage)
         if needs_replay:
             stage = "convert"
@@ -512,6 +522,8 @@ def main(argv=None):
                         help="replay the proxy's experimental buffer capture (requires --buffered; excludes fixture methods)")
     parser.add_argument("--experimental-combined", action="store_true",
                         help="test the separate combined facade DLL (requires --proxy-buffer-replay)")
+    parser.add_argument("--experimental-repeated-unlock", action="store_true",
+                        help="enable resource-local repeated Unlock observation (requires --experimental-combined)")
     args = parser.parse_args(argv)
     if args.verify_buffer_readback and not args.buffered:
         parser.error("--verify-buffer-readback requires --buffered")
@@ -523,10 +535,13 @@ def main(argv=None):
         parser.error("--proxy-buffer-replay requires --buffered and excludes fixture buffer methods")
     if args.experimental_combined and not args.proxy_buffer_replay:
         parser.error("--experimental-combined requires --proxy-buffer-replay")
+    if args.experimental_repeated_unlock and not args.experimental_combined:
+        parser.error("--experimental-repeated-unlock requires --experimental-combined")
     try:
         result = execute(args.engine, args.bottle, args.build_dir, args.output_dir, args.timeout,
                          args.camera, args.buffered, args.verify_buffer_readback, args.replay_buffer_snapshot,
-                         args.wrapped_buffers, args.proxy_buffer_replay, args.multi_camera, args.experimental_combined)
+                         args.wrapped_buffers, args.proxy_buffer_replay, args.multi_camera, args.experimental_combined,
+                         args.experimental_repeated_unlock)
     except RunError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

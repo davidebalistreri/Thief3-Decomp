@@ -2083,6 +2083,91 @@ bool CheckResetWithLiveResources(HWND window, bool facade_mode) {
     std::printf("resource_facade_live_reset_roundtrips=PASS\n");
     return true;
 }
+
+bool ObserveRepeatedUnlockExperiment(HWND window, bool facade_mode) {
+    ComPtr<IDirect3D8> native_factory, facade_factory;
+    native_factory.value = Direct3DCreate8(D3D_SDK_VERSION);
+    auto buffers = t3render::buffers::BufferProxy::Create(ReadFixtureMemory, nullptr);
+    if (!native_factory.value || !buffers || !buffers->EnableRepeatedUnlockExperiment()) return false;
+    IDirect3D8* selected = native_factory.value;
+    if (facade_mode) {
+        native_factory->AddRef();
+        facade_factory.value = t3render::fixture::CreatePersistentEagerFacadeFactory(native_factory.value, buffers);
+        if (!facade_factory.value) { native_factory->Release(); return false; }
+        selected = facade_factory.value;
+    }
+    D3DDISPLAYMODE display{};
+    if (FAILED(selected->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &display))) return false;
+    D3DPRESENT_PARAMETERS pp{};
+    pp.BackBufferWidth = kWidth; pp.BackBufferHeight = kHeight; pp.BackBufferFormat = display.Format;
+    pp.BackBufferCount = 1; pp.SwapEffect = D3DSWAPEFFECT_DISCARD; pp.hDeviceWindow = window;
+    pp.Windowed = TRUE; pp.Flags = D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
+    ComPtr<IDirect3DDevice8> device;
+    if (FAILED(selected->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, window,
+                                     D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, device.put())) || !device.value) return false;
+    ComPtr<IDirect3DVertexBuffer8> affected, visible;
+    ComPtr<IDirect3DIndexBuffer8> indices;
+    const Vertex vertices[] = {{16, 16, 0, 1, 0xffe43b3b}, {240, 16, 0, 1, 0xffe43b3b},
+                               {16, 240, 0, 1, 0xffe43b3b}};
+    const WORD index_data[] = {0, 1, 2};
+    if (FAILED(device->CreateVertexBuffer(sizeof(vertices), D3DUSAGE_WRITEONLY, kFvf, D3DPOOL_MANAGED, affected.put())) ||
+        FAILED(device->CreateVertexBuffer(sizeof(vertices), D3DUSAGE_WRITEONLY, kFvf, D3DPOOL_MANAGED, visible.put())) ||
+        FAILED(device->CreateIndexBuffer(sizeof(index_data), D3DUSAGE_WRITEONLY, D3DFMT_INDEX16, D3DPOOL_MANAGED, indices.put())) ||
+        !affected.value || !visible.value || !indices.value) return false;
+    for (auto* vertex : {affected.value, visible.value}) {
+        BYTE* data = nullptr;
+        if (FAILED(vertex->Lock(0, sizeof(vertices), &data, 0)) || !data) return false;
+        std::memcpy(data, vertices, sizeof(vertices));
+        if (FAILED(vertex->Unlock())) return false;
+    }
+    BYTE* data = nullptr;
+    if (FAILED(indices->Lock(0, sizeof(index_data), &data, 0)) || !data) return false;
+    std::memcpy(data, index_data, sizeof(index_data));
+    if (FAILED(indices->Unlock())) return false;
+    const HRESULT repeated = affected->Unlock();
+    IDirect3DDevice8* native = nullptr;
+    std::uint64_t ticket = 0;
+    if (facade_mode) {
+        native = static_cast<t3render::fixture::DeviceFixture*>(device.value)->NativeForFixture();
+        auto first = buffers->UnwrapVertex(native, affected.value);
+        auto second = buffers->UnwrapVertex(native, visible.value);
+        auto index = buffers->UnwrapIndex(native, indices.value);
+        Vertex copy[3]{}; WORD copied_indices[3]{};
+        if (!first.wrapped() || !second.wrapped() || !index.wrapped() ||
+            buffers->ReadVertex(native, first.native(), 0, copy, sizeof(copy)) != t3render::ir::RegistryResult::Unavailable ||
+            buffers->ReadVertex(native, second.native(), 0, copy, sizeof(copy)) != t3render::ir::RegistryResult::Ok ||
+            std::memcmp(copy, vertices, sizeof(vertices)) ||
+            buffers->ReadIndex(native, index.native(), 0, copied_indices, sizeof(copied_indices)) != t3render::ir::RegistryResult::Ok ||
+            std::memcmp(copied_indices, index_data, sizeof(index_data)) ||
+            buffers->GetRepeatedUnlockStats(native).completed != 1) return false;
+    }
+    if (FAILED(device->SetVertexShader(kFvf)) || FAILED(device->SetPixelShader(0)) ||
+        FAILED(device->SetRenderState(D3DRS_LIGHTING, FALSE)) || FAILED(device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE)) ||
+        FAILED(device->SetRenderState(D3DRS_ZENABLE, FALSE)) || FAILED(device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE)) ||
+        FAILED(device->SetTexture(0, nullptr)) || FAILED(device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1)) ||
+        FAILED(device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE)) ||
+        FAILED(device->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE)) ||
+        FAILED(device->SetStreamSource(0, visible.value, sizeof(Vertex))) || FAILED(device->SetIndices(indices.value, 0)) ||
+        FAILED(device->Clear(0, nullptr, D3DCLEAR_TARGET, kClear, 1, 0)) || FAILED(device->BeginScene())) return false;
+    if (facade_mode && !(ticket = buffers->BeginDraw(native))) return false;
+    const HRESULT draw = device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 3, 0, 1);
+    if (facade_mode && !buffers->EndDraw(native, ticket)) return false;
+    if (FAILED(draw) || FAILED(device->EndScene())) return false;
+    ComPtr<IDirect3DSurface8> back;
+    D3DLOCKED_RECT pixels{};
+    if (FAILED(device->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, back.put())) || !back.value ||
+        FAILED(back->LockRect(&pixels, nullptr, D3DLOCK_READONLY))) return false;
+    DWORD pixel = 0;
+    const bool valid = pixels.pBits && pixels.Pitch >= static_cast<INT>(kWidth * 4);
+    if (valid) std::memcpy(&pixel, static_cast<const BYTE*>(pixels.pBits) + 64 * pixels.Pitch + 64 * 4, sizeof(pixel));
+    if (FAILED(back->UnlockRect()) || !valid || (pixel & 0xffffffu) != 0xe43b3bu ||
+        FAILED(device->SetStreamSource(0, nullptr, 0)) || FAILED(device->SetIndices(nullptr, 0))) return false;
+    std::printf("repeated_unlock_experiment repeated=0x%08lx pixel=0x%06lx\n",
+                static_cast<unsigned long>(static_cast<std::uint32_t>(repeated)),
+                static_cast<unsigned long>(pixel & 0xffffffu));
+    if (facade_mode) std::printf("repeated_unlock_experiment_shadow=PASS\n");
+    return true;
+}
 #endif
 
 bool Render(HWND window, bool facade_mode, const wchar_t* output) {
@@ -2289,12 +2374,13 @@ int wmain(int argc, wchar_t** argv) {
     if (ok) ok = ObserveEagerBufferLifetime(window, facade_mode);
     if (ok) ok = ObserveEagerBufferLifetime(window, facade_mode, true);
     if (ok) ok = ObserveCrossDevicePrivateData(window, facade_mode);
+    if (ok) ok = ObserveRepeatedUnlockExperiment(window, facade_mode);
 #endif
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
     if (facade_mode) {
         ok = ok && t3render::fixture::buffer_facade_close_successes ==
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
-             11 &&
+             12 &&
 #else
              1 &&
 #endif
@@ -2303,7 +2389,7 @@ int wmain(int argc, wchar_t** argv) {
     }
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
     if (facade_mode) {
-        ok = ok && t3render::fixture::resource_facade_close_successes == 11 &&
+        ok = ok && t3render::fixture::resource_facade_close_successes == 12 &&
              t3render::fixture::resource_facade_close_failures == 0;
         if (ok) std::printf("resource_facade_final_close=PASS\n");
     }

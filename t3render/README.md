@@ -81,6 +81,19 @@ observed Lock and the Unlock result candidate succeeded. A separate
 shows that Highball accepts that sequence in both native and facade modes, but
 does not prove the game used that exact sequence.
 
+`T3RENDER_EXPERIMENTAL_REPEATED_UNLOCK=1` is a separate opt-in within the
+combined facade. If the same facade buffer has a completed observed Lock/Unlock
+pair and no lock or mutation is active, a subsequent Unlock discards that
+buffer's entire shadow before forwarding and holds a device mutation window.
+Success preserves unrelated shadows; failure, detected overlap or any other
+mismatch invalidates the device. Draws outside the capture window are not
+bracketed, so this does not establish general concurrency safety. A discarded
+shadow is never restored by later locks.
+The header and per-draw counter explicitly identify this policy. Its
+[Highball fixture](benchmarks/d3d8/2026-11-14-repeated-unlock-policy/result.json)
+checks this restricted sequence; unobserved native aliases, TDS behavior and
+the menu text regression remain unverified.
+
 Add `-DT3RENDER_BUILD_SMOKE_TEST=ON` at configuration time to build a
 standalone D3D8 program in the `smoke/` subdirectory. It draws four synthetic
 triangles, checks one pixel of each and prints a backbuffer hash. Compare that

@@ -1603,6 +1603,64 @@ void UnlockMismatchDiagnostics() {
         assert(wrapper->Release() == 0 && native.destroyed);
     }
 }
+
+void RepeatedUnlockExperiment() {
+    Reader reader;
+    for (unsigned scenario = 0; scenario < 4; ++scenario) {
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        assert(proxy->EnableRepeatedUnlockExperiment());
+        assert(!proxy->EnableRepeatedUnlockExperiment());
+        FakeDevice native, facade;
+        Vertex affected, other; Index indices;
+        auto* a = proxy->AdoptVertexForFacade(&native, &facade, &affected, 8, true);
+        auto* b = proxy->AdoptVertexForFacade(&native, &facade, &other, 8, true);
+        auto* i = proxy->AdoptIndexForFacade(&native, &facade, &indices, 8, true);
+        assert(a && b && i);
+        const BYTE data[]{1, 4, 9}; BYTE observed[3]{};
+        if (scenario != 3) Fill(a, 0, data, 3);
+        Fill(b, 0, data, 3); Fill(i, 0, data, 3);
+        assert(!proxy->EnableRepeatedUnlockExperiment());
+        if (scenario == 1) affected.unlock_result = E_FAIL;
+        if (scenario == 2) affected.on_unlock = [&] { assert(!proxy->BeginDraw(&native)); };
+        const HRESULT repeated = a->Unlock();
+        assert(repeated == (scenario == 1 ? E_FAIL : S_OK));
+        affected.on_unlock = {};
+        auto stats = proxy->GetRepeatedUnlockStats(&native);
+        assert(stats.enabled && stats.completed == (scenario == 0 ? 1u : 0u));
+        assert(proxy->ReadVertex(&native, &affected, 0, observed, 3) == RegistryResult::Unavailable);
+        if (scenario == 0) {
+            assert(proxy->ReadVertex(&native, &other, 0, observed, 3) == RegistryResult::Ok);
+            assert(proxy->ReadIndex(&native, &indices, 0, observed, 3) == RegistryResult::Ok);
+            const auto ticket = proxy->BeginDraw(&native);
+            assert(ticket && proxy->EndDraw(&native, ticket));
+            // Re-locking the discarded source remains forwardable but cannot
+            // resurrect its old shadow or invalidate unrelated buffers.
+            Fill(a, 0, data, 3);
+            assert(proxy->ReadVertex(&native, &affected, 0, observed, 3) == RegistryResult::Unavailable);
+            assert(proxy->ReadIndex(&native, &indices, 0, observed, 3) == RegistryResult::Ok);
+            assert(a->Unlock() == S_OK && proxy->GetRepeatedUnlockStats(&native).completed == 2);
+            // A third Unlock without a new matched pair fails closed.
+            assert(a->Unlock() == S_OK && !proxy->BeginDraw(&native));
+        } else {
+            assert(proxy->ReadVertex(&native, &other, 0, observed, 3) == RegistryResult::Unavailable);
+            assert(!proxy->BeginDraw(&native));
+        }
+        assert(a->Release() == 0 && b->Release() == 0 && i->Release() == 0);
+        assert(proxy->CloseFacadeDevice(&native, &facade));
+        assert(facade.Release() == 0 && native.Release() == 0);
+    }
+    // The opt-in never relaxes the separate native-resource observer, whose
+    // GetDevice can expose an untracked device alias.
+    auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+    assert(proxy->EnableRepeatedUnlockExperiment());
+    Vertex native;
+    auto* vertex = proxy->AdoptVertex(Owner(), &native, 8, true);
+    const BYTE data[]{1, 2};
+    Fill(vertex, 0, data, sizeof(data));
+    assert(vertex->Unlock() == S_OK && !proxy->BeginDraw(Owner()));
+    assert(proxy->GetRepeatedUnlockStats(Owner()).completed == 0);
+    assert(vertex->Release() == 0 && native.destroyed);
+}
 }  // namespace
 int main() {
     LifetimeAndIdentity();
@@ -1630,4 +1688,5 @@ int main() {
     StopObservationKeepsForwarding();
     ResetProcessAndFailures();
     UnlockMismatchDiagnostics();
+    RepeatedUnlockExperiment();
 }

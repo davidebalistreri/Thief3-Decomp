@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "experimental_repeated_unlock_resource_discard",
+  "status": "PASS",
+  "runtime": "Highball CrossOver 26.3 r30 / Wine x86",
+  "fixture_sha256": "df10f882697c887c6560ff0679e4dd37a697f5ad1367c6cbc8968b0405d30faa",
+  "experimental_proxy_sha256": "b7441b6a8af27e6b00092919ec3ff3056bd203dfec81b5049029870e0d2591df",
+  "result": {
+    "repeated_unlock_hresult_native_and_facade": 0,
+    "affected_vertex_shadow_unavailable": true,
+    "other_vertex_and_index_shadows_preserved": true,
+    "subsequent_indexed_draw_window_stable": true,
+    "native_and_facade_sample_rgb": "e43b3b",
+    "separate_synchronized_d3d8_dx12_fixture_rgb_equal": true,
+    "proxy_flag_baseline_capture_replay_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679"
+  },
+  "limitations": [
+    "Only a synthetic sequential Lock/Unlock/Unlock sequence; the TDS call sequence is not proven.",
+    "The proxy flag smoke test does not itself contain a repeated Unlock; the shadow isolation fixture tests that sequence separately.",
+    "Native aliases, runtime concurrency, menu text, and real TDS use of this policy are not validated.",
+    "A resource shadow remains unavailable after it is discarded, even if later writes succeed."
+  ],
+  "local_results": "build/t3render-captures/2026-11-14-repeated-unlock-policy-final"
+}

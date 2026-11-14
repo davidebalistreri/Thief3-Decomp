@@ -26,6 +26,8 @@ struct BufferObserver {
     const char* failure_cause = nullptr;
     unsigned failure_line = 0;
     buffers::UnlockFailure failure_unlock{};
+    bool repeated_unlock_policy = false;
+    std::uint64_t repeated_unlocks = 0;
 };
 
 // Optional getter results sampled outside the writer mutex. The caller owns
@@ -73,7 +75,7 @@ struct DrawCall {
 
 bool CaptureConfigured();
 // Marks the opt-in experimental facade before the first frame is opened.
-void CaptureExperimentalFacade();
+void CaptureExperimentalFacade(bool repeated_unlock_policy = false);
 // Advisory only: a concurrent Present may change the active window.
 bool CaptureWantsDraw(IDirect3DDevice8*);
 // 0 means unavailable caps or a disabled constant observation.

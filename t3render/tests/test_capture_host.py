@@ -104,6 +104,12 @@ class CaptureHostTests(unittest.TestCase):
         self.assertEqual(header["experimental_facade"], {"enabled": True, "identity_verified": False,
                                                          "concurrency_verified": False})
 
+    def test_repeated_unlock_experiment_is_explicit_in_header(self):
+        self.run_capture("experimental_repeated_header", frame="1")
+        header = self.records()[0]
+        self.assertFalse(header["replayable"])
+        self.assertTrue(header["experimental_facade"]["repeated_unlock_resource_discard"])
+
     def test_reentrant_device_operation_abandons_partial_frame(self):
         for scenario in ("shader_abandon", "shader_abandon_all"):
             with self.subTest(scenario=scenario):
@@ -427,6 +433,7 @@ class CaptureHostTests(unittest.TestCase):
                           "unlock": {"resource": "vertex", "pending_lock": False, "locked": False,
                                      "pending_unlock": False, "operation_exhausted": False,
                                      "last_lock_hr": -1, "unlock_hr_candidate": 0}})
+        self.assertEqual(draws[3]["buffer_data"]["repeated_unlocks_completed"], 2)
         self.assertFalse(results[draws[3]["op_id"]]["buffer_stable"])
         for component in ("vertex", "index"):
             self.assertEqual(draws[3]["buffer_data"][component]["status"], "window_unavailable")

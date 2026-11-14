@@ -1336,9 +1336,13 @@ extern "C" IDirect3D8* WINAPI Proxy_Direct3DCreate8(UINT sdk_version) {
     const bool combined = GetEnvironmentVariableW(L"T3RENDER_EXPERIMENTAL_COMBINED", option, 2) == 1 && option[0] == L'1';
     if (factory && configured && combined) {
         auto manager = t3render::buffers::BufferProxy::Create(ReadBufferSnapshot, nullptr);
-        auto* facade = manager ? t3render::fixture::CreateExperimentalCombinedFacadeFactory(factory, manager) : nullptr;
+        wchar_t unlock_option[2]{};
+        const bool repeated_unlock = GetEnvironmentVariableW(L"T3RENDER_EXPERIMENTAL_REPEATED_UNLOCK", unlock_option, 2) == 1 &&
+                                     unlock_option[0] == L'1';
+        const bool policy_ready = manager && (!repeated_unlock || manager->EnableRepeatedUnlockExperiment());
+        auto* facade = policy_ready ? t3render::fixture::CreateExperimentalCombinedFacadeFactory(factory, manager) : nullptr;
         if (facade) {
-            t3render::CaptureExperimentalFacade();
+            t3render::CaptureExperimentalFacade(repeated_unlock);
             return facade;
         }
         t3render::CaptureAbandonDevice(nullptr);

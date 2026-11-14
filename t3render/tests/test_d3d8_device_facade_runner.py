@@ -62,6 +62,9 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
         lines.append("shader_bound_deletion delete=0x00000000 create=0x00000000 get=0x00000000 same_handle=1 "
                      "bound_new=1 retained_draw=1 retained_pixel=0x00ff00 replacement_draw=1 replacement_pixel=0xe43b3b cleanup=PASS")
         lines.append("repeated_vertex_unlock first=0x00000000 repeated=0x00000000 pixel=0xe43b3b")
+        lines.append("repeated_unlock_experiment repeated=0x00000000 pixel=0xe43b3b")
+        if mode == "facade":
+            lines.append("repeated_unlock_experiment_shadow=PASS")
         lines.extend(("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                       "resource_facade_volume_roundtrips=PASS",
                       "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",

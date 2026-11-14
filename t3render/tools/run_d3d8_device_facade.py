@@ -34,6 +34,8 @@ SHADER_BOUND_DELETION = re.compile(
     r"replacement_draw=([01]) replacement_pixel=(0x[0-9a-fA-F]{6}) cleanup=PASS\Z")
 REPEATED_VERTEX_UNLOCK = re.compile(
     r"repeated_vertex_unlock first=(0x[0-9a-fA-F]{8}) repeated=(0x[0-9a-fA-F]{8}) pixel=(0x[0-9a-fA-F]{6})\Z")
+REPEATED_UNLOCK_EXPERIMENT = re.compile(
+    r"repeated_unlock_experiment repeated=(0x[0-9a-fA-F]{8}) pixel=(0x[0-9a-fA-F]{6})\Z")
 PRIVATE_KINDS = ("vertex", "index", "texture", "backbuffer", "surface_level", "cube", "volume_texture", "volume")
 PRIVATE_RECORD = re.compile(
     r"private_data kind=(?P<kind>[a-z_]+) "
@@ -121,6 +123,19 @@ def inspect_repeated_vertex_unlock(lines):
     return {"first": first.lower(), "repeated": repeated.lower(), "pixel": pixel.lower()}
 
 
+def inspect_repeated_unlock_experiment(lines, mode):
+    matches = [REPEATED_UNLOCK_EXPERIMENT.fullmatch(line) for line in lines if line.startswith("repeated_unlock_experiment ")]
+    if len(matches) != 1 or matches[0] is None:
+        raise RunError("repeated Unlock experiment is missing or malformed")
+    repeated, pixel = matches[0].groups()
+    if not successful_hresult(repeated) or pixel.lower() != "0xe43b3b":
+        raise RunError("repeated Unlock experiment did not produce the expected pixel")
+    expected = ["repeated_unlock_experiment_shadow=PASS"] if mode == "facade" else []
+    if [line for line in lines if line.startswith("repeated_unlock_experiment_shadow=")] != expected:
+        raise RunError("repeated Unlock shadow isolation is missing or conflicting")
+    return {"repeated": repeated.lower(), "pixel": pixel.lower()}
+
+
 def inspect_private_data(lines, mode):
     records = [PRIVATE_RECORD.fullmatch(line) for line in lines if line.startswith("private_data ")]
     if any(record is None for record in records) or tuple(record['kind'] for record in records) != PRIVATE_KINDS:
@@ -188,6 +203,8 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
         inspect_bound_shader_deletion(lines)
         repeated_unlock = inspect_repeated_vertex_unlock(lines)
         actual.extend((f"RepeatedVertexUnlock.{key}", value) for key, value in repeated_unlock.items())
+        repeated_experiment = inspect_repeated_unlock_experiment(lines, mode)
+        actual.extend((f"RepeatedUnlockExperiment.{key}", value) for key, value in repeated_experiment.items())
         # Compare observed blob operations; unknown/COM results intentionally
         # differ and are validated separately as a compatibility gap.
         actual.extend(inspect_private_data(lines, mode))
@@ -517,6 +534,8 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
                     log.read_text(encoding="utf-8", errors="replace").splitlines())
                 result["runs"][stage]["repeated_vertex_unlock"] = inspect_repeated_vertex_unlock(
                     log.read_text(encoding="utf-8", errors="replace").splitlines())
+                result["runs"][stage]["repeated_unlock_experiment"] = inspect_repeated_unlock_experiment(
+                    log.read_text(encoding="utf-8", errors="replace").splitlines(), stage)
             if resource_facade and stage == "facade":
                 trace = Path(str(ppm) + ".trace.jsonl")
                 inspect_prepared_trace(trace)

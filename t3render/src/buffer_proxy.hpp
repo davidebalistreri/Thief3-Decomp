@@ -95,6 +95,13 @@ public:
                                                 std::size_t budget = 32u * 1024u * 1024u,
                                                 std::size_t max_resources = 4096) noexcept;
 
+    // Opt-in experiment, before any device or resource is registered. A
+    // recognized repeated Unlock discards that buffer's shadow before the
+    // native call and holds a device mutation window through its completion.
+    bool EnableRepeatedUnlockExperiment() noexcept;
+    struct RepeatedUnlockStats { bool enabled = false; std::uint64_t completed = 0; };
+    RepeatedUnlockStats GetRepeatedUnlockStats(IDirect3DDevice8* owner) noexcept;
+
     // Adopts the native Create/Get +1 reference. On success returns one wrapper
     // reference and consumes native; on fallback returns native unchanged.
     // A getter (freshly_created=false) cannot create new tracked data.

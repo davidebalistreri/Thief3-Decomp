@@ -127,7 +127,7 @@ public:
         if (writer_active_) { Unsupported(); SetLastError(before); return native_->CreateVertexShader(declaration, program, handle, usage); }
         const auto ticket = shaders_.BeginCreate(device_);
         auto declaration_snapshot = ir::ScanDeclaration(reinterpret_cast<std::uintptr_t>(declaration), ReadMemory, nullptr);
-        auto program_snapshot = ir::ScanVertexShader11(reinterpret_cast<std::uintptr_t>(program), ReadMemory, nullptr, 1024);
+        auto program_snapshot = ir::ScanVertexShader1x(reinterpret_cast<std::uintptr_t>(program), ReadMemory, nullptr, 1024);
         SetLastError(before);
         const HRESULT hr = native_->CreateVertexShader(declaration, program, handle, usage);
         const DWORD after = GetLastError();

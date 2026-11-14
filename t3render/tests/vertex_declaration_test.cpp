@@ -381,6 +381,15 @@ void ProgramSharesDeclarationLifetimeAndBudget() {
     assert(observed.status == ShaderObservationStatus::Candidate && observed.words == Complete().words &&
            observed.program_status == ShaderProgramStatus::Complete && observed.program_words == words);
 
+    auto words10 = words;
+    words10[0] = 0xfffe0100u;
+    create = registry.BeginCreate(device);
+    assert(registry.EndCreate(create, true, true, 0x45, Complete(), {ShaderProgramStatus::Complete, words10}));
+    observed = Observe(registry, device, 0x45);
+    assert(observed.status == ShaderObservationStatus::Candidate && observed.program_words == words10);
+    auto deletion10 = registry.BeginDelete(device, 0x45);
+    assert(deletion10 && registry.EndDelete(deletion10, true));
+
     const auto reset = registry.BeginReset(device);
     assert(reset && registry.EndReset(reset, 0));
     const auto set = registry.BeginSet(device);

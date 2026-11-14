@@ -1009,7 +1009,7 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
     uint64_t program_words_emitted = 0;
     uint64_t constant_words_emitted = 0;
     if (SUCCEEDED(vs_hr)) out << vs; else out << "null";
-    if (draw.shader_snapshot) {
+    if (draw.shader_snapshot && s.declaration_requested) {
         const auto& declaration = draw.shader_snapshot->declaration;
         const char* status = "unknown";
         switch (declaration.status) {
@@ -1041,11 +1041,12 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
             declaration.program_status != ir::ShaderProgramStatus::NotRequested) {
             const bool framed = declaration.program_status == ir::ShaderProgramStatus::Complete &&
                 program_count >= 2 && program_count <= kProgramObservationWords &&
-                declaration.program_words.front() == 0xfffe0101u && declaration.program_words.back() == 0x0000ffffu;
+                ir::IsVertexShader1x(declaration.program_words.front()) && declaration.program_words.back() == 0x0000ffffu;
             const bool budget = framed && s.vertex_program_words <= kProgramFrameWords &&
                 program_count <= kProgramFrameWords - s.vertex_program_words;
             if (budget) {
-                out << ",\"vertex_program\":{\"status\":\"candidate\",\"version\":\"vs_1_1\",\"generation\":"
+                out << ",\"vertex_program\":{\"status\":\"candidate\",\"version\":\""
+                    << (declaration.program_words.front() == 0xfffe0100u ? "vs_1_0" : "vs_1_1") << "\",\"generation\":"
                     << declaration.generation << ",\"words\":[";
                 for (size_t i = 0; i < program_count; ++i) {
                     if (i) out << ',';
@@ -1086,7 +1087,7 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
         const auto prior_program_count = declaration.pre_reset_program_words.size();
         if (history_words_emitted && s.vertex_programs_requested &&
             prior_program_count >= 2 && prior_program_count <= kProgramObservationWords &&
-            declaration.pre_reset_program_words.front() == 0xfffe0101u &&
+            ir::IsVertexShader1x(declaration.pre_reset_program_words.front()) &&
             declaration.pre_reset_program_words.back() == 0x0000ffffu &&
             s.vertex_program_words <= kProgramFrameWords && prior_program_count <= kProgramFrameWords - s.vertex_program_words) {
             out << ",\"vertex_program_pre_reset\":{\"status\":\"hypothesis\","

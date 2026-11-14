@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "kernel_shader_version_inventory_and_synthetic_vs10",
+  "kernel_inventory": {
+    "local_asset": "Content/T3/Maps/Kernel_GFXALL.ibt",
+    "sha256": "6003062204a67e95e10e6d6d92d58794f4b4c67459238a96c175574d445d80ad",
+    "flesh_shader_resources": 93,
+    "malformed_resources": 0,
+    "vertex_vs_1_0": 39,
+    "vertex_vs_1_1": 3,
+    "vertex_programs_with_supported_framing": 42,
+    "pixel_ps_1_1": 51
+  },
+  "highball_fixture": {
+    "status": "PASS",
+    "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86",
+    "mode": "synthetic_vs_1_0",
+    "proxy_sha256": "61cecdd82ada5c31f3f6ea2534f3884d36223a984a7de8e87a36962d98391155",
+    "fixture_sha256": "b11f44ad2e62a6ebb0fd821c09d1562e62d1ca837589530737733ba85cf549ac",
+    "baseline_proxy_off_proxy_on_ppm_sha256": "c093048051cee6e2938757ca98e58f472d692f1c4050cdd0adf049dfa1f2159c",
+    "proxy_on_trace_sha256": "ed5ad3630bed4280b8564c975159a4d08912601f0c1b04239fa7b39f47e810ab",
+    "local_results": "build/t3render-captures/2026-11-14-vs10-fixture-v2"
+  },
+  "combined_facade_fixture": {
+    "status": "PASS",
+    "proxy_sha256": "7849b4941ef872671ac7dc5a71a859528049c9205f15454e8a5d24afc3eaaa50",
+    "baseline_proxy_off_proxy_on_ppm_sha256": "c093048051cee6e2938757ca98e58f472d692f1c4050cdd0adf049dfa1f2159c",
+    "first_draw": "The synthetic VS 1.0 program and declaration were captured as candidates with a stable draw result.",
+    "second_draw": "Shader evidence was intentionally unavailable after the first shader was deleted; HRESULTs and RGB remained equal.",
+    "local_results": "build/t3render-captures/2026-11-14-vs10-combined-fixture-v3"
+  },
+  "limitations": [
+    "Token framing does not validate instruction semantics, runtime handle association or GPU input.",
+    "The runtime tests use a synthetic two-draw VS 1.0 program, not a TDS shader.",
+    "The newer TDS bedroom capture used the earlier proxy and yielded no eligible post-Reset program; its shader versions are not established by this inventory.",
+    "This is not a DX12 shader translator, gameplay test or replay of the bedroom."
+  ]
+}

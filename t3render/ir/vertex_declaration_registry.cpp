@@ -315,7 +315,7 @@ bool VertexDeclarationRegistry::EndCreate(ShaderTicket ticket, bool native_succe
                           snapshot.words.back() == 0xffffffffu;
     const std::size_t declaration_count = complete ? snapshot.words.size() : 0;
     const bool program_complete = program.status == ShaderProgramStatus::Complete && program.words.size() >= 2 &&
-                                  program.words.front() == 0xfffe0101u && program.words.back() == 0x0000ffffu;
+                                  IsVertexShader1x(program.words.front()) && program.words.back() == 0x0000ffffu;
     if (program.status == ShaderProgramStatus::Complete && !program_complete)
         program.status = ShaderProgramStatus::UnsupportedInstruction;
     if (program_complete && program.words.size() > limits_.words_per_program)

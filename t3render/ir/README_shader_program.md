@@ -1,6 +1,6 @@
 # D3D8 vertex program framing
 
-`ScanVertexShader11` is a bounded reader for application-provided `vs_1_1`
+`ScanVertexShader1x` is a bounded reader for application-provided `vs_1_0` and `vs_1_1`
 bytecode. It frames known instructions, skips the full COMMENT and DEF
 payloads even if they contain an END-looking word, and fails closed on
 unsupported versions, unknown instructions, unreadable bytes and budget or
@@ -21,9 +21,13 @@ The optional proxy observer samples at `CreateVertexShader` and writes bounded
 program candidates into the diagnostic trace. The offline IR retains them only
 with a matching declaration generation and a successful, stable draw. The
 caller must supply a fault-safe reader; a snapshot may race application writes.
-Other shader versions, pixel shaders, constants and unobserved device aliases
-remain unhandled. No real TDS shader has yet been captured or replayed by this
-observer.
+Other shader versions and pixel shaders remain unhandled. Constants are sampled
+by a separate observer. Nothing here establishes which code a TDS draw consumed
+or translates a TDS shader into DX12.
+
+`tools/inventory_flesh_shaders.py` reads a local kernel IBT and reports aggregate
+version and framing counts without exporting game bytecode. Framing alone does
+not establish instruction semantics or map a program to a runtime handle.
 
 From `t3sdk`, run the host framing checks and the i686 cross-compile check:
 

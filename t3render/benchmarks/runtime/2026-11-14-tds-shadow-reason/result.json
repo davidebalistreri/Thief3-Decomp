@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "tds_bedroom_shadow_reasons",
+  "status": "PARTIAL",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86 virtual desktop",
+  "scene": "SouthQuarter1_int1, Garrett's Building save, bedroom; user oriented toward bed",
+  "proxy_commit": "d1a376f9",
+  "proxy_sha256": "1a9d3b4fb77edf1d7a9617ad8dfab0a718d4b578f5b5a2f785310eb03d2e5d2e",
+  "temporary_proxy_removed": true,
+  "capture": {
+    "frames": 1,
+    "frame": 1023,
+    "present_hresult": 0,
+    "draws": 318,
+    "successful_draws": 318,
+    "indexed_draws": 309,
+    "indexed_draws_with_stable_buffer_windows": 309,
+    "draws_with_stable_shader_windows": 318,
+    "sampled_vertex_constants": 318,
+    "vertex_payloads_captured": 35,
+    "vertex_payloads_unknown_resource": 274,
+    "index_payloads_captured": 1,
+    "index_payloads_unknown_resource": 308,
+    "color_writing_indexed_draws": 261,
+    "color_writing_draws_using_2621440_byte_vertex_buffer_with_unknown_resource": 230,
+    "declarations_unavailable_after_reset_attempt": 302,
+    "vertex_program_candidates": 0,
+    "raw_trace_sha256": "fde8486876b10de531d999def2374bf8a31f7aee2bef028205cef55860969b02"
+  },
+  "observations": [
+    "Prepared reads for the large vertex buffer returned unknown_resource, not unknown_data or abandoned. The diagnostic does not distinguish every possible reason for a missing tracked token.",
+    "The declaration registry recorded reset_attempt for 302 draws. The frame itself records no Reset; the reset attempt predates the capture window.",
+    "No unsupported-program first word was emitted because no eligible declaration candidate was available in this frame.",
+    "The proxy retires prior buffer tokens during reset; this is a plausible explanation for untracked survivors but the trace alone does not prove the lifecycle of each resource."
+  ],
+  "limitations": [
+    "Captured buffers and constants are observations, not proof of GPU input; this is not a replayable frame.",
+    "There is no synchronized D3D8 screenshot or shader/texture capture sufficient for a DX12 room comparison.",
+    "The game-derived trace and Wine log remain local and are not committed.",
+    "The previously reported menu text truncation remains unresolved."
+  ],
+  "local_trace": "build/t3render-captures/2026-11-14-tds-shadow-reason/bedroom.jsonl"
+}

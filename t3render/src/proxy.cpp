@@ -925,7 +925,7 @@ HRESULT STDMETHODCALLTYPE DeviceCreateVertexShader(IDirect3DDevice8* device, con
                                                            ReadDeclarationSnapshot, nullptr)
                            : t3render::ir::DeclarationSnapshot{};
     auto program = ticket && binding->capture_vertex_programs
-        ? t3render::ir::ScanVertexShader11(reinterpret_cast<std::uintptr_t>(function), ReadDeclarationSnapshot, nullptr, 1024)
+        ? t3render::ir::ScanVertexShader1x(reinterpret_cast<std::uintptr_t>(function), ReadDeclarationSnapshot, nullptr, 1024)
         : t3render::ir::ShaderProgramSnapshot{};
     error.Restore();
     const HRESULT hr = reinterpret_cast<CreateVertexShader>(binding->original[Layout().device_create_vertex_shader])(

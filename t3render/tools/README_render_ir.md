@@ -121,7 +121,7 @@ data is removed after validation. No third-party modules are needed.
   between frames. Raw fields are preserved without validation in the D3D8
   compatibility extension. Old traces retain their previous shape; no history
   makes the frame replayable.
-- Optional `vertex_program_observed` describes a bounded `vs_1_1` program
+- Optional `vertex_program_observed` describes a bounded `vs_1_0` or `vs_1_1` program
   sampled from application memory at shader creation. It appears only when the
   program and declaration share a generation, the draw result is successful
   and stable, the opt-in header and frame budget are valid, and the complete

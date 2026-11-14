@@ -9,7 +9,7 @@
 namespace t3render::ir {
 
 // A framed application-memory observation, not proof of shader validity or of
-// what the driver used. Only vs_1_1 is recognized; unsupported data fails
+// what the driver used. VS 1.0 and 1.1 are framed; unsupported data fails
 // closed and never exposes a partial program.
 enum class ShaderProgramStatus {
     NotRequested,
@@ -34,7 +34,10 @@ struct ShaderProgramSnapshot {
 
 // `reader` must return true only for a complete copy and must not reenter D3D.
 // max_words includes the version and END tokens, and is limited to 4096.
-ShaderProgramSnapshot ScanVertexShader11(std::uintptr_t address, DeclarationReader reader,
+constexpr bool IsVertexShader1x(std::uint32_t word) noexcept {
+    return word == 0xfffe0100u || word == 0xfffe0101u;
+}
+ShaderProgramSnapshot ScanVertexShader1x(std::uintptr_t address, DeclarationReader reader,
                                          void* context, std::size_t max_words) noexcept;
 
 } // namespace t3render::ir

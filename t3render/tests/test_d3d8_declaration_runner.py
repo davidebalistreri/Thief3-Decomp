@@ -67,6 +67,15 @@ class DeclarationRunnerTests(unittest.TestCase):
         with self.assertRaises(runner.RunError):
             self.check(events, False)
 
+    def test_combined_opt_out_requires_stable_windows_without_declaration(self):
+        events = trace(False)
+        events[5]["shader_stable"] = True
+        events[7]["shader_stable"] = False
+        self.path.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+        runner.inspect_trace(self.path, [0x100, 0x101], False, False, "program-10", True)
+        with self.assertRaises(runner.RunError):
+            runner.inspect_trace(self.path, [0x100, 0x101], False, False, "program-10", False)
+
     def test_program_capture_checks_words_generation_and_capability(self):
         records = trace(True)
         records[0]["vertex_program_capture"] = {"requested": True, "words_per_observation": 1024,
@@ -85,6 +94,18 @@ class DeclarationRunnerTests(unittest.TestCase):
                 del changed[0]["vertex_program_capture"]
             with self.subTest(case=case), self.assertRaises(runner.RunError):
                 self.check(changed, True, case != "unexpected")
+
+    def test_program_10_checks_version_and_words(self):
+        records = trace(True)
+        records[0]["vertex_program_capture"] = {"requested": True, "words_per_observation": 1024,
+                                                "words_per_frame": 262144}
+        for i, index in enumerate((4, 6), 1):
+            records[index]["vertex_program"] = {"status": "candidate", "version": "vs_1_0", "generation": i,
+                                                 "words": [0xfffe0100, *runner.PROGRAM_WORDS[1:]]}
+        self.path.write_text("".join(json.dumps(event) + "\n" for event in records), encoding="utf-8")
+        runner.inspect_trace(self.path, [0x100, 0x101], True, True, "program-10")
+        with self.assertRaises(runner.RunError):
+            runner.inspect_trace(self.path, [0x100, 0x101], True, True, "program")
 
     def test_requires_complete_successful_ordered_hresult_sequence(self):
         lines = [f"parity {name} hr=00000000" for name in runner.EXPECTED_CALLS]

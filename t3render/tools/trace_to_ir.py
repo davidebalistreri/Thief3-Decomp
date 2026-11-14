@@ -381,10 +381,10 @@ def pre_reset_declaration(draw, result, header, within_frame_budget):
 
 
 def framed_vertex_program(words):
-    """Frame the supported VS 1.1 token subset, without validating semantics."""
+    """Frame the supported VS 1.0/1.1 token subset, without validating semantics."""
     if not isinstance(words, list) or not 2 <= len(words) <= 1024 or any(uint32(w) is None for w in words):
         return False
-    if words[0] != 0xfffe0101:
+    if words[0] not in (0xfffe0100, 0xfffe0101):
         return False
     counts = {0: 0, 1: 2, 2: 3, 3: 3, 4: 4, 5: 3, 6: 2, 7: 2, 8: 3, 9: 3, 10: 3,
               11: 3, 12: 3, 13: 3, 14: 2, 15: 2, 16: 2, 17: 3, 18: 4, 19: 2,
@@ -457,10 +457,11 @@ def observed_vertex_program(draw, result, header, within_frame_budget):
         return {"status": "unavailable", "reason": raw["reason"], "shader_value": declaration["shader_value"],
                 "generation": generation, "words": None, "shader_stable": declaration["shader_stable"],
                 "draw_hresult": declaration["draw_hresult"]}
-    if (raw.get("status") != "candidate" or raw.get("version") != "vs_1_1" or
-            not framed_vertex_program(raw.get("words")) or len(raw["words"]) > per_observation):
+    if (raw.get("status") != "candidate" or not framed_vertex_program(raw.get("words")) or
+            len(raw["words"]) > per_observation or
+            raw.get("version") != {0xfffe0100: "vs_1_0", 0xfffe0101: "vs_1_1"}[raw["words"][0]]):
         return None
-    return {"status": "candidate", "version": "vs_1_1", "shader_value": declaration["shader_value"],
+    return {"status": "candidate", "version": raw["version"], "shader_value": declaration["shader_value"],
             "generation": generation, "words": raw["words"][:],
             "shader_stable": declaration["shader_stable"], "draw_hresult": declaration["draw_hresult"]}
 

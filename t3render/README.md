@@ -326,9 +326,10 @@ Buffer bytes and shader programs remain absent, so this frame cannot be replayed
 #### Vertex-program candidates
 
 `T3RENDER_CAPTURE_VERTEX_PROGRAMS=1`, together with declaration observation,
-samples bounded `vs_1_1` application-memory programs at `CreateVertexShader`.
-It does not query shader handles through the driver and remains suppressed
-when buffer observation is active. Other versions, malformed data, null
+samples bounded `vs_1_0` and `vs_1_1` application-memory programs at `CreateVertexShader`.
+It does not query shader handles through the driver; the standard hook suppresses
+it when buffer observation is active, while the experimental combined facade
+can observe both. Other versions, malformed data, null
 functions and exceeded budgets expose no program words. Programs share the
 per-device declaration budget and are not exposed as candidates after Reset. The trace is
 limited to 1024 words per observation and 262144 per frame; the offline IR
@@ -344,6 +345,14 @@ pixel programs and buffers are still required for a replay. See the
 In a [TDS test](benchmarks/d3d8/2026-11-13-tds-vertex-program/result.json),
 a prior Reset invalidated the declarations and no program was emitted. This
 does not establish which shader versions the game uses.
+
+An offline [kernel inventory](benchmarks/d3d8/2026-11-14-vs10-observation/result.json)
+found 39 `vs_1_0` and 3 `vs_1_1` vertex programs with supported token framing.
+That inventory does not bind any program to a particular runtime draw. A
+synthetic `vs_1_0` Highball test matched HRESULTs and RGB with and without the
+standard proxy and the experimental combined facade; it is not a replay of a
+TDS shader. The combined facade invalidated shader evidence after the first
+shader deletion, as required by the handle-reuse policy.
 A [follow-up](benchmarks/d3d8/2026-11-13-tds-program-history/result.json)
 retained 495 declaration and 94 program hypotheses across successful Reset
 and rebind observations; they remain unverified pre-reset data.

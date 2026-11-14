@@ -49,6 +49,14 @@ class ProgramTraceTests(unittest.TestCase):
         self.assertEqual(program, {"status": "candidate", "version": "vs_1_1", "generation": 5,
                                    "words": WORDS, "shader_value": 0x44, "shader_stable": True, "draw_hresult": 0})
 
+    def test_vertex_10_requires_matching_version_label(self):
+        records = program_events()
+        records[2]["vertex_program"].update(version="vs_1_0", words=[0xfffe0100, *WORDS[1:]])
+        program = self.commands(records)[0]["vertex_program_observed"]
+        self.assertEqual((program["version"], program["words"][0]), ("vs_1_0", 0xfffe0100))
+        records[2]["vertex_program"]["version"] = "vs_1_1"
+        self.assertNotIn("vertex_program_observed", self.commands(records)[0])
+
     def test_capability_and_result_are_required(self):
         for mode in ("missing", "disabled", "decl_disabled", "too_large", "too_small", "bad_frame_limit",
                      "failed", "unstable", "missing_stability", "generation_mismatch", "version"):
@@ -137,6 +145,14 @@ class ProgramTraceTests(unittest.TestCase):
                 command = self.commands(records)[0]
                 self.assertNotIn("vertex_program_pre_reset", command)
                 self.assertNotIn("vertex_program_observed", command)
+
+    def test_pre_reset_vertex_10_remains_a_hypothesis(self):
+        records = program_history_events()
+        records[2]["vertex_program_pre_reset"]["words"][0] = 0xfffe0100
+        command = self.commands(records)[0]
+        self.assertEqual(command["vertex_program_pre_reset"]["status"], "hypothesis")
+        self.assertEqual(command["vertex_program_pre_reset"]["words"][0], 0xfffe0100)
+        self.assertNotIn("vertex_program_observed", command)
 
     def test_pre_reset_program_words_share_frame_budget(self):
         records = program_history_events()

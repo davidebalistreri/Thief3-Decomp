@@ -5,7 +5,6 @@
 namespace t3render::ir {
 namespace {
 constexpr std::size_t kAbsoluteWordLimit = 4096;
-constexpr std::uint32_t kVs11 = 0xfffe0101u;
 constexpr std::uint32_t kEnd = 0x0000ffffu;
 constexpr std::uint32_t kComment = 0x0000fffeu;
 constexpr std::uint32_t kDef = 81;
@@ -27,7 +26,7 @@ int ParameterCount(std::uint32_t opcode) noexcept {
 }
 } // namespace
 
-ShaderProgramSnapshot ScanVertexShader11(std::uintptr_t address, DeclarationReader reader,
+ShaderProgramSnapshot ScanVertexShader1x(std::uintptr_t address, DeclarationReader reader,
                                          void* context, std::size_t max_words) noexcept {
     ShaderProgramSnapshot result;
     if (!reader || !max_words || max_words > kAbsoluteWordLimit) {
@@ -60,7 +59,7 @@ ShaderProgramSnapshot ScanVertexShader11(std::uintptr_t address, DeclarationRead
         if (!read_word()) return result;
         result.first_word_known = true;
         result.first_word = result.words.back();
-        if (result.words.back() != kVs11) { fail(ShaderProgramStatus::UnsupportedVersion); return result; }
+        if (!IsVertexShader1x(result.words.back())) { fail(ShaderProgramStatus::UnsupportedVersion); return result; }
         while (read_word()) {
             const std::uint32_t token = result.words.back();
             if (token == kEnd) { result.status = ShaderProgramStatus::Complete; return result; }
@@ -69,7 +68,7 @@ ShaderProgramSnapshot ScanVertexShader11(std::uintptr_t address, DeclarationRead
                 for (std::size_t i = 0; i < count; ++i) if (!read_word()) return result;
                 continue;
             }
-            // VS 1.1 has no instruction-length field or coissue flag. Refuse
+            // VS 1.x has no instruction-length field or coissue flag. Refuse
             // modified/reserved opcode tokens instead of guessing their size.
             const int count = ParameterCount(token);
             if (count < 0) { fail(ShaderProgramStatus::UnsupportedInstruction); return result; }

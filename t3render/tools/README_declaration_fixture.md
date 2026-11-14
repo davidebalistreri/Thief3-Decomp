@@ -3,6 +3,7 @@
 This x86 fixture creates two vertex shaders with the same position/color
 declaration, binds and queries each handle, draws a triangle, restores FVF and
 deletes the shader. Its default `program` mode uses a minimal vs_1_1 program;
+`program-10` uses the equivalent synthetic vs_1_0 program, while
 `declaration-only` explicitly tests `CreateVertexShader` with a null function.
 The two modes are different experiments: a failed program run must not be
 reported as a programmable-shader success if declaration-only works.
@@ -46,7 +47,7 @@ update its bottle state. The fixture covers no buffer wrappers, state blocks,
 reset, alias escape, concurrency, alpha, native Windows or TDS. The trace is a
 candidate observation, not a replay or proof of driver-consumed bytes.
 
-Append `--vertex-programs` in `program` mode to compare the observed VS 1.1
+Append `--vertex-programs` in `program` or `program-10` mode to compare the observed VS 1.x
 words to the fixture input in the proxy run. The other two runs keep that
 observer disabled; HRESULT and RGB comparisons are unchanged.
 The [2026-11-13 Highball result](../benchmarks/d3d8/2026-11-13-vertex-program/result.json)

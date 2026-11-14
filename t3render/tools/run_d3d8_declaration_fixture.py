@@ -57,7 +57,7 @@ def inspect_image(path):
     return image
 
 
-def inspect_trace(path, handles, enabled, program_capture=False, mode="program"):
+def inspect_trace(path, handles, enabled, program_capture=False, mode="program", experimental_combined=False):
     trace_summary.summarize(path)
     records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     expected_events = ["header", "frame_begin", "clear", "clear_result", "draw", "draw_result",
@@ -84,24 +84,33 @@ def inspect_trace(path, handles, enabled, program_capture=False, mode="program")
                                                            for k, v in fields.items()) or result.get("hr") != 0 or
                 result.get("op_id") != draw.get("op_id")):
             raise RunError("draw/result/handle mismatch")
-        if enabled:
+        observable = not experimental_combined or generation == 1
+        if enabled and observable:
             declaration = draw.get("vertex_declaration")
             if (result.get("shader_stable") is not True or not isinstance(declaration, dict) or
                     type(declaration.get("generation")) is not int or declaration != {
                         "status": "candidate", "generation": generation, "words": WORDS}):
                 raise RunError("declaration observation was not paired and stable")
-        elif "vertex_declaration" in draw or "shader_stable" in result:
+        elif enabled and experimental_combined:
+            declaration = draw.get("vertex_declaration")
+            if result.get("shader_stable") is not False or not isinstance(declaration, dict) or \
+                    declaration.get("status") != "unsafe" or declaration.get("words") is not None:
+                raise RunError("combined facade must fail closed after the first shader deletion")
+        elif "vertex_declaration" in draw or (not experimental_combined and "shader_stable" in result):
             raise RunError("opt-out unexpectedly produced declaration observations")
-        expected_program = {"status": "candidate", "version": "vs_1_1", "generation": generation,
-                            "words": PROGRAM_WORDS}
-        if enabled and program_capture and mode == "program":
+        elif experimental_combined and result.get("shader_stable") is not (generation == 1):
+            raise RunError("combined facade shader window did not fail closed after deletion")
+        version = "vs_1_0" if mode == "program-10" else "vs_1_1"
+        words = ([0xfffe0100] + PROGRAM_WORDS[1:]) if mode == "program-10" else PROGRAM_WORDS
+        expected_program = {"status": "candidate", "version": version, "generation": generation, "words": words}
+        if enabled and observable and program_capture and mode in ("program", "program-10"):
             if draw.get("vertex_program") != expected_program:
                 raise RunError("vertex program did not match the fixture input")
         elif "vertex_program" in draw:
             raise RunError("unexpected vertex-program observation")
 
 
-def execute(engine, bottle, fixture, proxy, output, timeout, mode, program_capture=False):
+def execute(engine, bottle, fixture, proxy, output, timeout, mode, program_capture=False, experimental_combined=False):
     engine, bottle, fixture, proxy, output = map(valid_path, (engine, bottle, fixture, proxy, output))
     wine, server, frameworks = engine / "engine/bin/wine", engine / "engine/bin/wineserver", engine / "frameworks"
     if not all(p.is_file() and os.access(p, os.X_OK) for p in (wine, server)) or not frameworks.is_dir():
@@ -120,7 +129,7 @@ def execute(engine, bottle, fixture, proxy, output, timeout, mode, program_captu
         output.mkdir()
     except OSError as exc:
         raise RunError(f"cannot create output directory: {exc}") from exc
-    env = {k: v for k, v in os.environ.items() if not k.startswith("T3RENDER_CAPTURE_")}
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("T3RENDER_CAPTURE_", "T3RENDER_EXPERIMENTAL_"))}
     for key in ("WINEDLLPATH", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH"):
         env.pop(key, None)
     env.update({"WINEPREFIX": str(bottle), "WINESERVER": str(server),
@@ -128,7 +137,7 @@ def execute(engine, bottle, fixture, proxy, output, timeout, mode, program_captu
                 "DYLD_FALLBACK_LIBRARY_PATH": f"{frameworks}:{frameworks}/GStreamer.framework/Versions/1.0/lib",
                 "DYLD_FALLBACK_FRAMEWORK_PATH": str(frameworks), "WINEDEBUG": "-all,+loaddll"})
     manifest = {"schema": 1, "test": "synthetic_d3d8_vertex_declaration", "mode": mode, "status": "FAIL",
-                "vertex_program_capture": program_capture,
+                "vertex_program_capture": program_capture, "experimental_combined": experimental_combined,
                 "fixture_sha256": sha256(fixture), "proxy_sha256": sha256(proxy), "runs": {},
                 "limitations": ["Synthetic x86 D3D8 fixture; no TDS process, assets or game frame.",
                                 "Two UP draws, one declaration layout, no buffer wrappers or state blocks.",
@@ -149,6 +158,8 @@ def execute(engine, bottle, fixture, proxy, output, timeout, mode, program_captu
                 shutil.copyfile(proxy, directory / "d3d8.dll")
                 stage_env.update({"WINEDLLOVERRIDES": "d3d8=n,b;nvapi64,nvngx=n,b;winemenubuilder.exe=d",
                                   "T3RENDER_CAPTURE_FRAME": "0", "T3RENDER_CAPTURE_PATH": windows_path(trace)})
+                if experimental_combined:
+                    stage_env["T3RENDER_EXPERIMENTAL_COMBINED"] = "1"
                 if stage == "proxy_on":
                     stage_env["T3RENDER_CAPTURE_DECLARATIONS"] = "1"
                     if program_capture:
@@ -159,7 +170,8 @@ def execute(engine, bottle, fixture, proxy, output, timeout, mode, program_captu
             images.append(inspect_image(ppm))
             parity.append(current_parity)
             if stage != "baseline":
-                inspect_trace(trace, handles, stage == "proxy_on", program_capture and stage == "proxy_on", mode)
+                inspect_trace(trace, handles, stage == "proxy_on", program_capture and stage == "proxy_on", mode,
+                              experimental_combined)
             manifest["runs"][stage] = {"log_sha256": sha256(log), "ppm_sha256": sha256(ppm),
                                        "trace_sha256": sha256(trace) if stage != "baseline" else None}
         stage = "compare"
@@ -183,13 +195,14 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for option in ("engine", "bottle", "fixture", "proxy", "output-dir"):
         parser.add_argument("--" + option, required=True)
-    parser.add_argument("--mode", choices=("program", "declaration-only"), default="program")
-    parser.add_argument("--vertex-programs", action="store_true", help="observe the fixture's VS 1.1 program")
+    parser.add_argument("--mode", choices=("program", "program-10", "declaration-only"), default="program")
+    parser.add_argument("--vertex-programs", action="store_true", help="observe the fixture's VS 1.x program")
+    parser.add_argument("--experimental-combined", action="store_true", help="activate the supplied combined facade proxy")
     parser.add_argument("--timeout", type=float, default=45)
     args = parser.parse_args(argv)
     try:
         result = execute(args.engine, args.bottle, args.fixture, args.proxy, args.output_dir, args.timeout, args.mode,
-                         args.vertex_programs)
+                         args.vertex_programs, args.experimental_combined)
     except (RunError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

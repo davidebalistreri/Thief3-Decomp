@@ -458,7 +458,7 @@ int main(int argc, char** argv) {
             t3render::CaptureShaderDrawResult(&device, token, S_OK, -1, i!=2);
         }
         t3render::CapturePresent(&device, S_OK);
-    } else if (scenario == "shader" || scenario == "shader_program" || scenario == "shader_program_unavailable" ||
+    } else if (scenario == "shader" || scenario == "shader_program" || scenario == "shader_program_10" || scenario == "shader_program_unavailable" ||
                scenario == "shader_constants") {
         if (t3render::CaptureWantsDraw(&device)) return 8;
         t3render::CapturePresent(&device, S_OK);
@@ -471,6 +471,7 @@ int main(int argc, char** argv) {
         snapshot.declaration.words = {0x20000000u, 0xffffffffu};
         snapshot.declaration.program_status = t3render::ir::ShaderProgramStatus::Complete;
         snapshot.declaration.program_words = {0xfffe0101u, 1u, 0xc00f0000u, 0x90e40000u, 0x0000ffffu};
+        if (scenario == "shader_program_10") snapshot.declaration.program_words[0] = 0xfffe0100u;
         if (scenario == "shader_constants") {
             snapshot.constants_requested = true;
             snapshot.constants_count = 96;

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cwchar>
 #include <vector>
 
@@ -74,7 +75,7 @@ bool SaveImage(IDirect3DDevice8* device, const wchar_t* path) {
     return Check(back->UnlockRect(), "UnlockRect") && valid && WriteNew(path, data);
 }
 
-bool Render(HWND window, const wchar_t* path, bool programmable) {
+bool Render(HWND window, const wchar_t* path, bool programmable, bool version10) {
     ComPtr<IDirect3D8> factory;
     factory.value = Direct3DCreate8(D3D_SDK_VERSION);
     if (!factory.value) return false;
@@ -107,7 +108,10 @@ bool Render(HWND window, const wchar_t* path, bool programmable) {
     };
     for (unsigned n = 0; n < 2; ++n) {
         DWORD shader = 0, got = 0;
-        const HRESULT create = device->CreateVertexShader(kDeclaration, programmable ? kProgram : nullptr, &shader, 0);
+        DWORD program[sizeof(kProgram) / sizeof(kProgram[0])];
+        std::memcpy(program, kProgram, sizeof(program));
+        if (version10) program[0] = D3DVS_VERSION(1, 0);
+        const HRESULT create = device->CreateVertexShader(kDeclaration, programmable ? program : nullptr, &shader, 0);
         if (!Check(create, n ? "Create2" : "Create1") || !shader ||
             !Check(device->SetVertexShader(shader), n ? "Set2" : "Set1") ||
             !Check(device->GetVertexShader(&got), n ? "Get2" : "Get1") || got != shader) return false;
@@ -125,7 +129,8 @@ bool Render(HWND window, const wchar_t* path, bool programmable) {
 
 int wmain(int argc, wchar_t** argv) {
     if (argc != 5 || std::wcscmp(argv[1], L"--output") || !argv[2][0] || std::wcscmp(argv[3], L"--mode") ||
-        (std::wcscmp(argv[4], L"program") && std::wcscmp(argv[4], L"declaration-only"))) return 2;
+        (std::wcscmp(argv[4], L"program") && std::wcscmp(argv[4], L"program-10") &&
+         std::wcscmp(argv[4], L"declaration-only"))) return 2;
     const HINSTANCE instance = GetModuleHandleW(nullptr);
     const wchar_t* name = L"T3RenderDeclarationFixture";
     WNDCLASSW cls{}; cls.lpfnWndProc = DefWindowProcW; cls.hInstance = instance; cls.lpszClassName = name;
@@ -134,7 +139,8 @@ int wmain(int argc, wchar_t** argv) {
                                 kSize, kSize, nullptr, nullptr, instance, nullptr);
     if (!window) { UnregisterClassW(name, instance); return 1; }
     ShowWindow(window, SW_SHOWNOACTIVATE); UpdateWindow(window);
-    const bool ok = Render(window, argv[2], !std::wcscmp(argv[4], L"program"));
+    const bool ok = Render(window, argv[2], std::wcscmp(argv[4], L"declaration-only") != 0,
+                           !std::wcscmp(argv[4], L"program-10"));
     DestroyWindow(window); UnregisterClassW(name, instance);
     return ok ? 0 : 1;
 }

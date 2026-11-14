@@ -6,7 +6,7 @@
 #include <limits>
 #include <vector>
 
-using t3render::ir::ScanVertexShader11;
+using t3render::ir::ScanVertexShader1x;
 using t3render::ir::ShaderProgramStatus;
 
 namespace {
@@ -33,7 +33,7 @@ bool Read(void* context, std::uintptr_t address, void* out, std::size_t length) 
 }
 
 void ExpectFailure(Memory& mem, ShaderProgramStatus expected, std::size_t limit = 64) {
-    const auto result = ScanVertexShader11(mem.base, Read, &mem, limit);
+    const auto result = ScanVertexShader1x(mem.base, Read, &mem, limit);
     assert(result.status == expected && result.words.empty());
 }
 
@@ -41,10 +41,13 @@ void FixtureProgram() {
     // vs_1_1: mov oPos, v0; mov oD0, c0, as used by the reset fixture.
     Memory mem{0x1000, {0xfffe0101, 1, 0xc00f0000, 0x90e40000,
                         1, 0xd00f0000, 0xa0e40000, 0x0000ffff}};
-    const auto result = ScanVertexShader11(mem.base, Read, &mem, 8);
+    const auto result = ScanVertexShader1x(mem.base, Read, &mem, 8);
     assert(result.status == ShaderProgramStatus::Complete && result.words == mem.words);
     assert(mem.reads == mem.words.size());
     ExpectFailure(mem, ShaderProgramStatus::WordLimit, 7);
+    mem.words[0] = 0xfffe0100;
+    const auto version10 = ScanVertexShader1x(mem.base, Read, &mem, 8);
+    assert(version10.status == ShaderProgramStatus::Complete && version10.words == mem.words);
 }
 
 void EmbeddedEndWordsAreNotTerminators() {
@@ -53,7 +56,7 @@ void EmbeddedEndWordsAreNotTerminators() {
     Memory mem{0x1000, {0xfffe0101, 0x0002fffe, 0x0000ffff, 0xfffe0101,
                         81, 0xa00f0000, 0x0000ffff, 0, 0xffffffff, 0x3f800000,
                         0x0000ffff}};
-    const auto result = ScanVertexShader11(mem.base, Read, &mem, 64);
+    const auto result = ScanVertexShader1x(mem.base, Read, &mem, 64);
     assert(result.status == ShaderProgramStatus::Complete && result.words == mem.words);
     assert(mem.reads == mem.words.size());
     mem.words.pop_back();
@@ -62,17 +65,17 @@ void EmbeddedEndWordsAreNotTerminators() {
 
 void BadInputFailsClosed() {
     Memory mem{0x1000, {0xfffe0101, 1, 0xc00f0000, 0x90e40000, 0x0000ffff}};
-    auto invalid = ScanVertexShader11(mem.base, nullptr, &mem, 64);
+    auto invalid = ScanVertexShader1x(mem.base, nullptr, &mem, 64);
     assert(invalid.status == ShaderProgramStatus::InvalidConfiguration && invalid.words.empty());
-    invalid = ScanVertexShader11(mem.base, Read, &mem, 0);
+    invalid = ScanVertexShader1x(mem.base, Read, &mem, 0);
     assert(invalid.status == ShaderProgramStatus::InvalidConfiguration && invalid.words.empty());
-    invalid = ScanVertexShader11(mem.base, Read, &mem, 4097);
+    invalid = ScanVertexShader1x(mem.base, Read, &mem, 4097);
     assert(invalid.status == ShaderProgramStatus::InvalidConfiguration && invalid.words.empty());
-    invalid = ScanVertexShader11(0, Read, &mem, 64);
+    invalid = ScanVertexShader1x(0, Read, &mem, 64);
     assert(invalid.status == ShaderProgramStatus::NullAddress && invalid.words.empty());
 
     mem.words[0] = 0xfffe0200;
-    auto unsupported = ScanVertexShader11(mem.base, Read, &mem, 64);
+    auto unsupported = ScanVertexShader1x(mem.base, Read, &mem, 64);
     assert(unsupported.status == ShaderProgramStatus::UnsupportedVersion && unsupported.words.empty() &&
            unsupported.first_word_known && unsupported.first_word == 0xfffe0200);
     mem.words[0] = 0xffff0101; // ps_1_1 is not a vertex program
@@ -101,7 +104,7 @@ void CountsAndBounds() {
                         2, 0x80000000, 0x80000000, 0x80000000,
                         4, 0x80000000, 0x80000000, 0x80000000, 0x80000000,
                         0x0000ffff}};
-    auto result = ScanVertexShader11(mem.base, Read, &mem, 64);
+    auto result = ScanVertexShader1x(mem.base, Read, &mem, 64);
     assert(result.status == ShaderProgramStatus::Complete && result.words == mem.words);
     mem.words = {0xfffe0101, 0x7ffffffe, 0, 0, 0, 0};
     ExpectFailure(mem, ShaderProgramStatus::WordLimit, 6);

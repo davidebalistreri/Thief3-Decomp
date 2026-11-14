@@ -209,6 +209,7 @@ class CaptureHostTests(unittest.TestCase):
     def test_vertex_program_requires_both_opt_ins_and_a_stable_result(self):
         self.run_capture("shader_program", frame="1", extra={"T3RENDER_CAPTURE_VERTEX_PROGRAMS": "1"})
         self.assertTrue(all("vertex_program" not in e for e in self.records() if e["event"] == "draw"))
+        self.assertTrue(all("vertex_declaration" not in e for e in self.records() if e["event"] == "draw"))
         self.path.unlink()
         self.run_capture("shader_program", frame="1", extra={"T3RENDER_CAPTURE_VERTEX_PROGRAMS": "1",
                                                        "T3RENDER_CAPTURE_DECLARATIONS": "1"})
@@ -242,6 +243,18 @@ class CaptureHostTests(unittest.TestCase):
         draws = [e for e in self.records() if e["event"] == "draw"]
         self.assertEqual(draws[0]["vertex_program"], {"status": "unavailable", "generation": 7,
                          "reason": "unsupported_version", "words": None, "first_word_observed": 0xfffe0200})
+
+    def test_vertex_program_10_is_serialized_and_converted(self):
+        self.run_capture("shader_program_10", frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1",
+                                                                "T3RENDER_CAPTURE_VERTEX_PROGRAMS": "1"})
+        draws = [e for e in self.records() if e["event"] == "draw"]
+        self.assertEqual(draws[0]["vertex_program"]["version"], "vs_1_0")
+        self.assertEqual(draws[0]["vertex_program"]["words"][0], 0xfffe0100)
+        result = subprocess.run([sys.executable, "-B", str(ROOT / "tools" / "trace_to_ir.py"), str(self.path)],
+                                text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command = json.loads(result.stdout)["frames"][0]["commands"][0]
+        self.assertEqual(command["vertex_program_observed"]["version"], "vs_1_0")
 
     def test_vertex_constants_require_opt_in_and_stable_paired_draw(self):
         self.run_capture("shader_constants", frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1"})

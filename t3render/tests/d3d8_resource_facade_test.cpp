@@ -524,7 +524,7 @@ void PrivateVertexTranslation() {
         bool fail_adopt = false;
         Bridge(Device* native, Device* facade, Device* index, Device* index_wrapper)
             : target_native(native), target_facade(facade), index_native(index), index_facade(index_wrapper) {}
-        bool Pin(const void* candidate, PrivateBufferPin& pin) noexcept override {
+        bool Pin(const void* candidate, PrivateObjectPin& pin) noexcept override {
             if (candidate == target_facade) {
                 pin.guard = target_facade; pin.native = target_native;
                 pin.kind = t3render::buffers::PrivateDataKind::VertexBuffer;
@@ -637,6 +637,68 @@ void PrivateVertexTranslation() {
     assert(native.Release() == 0 && facade.Release() == 0 && target_native.Release() == 0 && target_facade.Release() == 0 &&
            index_native.Release() == 0 && index_facade.Release() == 0);
 }
+
+void PrivateResourceTranslation() {
+    Device native, facade;
+    Texture texture; texture.device = &native;
+    Cube cube; cube.device = &native;
+    auto router = Router::Create(&native, &facade);
+    auto* source = router->AdoptTexture(&texture);
+    auto* target = router->AdoptCube(&cube);
+    assert(source && target);
+    IUnknown* texture_data = nullptr;
+    IUnknown* cube_data = nullptr;
+    auto enable_data = [&](auto& resource, IUnknown*& slot) {
+        IUnknown** entry = &slot;
+        resource.on_private_set = [&, entry](REFGUID, const void* value, DWORD size, DWORD flags) {
+            assert((value == &texture || value == &cube) && size == sizeof(IUnknown*) && flags == D3DSPD_IUNKNOWN);
+            auto* native_value = const_cast<IUnknown*>(static_cast<const IUnknown*>(value));
+            native_value->AddRef(); if (*entry) (*entry)->Release(); *entry = native_value;
+            SetLastError(210); return S_OK;
+        };
+        resource.on_private_get = [entry](REFGUID, void* data, DWORD* size) {
+            if (!*entry || !size || !data || *size < sizeof(IUnknown*)) return E_FAIL;
+            (*entry)->AddRef(); std::memcpy(data, entry, sizeof(*entry)); *size = sizeof(IUnknown*);
+            SetLastError(211); return S_OK;
+        };
+        resource.on_private_free = [entry](REFGUID) {
+            if (!*entry) return E_FAIL;
+            (*entry)->Release(); *entry = nullptr; SetLastError(212); return S_OK;
+        };
+    };
+    enable_data(texture, texture_data);
+    enable_data(cube, cube_data);
+
+    // A native self-reference is released explicitly, as it is in native COM.
+    assert(source->SetPrivateData(kExtra, source, sizeof(IUnknown*), D3DSPD_IUNKNOWN) == S_OK);
+    assert(texture_data == &texture && texture.refs == 2 && GetLastError() == 210);
+    IUnknown* found = nullptr; DWORD size = sizeof(found);
+    assert(source->GetPrivateData(kExtra, &found, &size) == S_OK && found == source && GetLastError() == 211);
+    found->Release();
+    assert(source->FreePrivateData(kExtra) == S_OK && texture.refs == 1 && GetLastError() == 212);
+
+    assert(source->SetPrivateData(kExtra, target, sizeof(IUnknown*), D3DSPD_IUNKNOWN) == S_OK);
+    assert(target->SetPrivateData(kExtra, source, sizeof(IUnknown*), D3DSPD_IUNKNOWN) == S_OK);
+    assert(texture_data == &cube && cube_data == &texture && texture.refs == 2 && cube.refs == 2);
+    size = sizeof(found); found = nullptr;
+    assert(source->GetPrivateData(kExtra, &found, &size) == S_OK && found == target);
+    found->Release();
+    size = sizeof(found); found = nullptr;
+    assert(target->GetPrivateData(kExtra, &found, &size) == S_OK && found == source);
+    found->Release();
+    assert(target->FreePrivateData(kExtra) == S_OK && texture.refs == 1);
+    assert(target->Release() == 0);
+    router->RetireDormantForReset();
+    assert(cube.refs == 1 && !cube.destroyed); // native source still retains it
+    size = sizeof(found); found = nullptr;
+    assert(source->GetPrivateData(kExtra, &found, &size) == S_OK && found);
+    void* reacquired = nullptr;
+    assert(found->QueryInterface(IID_IDirect3DCubeTexture8, &reacquired) == S_OK && reacquired);
+    static_cast<IUnknown*>(reacquired)->Release(); found->Release();
+    assert(source->FreePrivateData(kExtra) == S_OK);
+    assert(source->Release() == 0 && router->Close() && texture.destroyed && cube.destroyed);
+    assert(native.Release() == 0 && facade.Release() == 0);
+}
 } // namespace
 
 int main() {
@@ -651,4 +713,5 @@ int main() {
     ResetRetiresDormantAndReconstructsParent();
     ConcurrentReacquisition();
     PrivateVertexTranslation();
+    PrivateResourceTranslation();
 }

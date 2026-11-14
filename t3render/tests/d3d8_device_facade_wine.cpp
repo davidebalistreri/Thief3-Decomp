@@ -393,8 +393,35 @@ bool ObservePrivateDataResources(IDirect3DDevice8* device, IDirect3DVertexBuffer
                 code(set), code(get), same ? 1u : 0u, parent ? 1u : 0u, code(freed));
     std::printf("private_data_index_alias set=0x%08lx get=0x%08lx same=%u parent=%u\n",
                 code(index_set), code(index_get), index_same ? 1u : 0u, index_parent ? 1u : 0u);
-    return SUCCEEDED(set) && SUCCEEDED(get) && SUCCEEDED(freed) && same && parent &&
-           SUCCEEDED(index_set) && SUCCEEDED(index_get) && index_same && index_parent;
+    if (FAILED(set) || FAILED(get) || FAILED(freed) || !same || !parent ||
+        FAILED(index_set) || FAILED(index_get) || !index_same || !index_parent) return false;
+
+    const GUID resource_key{0x3ee22a98, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
+    struct Target { IUnknown* value; const IID* iid; };
+    const Target targets[] = {{texture, &IID_IDirect3DTexture8}, {cube.value, &IID_IDirect3DCubeTexture8},
+        {volume_texture.value, &IID_IDirect3DVolumeTexture8}, {volume.value, &IID_IDirect3DVolume8},
+        {level.value, &IID_IDirect3DSurface8}, {back, &IID_IDirect3DSurface8}};
+    for (const auto& target : targets) {
+        if (FAILED(texture->SetPrivateData(resource_key, target.value, sizeof(IUnknown*), D3DSPD_IUNKNOWN))) return false;
+        ComPtr<IUnknown> found, typed;
+        DWORD found_size = sizeof(found.value);
+        if (FAILED(texture->GetPrivateData(resource_key, found.put(), &found_size)) || !found.value ||
+            found_size != sizeof(found.value) || !EqualIdentity(found.value, target.value) ||
+            FAILED(found->QueryInterface(*target.iid, reinterpret_cast<void**>(typed.put()))) ||
+            !EqualIdentity(typed.value, target.value) || FAILED(texture->FreePrivateData(resource_key))) return false;
+    }
+    // The application-created native texture/cube cycle is deliberately
+    // broken while both endpoints are still live, just as for native D3D8.
+    if (FAILED(texture->SetPrivateData(resource_key, cube.value, sizeof(IUnknown*), D3DSPD_IUNKNOWN)) ||
+        FAILED(cube->SetPrivateData(resource_key, texture, sizeof(IUnknown*), D3DSPD_IUNKNOWN))) return false;
+    ComPtr<IUnknown> cube_value, texture_value;
+    DWORD cube_size = sizeof(cube_value.value), texture_size = sizeof(texture_value.value);
+    if (FAILED(texture->GetPrivateData(resource_key, cube_value.put(), &cube_size)) ||
+        FAILED(cube->GetPrivateData(resource_key, texture_value.put(), &texture_size)) ||
+        !EqualIdentity(cube_value.value, cube.value) || !EqualIdentity(texture_value.value, texture) ||
+        FAILED(texture->FreePrivateData(resource_key)) || FAILED(cube->FreePrivateData(resource_key))) return false;
+    std::printf("private_resource_self_and_cross_aliases=PASS\n");
+    return true;
 }
 
 bool ObserveTranslatedPrivateLifetime(HWND window, bool facade_mode) {
@@ -422,14 +449,18 @@ bool ObserveTranslatedPrivateLifetime(HWND window, bool facade_mode) {
     ComPtr<IDirect3DTexture8> texture;
     ComPtr<IDirect3DVertexBuffer8> vertex;
     ComPtr<IDirect3DIndexBuffer8> index;
+    ComPtr<IDirect3DCubeTexture8> cube;
     if (FAILED(device->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, texture.put())) || !texture.value ||
         FAILED(device->CreateVertexBuffer(sizeof(Vertex), D3DUSAGE_WRITEONLY, kFvf, D3DPOOL_MANAGED, vertex.put())) ||
         !vertex.value || FAILED(device->CreateIndexBuffer(3 * sizeof(WORD), D3DUSAGE_WRITEONLY, D3DFMT_INDEX16,
-                                                          D3DPOOL_MANAGED, index.put())) || !index.value) return false;
+                                                          D3DPOOL_MANAGED, index.put())) || !index.value ||
+        FAILED(device->CreateCubeTexture(2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, cube.put())) || !cube.value) return false;
     const GUID key{0x3ee22a96, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
     const GUID index_key{0x3ee22a97, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
+    const GUID cube_key{0x3ee22a99, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
     if (FAILED(texture->SetPrivateData(key, vertex.value, sizeof(IUnknown*), D3DSPD_IUNKNOWN)) ||
-        FAILED(texture->SetPrivateData(index_key, index.value, sizeof(IUnknown*), D3DSPD_IUNKNOWN))) return false;
+        FAILED(texture->SetPrivateData(index_key, index.value, sizeof(IUnknown*), D3DSPD_IUNKNOWN)) ||
+        FAILED(texture->SetPrivateData(cube_key, cube.value, sizeof(IUnknown*), D3DSPD_IUNKNOWN))) return false;
     DWORD query_size = 0;
     if (FAILED(texture->GetPrivateData(key, nullptr, &query_size)) || query_size != sizeof(IUnknown*)) return false;
     IUnknown* untouched = reinterpret_cast<IUnknown*>(1);
@@ -442,7 +473,22 @@ bool ObserveTranslatedPrivateLifetime(HWND window, bool facade_mode) {
     IUnknown* const original_index = index.value;
     const ULONG index_remaining = index->Release();
     index.value = nullptr;
-    if (facade_mode && (remaining != 0 || index_remaining != 0)) return false;
+    IUnknown* const original_cube = cube.value;
+    const ULONG cube_remaining = cube->Release();
+    cube.value = nullptr;
+    if (facade_mode && (remaining != 0 || index_remaining != 0 || cube_remaining != 0)) return false;
+    ComPtr<IUnknown> cube_value;
+    ComPtr<IDirect3DCubeTexture8> recovered_cube;
+    ComPtr<IDirect3DDevice8> cube_parent;
+    DWORD cube_size = sizeof(cube_value.value);
+    if (FAILED(texture->GetPrivateData(cube_key, cube_value.put(), &cube_size)) || !cube_value.value ||
+        cube_size != sizeof(cube_value.value) || (facade_mode && cube_value.value != original_cube) ||
+        FAILED(cube_value->QueryInterface(IID_IDirect3DCubeTexture8, reinterpret_cast<void**>(recovered_cube.put()))) ||
+        !recovered_cube.value || FAILED(recovered_cube->GetDevice(cube_parent.put())) ||
+        !EqualIdentity(cube_parent.value, device.value)) return false;
+    cube_parent->Release(); cube_parent.value = nullptr;
+    recovered_cube->Release(); recovered_cube.value = nullptr;
+    cube_value->Release(); cube_value.value = nullptr;
     ComPtr<IUnknown> index_value;
     ComPtr<IDirect3DIndexBuffer8> recovered_index;
     ComPtr<IDirect3DDevice8> index_parent;
@@ -469,6 +515,15 @@ bool ObserveTranslatedPrivateLifetime(HWND window, bool facade_mode) {
     // Reset retires the dormant vertex facade; the live managed texture's
     // private data must reacquire it without exposing the native interface.
     if (FAILED(device->Reset(&pp))) return false;
+    cube_size = sizeof(cube_value.value);
+    if (FAILED(texture->GetPrivateData(cube_key, cube_value.put(), &cube_size)) || !cube_value.value ||
+        cube_size != sizeof(cube_value.value) ||
+        FAILED(cube_value->QueryInterface(IID_IDirect3DCubeTexture8, reinterpret_cast<void**>(recovered_cube.put()))) ||
+        !recovered_cube.value || FAILED(recovered_cube->GetDevice(cube_parent.put())) ||
+        !EqualIdentity(cube_parent.value, device.value)) return false;
+    cube_parent->Release(); cube_parent.value = nullptr;
+    recovered_cube->Release(); recovered_cube.value = nullptr;
+    cube_value->Release(); cube_value.value = nullptr;
     index_size = sizeof(index_value.value);
     if (FAILED(texture->GetPrivateData(index_key, index_value.put(), &index_size)) || !index_value.value ||
         index_size != sizeof(index_value.value) ||

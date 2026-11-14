@@ -44,20 +44,20 @@ struct LastError final {
     void capture() { value = GetLastError(); }
 };
 
-struct PrivateBufferPin final {
+struct PrivateObjectPin final {
     IUnknown* native = nullptr; // borrowed; kept alive by guard
     IUnknown* guard = nullptr; // owned facade reference
     t3render::buffers::PrivateDataKind kind = t3render::buffers::PrivateDataKind::Blob;
-    ~PrivateBufferPin() { if (guard) { LastError error; guard->Release(); } }
-    PrivateBufferPin() = default;
-    PrivateBufferPin(const PrivateBufferPin&) = delete;
-    PrivateBufferPin& operator=(const PrivateBufferPin&) = delete;
+    ~PrivateObjectPin() { if (guard) { LastError error; guard->Release(); } }
+    PrivateObjectPin() = default;
+    PrivateObjectPin(const PrivateObjectPin&) = delete;
+    PrivateObjectPin& operator=(const PrivateObjectPin&) = delete;
 };
 
 // Only deliberately recognized buffer facades can cross this bridge.
 // No callback is invoked with the private-data or router mutex held.
 struct PrivateBufferBridge {
-    virtual bool Pin(const void* candidate, PrivateBufferPin& pin) noexcept = 0;
+    virtual bool Pin(const void* candidate, PrivateObjectPin& pin) noexcept = 0;
     // Consumes a successful native GetPrivateData +1, including on failure.
     virtual IUnknown* Adopt(t3render::buffers::PrivateDataKind kind, IUnknown* native) noexcept = 0;
     virtual ~PrivateBufferBridge() = default;
@@ -93,6 +93,7 @@ struct Entry {
     virtual bool TryRevive() noexcept = 0;
     virtual bool Dormant() const noexcept = 0;
     virtual IUnknown* Unknown() noexcept = 0;
+    virtual IUnknown* NativeUnknown() noexcept = 0;
     virtual IDirect3DSurface8* NativeSurface() noexcept = 0;
     virtual IDirect3DBaseTexture8* NativeTexture() noexcept = 0;
     virtual void DestroyDormant() noexcept = 0;
@@ -117,6 +118,47 @@ struct State {
 template<class Interface> class Wrapper;
 template<class Interface>
 Interface* Adopt(const std::shared_ptr<State>& state, Interface* native, Kind kind) noexcept;
+HRESULT MapContainer(const std::shared_ptr<State>& state, REFIID iid, IUnknown* native, void** output) noexcept;
+
+inline t3render::buffers::PrivateDataKind PrivateKind(Kind kind) noexcept {
+    using K = t3render::buffers::PrivateDataKind;
+    switch (kind) {
+        case Kind::Surface: return K::Surface;
+        case Kind::Texture: return K::Texture;
+        case Kind::Cube: return K::Cube;
+        case Kind::VolumeTexture: return K::VolumeTexture;
+        case Kind::Volume: return K::Volume;
+        case Kind::SwapChain: return K::SwapChain;
+    }
+    return K::Blob;
+}
+
+inline const IID* PrivateResourceIid(t3render::buffers::PrivateDataKind kind) noexcept {
+    using K = t3render::buffers::PrivateDataKind;
+    switch (kind) {
+        case K::Surface: return &IID_IDirect3DSurface8;
+        case K::Texture: return &IID_IDirect3DTexture8;
+        case K::Cube: return &IID_IDirect3DCubeTexture8;
+        case K::VolumeTexture: return &IID_IDirect3DVolumeTexture8;
+        case K::Volume: return &IID_IDirect3DVolume8;
+        case K::SwapChain: return &IID_IDirect3DSwapChain8;
+        default: return nullptr;
+    }
+}
+
+// Recognize only a live wrapper from this router, by pointer lookup; never
+// dereference an unknown candidate or call COM while holding the map lock.
+inline bool PinPrivateResource(const std::shared_ptr<State>& state, const void* candidate,
+                               PrivateObjectPin& pin) noexcept {
+    if (!candidate) return false;
+    std::lock_guard<std::mutex> lock(state->mutex);
+    const auto found = state->wrappers.find(const_cast<void*>(candidate));
+    if (state->closing || found == state->wrappers.end() || !found->second->TryAddRef()) return false;
+    pin.guard = found->second->Unknown();
+    pin.native = found->second->NativeUnknown();
+    pin.kind = PrivateKind(found->second->kind);
+    return true;
+}
 
 template<class Interface>
 class CommonIdentity : public Interface, public Entry {
@@ -141,6 +183,7 @@ public:
     }
     bool Dormant() const noexcept override { return refs_.load(std::memory_order_acquire) == 0; }
     IUnknown* Unknown() noexcept override { return static_cast<Interface*>(this); }
+    IUnknown* NativeUnknown() noexcept override { return real_; }
     void DestroyDormant() noexcept override {
         Interface* native = real_;
         delete static_cast<Wrapper<Interface>*>(this);
@@ -213,12 +256,13 @@ public:
     }
     HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID guid, const void* data, DWORD size, DWORD flags) override {
         const GUID key = guid;
-        if (flags == D3DSPD_IUNKNOWN && size == sizeof(IUnknown*) && this->state_->bridge) {
+        if (flags == D3DSPD_IUNKNOWN && size == sizeof(IUnknown*)) {
             LastError error;
-            PrivateBufferPin pin;
-            if (!this->state_->bridge->Pin(data, pin) || !pin.native || !pin.guard ||
-                (pin.kind != t3render::buffers::PrivateDataKind::VertexBuffer &&
-                 pin.kind != t3render::buffers::PrivateDataKind::IndexBuffer)) return E_NOTIMPL;
+            PrivateObjectPin pin;
+            bool recognized = PinPrivateResource(this->state_, data, pin);
+            if (!recognized && this->state_->bridge) recognized = this->state_->bridge->Pin(data, pin);
+            if (!recognized || !pin.native || !pin.guard || pin.kind == t3render::buffers::PrivateDataKind::Blob)
+                return E_NOTIMPL;
             error.restore();
             const HRESULT hr = private_blobs_.SetTyped(key, pin.kind,
                 [&] { return this->real_->SetPrivateData(key, pin.native, size, flags); });
@@ -232,7 +276,8 @@ public:
         return private_blobs_.GetTyped(key, [&](t3render::buffers::PrivateDataKind kind) {
             if (kind == t3render::buffers::PrivateDataKind::Blob)
                 return this->real_->GetPrivateData(key, data, size);
-            if (!this->state_->bridge) return E_NOTIMPL;
+            const IID* resource_iid = PrivateResourceIid(kind);
+            if (!resource_iid && !this->state_->bridge) return E_NOTIMPL;
             // A native resource pointer must never be exposed to the caller.
             // Use local storage even for short buffers or a null size pointer.
             IUnknown* native = nullptr;
@@ -243,7 +288,13 @@ public:
                 if (native) native->Release();
                 return E_FAIL;
             }
-            IUnknown* mapped = this->state_->bridge->Adopt(kind, native);
+            IUnknown* mapped = nullptr;
+            if (resource_iid) {
+                void* result = nullptr;
+                const HRESULT mapped_hr = MapContainer(this->state_, *resource_iid, native, &result);
+                if (FAILED(mapped_hr)) return E_FAIL;
+                mapped = static_cast<IUnknown*>(result);
+            } else mapped = this->state_->bridge->Adopt(kind, native);
             if (!mapped) return E_FAIL;
             std::memcpy(data, &mapped, sizeof(mapped));
             return hr;
@@ -272,7 +323,6 @@ public:
     DWORD STDMETHODCALLTYPE GetLevelCount() override { return this->real_->GetLevelCount(); }
 };
 
-HRESULT MapContainer(const std::shared_ptr<State>& state, REFIID iid, IUnknown* native, void** output) noexcept;
 
 template<>
 class Wrapper<IDirect3DSurface8> final : public Common<IDirect3DSurface8> {

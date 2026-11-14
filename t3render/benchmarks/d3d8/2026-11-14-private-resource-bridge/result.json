@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_private_resource_bridge",
+  "date": "2026-11-14",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "c9b34ac9769c8b6756885c5b7dba85656bd97378d435e305509c1c93c8ed5c21",
+    "t3render/src/buffer_proxy.cpp": "480d3dabc8263834cb651a660adddd0d57079ffe31dcfdd9306255ae514a0a8f",
+    "t3render/src/buffer_proxy.hpp": "eca73326aad67e878bfbb450bdb8d2d7fb3ab33fad1fb640912ef3fb03ca597b",
+    "t3render/src/private_blob.hpp": "171fd953627eb688fd7178069e380ee2e270612a049991a7cad7816767b2d0c6",
+    "t3render/ir/buffer_registry.cpp": "9e24931212d54e0ee58b7be7313a85510e9fc867f3a3b20297eff3e1f6138b84",
+    "t3render/ir/buffer_shadow.cpp": "9cfed54a6fcf4718e80fd1d8301a8afa5f84852ac70b428938b06d1e64cddafe",
+    "t3render/tests/d3d8_resource_facade.hpp": "e583b3b48698936d479eb32fac3b75dd0d0adcd230d51919205b7fc93dd659ca",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "21bdd67358220b05c452d35c84f105ef2a599328490784fe9eeba56d71ce9b54",
+    "t3render/tests/d3d8_device_facade.hpp": "db2ac8acaa8a08873d14ad7fa9404f7b04f4b61e69b6976f193aeaa95aab43b0",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "dd5ff2540d1d5ac211ea1bcfb8ad315b1d3d5a31fa5fbc20e8db440c24e4685a",
+    "t3render/tests/d3d8_resource_facade_test.cpp": "1463ae256138feee1199a6dd01a505af3c3d9ce09fa56b23da3a816c5db8f0c4",
+    "t3render/tests/buffer_proxy_test.cpp": "ccd6df0e8c62fb2e5371b33d772e82a630ad7a9b8a029ff88314c8bb385ff34e",
+    "t3render/tests/private_blob_test.cpp": "85ca66ac999c53ca2aff4c33b503a314740412c83c91a48fbf8500a81b77ac31",
+    "t3render/tests/test_d3d8_device_facade_runner.py": "abfc4cc2221474ab08ed7ea3a259e885b4397542ccf1e50ab41b7fdc0c0a48e9",
+    "t3render/tools/run_d3d8_device_facade.py": "8c022eca13884ee31c3d5016f4d67858232af367030eaf8f8ba346e0057e3ef7"
+  },
+  "fixture_sha256": "ee96688430b3c634aa6638455fc3690b8f38a49206d937cd500d29ff0e920f8e",
+  "result": {
+    "resource_targets": [
+      "texture",
+      "cube",
+      "volume_texture",
+      "volume",
+      "surface",
+      "backbuffer"
+    ],
+    "texture_self_reference_freed": true,
+    "texture_cube_cycle_freed": true,
+    "cube_reacquired_after_dormancy_and_reset": true,
+    "vb_ib_reacquired_after_dormancy_and_reset": true,
+    "close_without_free_on_acyclic_references": true,
+    "parity_records_each": 159,
+    "rgb_ppm_sha256_both": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+    "baseline_log_sha256": "92168c18add53cd7d13ee6ce6abad644da10e62625bfadbc6aa7699cb779b416",
+    "facade_log_sha256": "9fbc5c1ade9edf066b2c080ee9859279530b204eef785a0ce32271d08fcabddc"
+  },
+  "limitations": [
+    "Isolated fixture only; not integrated into the proxy or TDS.",
+    "Buffer facades as private-data sources, external IUnknown and cross-device inputs remain unsupported.",
+    "Swapchain as private-data target and general runtime concurrency remain unverified.",
+    "Dormant source retirement may lose provenance; unknown GUIDs and overlapping calls fail closed.",
+    "Dormant native resources can outlive their native-only counterparts; application-created native COM cycles still require breaking.",
+    "One Wine runtime; native Windows, TDS, alpha and gameplay parity remain untested."
+  ]
+}

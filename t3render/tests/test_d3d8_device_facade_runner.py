@@ -27,6 +27,7 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
         lines.extend(f"private_data kind={kind} {private}" for kind in probe.PRIVATE_KINDS)
         lines.append("private_data_alias set=0x00000000 get=0x00000000 same=1 parent=1 free=0x00000000")
         lines.append("private_data_index_alias set=0x00000000 get=0x00000000 same=1 parent=1")
+        lines.append("private_resource_self_and_cross_aliases=PASS")
         lines.append("private_lifetime_native_dependent_release=PASS" if mode == "baseline" else
                      "private_lifetime_naive_cycle_and_cleanup=PASS")
         lines.append("private_translated_lifetime=PASS")
@@ -105,6 +106,11 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
             index_alias = next(line for line in original if line.startswith("private_data_index_alias "))
             for changed in ([line for line in original if line != index_alias], original + [index_alias],
                             [line.replace(index_alias, index_alias.replace("parent=1", "parent=0")) for line in original]):
+                with self.subTest(mode=mode), self.assertRaises(probe.RunError):
+                    self.inspect(changed, mode, resource_facade=True)
+            resources = "private_resource_self_and_cross_aliases=PASS"
+            for changed in ([line for line in original if line != resources], original + [resources],
+                            [line.replace(resources, "private_resource_self_and_cross_aliases=FAIL") for line in original]):
                 with self.subTest(mode=mode), self.assertRaises(probe.RunError):
                     self.inspect(changed, mode, resource_facade=True)
             lifetime = next(line for line in original if line.startswith("private_lifetime_"))

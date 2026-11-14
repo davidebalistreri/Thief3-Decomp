@@ -94,6 +94,9 @@ def inspect_private_data(lines, mode):
     indices = [line for line in lines if line.startswith("private_data_index_alias ")]
     if indices != ["private_data_index_alias set=0x00000000 get=0x00000000 same=1 parent=1"]:
         raise RunError("private-data index-buffer alias observation is missing or unexpected")
+    if [line for line in lines if line.startswith("private_resource_self_and_cross_aliases=")] != [
+            "private_resource_self_and_cross_aliases=PASS"]:
+        raise RunError("private-data resource self/cross-reference observation is missing or conflicting")
     return observations
 
 
@@ -251,7 +254,7 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
     if resource_facade:
         result["limitations"] = ["Fixture only: not integrated with the proxy or TDS.",
                                  "Only selected 2D, cube, volume, surface, swapchain and buffer paths were exercised; other interfaces remain unverified.",
-                                 "Only known VB/IB IUnknown values from non-buffer resource facades are translated; other COM private data and unknown interfaces fail closed.",
+                                 "Only known same-device buffer/resource IUnknown values from non-buffer resource facades are translated; external COM values and unknown interfaces fail closed.",
                                  "One diagnostic intentionally stores a wrapped IUnknown on a borrowed native texture, then breaks the cycle; this is not an application path.",
                                  "Two reset scenarios were exercised; runtime concurrency and comprehensive state-block behavior remain untested.",
                                  "Six synthetic triangles and selected fixed-function states only; no gameplay parity."]

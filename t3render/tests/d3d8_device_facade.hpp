@@ -86,7 +86,7 @@ public:
     FixturePrivateBufferBridge(std::shared_ptr<t3render::buffers::BufferProxy> buffers,
                                IDirect3DDevice8* native, IDirect3DDevice8* facade) noexcept
         : buffers_(std::move(buffers)), native_(native), facade_(facade) {}
-    bool Pin(const void* candidate, t3render::resource_fixture::PrivateBufferPin& pin) noexcept override {
+    bool Pin(const void* candidate, t3render::resource_fixture::PrivateObjectPin& pin) noexcept override {
         bool vertex = false;
         pin.guard = buffers_->PinPrivateBuffer(native_, facade_, candidate, &pin.native, &vertex);
         pin.kind = vertex ? t3render::buffers::PrivateDataKind::VertexBuffer :

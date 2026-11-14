@@ -20,13 +20,13 @@ They do not retain the facade while dormant, and the facade closes the router
 at final release. Unsupported IIDs return `E_NOINTERFACE`, and failures can
 differ from native COM behavior.
 
-Private data support opaque blobs and, on non-buffer resource facades, a
-recognized live vertex- or index-buffer facade from the same device. The bridge pins the
-facade during Set, stores the native buffer in the native resource, and maps a
-native Get back to the facade using the buffer registry. It never stores the
-wrapper in native private data. Other `IUnknown` values, unknown GUIDs and
-unknown inputs return `E_NOTIMPL`. Buffer facades themselves still accept only
-opaque blobs. The wrapper tracks at most 64 GUIDs and refuses overlapping or
+Private data support opaque blobs and, on non-buffer resource facades, known
+live buffer or resource facades from the same device. The bridge pins the
+facade during Set, stores the native object in the native resource, and maps a
+native Get back to the facade using the registries. It never stores the
+wrapper in native private data. External `IUnknown` values, unknown GUIDs and
+cross-device or unknown inputs return `E_NOTIMPL`. Buffer facades themselves
+still accept only opaque blobs. The wrapper tracks at most 64 GUIDs and refuses overlapping or
 reentrant private-data calls. Failed writes or frees discard provenance. Reset
 retirement can discard a source wrapper's provenance even if the native
 resource survives. This subset assumes the fixture's closed boundary and is
@@ -129,6 +129,16 @@ from VB to IB, and checks both buffers after dormancy and a successful Reset
 with the private references still present during facade teardown. It has the
 same restrictions as the vertex-only experiment. Logs and PPMs are under
 `build/t3render-captures/2026-11-14-private-buffer-bridge-v2/`.
+
+The [resource bridge observation](../benchmarks/d3d8/2026-11-14-private-resource-bridge/result.json)
+adds texture, cube, volume texture, volume and surface targets. It checks a
+texture self-reference and a texture/cube cycle, explicitly freeing those
+references as required by native COM. A managed cube held only by a texture's
+private data was reacquired before and after Reset. Device/registry teardown
+completed with that native private reference still stored. Swapchain private
+targets, external COM objects, cross-device inputs, buffer sources and general
+runtime concurrency remain unverified or unsupported. Full local logs and PPMs
+are under `build/t3render-captures/2026-11-14-private-resource-bridge-v2/`.
 
 The later [state-block observation](../benchmarks/d3d8/2026-11-13-stateblock-facade/result.json)
 exercised Create, Capture, Begin/End, Apply and Delete on the combined facade.

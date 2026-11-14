@@ -28,6 +28,36 @@ cmake -S t3render -B build/t3render-mingw -G Ninja \
 cmake --build build/t3render-mingw
 ```
 
+### Experimental combined observer
+
+The normal proxy remains the default. Build the separate experimental facade
+with `-DT3RENDER_BUILD_EXPERIMENTAL_COMBINED_PROXY=ON` and target
+`t3render_experimental_combined_proxy`; its DLL is in
+`build/t3render-mingw/experimental_combined_proxy/`. Both a valid capture
+configuration and `T3RENDER_EXPERIMENTAL_COMBINED=1` are required to activate
+it. Set `T3RENDER_CAPTURE_BUFFERS=1`, `T3RENDER_CAPTURE_DECLARATIONS=1`,
+`T3RENDER_CAPTURE_VERTEX_PROGRAMS=1` and
+`T3RENDER_CAPTURE_VERTEX_CONSTANTS=1` to request the combined observations.
+
+This is a deliberately experimental COM boundary: unsupported interfaces,
+resource aliases, reset, private data, and runtime concurrency can change game
+behavior or invalidate evidence. A known state-block epoch begins at device
+creation; shader deletion and unrecognized state-block operations invalidate
+observations rather than trusting a reused handle. Reset retires this epoch.
+The trace is always marked non-replayable, and records unsafe or unavailable
+data rather than presenting it as confirmed. Texture contents are not captured.
+The proxy does not alter stealth data.
+
+For the hidden synthetic Highball smoke test and the limited DX12 replay, build
+the D3D8 UP fixture and DX12 replay targets too, then run
+`tools/run_synthetic_up_replay.py` with `--buffered --proxy-buffer-replay
+--experimental-combined` and the engine, bottle, build and new output paths.
+This checks one FVF triangle; the programmable-shader synchronized fixture is
+documented in [the resource facade notes](tests/README_resource_facade.md).
+Neither synthetic result establishes TDS compatibility or room replay.
+The [Highball result](benchmarks/d3d8/2026-11-14-experimental-combined-proxy/result.json)
+records the tested binary and matching RGB hashes.
+
 Add `-DT3RENDER_BUILD_SMOKE_TEST=ON` at configuration time to build a
 standalone D3D8 program in the `smoke/` subdirectory. It draws four synthetic
 triangles, checks one pixel of each and prints a backbuffer hash. Compare that

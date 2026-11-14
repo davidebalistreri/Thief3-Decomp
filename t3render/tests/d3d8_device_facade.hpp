@@ -96,9 +96,11 @@ public:
 #endif
     void ExternalObserved() noexcept override {
         const DWORD error = GetLastError();
-        buffers_->InvalidateDevice(native_);
 #ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
-        if (observer_) observer_->Invalidate();
+        if (observer_) observer_->Unsupported();
+        else buffers_->InvalidateDevice(native_);
+#else
+        buffers_->InvalidateDevice(native_);
 #endif
         SetLastError(error);
     }
@@ -189,6 +191,10 @@ public:
         const DWORD before = GetLastError();
         IDirect3DDevice8* native = native_;
         IDirect3D8* parent = factory_;
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+        SetCombinedObserver(nullptr);
+        owned_combined_observer_.reset();
+#endif
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
         if (resources_) {
             if (resources_->Close()) ++resource_facade_close_successes;
@@ -690,7 +696,7 @@ public:
     }
     HRESULT STDMETHODCALLTYPE DrawPrimitive(D3DPRIMITIVETYPE PrimitiveType,UINT StartVertex,UINT PrimitiveCount) override {
 #ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
-        if (combined_observer_) combined_observer_->Unsupported();
+        if (combined_observer_) return combined_observer_->DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount);
 #endif
         return native_->DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount);
     }
@@ -702,13 +708,14 @@ public:
     }
     HRESULT STDMETHODCALLTYPE DrawPrimitiveUP(D3DPRIMITIVETYPE primitive_type, UINT primitive_count, const void *data, UINT stride) override {
 #ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
-        if (combined_observer_) combined_observer_->Unsupported();
+        if (combined_observer_) return combined_observer_->DrawPrimitiveUP(primitive_type, primitive_count, data, stride);
 #endif
         return native_->DrawPrimitiveUP(primitive_type, primitive_count, data, stride);
     }
     HRESULT STDMETHODCALLTYPE DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE primitive_type, UINT min_vertex_idx, UINT vertex_count, UINT primitive_count, const void *index_data, D3DFORMAT index_format, const void *data, UINT stride) override {
 #ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
-        if (combined_observer_) combined_observer_->Unsupported();
+        if (combined_observer_) return combined_observer_->DrawIndexedPrimitiveUP(primitive_type, min_vertex_idx, vertex_count,
+                                                                                  primitive_count, index_data, index_format, data, stride);
 #endif
         return native_->DrawIndexedPrimitiveUP(primitive_type, min_vertex_idx, vertex_count, primitive_count, index_data, index_format, data, stride);
     }
@@ -868,6 +875,17 @@ public:
 
 private:
     friend class DeviceFixtureFactory;
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+    bool AttachExperimentalObserver(const D3DPRESENT_PARAMETERS* presentation) noexcept {
+        if (!buffers_ || !presentation) return false;
+        auto observer = std::unique_ptr<CombinedCaptureObserver>(
+            new (std::nothrow) CombinedCaptureObserver(native_, *buffers_, *presentation));
+        if (!observer || !observer->valid() || !observer->EnableFixtureStateBlocks()) return false;
+        SetCombinedObserver(observer.get());
+        owned_combined_observer_ = std::move(observer);
+        return true;
+    }
+#endif
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
     DeviceFixture(IDirect3DDevice8* native, IDirect3D8* factory, IDirect3D8* native_factory,
                   std::shared_ptr<t3render::buffers::BufferProxy> buffers, bool retain_resources,
@@ -958,6 +976,9 @@ private:
 #ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
     CombinedCaptureObserver* combined_observer_ = nullptr;
     std::weak_ptr<FixturePrivateObjectBridge> combined_bridge_;
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+    std::unique_ptr<CombinedCaptureObserver> owned_combined_observer_;
+#endif
 #endif
 };
 
@@ -984,6 +1005,14 @@ public:
         SetLastError(before);
         return facade;
     }
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+    static IDirect3D8* AdoptExperimental(IDirect3D8* native,
+                                         std::shared_ptr<t3render::buffers::BufferProxy> buffers) noexcept {
+        auto* facade = static_cast<DeviceFixtureFactory*>(AdoptBuffers(native, std::move(buffers), false, false, true));
+        if (facade) facade->auto_combined_observer_ = true;
+        return facade;
+    }
+#endif
 #endif
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** output) override {
         if (!output) return E_POINTER;
@@ -1029,6 +1058,13 @@ public:
         }
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
         if (!facade->resources_) {
+            facade->Release();
+            SetLastError(after_native);
+            return E_OUTOFMEMORY;
+        }
+#endif
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+        if (auto_combined_observer_ && !facade->AttachExperimentalObserver(presentation)) {
             facade->Release();
             SetLastError(after_native);
             return E_OUTOFMEMORY;
@@ -1085,6 +1121,9 @@ private:
     bool retain_buffers_ = true;
     bool preserve_buffer_shadows_ = false;
 #endif
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+    bool auto_combined_observer_ = false;
+#endif
     FixtureReferenceCount refs_;
 };
 
@@ -1113,6 +1152,12 @@ inline IDirect3D8* CreatePersistentEagerFacadeFactory(IDirect3D8* native,
                                                       std::shared_ptr<t3render::buffers::BufferProxy> buffers) noexcept {
     return DeviceFixtureFactory::AdoptBuffers(native, std::move(buffers), false, false, true);
 }
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+inline IDirect3D8* CreateExperimentalCombinedFacadeFactory(IDirect3D8* native,
+                                                           std::shared_ptr<t3render::buffers::BufferProxy> buffers) noexcept {
+    return DeviceFixtureFactory::AdoptExperimental(native, std::move(buffers));
+}
+#endif
 #endif
 #endif
 

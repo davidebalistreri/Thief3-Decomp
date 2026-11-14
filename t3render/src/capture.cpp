@@ -59,6 +59,7 @@ struct CaptureState {
     bool history_requested = false;
     bool vertex_programs_requested = false;
     bool vertex_constants_requested = false;
+    bool experimental_facade = false;
     bool begun = false;
     bool had_reset = false;
     uint64_t frame = 0;
@@ -230,6 +231,7 @@ bool Open(CaptureState& s) {
         << kProgramObservationWords << ",\"words_per_frame\":" << kProgramFrameWords << '}';
     if (s.vertex_constants_requested) out << ",\"vertex_constant_capture\":{\"requested\":true,\"registers_per_observation\":"
         << kVertexConstantRegisters << ",\"words_per_frame\":" << kVertexConstantFrameWords << '}';
+    if (s.experimental_facade) out << ",\"experimental_facade\":{\"enabled\":true,\"identity_verified\":false,\"concurrency_verified\":false}";
     out << ",\"limitations\":["
         << "\"texture bytes and T3 asset names are not captured\","
         << "\"optional buffer shadows are bounded observations, not proof of driver input\","
@@ -1212,6 +1214,14 @@ bool CaptureConfigured() {
         Initialize(s);
         return s.enabled;
     } catch (...) { Fail(); return false; }
+}
+
+void CaptureExperimentalFacade() {
+    try {
+        auto& s = State();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (s.enabled && !s.complete && !s.begun && s.file == INVALID_HANDLE_VALUE) s.experimental_facade = true;
+    } catch (...) { Fail(); }
 }
 
 void CaptureDevice(IDirect3DDevice8* device, const D3DPRESENT_PARAMETERS* presentation) {

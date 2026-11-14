@@ -89,6 +89,29 @@ else()
 endif()
 set_target_properties(t3render PROPERTIES OUTPUT_NAME d3d8 PREFIX "")
 
+# Separate opt-in artifact for the experimental combined COM facade. The
+# standard DLL is unchanged; this DLL requires a runtime environment flag.
+option(T3RENDER_BUILD_EXPERIMENTAL_COMBINED_PROXY "Build the experimental combined facade proxy" OFF)
+if(T3RENDER_BUILD_EXPERIMENTAL_COMBINED_PROXY)
+  add_library(t3render_experimental_combined_proxy SHARED
+    src/proxy.cpp src/buffer_proxy.cpp src/vtable_layout.c src/capture.cpp ${t3render_exports})
+  target_compile_features(t3render_experimental_combined_proxy PRIVATE cxx_std_17)
+  target_compile_definitions(t3render_experimental_combined_proxy PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+    T3RENDER_EXPERIMENTAL_COMBINED_PROXY)
+  target_link_libraries(t3render_experimental_combined_proxy PRIVATE dxguid t3render_ir)
+  if(MSVC)
+    target_compile_options(t3render_experimental_combined_proxy PRIVATE /W4 /utf-8)
+    set_property(TARGET t3render_experimental_combined_proxy PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  else()
+    target_compile_options(t3render_experimental_combined_proxy PRIVATE -Wall -Wextra)
+    target_link_options(t3render_experimental_combined_proxy PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
+  set_target_properties(t3render_experimental_combined_proxy PROPERTIES OUTPUT_NAME d3d8 PREFIX ""
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/experimental_combined_proxy"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/experimental_combined_proxy"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/experimental_combined_proxy")
+endif()
+
 # A separate, explicit test artifact only. The normal t3render target above is
 # always compiled with conservative state-block invalidation and is unchanged
 # by this option. Never deploy this DLL to TDS.

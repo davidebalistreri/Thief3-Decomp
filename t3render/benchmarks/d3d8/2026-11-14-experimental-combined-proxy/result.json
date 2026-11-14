@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "status": "PASS",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86",
+  "test": "experimental_combined_proxy_buffered_fvf_and_dx12",
+  "result": {
+    "fixture_sha256": "912bd16c5a060690b50c4d7959d114f68d43a2a7e7dd5ca2f5139b2828de6127",
+    "proxy_sha256": "633f0d2ace10acca3c74850a472fb8ba8f73f6edf32ea7542866e0877cd6a551",
+    "dx12_replay_sha256": "4d126991d28869530e23729f89bf3cc03a25637d194a7f8461823346903979c2",
+    "baseline_capture_dx12_rgb_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679",
+    "captured_vb_ib_and_constants": true,
+    "buffer_and_shader_draw_windows_stable": true,
+    "fvf": 68,
+    "programmable_shader_tested": false,
+    "tds_tested": false
+  },
+  "limitations": [
+    "One synthetic indexed FVF triangle; no general frame replay or gameplay parity.",
+    "The separately built facade is experimental; COM aliases and runtime concurrency are not fully validated.",
+    "Texture content is not captured. The synchronized programmable shader fixture is a separate test."
+  ],
+  "local_results": "build/t3render-captures/2026-11-14-experimental-combined-proxy-final"
+}

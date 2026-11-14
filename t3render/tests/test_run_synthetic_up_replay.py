@@ -27,7 +27,9 @@ print(json.dumps({{"kind": kind, "cwd": os.getcwd(), "args": args,
  "overrides": os.environ.get("WINEDLLOVERRIDES"), "dllpath": os.environ.get("WINEDLLPATH_PREPEND"),
  "inherited": [os.environ.get(x) for x in ("WINEDLLPATH", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH")],
  "capture_key": os.environ.get("T3RENDER_CAPTURE_KEY"), "frame": os.environ.get("T3RENDER_CAPTURE_FRAME"),
- "buffers": os.environ.get("T3RENDER_CAPTURE_BUFFERS")}}), flush=True)
+ "buffers": os.environ.get("T3RENDER_CAPTURE_BUFFERS"),
+ "combined": os.environ.get("T3RENDER_EXPERIMENTAL_COMBINED"),
+ "constants": os.environ.get("T3RENDER_CAPTURE_VERTEX_CONSTANTS")}}), flush=True)
 if os.environ.get("FAKE_TIMEOUT") == kind:
     time.sleep(30)
 if os.environ.get("FAKE_FAIL") == kind:
@@ -133,6 +135,7 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
         (self.bottle / "bottle.json").write_text('{"keep": true}\n')
         write_pe(self.build / "d3d8_up_fixture/t3render_d3d8_up_fixture.exe")
         write_pe(self.build / "d3d8.dll", dll=True)
+        write_pe(self.build / "experimental_combined_proxy/d3d8.dll", dll=True)
         write_pe(self.build / "t3render_d3d12_replay_up.exe")
         self.trace = self.root / "fixture.jsonl"
         self.trace.write_text("".join(json.dumps(event) + "\n" for event in fixture()), encoding="utf-8")
@@ -159,7 +162,7 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
 
     def run_runner(self, *, output=None, extra_env=None, timeout="5", engine=None, bottle=None, build=None,
                    camera=False, buffered=False, verify_buffer_readback=False, replay_buffer_snapshot=False,
-                   wrapped_buffers=False, proxy_buffer_replay=False, multi_camera=False):
+                   wrapped_buffers=False, proxy_buffer_replay=False, multi_camera=False, experimental_combined=False):
         env = os.environ.copy()
         env.update({"FAKE_TRACE": str(self.trace), "FAKE_TRACE_CAMERA": str(self.camera_trace),
                     "FAKE_TRACE_MULTI": str(self.multi_trace),
@@ -170,7 +173,7 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
                     "WINEDLLPATH_PREPEND": "poison/dxmt", "DYLD_LIBRARY_PATH": "poison",
                     "DYLD_FRAMEWORK_PATH": "poison", "T3RENDER_CAPTURE_KEY": "F11",
                     "T3RENDER_CAPTURE_FRAME": "12", "T3RENDER_CAPTURE_PATH": "poison",
-                    "T3RENDER_CAPTURE_BUFFERS": "poison"})
+                    "T3RENDER_CAPTURE_BUFFERS": "poison", "T3RENDER_EXPERIMENTAL_COMBINED": "poison"})
         env.update(extra_env or {})
         args = [sys.executable, "-B", str(RUNNER), "--engine", str(engine or self.engine),
                                "--bottle", str(bottle or self.bottle), "--build-dir", str(build or self.build),
@@ -189,6 +192,8 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
             args.append("--replay-buffer-snapshot")
         if proxy_buffer_replay:
             args.append("--proxy-buffer-replay")
+        if experimental_combined:
+            args.append("--experimental-combined")
         return subprocess.run(args, env=env, text=True, capture_output=True, timeout=20)
 
     def manifest(self):
@@ -250,6 +255,28 @@ class SyntheticReplayRunnerTests(unittest.TestCase):
         self.assertIn("trace_buffer_to_up_packet.py", (self.output / "convert.log").read_text())
         self.assertTrue((self.output / "packet.txt").read_text().startswith("T3R_UP_V1\n"))
         self.assertTrue(any("does not validate TDS" in item for item in manifest["limitations"]))
+
+    def test_combined_proxy_requires_observations_and_isolates_flag(self):
+        events = [json.loads(line) for line in self.proxy_trace.read_text().splitlines()]
+        events[0]["experimental_facade"] = {"enabled": True}
+        events[0]["replayable"] = False
+        events[4]["vertex_constants"] = {"status": "sampled"}
+        events[5]["shader_stable"] = True
+        self.proxy_trace.write_text("".join(json.dumps(e) + "\n" for e in events))
+        result = self.run_runner(buffered=True, proxy_buffer_replay=True, experimental_combined=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.manifest()["experimental_combined"])
+        self.assertIsNone(self.log("baseline")["combined"])
+        self.assertEqual(self.log("capture")["combined"], "1")
+        self.assertEqual(self.log("capture")["constants"], "1")
+        self.assertIsNone(self.log("replay")["combined"])
+        self.assertIn("--hidden", self.log("capture")["args"])
+        events[5]["shader_stable"] = False
+        self.proxy_trace.write_text("".join(json.dumps(e) + "\n" for e in events))
+        output = self.root / "unstable-combined"
+        result = self.run_runner(buffered=True, proxy_buffer_replay=True, experimental_combined=True, output=output)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads((output / "result.json").read_text())["failed_stage"], "trace_validation")
 
     def test_proxy_buffer_replay_rejects_unavailable_or_unstable_observations(self):
         cases = ("missing_vertex", "missing_index", "unstable", "missing_capability", "malformed")

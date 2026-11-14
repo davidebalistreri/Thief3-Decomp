@@ -306,6 +306,7 @@ int main(int argc, char** argv) {
     presentation.BackBufferHeight = 720;
     presentation.Windowed = TRUE;
     const bool configured = t3render::CaptureConfigured();
+    if (scenario == "experimental_header") t3render::CaptureExperimentalFacade();
     t3render::CaptureDevice(&device, &presentation);
     t3render::CaptureDevice(&unrelated, &presentation);
     const auto draw = MakeDraw(t3render::DrawKind::Primitive);

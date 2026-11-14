@@ -97,6 +97,13 @@ class CaptureHostTests(unittest.TestCase):
         self.assertTrue(events[-2]["had_reset"])
         self.assertEqual(events[-2]["draws"], 4)
 
+    def test_experimental_facade_is_explicitly_marked_partial(self):
+        self.run_capture("experimental_header", frame="1")
+        header = self.records()[0]
+        self.assertFalse(header["replayable"])
+        self.assertEqual(header["experimental_facade"], {"enabled": True, "identity_verified": False,
+                                                         "concurrency_verified": False})
+
     def test_reentrant_device_operation_abandons_partial_frame(self):
         for scenario in ("shader_abandon", "shader_abandon_all"):
             with self.subTest(scenario=scenario):

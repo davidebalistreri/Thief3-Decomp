@@ -7,6 +7,13 @@
 
 #include <windows.h>
 
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+#define T3RENDER_BUFFER_FACADE_FIXTURE
+#define T3RENDER_RESOURCE_FACADE_FIXTURE
+#define T3RENDER_COMBINED_CAPTURE_FIXTURE
+#include "../tests/d3d8_device_facade.hpp"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -1324,6 +1331,21 @@ extern "C" IDirect3D8* WINAPI Proxy_Direct3DCreate8(UINT sdk_version) {
     error.Capture();
     bool configured = false;
     Observe([&] { CaptureQueryScope scope(nullptr); configured = t3render::CaptureConfigured(); });
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+    wchar_t option[2]{};
+    const bool combined = GetEnvironmentVariableW(L"T3RENDER_EXPERIMENTAL_COMBINED", option, 2) == 1 && option[0] == L'1';
+    if (factory && configured && combined) {
+        auto manager = t3render::buffers::BufferProxy::Create(ReadBufferSnapshot, nullptr);
+        auto* facade = manager ? t3render::fixture::CreateExperimentalCombinedFacadeFactory(factory, manager) : nullptr;
+        if (facade) {
+            t3render::CaptureExperimentalFacade();
+            return facade;
+        }
+        t3render::CaptureAbandonDevice(nullptr);
+        Diagnostic("T3Render: experimental facade unavailable; returning the native factory without capture\n");
+        return factory;
+    }
+#endif
     if (configured) Observe([&] { EnableBufferObserver(); EnableDeclarationObserver(); });
     // Without a valid opt-in, there is no change to the returned object.
     if (factory && configured && !Bind(factory, false)) {

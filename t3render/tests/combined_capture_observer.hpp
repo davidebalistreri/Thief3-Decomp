@@ -1,10 +1,13 @@
 #pragma once
 
-// Isolated single-threaded fixture observer. This is not a complete device
-// boundary and must not be installed in TDS.
+// Experimental observer shared by the synthetic fixture and the separately
+// built opt-in proxy. The device boundary and runtime concurrency are not
+// proven; an experimental capture is diagnostic and may be incomplete.
 #include "prepared_buffer_capture.hpp"
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <mutex>
 #include <unordered_map>
 
 namespace t3render::fixture {
@@ -15,11 +18,13 @@ public:
     CombinedCaptureObserver(IDirect3DDevice8* native, buffers::BufferProxy& buffers,
                             const D3DPRESENT_PARAMETERS& presentation) noexcept
         : native_(native), buffers_(buffers), device_(shaders_.OpenDevice()) {
-        CaptureDevice(native_, &presentation);
+        if (writer_active_) { shaders_.MarkUnsafe(device_); deferred_abandon_ = true; }
+        else { WriterScope scope; CaptureDevice(native_, &presentation); }
     }
     ~CombinedCaptureObserver() {
         shaders_.CloseDevice(device_);
-        CaptureDeviceReleased(native_);
+        if (writer_active_) deferred_abandon_ = true;
+        else { WriterScope scope; CaptureDeviceReleased(native_); }
     }
     bool valid() const noexcept { return native_ && device_; }
     void Invalidate() noexcept { shaders_.Invalidate(device_); }
@@ -37,8 +42,12 @@ public:
     }
     ir::ShaderTicket BeginReset() noexcept {
         const DWORD before = GetLastError();
-        state_blocks_.clear();
-        state_blocks_enabled_ = false;
+        if (writer_active_) { Unsupported(); SetLastError(before); return {}; }
+        {
+            std::lock_guard<std::mutex> lock(state_blocks_mutex_);
+            state_blocks_.clear();
+            state_blocks_enabled_ = false;
+        }
         const auto ticket = shaders_.BeginReset(device_);
         SetLastError(before);
         return ticket;
@@ -47,30 +56,45 @@ public:
         const DWORD before = GetLastError();
         const bool stable = shaders_.EndReset(ticket, static_cast<std::uint32_t>(hr));
         reset_recovery_ = FAILED(hr) || !stable;
-        CaptureReset(native_, presentation, hr);
+        if (writer_active_) deferred_abandon_ = true;
+        else { WriterScope scope; CaptureReset(native_, presentation, hr); }
         SetLastError(before);
     }
     void Unsupported() noexcept {
         const DWORD before = GetLastError();
-        Invalidate();
-        buffers_.InvalidateDevice(native_);
-        CaptureAbandonDevice(native_);
+        if (writer_active_) {
+            shaders_.MarkUnsafe(device_);
+            deferred_abandon_ = true;
+        } else {
+            Invalidate();
+            buffers_.InvalidateDevice(native_);
+#ifndef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+            WriterScope scope;
+            CaptureAbandonDevice(native_);
+#endif
+        }
         SetLastError(before);
     }
     // Explicit fixture attestation: prior shader and state-block identities
     // were retired before this fully observed device epoch. Not a game API.
     bool EnableFixtureStateBlocks() noexcept {
+        std::lock_guard<std::mutex> lock(state_blocks_mutex_);
         if (!valid() || reset_recovery_ || state_blocks_enabled_ || !state_blocks_.empty()) return false;
         state_blocks_enabled_ = true;
         return true;
     }
     ir::ShaderTicket BeginStateBlock(StateBlockAction action, DWORD token, D3DSTATEBLOCKTYPE type) noexcept {
         const DWORD before = GetLastError();
-        bool allowed = state_blocks_enabled_ && !reset_recovery_ && action != StateBlockAction::Unsupported;
-        if (action == StateBlockAction::Create) allowed = allowed && type == D3DSBT_ALL;
-        else {
-            const auto found = state_blocks_.find(token);
-            allowed = allowed && found != state_blocks_.end() && found->second == shader_epoch_;
+        if (writer_active_) { Unsupported(); SetLastError(before); return {}; }
+        bool allowed;
+        {
+            std::lock_guard<std::mutex> lock(state_blocks_mutex_);
+            allowed = state_blocks_enabled_ && !reset_recovery_ && action != StateBlockAction::Unsupported;
+            if (action == StateBlockAction::Create) allowed = allowed && type == D3DSBT_ALL;
+            else {
+                const auto found = state_blocks_.find(token);
+                allowed = allowed && found != state_blocks_.end() && found->second == shader_epoch_;
+            }
         }
         const auto ticket = allowed ? shaders_.BeginSet(device_) : ir::ShaderTicket{};
         if (!ticket) Unsupported();
@@ -84,10 +108,14 @@ public:
             std::uint32_t value = 0;
             accepted = ReadMemory(nullptr, reinterpret_cast<std::uintptr_t>(output), &value, sizeof(value)) && value;
             if (accepted) {
-                try { accepted = state_blocks_.size() < 64 && state_blocks_.emplace(value, shader_epoch_).second; }
+                try {
+                    std::lock_guard<std::mutex> lock(state_blocks_mutex_);
+                    accepted = state_blocks_.size() < 64 && state_blocks_.emplace(value, shader_epoch_).second;
+                }
                 catch (...) { accepted = false; }
             }
         } else if (accepted && action == StateBlockAction::Delete) {
+            std::lock_guard<std::mutex> lock(state_blocks_mutex_);
             accepted = state_blocks_.erase(token) == 1;
         }
         if (!accepted) Unsupported();
@@ -96,6 +124,7 @@ public:
 
     HRESULT CreateVertexShader(const DWORD* declaration, const DWORD* program, DWORD* handle, DWORD usage) noexcept {
         const DWORD before = GetLastError();
+        if (writer_active_) { Unsupported(); SetLastError(before); return native_->CreateVertexShader(declaration, program, handle, usage); }
         const auto ticket = shaders_.BeginCreate(device_);
         auto declaration_snapshot = ir::ScanDeclaration(reinterpret_cast<std::uintptr_t>(declaration), ReadMemory, nullptr);
         auto program_snapshot = ir::ScanVertexShader11(reinterpret_cast<std::uintptr_t>(program), ReadMemory, nullptr, 1024);
@@ -110,6 +139,7 @@ public:
     }
     HRESULT SetVertexShader(DWORD value) noexcept {
         const DWORD before = GetLastError();
+        if (writer_active_) { Unsupported(); SetLastError(before); return native_->SetVertexShader(value); }
         const auto ticket = shaders_.BeginSet(device_);
         SetLastError(before);
         const HRESULT hr = native_->SetVertexShader(value);
@@ -120,9 +150,16 @@ public:
     }
     HRESULT DeleteVertexShader(DWORD value) noexcept {
         const DWORD before = GetLastError();
+        if (writer_active_) { Unsupported(); SetLastError(before); return native_->DeleteVertexShader(value); }
         // A deleted shader can remain reachable through a block or the
         // current binding. Do not trust later handle reuse in this epoch.
-        if (state_blocks_enabled_) { ++shader_epoch_; Unsupported(); }
+        bool invalidate = false;
+        {
+            std::lock_guard<std::mutex> lock(state_blocks_mutex_);
+            invalidate = state_blocks_enabled_;
+            if (invalidate) ++shader_epoch_;
+        }
+        if (invalidate) Unsupported();
         const auto ticket = shaders_.BeginDelete(device_, value);
         SetLastError(before);
         const HRESULT hr = native_->DeleteVertexShader(value);
@@ -133,6 +170,7 @@ public:
     }
     HRESULT SetVertexShaderConstant(DWORD reg, const void* data, DWORD count) noexcept {
         const DWORD before = GetLastError();
+        if (writer_active_) { Unsupported(); SetLastError(before); return native_->SetVertexShaderConstant(reg, data, count); }
         const auto ticket = shaders_.BeginSetConstants(device_);
         SetLastError(before);
         const HRESULT hr = native_->SetVertexShaderConstant(reg, data, count);
@@ -142,36 +180,77 @@ public:
         return hr;
     }
     HRESULT Present(const RECT* source, const RECT* dest, HWND window, const RGNDATA* dirty) noexcept {
+        if (writer_active_) {
+            const DWORD before = GetLastError(); Unsupported(); SetLastError(before);
+            return native_->Present(source, dest, window, dirty);
+        }
         const HRESULT hr = native_->Present(source, dest, window, dirty);
         const DWORD after = GetLastError();
-        CapturePresent(native_, hr);
+        { WriterScope scope; CapturePresent(native_, hr); }
         SetLastError(after);
         return hr;
     }
     HRESULT Clear(DWORD count, const D3DRECT* rectangles, DWORD flags, D3DCOLOR color, float depth, DWORD stencil) noexcept {
         const DWORD before = GetLastError();
-        const auto operation = CaptureClear(native_, count, rectangles, flags, color, depth, stencil);
+        if (writer_active_) { Unsupported(); SetLastError(before); return native_->Clear(count, rectangles, flags, color, depth, stencil); }
+        std::uint64_t operation;
+        { WriterScope scope; operation = CaptureClear(native_, count, rectangles, flags, color, depth, stencil); }
         SetLastError(before);
         const HRESULT hr = native_->Clear(count, rectangles, flags, color, depth, stencil);
         const DWORD after = GetLastError();
-        CaptureClearResult(native_, operation, hr);
+        { WriterScope scope; CaptureClearResult(native_, operation, hr); }
         SetLastError(after);
         return hr;
     }
     HRESULT DrawIndexed(D3DPRIMITIVETYPE type, UINT minimum, UINT vertices, UINT start, UINT count) noexcept {
+        DrawCall call{};
+        call.kind = DrawKind::IndexedPrimitive; call.primitive_type = type;
+        call.min_vertex_index = minimum; call.num_vertices = vertices;
+        call.start_index = start; call.primitive_count = count;
+        return Draw(call, [&] { return native_->DrawIndexedPrimitive(type, minimum, vertices, start, count); });
+    }
+    HRESULT DrawPrimitive(D3DPRIMITIVETYPE type, UINT start, UINT count) noexcept {
+        DrawCall call{};
+        call.kind = DrawKind::Primitive; call.primitive_type = type;
+        call.start_vertex = start; call.primitive_count = count;
+        return Draw(call, [&] { return native_->DrawPrimitive(type, start, count); });
+    }
+    HRESULT DrawPrimitiveUP(D3DPRIMITIVETYPE type, UINT count, const void* data, UINT stride) noexcept {
+        DrawCall call{};
+        call.kind = DrawKind::PrimitiveUP; call.primitive_type = type; call.primitive_count = count;
+        call.vertex_data = data; call.vertex_stride = stride;
+        return Draw(call, [&] { return native_->DrawPrimitiveUP(type, count, data, stride); });
+    }
+    HRESULT DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE type, UINT minimum, UINT vertices, UINT count,
+                                   const void* indices, D3DFORMAT format, const void* data, UINT stride) noexcept {
+        DrawCall call{};
+        call.kind = DrawKind::IndexedPrimitiveUP; call.primitive_type = type; call.primitive_count = count;
+        call.min_vertex_index = minimum; call.num_vertices = vertices; call.index_data = indices;
+        call.index_format = format; call.vertex_data = data; call.vertex_stride = stride;
+        return Draw(call, [&] { return native_->DrawIndexedPrimitiveUP(type, minimum, vertices, count, indices, format, data, stride); });
+    }
+private:
+    template<class Forward>
+    HRESULT Draw(DrawCall call, Forward forward) noexcept {
         const DWORD before = GetLastError();
-        if (reset_recovery_) {
+        if (writer_active_) { Unsupported(); SetLastError(before); return forward(); }
+        const bool recovering = reset_recovery_;
+#ifndef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+        if (recovering) {
             CaptureAbandonDevice(native_);
             SetLastError(before);
-            return native_->DrawIndexedPrimitive(type, minimum, vertices, start, count);
+            return forward();
         }
+#endif
         if (!CaptureWantsDraw(native_)) {
             SetLastError(before);
-            return native_->DrawIndexedPrimitive(type, minimum, vertices, start, count);
+            return forward();
         }
         const auto buffer_ticket = buffers_.BeginDraw(native_);
-        const auto shader_ticket = shaders_.BeginDraw(device_);
+        const auto shader_ticket = recovering ? ir::ShaderTicket{} : shaders_.BeginDraw(device_);
         ShaderSnapshot shader;
+        if (!shader_ticket) shader.declaration.status = recovering ? ir::ShaderObservationStatus::Unavailable
+                                                                    : ir::ShaderObservationStatus::Unsafe;
         shader.getter_result = native_->GetVertexShader(&shader.value);
         shader.constants_requested = true;
         shader.constants_count = CaptureVertexConstantCount(native_);
@@ -192,37 +271,50 @@ public:
         }
         HRESULT hr;
         std::uint64_t operation;
-        bool buffer_stable;
+        const bool buffered = call.kind == DrawKind::Primitive || call.kind == DrawKind::IndexedPrimitive;
+        const bool indexed = call.kind == DrawKind::IndexedPrimitive;
         {
-            PreparedBufferCapture prepared(buffers_, native_, buffer_ticket, true);
-            DrawCall call{};
-            call.kind = DrawKind::IndexedPrimitive; call.primitive_type = type;
-            call.min_vertex_index = minimum; call.num_vertices = vertices;
-            call.start_index = start; call.primitive_count = count; call.shader_snapshot = &shader;
-            prepared.Attach(call);
-            operation = CaptureDraw(native_, call);
+            PreparedBufferCapture prepared(buffers_, native_, buffered ? buffer_ticket : 0, indexed);
+            call.shader_snapshot = &shader;
+            if (buffered) prepared.Attach(call);
+            { WriterScope scope; operation = CaptureDraw(native_, call); }
             SetLastError(before);
-            hr = native_->DrawIndexedPrimitive(type, minimum, vertices, start, count);
+            hr = forward();
             const DWORD after = GetLastError();
-            buffer_stable = buffer_ticket && buffers_.EndDraw(native_, buffer_ticket);
+            const bool buffer_stable = buffer_ticket && buffers_.EndDraw(native_, buffer_ticket);
             const bool shader_stable = shader_ticket && shaders_.End(shader_ticket) && SUCCEEDED(hr) &&
                                        SUCCEEDED(shader.getter_result);
-            CaptureShaderDrawResult(native_, operation, hr, buffer_stable ? 1 : 0, shader_stable);
+            { WriterScope scope; CaptureShaderDrawResult(native_, operation, hr, buffered ? (buffer_stable ? 1 : 0) : -1, shader_stable); }
             SetLastError(after);
         }
         return hr;
     }
-private:
     static bool ReadMemory(void*, std::uintptr_t address, void* output, std::size_t size) noexcept {
         SIZE_T copied = 0;
         return address && output && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address),
                                                      output, size, &copied) && copied == size;
     }
+    class WriterScope final {
+    public:
+        WriterScope() noexcept { writer_active_ = true; }
+        ~WriterScope() {
+            const DWORD before = GetLastError();
+            writer_active_ = false;
+            if (deferred_abandon_) {
+                deferred_abandon_ = false;
+                CaptureAbandonDevice(nullptr);
+            }
+            SetLastError(before);
+        }
+    };
+    inline static thread_local bool writer_active_ = false;
+    inline static thread_local bool deferred_abandon_ = false;
     IDirect3DDevice8* native_; // borrowed from fixture device
     buffers::BufferProxy& buffers_;
     ir::VertexDeclarationRegistry shaders_;
     std::uint64_t device_;
-    bool reset_recovery_ = false; // sequential fixture only
+    std::atomic<bool> reset_recovery_{false};
+    std::mutex state_blocks_mutex_;
     bool state_blocks_enabled_ = false;
     std::uint64_t shader_epoch_ = 1;
     std::unordered_map<DWORD, std::uint64_t> state_blocks_;

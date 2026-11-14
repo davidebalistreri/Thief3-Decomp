@@ -426,6 +426,7 @@ int wmain(int argc, wchar_t** argv) {
     bool verify_buffer_readback = false;
     bool wrapped_buffers = false;
     bool writeonly_buffers = false;
+    bool hidden = false;
     for (int i = 1; i < argc; ++i) {
         if (!std::wcscmp(argv[i], L"--camera") && fixture == Fixture::Screen) fixture = Fixture::Camera;
         else if (!std::wcscmp(argv[i], L"--multi-camera") && fixture == Fixture::Screen) fixture = Fixture::MultiCamera;
@@ -433,11 +434,12 @@ int wmain(int argc, wchar_t** argv) {
         else if (!std::wcscmp(argv[i], L"--verify-buffer-readback") && !verify_buffer_readback) verify_buffer_readback = true;
         else if (!std::wcscmp(argv[i], L"--wrapped-buffers") && !wrapped_buffers) wrapped_buffers = true;
         else if (!std::wcscmp(argv[i], L"--writeonly-buffers") && !writeonly_buffers) writeonly_buffers = true;
+        else if (!std::wcscmp(argv[i], L"--hidden") && !hidden) hidden = true;
         else if (!std::wcscmp(argv[i], L"--buffer-snapshot") && !buffer_snapshot_path && i + 1 < argc &&
                  argv[i + 1][0] && std::wcsncmp(argv[i + 1], L"--", 2) != 0) buffer_snapshot_path = argv[++i];
         else if (!std::wcscmp(argv[i], L"--output") && !output && i + 1 < argc && argv[i + 1][0]) output = argv[++i];
         else {
-            std::fwprintf(stderr, L"usage: d3d8_up_fixture [--camera | --multi-camera | --buffered [--writeonly-buffers | --wrapped-buffers | --verify-buffer-readback] [--buffer-snapshot new-file]] [--output new-image.ppm]\n");
+            std::fwprintf(stderr, L"usage: d3d8_up_fixture [--camera | --multi-camera | --buffered [--writeonly-buffers | --wrapped-buffers | --verify-buffer-readback] [--buffer-snapshot new-file]] [--hidden] [--output new-image.ppm]\n");
             return 2;
         }
     }
@@ -481,8 +483,7 @@ int wmain(int argc, wchar_t** argv) {
         UnregisterClassW(name, instance);
         return 1;
     }
-    ShowWindow(window, SW_SHOWNOACTIVATE);
-    UpdateWindow(window);
+    if (!hidden) { ShowWindow(window, SW_SHOWNOACTIVATE); UpdateWindow(window); }
     const bool ok = Render(window, output, fixture, verify_buffer_readback, buffer_snapshot_path, wrapped_buffers, writeonly_buffers);
     DestroyWindow(window);
     UnregisterClassW(name, instance);

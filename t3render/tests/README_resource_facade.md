@@ -247,6 +247,33 @@ native Windows and TDS remain unverified. This is not a unified game facade;
 do not enable it in TDS. Full local logs, images and the synthetic trace are
 under `build/t3render-captures/2026-11-14-prepared-capture-verified/`.
 
+The subsequent [combined-observer experiment](../benchmarks/d3d8/2026-11-14-combined-observer-dx12/result.json)
+intercepts shader creation, binding, constant writes and an indexed draw in
+the resource facade fixture. Following state-block restore and wrapper
+retirement, one draw produced both exact VB/IB shadow bytes and candidate
+declaration/program plus sampled constants in the same trace. The writer
+recorded the clear, draw, paired stability flags and Present. An RGB image was
+read from the D3D8 backbuffer after that draw and before the same Present.
+
+The runner recognized this fixture's **one exact** `vs_1_1` program (`oPos =
+v0`, `oD0 = c0`), converted its indexed vertices and constant into a synthetic
+flat-color packet, then compared the offscreen DX12 RGB output with that
+synchronized D3D8 image. All pixels matched on Highball. The converter does not
+execute or generally translate shader bytecode; its three identity matrices
+represent this particular shader, not a captured camera. Depth, blending,
+textures and gameplay are not tested in that replay. The separate default
+fixture's 159 native/facade observations and RGB comparison are not that draw.
+The converter rejects unsupported states and requires fixture attestation.
+
+This observer is attached only inside the single-threaded fixture, after the
+state block was applied and detached before Reset. A sequential Reset,
+state-block call, or unsupported draw while attached abandons capture. It is not a complete
+facade or a transparent game observer: native alias escapes, other resource
+operations, concurrency and reentrancy remain open, and texture contents are not captured.
+The offline diagnostic IR is still incomplete and marks the frame unreplayable.
+Do not install the facade in TDS. Full local artifacts are under
+`build/t3render-captures/2026-11-14-combined-observer-dx12/`.
+
 The later [state-block observation](../benchmarks/d3d8/2026-11-13-stateblock-facade/result.json)
 exercised Create, Capture, Begin/End, Apply and Delete on the combined facade.
 After VB/IB wrappers became dormant and were reacquired, their `WRITEONLY`
@@ -275,8 +302,11 @@ python3 -B t3render/tools/run_d3d8_device_facade.py \
   --engine '/absolute/path/to/Highball/engine' \
   --bottle '/absolute/path/to/Highball/bottle' \
   --fixture '/absolute/path/to/t3sdk/build/t3render-mingw/d3d8_resource_facade_fixture/t3render_d3d8_resource_facade_fixture.exe' \
-  --output-dir '/absolute/path/to/new/output-directory' --resource-facade
+  --output-dir '/absolute/path/to/new/output-directory' --resource-facade \
+  --dx12-replay '/absolute/path/to/t3sdk/build/t3render-mingw/t3render_d3d12_replay_up.exe'
 ```
 
 The runner does not edit the game installation. Wine may update the bottle;
-do not run the fixture concurrently with TDS.
+do not run the fixture concurrently with TDS. Omit `--dx12-replay` to skip
+the synthetic DX12 comparison. Build that executable with
+`T3RENDER_BUILD_D3D12_REPLAY_UP=ON` before requesting it.

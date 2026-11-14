@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "test": "synthetic_combined_buffer_shader_dx12_replay",
+  "date": "2026-11-14",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "d95ac05704c5786316b703eaf3b72a24920bd1b6c2aaadfebf3d3a7cdd9e8227",
+    "t3render/src/buffer_proxy.cpp": "0ba4ac2e2cfde24a94bafcf420b326a7f9c71452323f676eff28b4d084b91c36",
+    "t3render/src/buffer_proxy.hpp": "c344ea074767aa0fcfd743c262de0438e2e89c63d43a21500e9958eba98ee916",
+    "t3render/src/capture.cpp": "2e5e2e58f86f6a7adb35d0fc0b644c06d1e54ab80ab38918063b4842777b3ae8",
+    "t3render/src/capture.hpp": "0ac95eb75d6684ba5bae1c393c2fc83d733a9d313438d101eef1be7208f63b6e",
+    "t3render/tests/prepared_buffer_capture.hpp": "d729a5e1ce04f3a043e0a93ea7a3984bf4cdcda3227a88299e83bcfcc488dc6d",
+    "t3render/tests/combined_capture_observer.hpp": "8f7ed758e219f91afd02ac0a422063501addf55b70b2311c4b19af35c9a6a83a",
+    "t3render/tests/d3d8_device_facade.hpp": "eada1bca72d6855599edc0136cf108b1431a4cdf1d49e142a59bbecc90fec8e5",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "a4768ed59abca126a38d027dcf96dc73026cb8cfd4e8896e54e4b0d71071c1f5",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "4848dbb7cb2b3c5b25b22547a95596c864519e682737c810e7288bbd1d18231b",
+    "t3render/tests/test_d3d8_device_facade_runner.py": "0f5b51de0fa5658642ce86cb83feab14b148f2560b7ef1777a0ef37ccfb21b02",
+    "t3render/tests/d3d12_replay_up.cpp": "bb0f334c68baa90cc51b58c367481af9363ec0c0127022d1ce4a63f8109087cb",
+    "t3render/tools/trace_to_up_packet.py": "69e107a87b88514a649f3963c2dc8a1c5e7fbc600a43a45a97fdbba986d59bcf",
+    "t3render/tools/run_d3d8_device_facade.py": "c8825cff3182d22f66c66767d0c586a24b0e896fdd2b1c027022b98c84d85f45"
+  },
+  "fixture_sha256": "68cefd8edc5c88c61d61b8c2dd0cdbedd5200299ea7f26ea510483d3455111b6",
+  "replay_executable_sha256": "4d126991d28869530e23729f89bf3cc03a25637d194a7f8461823346903979c2",
+  "result": {
+    "same_draw_vertex_bytes": 60,
+    "same_draw_index_bytes": 6,
+    "declaration": "candidate",
+    "program": "candidate_vs_1_1",
+    "constants": "sampled",
+    "buffer_and_shader_draw_windows_stable": true,
+    "synchronized_d3d8_and_dx12_rgb_identical": true,
+    "synchronized_d3d8_and_dx12_rgb_ppm_sha256": "5f46fcdfe5237797a1425f91d3abc19689c225e67e38b5ecbf7f25b39db16c85",
+    "fixture_packet_sha256": "2ac6be3e011f2a46b58dd5721b59065363f362b9848aad8846a3502b83c14c06",
+    "trace_sha256": "dcf2c99131a5e676845e97f2096e8b369449fbab0c6516b19c7a088742642b09",
+    "replay_log_sha256": "fdb3e1784756ad9b86493ac67c3c78970baece2cc1beb06604538124b8e4db88",
+    "default_fixture_parity_records_each": 159,
+    "default_fixture_ppm_sha256_both": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+    "offline_ir_replayable": false,
+    "offline_ir_extraction_complete": false
+  },
+  "limitations": [
+    "Fixture only: observer is not integrated into the proxy or TDS.",
+    "The fixture attaches the single-threaded observer after a state-block restore and detaches it before Reset; unsupported calls abandon capture.",
+    "Replay recognizes exactly one vs_1_1 program and substitutes its known output; it does not execute shader bytecode.",
+    "DX12 replay uses identity matrices to model this program, not a captured camera; no depth, blending, texture content or TDS gameplay.",
+    "Default fixture RGB parity is a separate draw from the synchronized shader image.",
+    "Native Windows, real TDS, alias escape coverage and runtime concurrency remain unverified."
+  ]
+}

@@ -61,6 +61,13 @@ trace contains observations, not all possible D3D8 operations; the converter
 requires explicit `--synthetic-fixture` attestation and rejects unsupported
 observed state, but cannot make arbitrary captures safe to replay.
 
+A later [combined resource-facade fixture](../tests/README_resource_facade.md)
+captures a single indexed draw with VB/IB shadows, one programmable vertex
+shader and constants in the same trace, together with a synchronized D3D8
+image. Its fixture-specific conversion and DX12 comparison matched RGB on
+Highball. It recognizes exactly one two-instruction shader and is not a general
+shader translator or replay of TDS.
+
 ## Build and host tests
 
 From the `t3sdk` directory, with an installed i686 MinGW-w64 compiler and

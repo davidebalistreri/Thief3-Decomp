@@ -9,6 +9,10 @@
 #include <atomic>
 #include <new>
 
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+#include "combined_capture_observer.hpp"
+#endif
+
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
 #include "../src/buffer_proxy.hpp"
 #endif
@@ -145,6 +149,10 @@ class DeviceFixtureFactory;
 
 class DeviceFixture final : public IDirect3DDevice8 {
 public:
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+    // Borrowed fixture-only observer; detach before it or this device dies.
+    void SetCombinedObserver(CombinedCaptureObserver* observer) noexcept { combined_observer_ = observer; }
+#endif
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
     // Test-only borrowed pointer for checking the buffer shadow registry; it
     // must never be handed to an application or used with wrapped inputs.
@@ -269,6 +277,9 @@ public:
         return native_->CreateAdditionalSwapChain(pPresentationParameters, pSwapChain);
     }
     HRESULT STDMETHODCALLTYPE Reset(D3DPRESENT_PARAMETERS * pPresentationParameters) override {
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        if (combined_observer_) combined_observer_->Unsupported();
+#endif
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
         const DWORD before = GetLastError();
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
@@ -295,6 +306,9 @@ public:
 #endif
     }
     HRESULT STDMETHODCALLTYPE Present(const RECT *src_rect, const RECT *dst_rect, HWND dst_window_override, const RGNDATA *dirty_region) override {
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        if (combined_observer_) return combined_observer_->Present(src_rect, dst_rect, dst_window_override, dirty_region);
+#endif
         return native_->Present(src_rect, dst_rect, dst_window_override, dirty_region);
     }
     HRESULT STDMETHODCALLTYPE GetBackBuffer(UINT BackBuffer,D3DBACKBUFFER_TYPE Type,IDirect3DSurface8 ** ppBackBuffer) override {
@@ -483,6 +497,9 @@ public:
         return native_->EndScene();
     }
     HRESULT STDMETHODCALLTYPE Clear(DWORD rect_count, const D3DRECT *rects, DWORD flags, D3DCOLOR color, float z, DWORD stencil) override {
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        if (combined_observer_) return combined_observer_->Clear(rect_count, rects, flags, color, z, stencil);
+#endif
         return native_->Clear(rect_count, rects, flags, color, z, stencil);
     }
     HRESULT STDMETHODCALLTYPE SetTransform(D3DTRANSFORMSTATETYPE state, const D3DMATRIX *matrix) override {
@@ -636,18 +653,33 @@ public:
         return native_->GetCurrentTexturePalette(PaletteNumber);
     }
     HRESULT STDMETHODCALLTYPE DrawPrimitive(D3DPRIMITIVETYPE PrimitiveType,UINT StartVertex,UINT PrimitiveCount) override {
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        if (combined_observer_) combined_observer_->Unsupported();
+#endif
         return native_->DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount);
     }
     HRESULT STDMETHODCALLTYPE DrawIndexedPrimitive(D3DPRIMITIVETYPE PrimitiveType,UINT minIndex,UINT NumVertices,UINT startIndex,UINT primCount) override {
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        if (combined_observer_) return combined_observer_->DrawIndexed(PrimitiveType, minIndex, NumVertices, startIndex, primCount);
+#endif
         return native_->DrawIndexedPrimitive(PrimitiveType, minIndex, NumVertices, startIndex, primCount);
     }
     HRESULT STDMETHODCALLTYPE DrawPrimitiveUP(D3DPRIMITIVETYPE primitive_type, UINT primitive_count, const void *data, UINT stride) override {
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        if (combined_observer_) combined_observer_->Unsupported();
+#endif
         return native_->DrawPrimitiveUP(primitive_type, primitive_count, data, stride);
     }
     HRESULT STDMETHODCALLTYPE DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE primitive_type, UINT min_vertex_idx, UINT vertex_count, UINT primitive_count, const void *index_data, D3DFORMAT index_format, const void *data, UINT stride) override {
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        if (combined_observer_) combined_observer_->Unsupported();
+#endif
         return native_->DrawIndexedPrimitiveUP(primitive_type, min_vertex_idx, vertex_count, primitive_count, index_data, index_format, data, stride);
     }
     HRESULT STDMETHODCALLTYPE ProcessVertices(UINT SrcStartIndex,UINT DestIndex,UINT VertexCount,IDirect3DVertexBuffer8 * pDestBuffer,DWORD Flags) override {
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        if (combined_observer_) combined_observer_->Unsupported();
+#endif
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
         if (buffers_) {
             const DWORD before = GetLastError();
@@ -666,18 +698,30 @@ public:
         return native_->ProcessVertices(SrcStartIndex, DestIndex, VertexCount, pDestBuffer, Flags);
     }
     HRESULT STDMETHODCALLTYPE CreateVertexShader(const DWORD *declaration, const DWORD *byte_code, DWORD *shader, DWORD usage) override {
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        if (combined_observer_) return combined_observer_->CreateVertexShader(declaration, byte_code, shader, usage);
+#endif
         return native_->CreateVertexShader(declaration, byte_code, shader, usage);
     }
     HRESULT STDMETHODCALLTYPE SetVertexShader(DWORD Handle) override {
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        if (combined_observer_) return combined_observer_->SetVertexShader(Handle);
+#endif
         return native_->SetVertexShader(Handle);
     }
     HRESULT STDMETHODCALLTYPE GetVertexShader(DWORD * pHandle) override {
         return native_->GetVertexShader(pHandle);
     }
     HRESULT STDMETHODCALLTYPE DeleteVertexShader(DWORD Handle) override {
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        if (combined_observer_) return combined_observer_->DeleteVertexShader(Handle);
+#endif
         return native_->DeleteVertexShader(Handle);
     }
     HRESULT STDMETHODCALLTYPE SetVertexShaderConstant(DWORD reg_idx, const void *data, DWORD count) override {
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        if (combined_observer_) return combined_observer_->SetVertexShaderConstant(reg_idx, data, count);
+#endif
         return native_->SetVertexShaderConstant(reg_idx, data, count);
     }
     HRESULT STDMETHODCALLTYPE GetVertexShaderConstant(DWORD Register,void * pConstantData,DWORD ConstantCount) override {
@@ -825,6 +869,9 @@ private:
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
     template<class Call>
     HRESULT StateBlockCall(Call call) {
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        if (combined_observer_) combined_observer_->Unsupported();
+#endif
         if (!buffers_) return call();
         FixtureBufferOperation operation(buffers_.get(), native_);
         const HRESULT hr = call();
@@ -855,6 +902,9 @@ private:
     std::shared_ptr<t3render::resource_fixture::Router> resources_;
 #endif
     FixtureReferenceCount refs_;
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+    CombinedCaptureObserver* combined_observer_ = nullptr;
+#endif
 };
 
 class DeviceFixtureFactory final : public IDirect3D8 {

@@ -49,6 +49,7 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
         if mode == "facade":
             lines.append("prepared_eager_buffer=PASS")
             lines.append("prepared_capture_draw=PASS")
+            lines.append("combined_capture_shader_pixel=PASS")
         lines.append("private_cross_device_cycle=PASS")
         lines.extend(("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                       "resource_facade_volume_roundtrips=PASS",
@@ -102,37 +103,92 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
 
     def test_prepared_trace_checks_bytes_and_paired_stability(self):
         vertices = b"".join(struct.pack("<ffffI", x, y, 0.5, 1, 0xffe43b3b)
-                            for x, y in ((12, 12), (116, 12), (12, 116)))
-        records = [{"event": "header", "replayable": False, "buffer_capture": {"requested": True}},
-                   {"event": "frame_begin", "frame": 1},
-                   {"event": "draw", "frame": 1, "op_id": 1, "call": "DrawIndexedPrimitive",
+                            for x, y in ((-0.8, 0.8), (0.8, 0.8), (-0.8, -0.8)))
+        records = [{"event": "header", "replayable": False, "operation_results": 1, "buffer_capture": {"requested": True},
+                    "declaration_capture": {"requested": True}, "vertex_program_capture": {"requested": True},
+                    "vertex_constant_capture": {"requested": True}},
+                   {"event": "frame_begin", "frame": 1,
+                    "presentation": {"width": 256, "height": 256, "format": 22, "multisample": 0,
+                                     "count": 1, "windowed": True}},
+                   {"event": "clear", "frame": 1, "op_id": 1, "rect_count": 0, "rects_status": "none",
+                    "rects": [], "flags": 1, "color": 0xff111318},
+                   {"event": "clear_result", "frame": 1, "op_id": 1, "hr": 0},
+                   {"event": "draw", "frame": 1, "op_id": 2, "call": "DrawIndexedPrimitive",
+                    "primitive_type": 4, "primitive_count": 1, "min_vertex_index": 0, "num_vertices": 3,
+                    "start_index": 0, "vertex_shader": 0xf0000002, "pixel_shader": 0,
+                    "viewport": {"x": 0, "y": 0, "width": 256, "height": 256, "min_z": 0, "max_z": 1},
+                    "render_states": dict(probe.trace_to_up_packet.REQUIRED_RENDER_STATES),
+                    "stages": [{"stage": 0, "texture": None, "states": dict(probe.trace_to_up_packet.STAGE0_STATES)},
+                               {"stage": 1, "texture": None, "states": {"1": 1}}],
+                    "streams": [{"stream": 0, "hr": 0, "stride": 20, "buffer": "vb"}],
+                    "indices": {"hr": 0, "base_vertex_index": 0, "buffer": "ib"},
+                    "vertex_declaration": {"status": "candidate", "generation": 1,
+                                           "words": [0x20000000, 0x40030000, 0x40040005, 0xffffffff]},
+                    "vertex_program": {"status": "candidate", "generation": 1, "version": "vs_1_1",
+                                       "words": [0xfffe0101, 1, 0xc00f0000, 0x90e40000, 1, 0xd00f0000, 0xa0e40000, 0xffff]},
+                    "vertex_constants": {"status": "sampled", "start_register": 0, "count": 1,
+                                         "getter_hr": 0, "verify_hr": 0, "bits": [0, 0x3f800000, 0, 0x3f800000]},
                     "buffer_data": {"source": "application_lock_shadow",
-                        "vertex": {"status": "captured", "data": vertices.hex(), "byte_count": 60,
+                        "vertex": {"status": "captured", "data": vertices.hex(), "byte_count": 60, "resource": "vb",
                                    "first_vertex": 0, "vertex_count": 3, "stride": 20, "byte_offset": 0},
-                        "index": {"status": "captured", "data": struct.pack("<3H", 0, 1, 2).hex(),
+                        "index": {"status": "captured", "data": struct.pack("<3H", 0, 1, 2).hex(), "resource": "ib",
                                   "byte_count": 6, "index_count": 3, "index_format": 101, "byte_offset": 0}}},
-                   {"event": "draw_result", "frame": 1, "op_id": 1, "hr": 0, "buffer_stable": True},
-                   {"event": "frame_end", "frame": 1, "present_hr": 0, "draws": 1, "replayable": False},
-                   {"event": "capture_end"}]
+                   {"event": "draw_result", "frame": 1, "op_id": 2, "hr": 0,
+                    "buffer_stable": True, "shader_stable": True},
+                   {"event": "frame_end", "frame": 1, "present_hr": 0, "draws": 1, "replayable": False,
+                    "concurrent_operations": False, "had_reset": False},
+                   {"event": "capture_end", "frames": 1}]
         path = Path(self.directory.name) / "trace.jsonl"
         def inspect(value):
             path.write_text("".join(json.dumps(record) + "\n" for record in value), encoding="utf-8")
             probe.inspect_prepared_trace(path)
         inspect(records)
-        for change in ("missing", "vertex", "index", "stable", "result", "frame", "replayable"):
+        with self.assertRaises(probe.RunError):
+            probe.prepared_replay_packet(records)
+        packet = probe.prepared_replay_packet(records, synthetic_fixture=True).splitlines()
+        self.assertEqual(packet[:3], ["T3R_XYZ_V1", "256 256", str(0xff111318)])
+        self.assertEqual(len(packet), 9)
+        self.assertTrue(all(line.endswith(str(0xff00ff00)) for line in packet[6:]))
+        for change in ("state", "binding", "viewport", "reset", "order"):
+            bad = copy.deepcopy(records)
+            if change == "state": bad[4]["render_states"]["27"] = 1
+            if change == "binding": bad[4]["streams"][0]["buffer"] = "other"
+            if change == "viewport": bad[4]["viewport"]["width"] = 128
+            if change == "reset": bad[6]["had_reset"] = True
+            if change == "order": bad[2]["op_id"] = bad[3]["op_id"] = 3
+            with self.subTest(change=change), self.assertRaises((probe.RunError, ValueError)):
+                probe.prepared_replay_packet(bad, synthetic_fixture=True)
+        for change in ("missing", "vertex", "index", "stable", "result", "frame", "replayable", "shader", "constant"):
             bad = copy.deepcopy(records)
             if change == "missing": bad.pop()
-            if change == "vertex": bad[2]["buffer_data"]["vertex"]["data"] = "00" * 60
-            if change == "index": bad[2]["buffer_data"]["index"]["data"] = "000000000000"
-            if change == "stable": bad[3]["buffer_stable"] = False
-            if change == "result": bad[3]["op_id"] = 2
-            if change == "frame": bad[4]["present_hr"] = -1
+            if change == "vertex": bad[4]["buffer_data"]["vertex"]["data"] = "00" * 60
+            if change == "index": bad[4]["buffer_data"]["index"]["data"] = "000000000000"
+            if change == "stable": bad[5]["buffer_stable"] = False
+            if change == "result": bad[5]["op_id"] = 3
+            if change == "frame": bad[6]["present_hr"] = -1
             if change == "replayable": bad[0]["replayable"] = True
+            if change == "shader": bad[4]["vertex_program"]["words"][0] = 0
+            if change == "constant": bad[4]["vertex_constants"]["bits"][1] = 0
             with self.subTest(change=change), self.assertRaises(probe.RunError):
                 inspect(bad)
     def inspect(self, lines, mode="facade", buffer_facade=False, resource_facade=False):
         self.log.write_text("noise from Wine\n" + "\n".join(lines) + "\n", encoding="utf-8")
         return probe.inspect_log(self.log, mode, buffer_facade, resource_facade)
+
+    def test_prepared_image_requires_shader_pixel(self):
+        image = bytearray(probe.HEADER + b"\x11\x13\x18" * (256 * 256))
+        for y in range(40, 90):
+            for x in range(40, 90):
+                pos = len(probe.HEADER) + (y * 256 + x) * 3
+                image[pos:pos + 3] = b"\x00\xff\x00"
+        pixel = len(probe.HEADER) + (64 * 256 + 64) * 3
+        image[pixel:pixel + 3] = b"\x00\xff\x00"
+        self.ppm.write_bytes(image)
+        probe.inspect_prepared_image(self.ppm)
+        image[pixel:pixel + 3] = b"\xff\x00\x00"
+        self.ppm.write_bytes(image)
+        with self.assertRaises(probe.RunError):
+            probe.inspect_prepared_image(self.ppm)
 
     def test_private_data_gap_requires_ordered_native_and_facade_evidence(self):
         for mode in ("baseline", "facade"):
@@ -207,13 +263,13 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
                 with self.subTest(mode=mode), self.assertRaises(probe.RunError):
                     self.inspect(changed, mode, resource_facade=True)
             if mode == "facade":
-                for prepared in ("prepared_eager_buffer=PASS", "prepared_capture_draw=PASS"):
+                for prepared in ("prepared_eager_buffer=PASS", "prepared_capture_draw=PASS", "combined_capture_shader_pixel=PASS"):
                     for changed in ([line for line in original if line != prepared], original + [prepared],
                                     [line.replace(prepared, prepared + "bad") for line in original]):
                         with self.subTest(mode=mode), self.assertRaises(probe.RunError):
                             self.inspect(changed, mode, resource_facade=True)
             else:
-                for prepared in ("prepared_eager_buffer=PASS", "prepared_capture_draw=PASS"):
+                for prepared in ("prepared_eager_buffer=PASS", "prepared_capture_draw=PASS", "combined_capture_shader_pixel=PASS"):
                     with self.subTest(mode=mode), self.assertRaises(probe.RunError):
                         self.inspect(original + [prepared], mode, resource_facade=True)
             cross_device = "private_cross_device_cycle=PASS"

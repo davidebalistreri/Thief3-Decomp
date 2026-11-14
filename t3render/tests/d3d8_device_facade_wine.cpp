@@ -867,42 +867,81 @@ bool ObserveExternalPrivateLifetime(HWND window, bool facade_mode, bool eager = 
     return true;
 }
 
+bool WriteNew(const wchar_t* path, const std::vector<BYTE>& bytes);
+
+bool SaveCombinedCapture(IDirect3DDevice8* device) {
+    ComPtr<IDirect3DSurface8> back;
+    D3DSURFACE_DESC desc{};
+    if (FAILED(device->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, back.put())) || !back.value ||
+        FAILED(back->GetDesc(&desc)) || desc.Width != kWidth || desc.Height != kHeight ||
+        (desc.Format != D3DFMT_X8R8G8B8 && desc.Format != D3DFMT_A8R8G8B8)) return false;
+    D3DLOCKED_RECT lock{};
+    if (FAILED(back->LockRect(&lock, nullptr, D3DLOCK_READONLY))) return false;
+    const bool valid = lock.pBits && lock.Pitch >= static_cast<INT>(kWidth * 4) &&
+        static_cast<std::size_t>(lock.Pitch) <= static_cast<std::size_t>(PTRDIFF_MAX) / kHeight;
+    std::vector<BYTE> ppm;
+    std::uint32_t sample = 0;
+    if (valid) {
+        const char header[] = "P6\n256 256\n255\n";
+        ppm.assign(header, header + sizeof(header) - 1);
+        ppm.reserve(ppm.size() + kWidth * kHeight * 3);
+        for (UINT y = 0; y < kHeight; ++y) {
+            const auto* row = static_cast<const BYTE*>(lock.pBits) + static_cast<std::ptrdiff_t>(y) * lock.Pitch;
+            for (UINT x = 0; x < kWidth; ++x) {
+                std::uint32_t pixel = 0;
+                std::memcpy(&pixel, row + x * 4, sizeof(pixel));
+                if (x == 64 && y == 64) sample = pixel & 0xffffffu;
+                ppm.push_back(static_cast<BYTE>(pixel >> 16));
+                ppm.push_back(static_cast<BYTE>(pixel >> 8));
+                ppm.push_back(static_cast<BYTE>(pixel));
+            }
+        }
+    }
+    if (FAILED(back->UnlockRect()) || !valid || sample != 0x00ff00u) return false;
+    wchar_t path[32768]{};
+    const DWORD length = GetEnvironmentVariableW(L"T3RENDER_CAPTURE_PATH", path, 32768);
+    if (!length || length >= 32768) return false;
+    return WriteNew((std::wstring(path) + L".ppm").c_str(), ppm);
+}
+
 bool CapturePreparedBufferDraw(IDirect3DDevice8* device, IDirect3DDevice8* native,
                                t3render::buffers::BufferProxy& buffers, D3DPRESENT_PARAMETERS& pp) {
     if (!t3render::CaptureConfigured()) return false;
-    if (FAILED(device->SetVertexShader(kFvf)) || FAILED(device->SetPixelShader(0)) ||
+    static const DWORD declaration[] = {
+        D3DVSD_STREAM(0), D3DVSD_REG(D3DVSDE_POSITION, D3DVSDT_FLOAT4),
+        D3DVSD_REG(D3DVSDE_DIFFUSE, D3DVSDT_D3DCOLOR), D3DVSD_END()
+    };
+    // vs_1_1: position from v0, color from c0 (the input vertices are red).
+    static const DWORD program[] = {
+        D3DVS_VERSION(1, 1), D3DSIO_MOV,
+        0x80000000u | D3DSPR_RASTOUT | D3DSP_WRITEMASK_ALL | D3DSRO_POSITION,
+        0x80000000u | D3DSPR_INPUT | D3DSP_NOSWIZZLE | D3DVSDE_POSITION,
+        D3DSIO_MOV, 0x80000000u | D3DSPR_ATTROUT | D3DSP_WRITEMASK_ALL,
+        0x80000000u | D3DSPR_CONST | D3DSP_NOSWIZZLE, D3DSIO_END
+    };
+    t3render::fixture::CombinedCaptureObserver observer(native, buffers, pp);
+    if (!observer.valid()) return false;
+    auto* facade = static_cast<t3render::fixture::DeviceFixture*>(device);
+    facade->SetCombinedObserver(&observer);
+    struct Detach { t3render::fixture::DeviceFixture* facade; ~Detach() { facade->SetCombinedObserver(nullptr); } } detach{facade};
+    DWORD shader = 0;
+    const float green[4]{0, 1, 0, 1};
+    if (FAILED(device->CreateVertexShader(declaration, program, &shader, D3DUSAGE_SOFTWAREPROCESSING)) || !shader ||
+        FAILED(device->SetVertexShader(shader)) || FAILED(device->SetVertexShaderConstant(0, green, 1)) ||
+        FAILED(device->SetPixelShader(0)) ||
         FAILED(device->SetRenderState(D3DRS_LIGHTING, FALSE)) || FAILED(device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE)) ||
         FAILED(device->SetRenderState(D3DRS_ZENABLE, FALSE)) || FAILED(device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE)) ||
         FAILED(device->SetTexture(0, nullptr)) || FAILED(device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1)) ||
         FAILED(device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE)) ||
+        FAILED(device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1)) ||
+        FAILED(device->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE)) ||
         FAILED(device->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE)) ||
-        FAILED(device->Clear(0, nullptr, D3DCLEAR_TARGET, kClear, 1, 0))) return false;
-    t3render::CaptureDevice(native, &pp);
-    const HRESULT first_present = device->Present(nullptr, nullptr, nullptr, nullptr);
-    t3render::CapturePresent(native, first_present);
-    if (FAILED(first_present) || FAILED(device->BeginScene())) return false;
-    const auto ticket = buffers.BeginDraw(native);
-    if (!ticket) return false;
-    HRESULT draw_result = E_FAIL;
-    std::uint64_t token = 0;
-    bool stable = false;
-    {
-        t3render::fixture::PreparedBufferCapture prepared(buffers, native, ticket, true);
-        t3render::DrawCall call{};
-        call.kind = t3render::DrawKind::IndexedPrimitive;
-        call.primitive_type = D3DPT_TRIANGLELIST;
-        call.num_vertices = 3; call.primitive_count = 1;
-        prepared.Attach(call);
-        token = t3render::CaptureDraw(native, call);
-        if (token) draw_result = device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 3, 0, 1);
-        stable = buffers.EndDraw(native, ticket);
-    }
-    t3render::CaptureBufferedDrawResult(native, token, draw_result, stable);
-    if (!token || !stable || FAILED(draw_result) || FAILED(device->EndScene())) return false;
-    const HRESULT last_present = device->Present(nullptr, nullptr, nullptr, nullptr);
-    t3render::CapturePresent(native, last_present);
-    t3render::CaptureDeviceReleased(native);
-    if (FAILED(last_present)) return false;
+        FAILED(device->Present(nullptr, nullptr, nullptr, nullptr)) ||
+        FAILED(device->Clear(0, nullptr, D3DCLEAR_TARGET, kClear, 1, 0)) || FAILED(device->BeginScene()) ||
+        FAILED(device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 3, 0, 1)) || FAILED(device->EndScene()) ||
+        !SaveCombinedCapture(device) || FAILED(device->Present(nullptr, nullptr, nullptr, nullptr)) ||
+        FAILED(device->SetVertexShader(kFvf)) || FAILED(device->DeleteVertexShader(shader))) return false;
+    std::printf("combined_capture_shader_pixel=PASS\n");
     std::printf("prepared_capture_draw=PASS\n");
     return true;
 }
@@ -927,11 +966,12 @@ bool ObserveEagerBufferLifetime(HWND window, bool facade_mode, bool persistent =
     D3DPRESENT_PARAMETERS pp{};
     pp.BackBufferWidth = kWidth; pp.BackBufferHeight = kHeight; pp.BackBufferFormat = display.Format;
     pp.BackBufferCount = 1; pp.SwapEffect = D3DSWAPEFFECT_DISCARD; pp.hDeviceWindow = window; pp.Windowed = TRUE;
+    pp.Flags = D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
     ComPtr<IDirect3DDevice8> device;
     if (FAILED(selected->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, window,
         D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, device.put())) || !device.value) return false;
-    const Vertex vertices[] = {{12, 12, 0.5f, 1, 0xffe43b3b}, {116, 12, 0.5f, 1, 0xffe43b3b},
-                               {12, 116, 0.5f, 1, 0xffe43b3b}};
+    const Vertex vertices[] = {{-0.8f, 0.8f, 0.5f, 1, 0xffe43b3b}, {0.8f, 0.8f, 0.5f, 1, 0xffe43b3b},
+                               {-0.8f, -0.8f, 0.5f, 1, 0xffe43b3b}};
     const WORD indices[]{0, 1, 2};
     ComPtr<IDirect3DVertexBuffer8> vertex;
     ComPtr<IDirect3DIndexBuffer8> index;
@@ -1882,7 +1922,10 @@ int wmain(int argc, wchar_t** argv) {
         const std::wstring trace_path = std::wstring(argv[2]) + L".trace.jsonl";
         if (!SetEnvironmentVariableW(L"T3RENDER_CAPTURE_PATH", trace_path.c_str()) ||
             !SetEnvironmentVariableW(L"T3RENDER_CAPTURE_FRAME", L"1") ||
-            !SetEnvironmentVariableW(L"T3RENDER_CAPTURE_BUFFERS", L"1")) return 1;
+            !SetEnvironmentVariableW(L"T3RENDER_CAPTURE_BUFFERS", L"1") ||
+            !SetEnvironmentVariableW(L"T3RENDER_CAPTURE_DECLARATIONS", L"1") ||
+            !SetEnvironmentVariableW(L"T3RENDER_CAPTURE_VERTEX_PROGRAMS", L"1") ||
+            !SetEnvironmentVariableW(L"T3RENDER_CAPTURE_VERTEX_CONSTANTS", L"1")) return 1;
     }
 #endif
     const HINSTANCE instance = GetModuleHandleW(nullptr);

@@ -929,21 +929,22 @@ bool SaveCombinedCapture(IDirect3DDevice8* device) {
     return WriteNew((std::wstring(path) + L".ppm").c_str(), ppm);
 }
 
+const DWORD kCombinedDeclaration[] = {
+    D3DVSD_STREAM(0), D3DVSD_REG(D3DVSDE_POSITION, D3DVSDT_FLOAT4),
+    D3DVSD_REG(D3DVSDE_DIFFUSE, D3DVSDT_D3DCOLOR), D3DVSD_END()
+};
+// vs_1_1: position from v0, color from c0 (the input vertices are red).
+const DWORD kCombinedProgram[] = {
+    D3DVS_VERSION(1, 1), D3DSIO_MOV,
+    0x80000000u | D3DSPR_RASTOUT | D3DSP_WRITEMASK_ALL | D3DSRO_POSITION,
+    0x80000000u | D3DSPR_INPUT | D3DSP_NOSWIZZLE | D3DVSDE_POSITION,
+    D3DSIO_MOV, 0x80000000u | D3DSPR_ATTROUT | D3DSP_WRITEMASK_ALL,
+    0x80000000u | D3DSPR_CONST | D3DSP_NOSWIZZLE, D3DSIO_END
+};
+
 bool CapturePreparedBufferDraw(IDirect3DDevice8* device, IDirect3DDevice8* native,
                                t3render::buffers::BufferProxy& buffers, D3DPRESENT_PARAMETERS& pp) {
     if (!t3render::CaptureConfigured()) return false;
-    static const DWORD declaration[] = {
-        D3DVSD_STREAM(0), D3DVSD_REG(D3DVSDE_POSITION, D3DVSDT_FLOAT4),
-        D3DVSD_REG(D3DVSDE_DIFFUSE, D3DVSDT_D3DCOLOR), D3DVSD_END()
-    };
-    // vs_1_1: position from v0, color from c0 (the input vertices are red).
-    static const DWORD program[] = {
-        D3DVS_VERSION(1, 1), D3DSIO_MOV,
-        0x80000000u | D3DSPR_RASTOUT | D3DSP_WRITEMASK_ALL | D3DSRO_POSITION,
-        0x80000000u | D3DSPR_INPUT | D3DSP_NOSWIZZLE | D3DVSDE_POSITION,
-        D3DSIO_MOV, 0x80000000u | D3DSPR_ATTROUT | D3DSP_WRITEMASK_ALL,
-        0x80000000u | D3DSPR_CONST | D3DSP_NOSWIZZLE, D3DSIO_END
-    };
     t3render::fixture::CombinedCaptureObserver observer(native, buffers, pp);
     if (!observer.valid()) return false;
     auto* facade = static_cast<t3render::fixture::DeviceFixture*>(device);
@@ -951,7 +952,7 @@ bool CapturePreparedBufferDraw(IDirect3DDevice8* device, IDirect3DDevice8* nativ
     struct Detach { t3render::fixture::DeviceFixture* facade; ~Detach() { facade->SetCombinedObserver(nullptr); } } detach{facade};
     DWORD shader = 0;
     const float green[4]{0, 1, 0, 1};
-    if (FAILED(device->CreateVertexShader(declaration, program, &shader, D3DUSAGE_SOFTWAREPROCESSING)) || !shader ||
+    if (FAILED(device->CreateVertexShader(kCombinedDeclaration, kCombinedProgram, &shader, D3DUSAGE_SOFTWAREPROCESSING)) || !shader ||
         FAILED(device->SetVertexShader(shader)) || FAILED(device->SetVertexShaderConstant(0, green, 1)) ||
         FAILED(device->SetPixelShader(0)) ||
         FAILED(device->SetRenderState(D3DRS_LIGHTING, FALSE)) || FAILED(device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE)) ||
@@ -968,6 +969,43 @@ bool CapturePreparedBufferDraw(IDirect3DDevice8* device, IDirect3DDevice8* nativ
         FAILED(device->SetVertexShader(kFvf)) || FAILED(device->DeleteVertexShader(shader))) return false;
     std::printf("combined_capture_shader_pixel=PASS\n");
     std::printf("prepared_capture_draw=PASS\n");
+    return true;
+}
+
+bool ObserveCombinedResetEpoch(IDirect3DDevice8* device, IDirect3DDevice8* native,
+                               t3render::buffers::BufferProxy& buffers, D3DPRESENT_PARAMETERS& pp) {
+    t3render::fixture::CombinedCaptureObserver observer(native, buffers, pp);
+    if (!observer.valid()) return false;
+    auto* facade = static_cast<t3render::fixture::DeviceFixture*>(device);
+    facade->SetCombinedObserver(&observer);
+    struct Detach { t3render::fixture::DeviceFixture* facade; ~Detach() { facade->SetCombinedObserver(nullptr); } } detach{facade};
+    DWORD old_shader = 0;
+    if (FAILED(device->CreateVertexShader(kCombinedDeclaration, kCombinedProgram, &old_shader, D3DUSAGE_SOFTWAREPROCESSING)) ||
+        !old_shader || FAILED(device->SetVertexShader(old_shader)) ||
+        observer.ShaderStatusForFixture(old_shader) != t3render::ir::ShaderObservationStatus::Candidate) return false;
+    D3DPRESENT_PARAMETERS invalid = pp;
+    invalid.SwapEffect = static_cast<D3DSWAPEFFECT>(0);
+    if (SUCCEEDED(device->Reset(&invalid)) || observer.ShaderWindowAvailableForFixture() ||
+        observer.ShaderStatusForFixture(old_shader) != t3render::ir::ShaderObservationStatus::Unavailable ||
+        FAILED(device->Reset(&pp)) || !observer.ShaderWindowAvailableForFixture() ||
+        observer.ShaderStatusForFixture(old_shader) != t3render::ir::ShaderObservationStatus::Unavailable ||
+        FAILED(device->SetVertexShader(kFvf)) || FAILED(device->DeleteVertexShader(old_shader))) return false;
+    DWORD fresh_shader = 0;
+    if (FAILED(device->CreateVertexShader(kCombinedDeclaration, kCombinedProgram, &fresh_shader, D3DUSAGE_SOFTWAREPROCESSING)) ||
+        !fresh_shader || observer.ShaderStatusForFixture(fresh_shader) != t3render::ir::ShaderObservationStatus::Candidate)
+        return false;
+    ComPtr<IDirect3DVertexBuffer8> fresh;
+    if (FAILED(device->CreateVertexBuffer(4, D3DUSAGE_WRITEONLY, 0, D3DPOOL_MANAGED, fresh.put())) || !fresh.value)
+        return false;
+    BYTE* mapped = nullptr;
+    if (FAILED(fresh->Lock(0, 4, &mapped, 0)) || !mapped) return false;
+    std::memset(mapped, 0x39, 4);
+    if (FAILED(fresh->Unlock())) return false;
+    auto pin = buffers.UnwrapVertex(native, fresh.value);
+    BYTE observed[4]{};
+    if (!pin.wrapped() || buffers.ReadVertex(native, pin.native(), 0, observed, sizeof(observed)) != t3render::ir::RegistryResult::Ok ||
+        observed[0] != 0x39 || FAILED(device->DeleteVertexShader(fresh_shader))) return false;
+    std::printf("combined_reset_shader_and_fresh_buffer_epoch=PASS\n");
     return true;
 }
 
@@ -1118,7 +1156,7 @@ bool ObserveEagerBufferLifetime(HWND window, bool facade_mode, bool persistent =
 
     if (persistent) {
         if (FAILED(device->SetStreamSource(0, nullptr, 0)) || FAILED(device->SetIndices(nullptr, 0)) || FAILED(device->DeleteStateBlock(block)) ||
-            FAILED(device->Reset(&pp))) return false;
+            (facade_mode ? !ObserveCombinedResetEpoch(device.value, native, *buffers, pp) : FAILED(device->Reset(&pp)))) return false;
         block_active = false;
         if (facade_mode) {
             Vertex observed[3]{}; WORD observed_indices[3]{};

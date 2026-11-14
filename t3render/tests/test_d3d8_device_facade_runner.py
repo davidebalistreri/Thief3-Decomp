@@ -51,6 +51,7 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
             lines.append("prepared_capture_draw=PASS")
             lines.append("combined_capture_shader_pixel=PASS")
             lines.append("combined_external_shader_invalidation=PASS")
+            lines.append("combined_reset_shader_and_fresh_buffer_epoch=PASS")
         lines.append("private_cross_device_cycle=PASS")
         lines.extend(("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                       "resource_facade_volume_roundtrips=PASS",
@@ -265,14 +266,14 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
                     self.inspect(changed, mode, resource_facade=True)
             if mode == "facade":
                 for prepared in ("prepared_eager_buffer=PASS", "prepared_capture_draw=PASS", "combined_capture_shader_pixel=PASS",
-                                 "combined_external_shader_invalidation=PASS"):
+                                 "combined_external_shader_invalidation=PASS", "combined_reset_shader_and_fresh_buffer_epoch=PASS"):
                     for changed in ([line for line in original if line != prepared], original + [prepared],
                                     [line.replace(prepared, prepared + "bad") for line in original]):
                         with self.subTest(mode=mode), self.assertRaises(probe.RunError):
                             self.inspect(changed, mode, resource_facade=True)
             else:
                 for prepared in ("prepared_eager_buffer=PASS", "prepared_capture_draw=PASS", "combined_capture_shader_pixel=PASS",
-                                 "combined_external_shader_invalidation=PASS"):
+                                 "combined_external_shader_invalidation=PASS", "combined_reset_shader_and_fresh_buffer_epoch=PASS"):
                     with self.subTest(mode=mode), self.assertRaises(probe.RunError):
                         self.inspect(original + [prepared], mode, resource_facade=True)
             cross_device = "private_cross_device_cycle=PASS"

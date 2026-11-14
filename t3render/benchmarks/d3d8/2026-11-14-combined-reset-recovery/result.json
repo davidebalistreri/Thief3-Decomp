@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "test": "synthetic_combined_reset_recovery",
+  "date": "2026-11-14",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/src/buffer_proxy.cpp": "df70b6085a55bf489d5a90201b271fb2c220a1a2e442ff6ffa0fdaa91f00eda1",
+    "t3render/src/capture.cpp": "2e5e2e58f86f6a7adb35d0fc0b644c06d1e54ab80ab38918063b4842777b3ae8",
+    "t3render/ir/vertex_declaration_registry.cpp": "69341205f6bf272a18eeebee72d8804f603754d2106467f486250a66821742f4",
+    "t3render/tests/combined_capture_observer.hpp": "8e24668000cc307d6753734438e67b502b437e30fa9f5120838a865acde519a2",
+    "t3render/tests/d3d8_device_facade.hpp": "cabb90ba5e2f68166cf2aa88d1d18f57f3885abfc90c14147ac0f0d628f08eae",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "cebb848e4a190ab2c12640a34c82c6a3146277a79c8382b6cfe7e30a60d4f6b3",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "4848dbb7cb2b3c5b25b22547a95596c864519e682737c810e7288bbd1d18231b",
+    "t3render/tests/test_d3d8_device_facade_runner.py": "3e9b3eabbd2aeee080cdef56a1d299981f3d3644f86af00c9296e60ee93b361c",
+    "t3render/tools/run_d3d8_device_facade.py": "c6be3594e2b7578b3b083208f9c7b346ac7ae13981d9c57db5b4ee922fe0c5bf"
+  },
+  "fixture_sha256": "662706f8db902fa1d4ae16969da883434953ed77e98e7d5b35445dac004ffe64",
+  "result": {
+    "failed_reset_requires_recovery": true,
+    "old_shader_unavailable_after_failed_and_successful_reset": true,
+    "fresh_shader_candidate_after_recovery": true,
+    "fresh_managed_writeonly_buffer_observable": true,
+    "surviving_buffer_shadow_unknown": true,
+    "synchronized_synthetic_d3d8_dx12_rgb_identical": true,
+    "synchronized_rgb_ppm_sha256": "5f46fcdfe5237797a1425f91d3abc19689c225e67e38b5ecbf7f25b39db16c85",
+    "trace_sha256": "01d093616d54dcebe087f80f4223a08e22133e81d5985fc9009de303f4f6a4f0",
+    "facade_log_sha256": "b6b3956fa03370fd00d2a5e3de20aa06bf1c8319041b9e05f366686e43b4c5b5"
+  },
+  "limitations": [
+    "Fixture only; not integrated into the proxy or TDS.",
+    "The reset/recovery sequence is separate from the captured and replayed draw.",
+    "The managed buffer surviving Reset remains unknown; only a fresh buffer is tracked.",
+    "State-block calls while the combined observer is attached still abandon capture.",
+    "Native Windows, TDS, other reset scenarios, concurrency and reentrancy remain unverified.",
+    "The DX12 comparison supports only the isolated exact synthetic shader."
+  ]
+}

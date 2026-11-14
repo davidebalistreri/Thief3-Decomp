@@ -176,6 +176,9 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
         hazard = ["combined_external_shader_invalidation=PASS"] if mode == "facade" else []
         if [line for line in lines if line.startswith("combined_external_shader_invalidation=")] != hazard:
             raise RunError("combined external-object invalidation is missing or conflicting")
+        reset_epoch = ["combined_reset_shader_and_fresh_buffer_epoch=PASS"] if mode == "facade" else []
+        if [line for line in lines if line.startswith("combined_reset_shader_and_fresh_buffer_epoch=")] != reset_epoch:
+            raise RunError("combined observer reset epoch is missing or conflicting")
         if [line for line in lines if line.startswith("private_cross_device_cycle=")] != ["private_cross_device_cycle=PASS"]:
             raise RunError("cross-device private-data observation is missing or conflicting")
         for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",

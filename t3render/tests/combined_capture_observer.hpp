@@ -22,8 +22,29 @@ public:
     bool valid() const noexcept { return native_ && device_; }
     void Invalidate() noexcept { shaders_.Invalidate(device_); }
     bool ShaderWindowAvailableForFixture() noexcept {
+        if (reset_recovery_) return false;
         const auto ticket = shaders_.BeginDraw(device_);
         return ticket && shaders_.End(ticket);
+    }
+    ir::ShaderObservationStatus ShaderStatusForFixture(DWORD value) noexcept {
+        if (reset_recovery_) return ir::ShaderObservationStatus::Unavailable;
+        const auto ticket = shaders_.BeginDraw(device_);
+        if (!ticket) return ir::ShaderObservationStatus::Unsafe;
+        const auto status = shaders_.Observe(ticket, value).status;
+        return shaders_.End(ticket) ? status : ir::ShaderObservationStatus::Unsafe;
+    }
+    ir::ShaderTicket BeginReset() noexcept {
+        const DWORD before = GetLastError();
+        const auto ticket = shaders_.BeginReset(device_);
+        SetLastError(before);
+        return ticket;
+    }
+    void EndReset(ir::ShaderTicket ticket, HRESULT hr, const D3DPRESENT_PARAMETERS* presentation) noexcept {
+        const DWORD before = GetLastError();
+        const bool stable = shaders_.EndReset(ticket, static_cast<std::uint32_t>(hr));
+        reset_recovery_ = FAILED(hr) || !stable;
+        CaptureReset(native_, presentation, hr);
+        SetLastError(before);
     }
     void Unsupported() noexcept {
         const DWORD before = GetLastError();
@@ -96,6 +117,11 @@ public:
     }
     HRESULT DrawIndexed(D3DPRIMITIVETYPE type, UINT minimum, UINT vertices, UINT start, UINT count) noexcept {
         const DWORD before = GetLastError();
+        if (reset_recovery_) {
+            CaptureAbandonDevice(native_);
+            SetLastError(before);
+            return native_->DrawIndexedPrimitive(type, minimum, vertices, start, count);
+        }
         if (!CaptureWantsDraw(native_)) {
             SetLastError(before);
             return native_->DrawIndexedPrimitive(type, minimum, vertices, start, count);
@@ -153,6 +179,7 @@ private:
     buffers::BufferProxy& buffers_;
     ir::VertexDeclarationRegistry shaders_;
     std::uint64_t device_;
+    bool reset_recovery_ = false; // sequential fixture only
 };
 
 }  // namespace t3render::fixture

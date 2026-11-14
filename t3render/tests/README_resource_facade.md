@@ -265,9 +265,9 @@ textures and gameplay are not tested in that replay. The separate default
 fixture's 159 native/facade observations and RGB comparison are not that draw.
 The converter rejects unsupported states and requires fixture attestation.
 
-This observer is attached only inside the single-threaded fixture, after the
-state block was applied and detached before Reset. A sequential Reset,
-state-block call, or unsupported draw while attached abandons capture. It is not a complete
+In that experiment the single-threaded observer was attached after the state
+block was applied and detached before Reset. A sequential state-block call or
+unsupported draw while attached abandons capture. It is not a complete
 facade or a transparent game observer: native alias escapes, other resource
 operations, concurrency and reentrancy remain open, and texture contents are not captured.
 The offline diagnostic IR is still incomplete and marks the frame unreplayable.
@@ -284,6 +284,17 @@ synthetic D3D8/DX12 RGB match. This is a sequential fixture test, not proof of
 safe observer lifetime under concurrent or arbitrary reentrant calls. The
 local logs and images are under
 `build/t3render-captures/2026-11-14-combined-external-invalidation-v3/`.
+
+The later [combined reset/recovery observation](../benchmarks/d3d8/2026-11-14-combined-reset-recovery/result.json)
+keeps a new fixture observer attached across a deliberately failed Reset and
+a successful recovery Reset. Shader sampling remains unavailable during
+recovery; the old shader remains unavailable after recovery. A newly created
+shader and a fresh managed `WRITEONLY` buffer become observable. Surviving
+pre-reset buffer bytes remain unknown. This reset sequence is separate from
+the earlier captured draw; no reset is present in that replayed frame. The test
+does not establish parity for every Reset, state block or concurrent call.
+Local logs and images are under
+`build/t3render-captures/2026-11-14-combined-reset-recovery/`.
 
 The later [state-block observation](../benchmarks/d3d8/2026-11-13-stateblock-facade/result.json)
 exercised Create, Capture, Begin/End, Apply and Delete on the combined facade.

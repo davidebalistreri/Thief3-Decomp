@@ -294,7 +294,8 @@ public:
     }
     HRESULT STDMETHODCALLTYPE Reset(D3DPRESENT_PARAMETERS * pPresentationParameters) override {
 #ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
-        if (combined_observer_) combined_observer_->Unsupported();
+        auto* observer = combined_observer_;
+        const auto shader_ticket = observer ? observer->BeginReset() : t3render::ir::ShaderTicket{};
 #endif
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
         const DWORD before = GetLastError();
@@ -315,6 +316,9 @@ public:
         const HRESULT hr = native_->Reset(pPresentationParameters);
         const DWORD after = GetLastError();
         if (buffers_ && ticket) (void)buffers_->EndFacadeReset(native_, ticket, SUCCEEDED(hr));
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        if (observer) observer->EndReset(shader_ticket, hr, pPresentationParameters);
+#endif
         SetLastError(after);
         return hr;
 #else

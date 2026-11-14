@@ -28,6 +28,10 @@ struct BufferObserver {
     buffers::UnlockFailure failure_unlock{};
     bool repeated_unlock_policy = false;
     std::uint64_t repeated_unlocks = 0;
+    // Optional detailed reads replace the corresponding boolean callback. The
+    // returned status is diagnostic only; all failed reads still fail closed.
+    buffers::ShadowReadStatus (*read_vertex_detailed)(void*, IDirect3DDevice8*, IDirect3DVertexBuffer8*, std::size_t, void*, std::size_t) = nullptr;
+    buffers::ShadowReadStatus (*read_index_detailed)(void*, IDirect3DDevice8*, IDirect3DIndexBuffer8*, std::size_t, void*, std::size_t) = nullptr;
 };
 
 // Optional getter results sampled outside the writer mutex. The caller owns

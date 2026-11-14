@@ -58,6 +58,8 @@ ShaderProgramSnapshot ScanVertexShader11(std::uintptr_t address, DeclarationRead
             return true;
         };
         if (!read_word()) return result;
+        result.first_word_known = true;
+        result.first_word = result.words.back();
         if (result.words.back() != kVs11) { fail(ShaderProgramStatus::UnsupportedVersion); return result; }
         while (read_word()) {
             const std::uint32_t token = result.words.back();

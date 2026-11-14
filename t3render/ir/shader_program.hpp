@@ -28,6 +28,8 @@ enum class ShaderProgramStatus {
 struct ShaderProgramSnapshot {
     ShaderProgramStatus status = ShaderProgramStatus::NotRequested;
     std::vector<std::uint32_t> words;
+    bool first_word_known = false;
+    std::uint32_t first_word = 0;
 };
 
 // `reader` must return true only for a complete copy and must not reenter D3D.

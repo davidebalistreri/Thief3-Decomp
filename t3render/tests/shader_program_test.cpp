@@ -72,7 +72,9 @@ void BadInputFailsClosed() {
     assert(invalid.status == ShaderProgramStatus::NullAddress && invalid.words.empty());
 
     mem.words[0] = 0xfffe0200;
-    ExpectFailure(mem, ShaderProgramStatus::UnsupportedVersion);
+    auto unsupported = ScanVertexShader11(mem.base, Read, &mem, 64);
+    assert(unsupported.status == ShaderProgramStatus::UnsupportedVersion && unsupported.words.empty() &&
+           unsupported.first_word_known && unsupported.first_word == 0xfffe0200);
     mem.words[0] = 0xffff0101; // ps_1_1 is not a vertex program
     ExpectFailure(mem, ShaderProgramStatus::UnsupportedVersion);
     mem.words[0] = 0xfffe0101;

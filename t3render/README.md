@@ -102,6 +102,13 @@ One color-writing indexed quad from that frame can now be displayed by the
 identified, and this is not a replay of the room. The frame remains partial and
 non-replayable; the user reported truncated menu text in that run.
 
+The combined observer also records a `shadow_reason` for failed prepared
+buffer reads and, for an unsupported vertex program, the first observed word if
+readable. These are diagnostic metadata only: an unknown buffer remains
+unknown and a shader word is not a program candidate. The paired draw result
+must still be checked, and these observations cannot identify unobserved aliases
+or prove GPU input. Older traces do not contain this information.
+
 Add `-DT3RENDER_BUILD_SMOKE_TEST=ON` at configuration time to build a
 standalone D3D8 program in the `smoke/` subdirectory. It draws four synthetic
 triangles, checks one pixel of each and prints a backbuffer hash. Compare that

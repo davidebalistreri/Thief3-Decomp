@@ -6,6 +6,9 @@ payloads even if they contain an END-looking word, and fails closed on
 unsupported versions, unknown instructions, unreadable bytes and budget or
 address limits. A null function pointer is reported separately. This is not a
 shader validator, translator or proof of the program used by a driver.
+For an unsupported version the observer may retain the first application-memory
+DWORD as diagnostic metadata; the framed program remains empty and unavailable.
+The value may be malformed or race a writer; it does not identify a driver shader.
 
 The declaration registry can optionally retain one program snapshot alongside
 its declaration and return it with a stable candidate. Both share the device's

@@ -1004,15 +1004,43 @@ template<class Buffer>
 ir::RegistryResult ReadPrepared(const std::shared_ptr<BufferProxy::State>& state, IDirect3DDevice8* expected_owner,
                                 Buffer* expected_native, ir::BufferToken token, std::uint64_t draw,
                                 IDirect3DDevice8* owner, Buffer* native, std::size_t offset,
-                                void* destination, std::size_t length) noexcept {
+                                void* destination, std::size_t length,
+                                ShadowReadStatus* detail = nullptr) noexcept {
+    if (detail) *detail = ShadowReadStatus::UnknownResource;
     if (!state || !owner || owner != expected_owner || !native || native != expected_native ||
         !token.identity || !token.generation || !draw) return ir::RegistryResult::UnknownResource;
     std::lock_guard<std::mutex> lock(state->mutex);
     const auto device = state->devices.find(owner);
     if (state->global_unsafe || device == state->devices.end() || device->second.unsafe ||
         device->second.reset || device->second.reset_recovery || device->second.draw != draw)
-        return ir::RegistryResult::Unavailable;
-    return state->shadows.Read(token, offset, destination, length);
+        { if (detail) *detail = ShadowReadStatus::Unavailable; return ir::RegistryResult::Unavailable; }
+    const auto result = state->shadows.Read(token, offset, destination, length);
+    if (detail) {
+        switch (result) {
+        case ir::RegistryResult::Ok: *detail = ShadowReadStatus::Captured; break;
+        case ir::RegistryResult::UnknownData: *detail = ShadowReadStatus::UnknownData; break;
+        case ir::RegistryResult::UnknownResource: case ir::RegistryResult::StaleGeneration:
+            *detail = ShadowReadStatus::UnknownResource; break;
+        case ir::RegistryResult::Busy: *detail = ShadowReadStatus::Busy; break;
+        case ir::RegistryResult::InvalidRange: *detail = ShadowReadStatus::InvalidRange; break;
+        case ir::RegistryResult::Unavailable: {
+            ir::BufferAvailability availability{};
+            if (state->shadows.Availability(token, availability) != ir::RegistryResult::Ok) {
+                *detail = ShadowReadStatus::Unavailable; break;
+            }
+            switch (availability) {
+            case ir::BufferAvailability::Abandoned: *detail = ShadowReadStatus::Abandoned; break;
+            case ir::BufferAvailability::BudgetExceeded: *detail = ShadowReadStatus::BudgetExceeded; break;
+            case ir::BufferAvailability::TooLarge: *detail = ShadowReadStatus::TooLarge; break;
+            case ir::BufferAvailability::AllocationFailed: *detail = ShadowReadStatus::AllocationFailed; break;
+            case ir::BufferAvailability::Tracked: *detail = ShadowReadStatus::Unavailable; break;
+            }
+            break;
+        }
+        default: *detail = ShadowReadStatus::Other; break;
+        }
+    }
+    return result;
 }
 
 template<class Buffer>
@@ -1262,10 +1290,24 @@ ir::RegistryResult BufferProxy::PreparedVertex::Read(IDirect3DDevice8* owner, ID
     LastError error;
     return ReadPrepared(state_, owner_, native_, token_, draw_, owner, native, offset, destination, length);
 }
+ShadowReadStatus BufferProxy::PreparedVertex::ReadDetailed(IDirect3DDevice8* owner, IDirect3DVertexBuffer8* native,
+                                                           std::size_t offset, void* destination, std::size_t length) const noexcept {
+    LastError error;
+    ShadowReadStatus status = ShadowReadStatus::Other;
+    (void)ReadPrepared(state_, owner_, native_, token_, draw_, owner, native, offset, destination, length, &status);
+    return status;
+}
 ir::RegistryResult BufferProxy::PreparedIndex::Read(IDirect3DDevice8* owner, IDirect3DIndexBuffer8* native,
                                                     std::size_t offset, void* destination, std::size_t length) const noexcept {
     LastError error;
     return ReadPrepared(state_, owner_, native_, token_, draw_, owner, native, offset, destination, length);
+}
+ShadowReadStatus BufferProxy::PreparedIndex::ReadDetailed(IDirect3DDevice8* owner, IDirect3DIndexBuffer8* native,
+                                                           std::size_t offset, void* destination, std::size_t length) const noexcept {
+    LastError error;
+    ShadowReadStatus status = ShadowReadStatus::Other;
+    (void)ReadPrepared(state_, owner_, native_, token_, draw_, owner, native, offset, destination, length, &status);
+    return status;
 }
 
 }  // namespace t3render::buffers

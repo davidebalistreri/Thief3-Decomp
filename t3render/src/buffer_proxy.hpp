@@ -66,6 +66,8 @@ public:
         bool valid() const noexcept { return state_ && token_.identity && token_.generation && draw_; }
         ir::RegistryResult Read(IDirect3DDevice8* owner, IDirect3DVertexBuffer8* native,
                                 std::size_t offset, void* destination, std::size_t length) const noexcept;
+        ShadowReadStatus ReadDetailed(IDirect3DDevice8* owner, IDirect3DVertexBuffer8* native,
+                                      std::size_t offset, void* destination, std::size_t length) const noexcept;
     private:
         friend class BufferProxy;
         std::shared_ptr<State> state_;
@@ -79,6 +81,8 @@ public:
         bool valid() const noexcept { return state_ && token_.identity && token_.generation && draw_; }
         ir::RegistryResult Read(IDirect3DDevice8* owner, IDirect3DIndexBuffer8* native,
                                 std::size_t offset, void* destination, std::size_t length) const noexcept;
+        ShadowReadStatus ReadDetailed(IDirect3DDevice8* owner, IDirect3DIndexBuffer8* native,
+                                      std::size_t offset, void* destination, std::size_t length) const noexcept;
     private:
         friend class BufferProxy;
         std::shared_ptr<State> state_;

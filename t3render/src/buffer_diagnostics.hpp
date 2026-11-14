@@ -6,6 +6,12 @@ namespace t3render::buffers {
 
 enum class InvalidationCause { Internal, Explicit, StateBlock, ProcessVertices, ExternalPrivateData, UnlockMismatch };
 
+// Observation-only classification; never authorizes a read or restores bytes.
+enum class ShadowReadStatus {
+    Captured, UnknownResource, UnknownData, Abandoned, BudgetExceeded,
+    TooLarge, AllocationFailed, Busy, InvalidRange, Unavailable, Other
+};
+
 struct UnlockFailure {
     bool present = false;
     bool vertex = false;

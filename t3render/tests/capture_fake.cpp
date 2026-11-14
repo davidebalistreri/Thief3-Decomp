@@ -179,6 +179,17 @@ bool ReadObservedIndex(void* context, IDirect3DDevice8* device, IDirect3DIndexBu
     return true;
 }
 
+t3render::buffers::ShadowReadStatus DetailedVertex(void* context, IDirect3DDevice8* device, IDirect3DVertexBuffer8* buffer,
+                                                   std::size_t offset, void* destination, std::size_t length) {
+    return ReadObservedVertex(context, device, buffer, offset, destination, length)
+        ? t3render::buffers::ShadowReadStatus::Captured : t3render::buffers::ShadowReadStatus::Abandoned;
+}
+t3render::buffers::ShadowReadStatus DetailedIndex(void* context, IDirect3DDevice8* device, IDirect3DIndexBuffer8* buffer,
+                                                  std::size_t offset, void* destination, std::size_t length) {
+    return ReadObservedIndex(context, device, buffer, offset, destination, length)
+        ? t3render::buffers::ShadowReadStatus::Captured : t3render::buffers::ShadowReadStatus::UnknownData;
+}
+
 t3render::DrawCall MakeDraw(t3render::DrawKind kind) {
     t3render::DrawCall draw{};
     draw.kind = kind;
@@ -470,6 +481,8 @@ int main(int argc, char** argv) {
         if (scenario == "shader_program_unavailable") {
             snapshot.declaration.program_status = t3render::ir::ShaderProgramStatus::UnsupportedVersion;
             snapshot.declaration.program_words.clear();
+            snapshot.declaration.program_first_word_known = true;
+            snapshot.declaration.program_first_word = 0xfffe0200;
         }
         auto candidate = draw;
         candidate.shader_snapshot = &snapshot;
@@ -610,6 +623,24 @@ int main(int argc, char** argv) {
         if (!emit(false)) return 8;
         bindings.vertex->Release(); bindings.index->Release();
         if (state.vertex_reads != 1 || state.index_reads != 1) return 8;
+        t3render::CapturePresent(&device, S_OK);
+    } else if (scenario == "shadow_reason") {
+        t3render::CapturePresent(&device, S_OK);
+        ObserverState state{&device};
+        t3render::BufferObserver observer{&state, true, ReadObservedVertex, ReadObservedIndex};
+        observer.read_vertex_detailed = DetailedVertex;
+        observer.read_index_detailed = DetailedIndex;
+        auto call = indexed;
+        call.min_vertex_index = 2; call.num_vertices = 3; call.start_index = 1; call.primitive_count = 1;
+        call.buffer_observer = &observer;
+        state.vertex_known = false; state.index_known = false;
+        auto token = t3render::CaptureDraw(&device, call);
+        if (!token) return 8;
+        t3render::CaptureBufferedDrawResult(&device, token, S_OK, true);
+        state.vertex_known = true; state.index_known = true;
+        token = t3render::CaptureDraw(&device, call);
+        if (!token) return 8;
+        t3render::CaptureBufferedDrawResult(&device, token, S_OK, true);
         t3render::CapturePresent(&device, S_OK);
     } else if (scenario == "buffered" || scenario == "buffer_budget" || scenario == "buffer_budget_fail" ||
         scenario == "buffer_budget_mixed") {

@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "combined_shadow_diagnostics_fixture",
+  "status": "PASS",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30 / Wine x86",
+  "fixture": "Synthetic indexed WRITEONLY FVF triangle with experimental combined observer and repeated-Unlock policy enabled.",
+  "proxy_sha256": "1a9d3b4fb77edf1d7a9617ad8dfab0a718d4b578f5b5a2f785310eb03d2e5d2e",
+  "baseline_captured_dx12_ppm_sha256": "2b3c2a64fb3dbef822435a32f719de640ecb4ad24a44b81a5e0653d595630679",
+  "trace_sha256": "b06515d191b07806afc4c79e203c9fd5db8140510bccb8b5019f603e3ffb7256",
+  "local_results": "build/t3render-captures/2026-11-14-shadow-reason-fixture",
+  "limitations": [
+    "This fixture captures a known successful buffer, not TDS's missing buffer or unsupported shader.",
+    "It does not establish COM or rendering parity for TDS, real-game shader identity or native Windows behavior.",
+    "Diagnostic read reasons and unsupported-version words are observations, not GPU input or complete shader programs."
+  ]
+}

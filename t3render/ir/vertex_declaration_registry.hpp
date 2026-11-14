@@ -42,6 +42,8 @@ struct ShaderObservation {
     // lifetime and budget and is never exposed after a Reset.
     ShaderProgramStatus program_status = ShaderProgramStatus::NotRequested;
     std::vector<std::uint32_t> program_words;
+    bool program_first_word_known = false;
+    std::uint32_t program_first_word = 0;
     // Quarantined pre-reset application data. This is a distinct hypothesis,
     // never a candidate or proof of the post-reset driver input.
     std::uint64_t reset_epoch = 0, rebind_epoch = 0;
@@ -115,6 +117,8 @@ private:
         std::size_t size = 0;
         std::size_t declaration_size = 0;
         ShaderProgramStatus program_status = ShaderProgramStatus::NotRequested;
+        bool program_first_word_known = false;
+        std::uint32_t program_first_word = 0;
     };
     struct Entry {
         bool occupied = false, available = false, queued = false;

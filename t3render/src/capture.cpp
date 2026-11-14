@@ -529,6 +529,7 @@ constexpr D3DTEXTURESTAGESTATETYPE kStageStates[] = {
 // same bytes: game threads may change the memory between our read and draw.
 struct UpBytes {
     const char* status = "unreadable";
+    const char* shadow_reason = nullptr;
     uint64_t byte_count = 0;
     bool byte_count_known = false;
     std::string hex;
@@ -629,19 +630,38 @@ void BytesJson(std::ostream& out, const UpBytes& data) {
     if (std::strcmp(data.status, "captured") == 0 || std::strcmp(data.status, "empty") == 0)
         out << '"' << data.hex << '"';
     else out << "null";
+    if (data.shadow_reason) out << ",\"shadow_reason\":\"" << data.shadow_reason << '\"';
+}
+
+const char* ShadowReason(buffers::ShadowReadStatus status) noexcept {
+    using buffers::ShadowReadStatus;
+    switch (status) {
+    case ShadowReadStatus::UnknownResource: return "unknown_resource";
+    case ShadowReadStatus::UnknownData: return "unknown_data";
+    case ShadowReadStatus::Abandoned: return "abandoned";
+    case ShadowReadStatus::BudgetExceeded: return "budget_exceeded";
+    case ShadowReadStatus::TooLarge: return "too_large";
+    case ShadowReadStatus::AllocationFailed: return "allocation_failed";
+    case ShadowReadStatus::Busy: return "busy";
+    case ShadowReadStatus::InvalidRange: return "invalid_range";
+    case ShadowReadStatus::Unavailable: return "unavailable";
+    case ShadowReadStatus::Other: return "other";
+    case ShadowReadStatus::Captured: return nullptr;
+    }
+    return "other";
 }
 
 // Read only from already-tracked CPU shadows. No additional D3D Lock occurs.
 // These are pre-draw observations, not a guarantee about driver input: the
 // paired result reports whether the intercepted draw window stayed stable.
-template<typename Resource, typename Reader>
+template<typename Resource, typename Reader, typename DetailedReader>
 UpBytes ReadShadow(CaptureState& s, const BufferObserver& observer, IDirect3DDevice8* device,
-                   Resource* resource, Reader reader, uint64_t offset, uint64_t count) {
+                   Resource* resource, Reader reader, DetailedReader detailed, uint64_t offset, uint64_t count) {
     UpBytes result;
     result.byte_count = count;
     result.byte_count_known = true;
     if (!observer.valid) { result.status = "window_unavailable"; return result; }
-    if (!reader) { result.status = "unknown"; return result; }
+    if (!reader && !detailed) { result.status = "unknown"; return result; }
     if (!count) { result.status = "empty"; return result; }
     if (count > kBufferComponentLimit) { result.status = "per_draw_limit"; return result; }
     if (count > kBufferFrameLimit - s.buffer_bytes) { result.status = "frame_limit"; return result; }
@@ -650,7 +670,13 @@ UpBytes ReadShadow(CaptureState& s, const BufferObserver& observer, IDirect3DDev
     }
     const size_t size = static_cast<size_t>(count);
     std::vector<BYTE> copy(size);
-    if (!reader(observer.context, device, resource, static_cast<size_t>(offset), copy.data(), size)) {
+    bool read = false;
+    if (detailed) {
+        const auto observed = detailed(observer.context, device, resource, static_cast<size_t>(offset), copy.data(), size);
+        read = observed == buffers::ShadowReadStatus::Captured;
+        if (!read) result.shadow_reason = ShadowReason(observed);
+    } else read = reader(observer.context, device, resource, static_cast<size_t>(offset), copy.data(), size);
+    if (!read) {
         result.status = "unknown"; return result;
     }
     constexpr char digits[] = "0123456789abcdef";
@@ -716,7 +742,7 @@ void CaptureBuffered(std::ostream& out, CaptureState& s, IDirect3DDevice8* devic
         if (FAILED(vb->GetDesc(&desc))) vertex.status = "descriptor_failed";
         else if (vertex_offset > desc.Size || vertex_size > uint64_t(desc.Size) - vertex_offset)
             vertex.status = "out_of_bounds";
-        else vertex = ReadShadow(s, observer, device, vb, observer.read_vertex, vertex_offset, vertex_size);
+        else vertex = ReadShadow(s, observer, device, vb, observer.read_vertex, observer.read_vertex_detailed, vertex_offset, vertex_size);
     }
 
     uint64_t index_offset = 0, index_size = 0;
@@ -743,7 +769,7 @@ void CaptureBuffered(std::ostream& out, CaptureState& s, IDirect3DDevice8* devic
                     index_offset_known = true;
                     if (index_offset > desc.Size || index_size > uint64_t(desc.Size) - index_offset)
                         index.status = "out_of_bounds";
-                    else index = ReadShadow(s, observer, device, ib, observer.read_index, index_offset, index_size);
+                    else index = ReadShadow(s, observer, device, ib, observer.read_index, observer.read_index_detailed, index_offset, index_size);
                 }
             }
         }
@@ -1031,7 +1057,11 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
                 const char* reason = declaration.program_status != ir::ShaderProgramStatus::Complete
                     ? ProgramUnavailableReason(declaration.program_status) : framed ? "frame_word_limit" : "invalid_snapshot";
                 out << ",\"vertex_program\":{\"status\":\"unavailable\",\"generation\":"
-                    << declaration.generation << ",\"reason\":\"" << reason << "\",\"words\":null}";
+                    << declaration.generation << ",\"reason\":\"" << reason << "\",\"words\":null";
+                if (declaration.program_status == ir::ShaderProgramStatus::UnsupportedVersion &&
+                    declaration.program_first_word_known)
+                    out << ",\"first_word_observed\":" << declaration.program_first_word;
+                out << '}';
             }
         }
         const auto count = declaration.pre_reset_words.size();

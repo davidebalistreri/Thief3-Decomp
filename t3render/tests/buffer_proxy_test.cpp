@@ -899,9 +899,16 @@ void PersistentEagerBufferShadows() {
            !std::memcmp(observed, data, sizeof(data)));
     assert(prepared_index.Read(&native, &ib, 0, observed, sizeof(observed)) == RegistryResult::Ok &&
            !std::memcmp(observed, data, sizeof(data)));
+    using t3render::buffers::ShadowReadStatus;
+    assert(prepared_vertex.ReadDetailed(&native, &alias, 0, observed, sizeof(observed)) == ShadowReadStatus::Captured);
+    assert(prepared_vertex.ReadDetailed(&native, &alias, 3, observed, 1) == ShadowReadStatus::UnknownData);
+    assert(prepared_vertex.ReadDetailed(&native, &alias, 8, observed, 1) == ShadowReadStatus::InvalidRange);
+    assert(prepared_index.ReadDetailed(&native, &ib, 3, observed, 1) == ShadowReadStatus::UnknownData);
+    assert(prepared_vertex.ReadDetailed(&native, &vb, 0, observed, sizeof(observed)) == ShadowReadStatus::UnknownResource);
     assert(prepared_vertex.Read(&native, &vb, 0, observed, sizeof(observed)) == RegistryResult::UnknownResource);
     assert(proxy->EndDraw(&native, draw));
     assert(prepared_vertex.Read(&native, &alias, 0, observed, sizeof(observed)) == RegistryResult::Unavailable);
+    assert(prepared_vertex.ReadDetailed(&native, &alias, 0, observed, sizeof(observed)) == ShadowReadStatus::Unavailable);
     vb.on_query = {}; ib.on_query = {};
     draw = proxy->BeginDraw(&native);
     assert(draw && prepared_vertex.Read(&native, &alias, 0, observed, sizeof(observed)) == RegistryResult::Unavailable);
@@ -1515,6 +1522,10 @@ void CapacityAndUnknownBuffersForward() {
     assert(wrapped && wrapped != &raw);
     Fill(wrapped, 0, data, 2);
     assert(no_budget->ReadVertex(Owner(), &raw, 0, out, 2) == RegistryResult::Unavailable);
+    const auto draw = no_budget->BeginDraw(Owner());
+    assert(draw && no_budget->PrepareVertexGetter(Owner(), &raw, draw).ReadDetailed(Owner(), &raw, 0, out, 2) ==
+           t3render::buffers::ShadowReadStatus::BudgetExceeded);
+    assert(no_budget->EndDraw(Owner(), draw));
     assert(wrapped->Release() == 0 && raw.destroyed);
 }
 
@@ -1632,7 +1643,9 @@ void RepeatedUnlockExperiment() {
             assert(proxy->ReadVertex(&native, &other, 0, observed, 3) == RegistryResult::Ok);
             assert(proxy->ReadIndex(&native, &indices, 0, observed, 3) == RegistryResult::Ok);
             const auto ticket = proxy->BeginDraw(&native);
-            assert(ticket && proxy->EndDraw(&native, ticket));
+            assert(ticket && proxy->PrepareVertexGetter(&native, &affected, ticket).ReadDetailed(&native, &affected, 0, observed, 3) ==
+                   t3render::buffers::ShadowReadStatus::Abandoned);
+            assert(proxy->EndDraw(&native, ticket));
             // Re-locking the discarded source remains forwardable but cannot
             // resurrect its old shadow or invalidate unrelated buffers.
             Fill(a, 0, data, 3);

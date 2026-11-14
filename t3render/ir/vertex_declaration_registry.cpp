@@ -396,6 +396,8 @@ bool VertexDeclarationRegistry::EndCreate(ShaderTicket ticket, bool native_succe
             payload->size = count;
             payload->declaration_size = declaration_count;
             payload->program_status = program.status;
+            payload->program_first_word_known = program.status == ShaderProgramStatus::UnsupportedVersion && program.first_word_known;
+            payload->program_first_word = program.first_word;
             payload->words.reset(new std::uint32_t[count]);
             std::copy(snapshot.words.begin(), snapshot.words.end(), payload->words.get());
             if (program_count) std::copy(program.words.begin(), program.words.end(),
@@ -584,6 +586,8 @@ ShaderObservation VertexDeclarationRegistry::Observe(ShaderTicket ticket, std::u
         destination.assign(pin->words.get(), pin->words.get() + pin->declaration_size);
         if (!history) {
             result.program_status = pin->program_status;
+            result.program_first_word_known = pin->program_first_word_known;
+            result.program_first_word = pin->program_first_word;
             if (pin->program_status == ShaderProgramStatus::Complete)
                 result.program_words.assign(pin->words.get() + pin->declaration_size, pin->words.get() + pin->size);
         } else if (pin->program_status == ShaderProgramStatus::Complete) {
@@ -609,6 +613,7 @@ ShaderObservation VertexDeclarationRegistry::Observe(ShaderTicket ticket, std::u
             std::vector<std::uint32_t>().swap(result.program_words);
             std::vector<std::uint32_t>().swap(result.pre_reset_program_words);
             result.program_status = ShaderProgramStatus::NotRequested;
+            result.program_first_word_known = false;
             result.status = ShaderObservationStatus::Unsafe;
         } else if (!history) result.status = ShaderObservationStatus::Candidate;
     } catch (...) {
@@ -617,6 +622,7 @@ ShaderObservation VertexDeclarationRegistry::Observe(ShaderTicket ticket, std::u
         std::vector<std::uint32_t>().swap(result.program_words);
         std::vector<std::uint32_t>().swap(result.pre_reset_program_words);
         result.program_status = ShaderProgramStatus::NotRequested;
+        result.program_first_word_known = false;
         if (!history) {
             result.status = ShaderObservationStatus::Unavailable;
             result.reason = ShaderUnavailableReason::ObservationError;

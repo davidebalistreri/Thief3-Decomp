@@ -411,6 +411,15 @@ void ProgramSharesDeclarationLifetimeAndBudget() {
     deletion = registry.BeginDelete(device, 0x44);
     assert(deletion && registry.EndDelete(deletion, true));
 
+    create = registry.BeginCreate(device);
+    assert(registry.EndCreate(create, true, true, 0x44, Complete(),
+                              {ShaderProgramStatus::UnsupportedVersion, {}, true, 0xfffe0200}));
+    observed = Observe(registry, device, 0x44);
+    assert(observed.program_status == ShaderProgramStatus::UnsupportedVersion && observed.program_words.empty() &&
+           observed.program_first_word_known && observed.program_first_word == 0xfffe0200);
+    deletion = registry.BeginDelete(device, 0x44);
+    assert(deletion && registry.EndDelete(deletion, true));
+
     // An oversized program is dropped independently; the valid declaration
     // stays observable. Program and declaration words share the device quota.
     VertexDeclarationRegistry short_program({1, 2, 8, 32, false, 4});

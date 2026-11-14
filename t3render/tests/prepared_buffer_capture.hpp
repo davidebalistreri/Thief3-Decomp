@@ -15,6 +15,8 @@ public:
         const DWORD error = GetLastError();
         bindings_.device = device;
         observer_ = {this, draw != 0, ReadVertex, ReadIndex};
+        observer_.read_vertex_detailed = ReadVertexDetailed;
+        observer_.read_index_detailed = ReadIndexDetailed;
         if (device) {
             const auto stats = manager.GetRepeatedUnlockStats(device);
             observer_.repeated_unlock_policy = stats.enabled;
@@ -62,6 +64,14 @@ private:
                           std::size_t offset, void* destination, std::size_t length) noexcept {
         const auto& self = *static_cast<PreparedBufferCapture*>(context);
         return self.index_.Read(device, buffer, offset, destination, length) == ir::RegistryResult::Ok;
+    }
+    static buffers::ShadowReadStatus ReadVertexDetailed(void* context, IDirect3DDevice8* device, IDirect3DVertexBuffer8* buffer,
+                                                        std::size_t offset, void* destination, std::size_t length) noexcept {
+        return static_cast<const PreparedBufferCapture*>(context)->vertex_.ReadDetailed(device, buffer, offset, destination, length);
+    }
+    static buffers::ShadowReadStatus ReadIndexDetailed(void* context, IDirect3DDevice8* device, IDirect3DIndexBuffer8* buffer,
+                                                       std::size_t offset, void* destination, std::size_t length) noexcept {
+        return static_cast<const PreparedBufferCapture*>(context)->index_.ReadDetailed(device, buffer, offset, destination, length);
     }
     BufferBindingSnapshot bindings_{};
     BufferObserver observer_{};

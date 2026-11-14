@@ -241,7 +241,7 @@ class CaptureHostTests(unittest.TestCase):
                                                                          "T3RENDER_CAPTURE_VERTEX_PROGRAMS": "1"})
         draws = [e for e in self.records() if e["event"] == "draw"]
         self.assertEqual(draws[0]["vertex_program"], {"status": "unavailable", "generation": 7,
-                         "reason": "unsupported_version", "words": None})
+                         "reason": "unsupported_version", "words": None, "first_word_observed": 0xfffe0200})
 
     def test_vertex_constants_require_opt_in_and_stable_paired_draw(self):
         self.run_capture("shader_constants", frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1"})
@@ -512,6 +512,17 @@ class CaptureHostTests(unittest.TestCase):
             for component in draw["buffer_data"].values():
                 if isinstance(component, dict) and component["status"] not in ("captured", "empty"):
                     self.assertIsNone(component["data"])
+
+    def test_shadow_failure_reasons_do_not_publish_partial_bytes(self):
+        self.run_capture("shadow_reason", frame="1", extra={"T3RENDER_CAPTURE_BUFFERS": "1"})
+        draws = [item for item in self.records() if item["event"] == "draw"]
+        self.assertEqual(len(draws), 2)
+        for part, reason in (("vertex", "abandoned"), ("index", "unknown_data")):
+            failed = draws[0]["buffer_data"][part]
+            self.assertEqual((failed["status"], failed["shadow_reason"], failed["data"]), ("unknown", reason, None))
+            captured = draws[1]["buffer_data"][part]
+            self.assertEqual(captured["status"], "captured")
+            self.assertNotIn("shadow_reason", captured)
 
     def test_buffered_budget_counts_only_successful_shadow_bytes(self):
         self.run_capture("buffer_budget", frame="1")

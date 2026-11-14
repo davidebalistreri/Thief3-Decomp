@@ -74,6 +74,12 @@ located the first invalidation in the observer's `BeginUnlock` consistency
 check. This did not identify the subcondition or native result. The diagnostic
 now records those details as observations while retaining fail-closed behavior;
 the native Unlock HRESULT is a candidate if calls overlap.
+A [third capture](benchmarks/runtime/2026-11-14-tds-unlock-mismatch/result.json)
+found no active tracked lock on the affected vertex buffer; both its last
+observed Lock and the Unlock result candidate succeeded. A separate
+[repeated-Unlock fixture](benchmarks/d3d8/2026-11-14-repeated-unlock/result.json)
+shows that Highball accepts that sequence in both native and facade modes, but
+does not prove the game used that exact sequence.
 
 Add `-DT3RENDER_BUILD_SMOKE_TEST=ON` at configuration time to build a
 standalone D3D8 program in the `smoke/` subdirectory. It draws four synthetic

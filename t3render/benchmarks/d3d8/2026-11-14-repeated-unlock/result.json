@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "synthetic_repeated_managed_writeonly_vertex_unlock",
+  "status": "PASS",
+  "runtime": "Highball CrossOver 26.3 r30 / Wine x86",
+  "fixture_sha256": "47c3c85775ce92218bc3661facc199810a979d8df626a4f24d4d5e39bd8c3f3b",
+  "result": {
+    "first_unlock_hresult": 0,
+    "repeated_unlock_hresult": 0,
+    "native_and_facade_sample_rgb": "e43b3b",
+    "native_and_facade_fixture_ppm_equal": true,
+    "separate_synchronized_d3d8_dx12_fixture_rgb_equal": true
+  },
+  "limitations": [
+    "A duplicate Unlock is one hypothesis compatible with the TDS observation, not a proven TDS call sequence.",
+    "The fixture tests one managed WRITEONLY vertex buffer and one rendered triangle; it does not prove alias closure or gameplay parity.",
+    "The synchronized D3D8/DX12 comparison is a separate synthetic draw, not a replay of the repeated Unlock draw."
+  ],
+  "local_results": "build/t3render-captures/2026-11-14-repeated-unlock-hypothesis"
+}

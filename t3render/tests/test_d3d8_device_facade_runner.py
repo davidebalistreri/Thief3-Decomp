@@ -61,6 +61,7 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
                      "before_draw=1 before_pixel=0xe43b3b draw=1 pixel=0x00ff00 cleanup=PASS")
         lines.append("shader_bound_deletion delete=0x00000000 create=0x00000000 get=0x00000000 same_handle=1 "
                      "bound_new=1 retained_draw=1 retained_pixel=0x00ff00 replacement_draw=1 replacement_pixel=0xe43b3b cleanup=PASS")
+        lines.append("repeated_vertex_unlock first=0x00000000 repeated=0x00000000 pixel=0xe43b3b")
         lines.extend(("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                       "resource_facade_volume_roundtrips=PASS",
                       "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
@@ -221,6 +222,14 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
                       [valid.replace("retained_draw=1", "retained_draw=0")]):
             with self.subTest(lines=lines), self.assertRaises(probe.RunError):
                 probe.inspect_bound_shader_deletion(lines)
+
+    def test_repeated_unlock_requires_one_valid_rendered_observation(self):
+        valid = "repeated_vertex_unlock first=0x00000000 repeated=0x00000000 pixel=0xe43b3b"
+        self.assertEqual(probe.inspect_repeated_vertex_unlock([valid])["repeated"], "0x00000000")
+        for lines in ([], [valid, valid], [valid.replace("first=0x00000000", "first=0x80004005")],
+                      [valid.replace("pixel=0xe43b3b", "pixel=0x000000")]):
+            with self.subTest(lines=lines), self.assertRaises(probe.RunError):
+                probe.inspect_repeated_vertex_unlock(lines)
 
     def test_private_data_gap_requires_ordered_native_and_facade_evidence(self):
         for mode in ("baseline", "facade"):

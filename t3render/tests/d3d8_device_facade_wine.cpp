@@ -968,6 +968,46 @@ bool SampleShaderColor(IDirect3DDevice8* device, DWORD& pixel) {
     return SUCCEEDED(back->UnlockRect()) && valid;
 }
 
+// Exercise the TDS-observed shape of the mismatch on a managed WRITEONLY VB.
+// The trace does not prove a duplicate Unlock, so this is a hypothesis test.
+bool ObserveRepeatedVertexUnlock(IDirect3DDevice8* device) {
+    const Vertex vertices[] = {{16, 16, 0, 1, 0xffe43b3b}, {240, 16, 0, 1, 0xffe43b3b},
+                               {16, 240, 0, 1, 0xffe43b3b}};
+    ComPtr<IDirect3DVertexBuffer8> vertex;
+    if (FAILED(device->CreateVertexBuffer(sizeof(vertices), D3DUSAGE_WRITEONLY, kFvf,
+                                          D3DPOOL_MANAGED, vertex.put())) || !vertex.value) return false;
+    BYTE* data = nullptr;
+    const HRESULT lock_hr = vertex->Lock(0, sizeof(vertices), &data, 0);
+    if (FAILED(lock_hr) || !data) return false;
+    std::memcpy(data, vertices, sizeof(vertices));
+    const HRESULT first_hr = vertex->Unlock();
+    if (FAILED(first_hr)) return false;
+    const HRESULT repeated_hr = vertex->Unlock();
+    if (FAILED(device->SetVertexShader(kFvf)) || FAILED(device->SetPixelShader(0)) ||
+        FAILED(device->SetRenderState(D3DRS_LIGHTING, FALSE)) || FAILED(device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE)) ||
+        FAILED(device->SetRenderState(D3DRS_ZENABLE, FALSE)) || FAILED(device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE)) ||
+        FAILED(device->SetTexture(0, nullptr)) || FAILED(device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1)) ||
+        FAILED(device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE)) ||
+        FAILED(device->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE)) ||
+        FAILED(device->SetStreamSource(0, vertex.value, sizeof(Vertex))) ||
+        FAILED(device->Clear(0, nullptr, D3DCLEAR_TARGET, kClear, 1, 0)) || FAILED(device->BeginScene()) ||
+        FAILED(device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1)) || FAILED(device->EndScene())) return false;
+    ComPtr<IDirect3DSurface8> back;
+    D3DLOCKED_RECT pixels{};
+    if (FAILED(device->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, back.put())) || !back.value ||
+        FAILED(back->LockRect(&pixels, nullptr, D3DLOCK_READONLY))) return false;
+    DWORD pixel = 0;
+    const bool valid = pixels.pBits && pixels.Pitch >= static_cast<INT>(kWidth * 4);
+    if (valid) std::memcpy(&pixel, static_cast<const BYTE*>(pixels.pBits) + 64 * pixels.Pitch + 64 * 4, sizeof(pixel));
+    if (FAILED(back->UnlockRect()) || !valid || (pixel & 0xffffffu) != 0xe43b3bu ||
+        FAILED(device->SetStreamSource(0, nullptr, 0))) return false;
+    std::printf("repeated_vertex_unlock first=0x%08lx repeated=0x%08lx pixel=0x%06lx\n",
+                static_cast<unsigned long>(static_cast<std::uint32_t>(first_hr)),
+                static_cast<unsigned long>(static_cast<std::uint32_t>(repeated_hr)),
+                static_cast<unsigned long>(pixel & 0xffffffu));
+    return true;
+}
+
 // Characterize handle lifetime independently of the combined observer.
 // A state block may restore a shader after its handle was deleted and reused;
 // the outcome must be observed rather than assumed from its numeric value.
@@ -2205,6 +2245,7 @@ bool Render(HWND window, bool facade_mode, const wchar_t* output) {
     if (facade_mode && !CheckFailedStateBlock(draw_device, native_owner, buffers)) return false;
     if (!ObserveShaderStateBlockLifetime(draw_device)) return false;
     if (!ObserveBoundShaderDeletion(draw_device)) return false;
+    if (!ObserveRepeatedVertexUnlock(draw_device)) return false;
 #endif
     return true;
 }

@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "tds_bedroom_unlock_mismatch_diagnostic",
+  "status": "PARTIAL",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86 virtual desktop",
+  "scene": "SouthQuarter1_int1, Garrett's Building save, bedroom",
+  "proxy_commit": "24345df9",
+  "proxy_sha256": "7188de75b555d5d58e6cf21d3921ee740338bd88ffdefa5db4be95a55da959b5",
+  "temporary_proxy_removed": true,
+  "capture": {
+    "frames": 1,
+    "frame": 1002,
+    "present_hresult": 0,
+    "draws": 744,
+    "indexed_draws": 735,
+    "up_draws": 9,
+    "stable_indexed_buffer_windows": 0,
+    "indexed_vb_ib_payloads": 0,
+    "declarations_unavailable_after_reset": 712,
+    "vertex_program_candidates": 0,
+    "vertex_constant_samples": 682,
+    "first_buffer_invalidation": {
+      "cause": "unlock_mismatch",
+      "resource": "vertex",
+      "pending_lock": false,
+      "locked": false,
+      "pending_unlock": false,
+      "operation_exhausted": false,
+      "last_observed_lock_hresult": 0,
+      "unlock_hresult_candidate": 0
+    },
+    "raw_trace_sha256": "31d8a96cc8a227ae3e075b6a79fd211c8c9684b0d31aaae8e5afa1247a9d9714"
+  },
+  "limitations": [
+    "The Unlock result is a candidate if calls overlap. The trace does not prove why no matching lock was active or rule out unobserved native aliases.",
+    "The first invalidation is observed before the selected frame. A failed draw window makes the VB/IB payloads unavailable.",
+    "The reported menu text truncation has not been isolated or corrected; no TDS frame replay was performed."
+  ],
+  "local_trace": "build/t3render-captures/bedroom-combined-20261114/bedroom-third.jsonl"
+}

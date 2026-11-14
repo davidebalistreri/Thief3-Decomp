@@ -789,11 +789,13 @@ void EagerFacadeBufferRetirement() {
 
 void PersistentEagerBufferShadows() {
     struct EmptyBridge final : PrivateObjectBridge {
+        std::function<void()> on_external;
         bool Pin(const void*, PrivateObjectPin&) noexcept override { return false; }
         IUnknown* Adopt(PrivateDataKind, IUnknown* native) noexcept override {
             if (native) native->Release();
             return nullptr;
         }
+        void ExternalObserved() noexcept override { if (on_external) on_external(); }
     };
     Reader reader;
     auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
@@ -1045,6 +1047,13 @@ void PersistentEagerBufferShadows() {
     assert(external_proxy->InstallFacadePrivateBridge(&external_device, &external_facade, bridge, false, external_markers));
     Vertex external_raw; external_raw.device = &external_device;
     IUnknown *external_marker = nullptr, *stored_object = nullptr;
+    unsigned external_notifications = 0;
+    bridge->on_external = [&] {
+        BYTE check = 0;
+        ++external_notifications;
+        assert(external_proxy->ReadVertex(&external_device, &external_raw, 0, &check, 1) == RegistryResult::Unavailable);
+        SetLastError(988);
+    };
     external_raw.on_private_get = [&](REFGUID key, void* output, DWORD* size) {
         if (IsEqualIID(key, t3render::markers::kPrivateMarkerGuid)) return external_marker ? S_OK : D3DERR_NOTFOUND;
         if (!stored_object || !output || !size || *size < sizeof(stored_object)) return E_FAIL;
@@ -1056,7 +1065,7 @@ void PersistentEagerBufferShadows() {
         auto* object = const_cast<IUnknown*>(static_cast<const IUnknown*>(input));
         if (IsEqualIID(key, t3render::markers::kPrivateMarkerGuid)) { external_marker = object; object->AddRef(); return S_OK; }
         BYTE check = 0;
-        assert(input == &external_object &&
+        assert(input == &external_object && external_notifications == 1 && GetLastError() == 440 &&
                external_proxy->ReadVertex(&external_device, &external_raw, 0, &check, 1) == RegistryResult::Unavailable);
         stored_object = object; object->AddRef(); SetLastError(701); return S_OK;
     };
@@ -1069,8 +1078,9 @@ void PersistentEagerBufferShadows() {
     auto* external_wrapper = external_proxy->AdoptVertexForFacade(&external_device, &external_facade, &external_raw, 8, true);
     assert(external_wrapper && external_marker);
     Fill(external_wrapper, 0, data, sizeof(data));
+    SetLastError(440);
     assert(external_wrapper->SetPrivateData(kAlias, &external_object, sizeof(IUnknown*), D3DSPD_IUNKNOWN) == S_OK &&
-           GetLastError() == 701 && external_object.refs == 2);
+           GetLastError() == 701 && external_object.refs == 2 && external_notifications == 1);
     assert(external_proxy->ReadVertex(&external_device, &external_raw, 0, observed, sizeof(observed)) == RegistryResult::Unavailable);
     external_raw.AddRef(); external_wrapper->Release();
     external_raw.AddRef();

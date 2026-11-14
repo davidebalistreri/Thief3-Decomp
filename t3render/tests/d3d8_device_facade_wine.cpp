@@ -297,6 +297,31 @@ public:
     ULONG refs = 1;
 };
 
+class ObservedExternalUnknown final : public IUnknown {
+public:
+    explicit ObservedExternalUnknown(t3render::fixture::CombinedCaptureObserver& observer) noexcept : observer_(observer) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        if (!IsEqualIID(iid, IID_IUnknown)) return E_NOINTERFACE;
+        AddRef(); *out = this; return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        saw_addref = true;
+        invalid_before_addref = invalid_before_addref && !observer_.ShaderWindowAvailableForFixture();
+        return ++refs_;
+    }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG remaining = --refs_;
+        if (!remaining) delete this;
+        return remaining;
+    }
+    bool saw_addref = false, invalid_before_addref = true;
+private:
+    t3render::fixture::CombinedCaptureObserver& observer_;
+    ULONG refs_ = 1;
+};
+
 class PrivateDeviceHolder final : public IUnknown {
 public:
     PrivateDeviceHolder(IDirect3DDevice8* device, std::shared_ptr<std::atomic<bool>> destroyed)
@@ -946,6 +971,44 @@ bool CapturePreparedBufferDraw(IDirect3DDevice8* device, IDirect3DDevice8* nativ
     return true;
 }
 
+bool ObserveCombinedExternalHazards(IDirect3DDevice8* device, IDirect3DDevice8* native,
+                                    t3render::buffers::BufferProxy& buffers, D3DPRESENT_PARAMETERS& pp,
+                                    IDirect3DVertexBuffer8* vertex) {
+    ComPtr<IDirect3DTexture8> texture;
+    if (FAILED(device->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, texture.put())) || !texture.value)
+        return false;
+    ComPtr<IDirect3DVertexBuffer8> probe;
+    if (FAILED(device->CreateVertexBuffer(4, D3DUSAGE_WRITEONLY, 0, D3DPOOL_MANAGED, probe.put())) || !probe.value) return false;
+    BYTE* mapped = nullptr;
+    if (FAILED(probe->Lock(0, 4, &mapped, 0)) || !mapped) return false;
+    std::memset(mapped, 0x42, 4);
+    if (FAILED(probe->Unlock())) return false;
+    auto pin = buffers.UnwrapVertex(native, probe.value);
+    BYTE observed[4]{};
+    if (!pin.wrapped() || buffers.ReadVertex(native, pin.native(), 0, observed, sizeof(observed)) != t3render::ir::RegistryResult::Ok ||
+        observed[0] != 0x42) return false;
+    auto* facade = static_cast<t3render::fixture::DeviceFixture*>(device);
+    const GUID key{0x3ee22aa1, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
+    for (unsigned kind = 0; kind < 2; ++kind) {
+        t3render::fixture::CombinedCaptureObserver observer(native, buffers, pp);
+        if (!observer.valid() || !observer.ShaderWindowAvailableForFixture()) return false;
+        facade->SetCombinedObserver(&observer);
+        struct Detach { t3render::fixture::DeviceFixture* facade; ~Detach() { facade->SetCombinedObserver(nullptr); } } detach{facade};
+        auto* external = new (std::nothrow) ObservedExternalUnknown(observer);
+        if (!external) return false;
+        ComPtr<IUnknown> owner; owner.value = external;
+        const HRESULT hr = kind == 0 ? texture->SetPrivateData(key, external, sizeof(IUnknown*), D3DSPD_IUNKNOWN) :
+                                       vertex->SetPrivateData(key, external, sizeof(IUnknown*), D3DSPD_IUNKNOWN);
+        const bool invalidated = external->saw_addref && external->invalid_before_addref &&
+            !observer.ShaderWindowAvailableForFixture() &&
+            buffers.ReadVertex(native, pin.native(), 0, observed, sizeof(observed)) == t3render::ir::RegistryResult::Unavailable;
+        const HRESULT freed = FAILED(hr) ? S_OK : kind == 0 ? texture->FreePrivateData(key) : vertex->FreePrivateData(key);
+        if (FAILED(hr) || FAILED(freed) || !invalidated) return false;
+    }
+    std::printf("combined_external_shader_invalidation=PASS\n");
+    return true;
+}
+
 bool ObserveEagerBufferLifetime(HWND window, bool facade_mode, bool persistent = false) {
     ComPtr<IDirect3D8> native_factory;
     native_factory.value = Direct3DCreate8(D3D_SDK_VERSION);
@@ -1072,6 +1135,7 @@ bool ObserveEagerBufferLifetime(HWND window, bool facade_mode, bool persistent =
             std::memcmp(copied_index, blob, sizeof(blob))) return false;
     }
 
+    if (facade_mode && persistent && !ObserveCombinedExternalHazards(device.value, native, *buffers, pp, vertex.value)) return false;
     auto destroyed = std::make_shared<std::atomic<bool>>(false);
     auto* holder = new (std::nothrow) PrivateDeviceHolder(device.value, destroyed);
     if (!holder) return false;

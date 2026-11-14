@@ -274,6 +274,17 @@ The offline diagnostic IR is still incomplete and marks the frame unreplayable.
 Do not install the facade in TDS. Full local artifacts are under
 `build/t3render-captures/2026-11-14-combined-observer-dx12/`.
 
+The [combined external-object observation](../benchmarks/d3d8/2026-11-14-combined-external-invalidation/result.json)
+checks external `IUnknown` writes from both a texture and a VB. The fixture
+invalidated buffer and shader observation before forwarding either object;
+the object's reentrant `AddRef` checked that the shader window was already
+unavailable. A fresh post-Reset buffer shadow was available before the first
+write and unavailable afterwards. The same run retained the synchronized
+synthetic D3D8/DX12 RGB match. This is a sequential fixture test, not proof of
+safe observer lifetime under concurrent or arbitrary reentrant calls. The
+local logs and images are under
+`build/t3render-captures/2026-11-14-combined-external-invalidation-v3/`.
+
 The later [state-block observation](../benchmarks/d3d8/2026-11-13-stateblock-facade/result.json)
 exercised Create, Capture, Begin/End, Apply and Delete on the combined facade.
 After VB/IB wrappers became dormant and were reacquired, their `WRITEONLY`

@@ -91,7 +91,17 @@ public:
                                IDirect3DDevice8* native, IDirect3DDevice8* facade) noexcept
         : buffers_(std::move(buffers)), native_(native), facade_(facade) {}
     void Attach(const std::shared_ptr<t3render::resource_fixture::Router>& router) noexcept { resources_ = router; }
-    void ExternalObserved() noexcept override { buffers_->InvalidateDevice(native_); }
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+    void SetCombinedObserver(CombinedCaptureObserver* observer) noexcept { observer_ = observer; }
+#endif
+    void ExternalObserved() noexcept override {
+        const DWORD error = GetLastError();
+        buffers_->InvalidateDevice(native_);
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+        if (observer_) observer_->Invalidate();
+#endif
+        SetLastError(error);
+    }
     bool Pin(const void* candidate, t3render::resource_fixture::PrivateObjectPin& pin) noexcept override {
         bool vertex = false;
         pin.guard = buffers_->PinPrivateBuffer(native_, facade_, candidate, &pin.native, &vertex);
@@ -142,6 +152,9 @@ private:
     std::weak_ptr<t3render::resource_fixture::Router> resources_;
     IDirect3DDevice8* const native_; // borrowed, kept alive by the device facade
     IDirect3DDevice8* const facade_;
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+    CombinedCaptureObserver* observer_ = nullptr; // borrowed; sequential fixture only
+#endif
 };
 #endif
 
@@ -151,7 +164,10 @@ class DeviceFixture final : public IDirect3DDevice8 {
 public:
 #ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
     // Borrowed fixture-only observer; detach before it or this device dies.
-    void SetCombinedObserver(CombinedCaptureObserver* observer) noexcept { combined_observer_ = observer; }
+    void SetCombinedObserver(CombinedCaptureObserver* observer) noexcept {
+        combined_observer_ = observer;
+        if (auto bridge = combined_bridge_.lock()) bridge->SetCombinedObserver(observer);
+    }
 #endif
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
     // Test-only borrowed pointer for checking the buffer shadow registry; it
@@ -846,6 +862,9 @@ private:
                 bridge->Attach(resources_);
                 auto markers = preserve_buffer_shadows ? resources_->PrivateMarkers() : nullptr;
                 if (!buffers_->InstallFacadePrivateBridge(native_, this, bridge, retain_buffers, markers)) resources_.reset();
+#ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
+                if (resources_) combined_bridge_ = bridge;
+#endif
             }
         } catch (...) {}
 #else
@@ -904,6 +923,7 @@ private:
     FixtureReferenceCount refs_;
 #ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
     CombinedCaptureObserver* combined_observer_ = nullptr;
+    std::weak_ptr<FixturePrivateObjectBridge> combined_bridge_;
 #endif
 };
 

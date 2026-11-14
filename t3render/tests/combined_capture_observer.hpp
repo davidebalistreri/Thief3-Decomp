@@ -21,6 +21,10 @@ public:
     }
     bool valid() const noexcept { return native_ && device_; }
     void Invalidate() noexcept { shaders_.Invalidate(device_); }
+    bool ShaderWindowAvailableForFixture() noexcept {
+        const auto ticket = shaders_.BeginDraw(device_);
+        return ticket && shaders_.End(ticket);
+    }
     void Unsupported() noexcept {
         const DWORD before = GetLastError();
         Invalidate();

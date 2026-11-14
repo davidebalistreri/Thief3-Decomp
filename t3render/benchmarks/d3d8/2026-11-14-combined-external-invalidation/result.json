@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "test": "synthetic_combined_external_invalidation",
+  "date": "2026-11-14",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/src/buffer_proxy.cpp": "df70b6085a55bf489d5a90201b271fb2c220a1a2e442ff6ffa0fdaa91f00eda1",
+    "t3render/src/buffer_proxy.hpp": "c344ea074767aa0fcfd743c262de0438e2e89c63d43a21500e9958eba98ee916",
+    "t3render/src/private_blob.hpp": "a17b40ffde3785f9544540eb082149e1b6c6937bc4f8aa68f98565b59a9ea664",
+    "t3render/tests/combined_capture_observer.hpp": "ccd8466cab0665085467c8636f350da4e1b421471b5c523aed0925207cd4b7d9",
+    "t3render/tests/d3d8_device_facade.hpp": "cfe6c9531b074a0b8e706e24a362409eab2286e5b44ea16b12171ed8a6f57c9d",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "a88b1a4444090e4ca0cf2092c887bd29a0d52d2c2aad9d8118e848d8a1074eea",
+    "t3render/tests/d3d8_resource_facade.hpp": "7c94e2bef1bb843be2b8d35df7ad509f0ad2946c46dbc648f77feb95ac6e5ed9",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "4848dbb7cb2b3c5b25b22547a95596c864519e682737c810e7288bbd1d18231b",
+    "t3render/tests/buffer_proxy_test.cpp": "f357ff0609a6955667666b4e9456aa878030ce6a31cf00b038b840dcb675ba74",
+    "t3render/tests/test_d3d8_device_facade_runner.py": "c8c08e346950971f216b2bed3534d839d54e6f4e14f1ad103280428e998b552c",
+    "t3render/tools/run_d3d8_device_facade.py": "63deee3ac9c4a41895482ba88081ec1229c157fae03b787e8392b34f3a6aad55"
+  },
+  "fixture_sha256": "1a1c12b12dbf88e7ba598b6c4da522b0bf1ec74f417d895e0a50102c8eccfc9b",
+  "result": {
+    "external_texture_and_vertex_writes_notified_shader_observer": true,
+    "shader_invalid_before_native_external_addref": true,
+    "fresh_writeonly_shadow_invalidated": true,
+    "default_fixture_parity_records_each": 159,
+    "default_fixture_ppm_sha256_both": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+    "synchronized_synthetic_d3d8_dx12_rgb_identical": true,
+    "synchronized_rgb_ppm_sha256": "5f46fcdfe5237797a1425f91d3abc19689c225e67e38b5ecbf7f25b39db16c85",
+    "trace_sha256": "b02591cd7661e34ec926c1aa22371bb97721a3c25ccbf42541c0d422ff92f538",
+    "facade_log_sha256": "e04cffff030a5560ac6eb71fa9fb632d51d66e9336ce2a4cb8e75148f3a2f6c7"
+  },
+  "limitations": [
+    "Fixture only; not integrated into game proxy or TDS.",
+    "Sequential external references and reentrant AddRef only; observer attach/detach is not synchronized for concurrent use.",
+    "Other hidden alias paths, COM identities, reentrancy and native Windows remain unverified.",
+    "The synchronized DX12 replay supports only one exact shader and does not establish general replay compatibility."
+  ]
+}

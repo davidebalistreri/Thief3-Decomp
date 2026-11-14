@@ -306,6 +306,10 @@ public:
                         std::lock_guard<std::mutex> lock(state_->mutex);
                         state_->PoisonLocked(owner);
                     }
+                    // The facade may also be observing shader or other state;
+                    // notify it outside the buffer mutex before forwarding an
+                    // external object capable of holding hidden aliases.
+                    bridge->ExternalObserved();
                     error.restore();
                     const HRESULT hr = PrivateState().SetTyped(key, PrivateDataKind::ExternalUnknown,
                         [&] { return real_->SetPrivateData(key, data, size, flags); });

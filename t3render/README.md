@@ -60,6 +60,11 @@ Neither synthetic result establishes TDS compatibility or room replay.
 The [Highball result](benchmarks/d3d8/2026-11-14-experimental-combined-proxy/result.json)
 records the tested binary and matching RGB hashes.
 
+A [timed bedroom batch](tools/README_tds_bedroom_batch.md) can collect three
+consecutive frames with one game launch and summarize missing observations.
+It has been simulated, not yet tested against live TDS; it does not produce an
+A/B image or establish a replayable frame.
+
 A subsequent [TDS bedroom capture](benchmarks/runtime/2026-11-14-tds-combined-observer/result.json)
 completed one frame but had no stable VB/IB windows. The earlier trace labeled
 prepared getters `getter_failed` even if a missing draw ticket meant they were

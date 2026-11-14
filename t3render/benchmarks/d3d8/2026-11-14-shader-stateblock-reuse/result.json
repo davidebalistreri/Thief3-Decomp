@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_shader_stateblock_handle_reuse",
+  "date": "2026-11-14",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/src/proxy.cpp": "6f7ea9661581df88caf1ad7534696f0f28fdddb08268bd69ef7593dc3aaacfd8",
+    "t3render/tests/d3d8_device_facade.hpp": "cabb90ba5e2f68166cf2aa88d1d18f57f3885abfc90c14147ac0f0d628f08eae",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "fa4c0a1431bd745fe319377de5e41b42302a2cdb9bd3da9c7192b4805f9bd1c3",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "4848dbb7cb2b3c5b25b22547a95596c864519e682737c810e7288bbd1d18231b",
+    "t3render/tests/proxy_mock.cpp": "77ac37ac1c427fefbf1b21fb77ab5a2df2f4f5599786d703818a811a09446a9f",
+    "t3render/tests/test_proxy.py": "8015a973fd387599f086a2d555eaa2509985df5845a8c5676f96e9b4f4f5d8be",
+    "t3render/tests/test_d3d8_device_facade_runner.py": "ad5e8d88222047f71b3bff57105a9693b4618fea329f6173eca5ec9d64374cc8",
+    "t3render/tools/run_d3d8_device_facade.py": "8983df2421c9408337be4c7ca02063f027d7a0a2ac2d9c2bf4d89f8d8f332af7"
+  },
+  "fixture_sha256": "03a9b1936d06dad6ccd66f2e97bddbd3a9635db1a6e79ec925812a678bc26640",
+  "result": {
+    "baseline": {
+      "delete": "0x00000000",
+      "create": "0x00000000",
+      "apply": "0x00000000",
+      "get": "0x00000000",
+      "same_handle": true,
+      "bound_old": true,
+      "bound_new": true,
+      "function_hr": "0x00000000",
+      "function": "replacement",
+      "before_draw": true,
+      "before_pixel": "0xe43b3b",
+      "draw": true,
+      "pixel": "0x00ff00"
+    },
+    "facade": {
+      "delete": "0x00000000",
+      "create": "0x00000000",
+      "apply": "0x00000000",
+      "get": "0x00000000",
+      "same_handle": true,
+      "bound_old": true,
+      "bound_new": true,
+      "function_hr": "0x00000000",
+      "function": "replacement",
+      "before_draw": true,
+      "before_pixel": "0xe43b3b",
+      "draw": true,
+      "pixel": "0x00ff00"
+    },
+    "baseline_log_sha256": "df0aa4b8c3c40d69f8470234aeaa7d5dde1503b38d36668f5dc8fc779c3317ac",
+    "facade_log_sha256": "301daf2851a0d48c982caa2932666bee15786884777719298315b5d86f2e8070",
+    "synchronized_synthetic_d3d8_dx12_rgb_identical": true,
+    "synchronized_rgb_ppm_sha256": "5f46fcdfe5237797a1425f91d3abc19689c225e67e38b5ecbf7f25b39db16c85"
+  },
+  "limitations": [
+    "Synthetic state-block sequence on one Wine runtime; not TDS or Windows native.",
+    "Numeric handle reuse and shader getter identity do not prove the shader executed by the driver.",
+    "Only one sample pixel per shader state was checked; the state block may restore more than the shader.",
+    "The separate D3D8/DX12 comparison does not replay the state-block experiment.",
+    "The observer still invalidates capture on state blocks and is not integrated into TDS."
+  ]
+}

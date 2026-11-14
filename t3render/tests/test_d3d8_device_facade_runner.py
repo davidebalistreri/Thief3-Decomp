@@ -53,6 +53,9 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
             lines.append("combined_external_shader_invalidation=PASS")
             lines.append("combined_reset_shader_and_fresh_buffer_epoch=PASS")
         lines.append("private_cross_device_cycle=PASS")
+        lines.append("shader_stateblock_lifetime delete=0x00000000 create=0x00000000 apply=0x00000000 get=0x00000000 "
+                     "same_handle=1 bound_old=1 bound_new=1 function_hr=0x00000000 function=replacement "
+                     "before_draw=1 before_pixel=0xe43b3b draw=1 pixel=0x00ff00 cleanup=PASS")
         lines.extend(("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                       "resource_facade_volume_roundtrips=PASS",
                       "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
@@ -191,6 +194,18 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
         self.ppm.write_bytes(image)
         with self.assertRaises(probe.RunError):
             probe.inspect_prepared_image(self.ppm)
+
+    def test_shader_stateblock_observation_requires_consistent_complete_record(self):
+        valid = next(line for line in fixture_log("facade", resource_facade=True)
+                     if line.startswith("shader_stateblock_lifetime "))
+        observation = probe.inspect_shader_stateblock([valid])
+        self.assertTrue(observation["same_handle"])
+        self.assertEqual(observation["function"], "replacement")
+        for lines in ([], [valid, valid], [valid.replace("cleanup=PASS", "cleanup=FAIL")],
+                      [valid.replace("create=0x00000000", "create=0x80004005")],
+                      [valid.replace("bound_new=1", "bound_new=0")]):
+            with self.subTest(lines=lines), self.assertRaises(probe.RunError):
+                probe.inspect_shader_stateblock(lines)
 
     def test_private_data_gap_requires_ordered_native_and_facade_evidence(self):
         for mode in ("baseline", "facade"):

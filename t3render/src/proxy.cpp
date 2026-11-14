@@ -992,7 +992,9 @@ HRESULT STDMETHODCALLTYPE DeviceSetVertexShaderConstant(IDirect3DDevice8* device
 }
 
 // State blocks can retain or restore native bindings without passing through
-// SetStreamSource/SetIndices. The production proxy invalidates evidence before
+// SetStreamSource/SetIndices. After shader-handle reuse, a restored state block
+// can also render differently from the program reported by the shader getter.
+// The production proxy invalidates evidence before
 // the call even if the runtime later rejects it. Only a separately built test
 // DLL explores a narrower binding-mutation window; that DLL is not safe for TDS.
 template <typename Method, typename... Args>

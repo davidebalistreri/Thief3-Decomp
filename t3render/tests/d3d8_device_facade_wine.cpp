@@ -942,6 +942,86 @@ const DWORD kCombinedProgram[] = {
     0x80000000u | D3DSPR_CONST | D3DSP_NOSWIZZLE, D3DSIO_END
 };
 
+bool SampleShaderColor(IDirect3DDevice8* device, DWORD& pixel) {
+    const Vertex triangle[] = {{-0.8f, 0.8f, 0.5f, 1, 0xffe43b3b}, {0.8f, 0.8f, 0.5f, 1, 0xffe43b3b},
+                               {-0.8f, -0.8f, 0.5f, 1, 0xffe43b3b}};
+    if (FAILED(device->Clear(0, nullptr, D3DCLEAR_TARGET, kClear, 1, 0)) || FAILED(device->BeginScene())) return false;
+    const HRESULT draw = device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, triangle, sizeof(Vertex));
+    const HRESULT end = device->EndScene();
+    ComPtr<IDirect3DSurface8> back;
+    D3DLOCKED_RECT lock{};
+    if (FAILED(draw) || FAILED(end) || FAILED(device->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, back.put())) ||
+        !back.value || FAILED(back->LockRect(&lock, nullptr, D3DLOCK_READONLY))) return false;
+    const bool valid = lock.pBits && lock.Pitch >= static_cast<INT>(kWidth * 4) &&
+        static_cast<std::size_t>(lock.Pitch) <= static_cast<std::size_t>(PTRDIFF_MAX) / kHeight;
+    if (valid) {
+        std::memcpy(&pixel, static_cast<const BYTE*>(lock.pBits) + 64 * lock.Pitch + 64 * 4, sizeof(pixel));
+        pixel &= 0xffffffu;
+    }
+    return SUCCEEDED(back->UnlockRect()) && valid;
+}
+
+// Characterize handle lifetime independently of the combined observer.
+// A state block may restore a shader after its handle was deleted and reused;
+// the outcome must be observed rather than assumed from its numeric value.
+bool ObserveShaderStateBlockLifetime(IDirect3DDevice8* device) {
+    const DWORD replacement_program[] = {
+        D3DVS_VERSION(1, 1), D3DSIO_MOV,
+        0x80000000u | D3DSPR_RASTOUT | D3DSP_WRITEMASK_ALL | D3DSRO_POSITION,
+        0x80000000u | D3DSPR_INPUT | D3DSP_NOSWIZZLE | D3DVSDE_POSITION,
+        D3DSIO_MOV, 0x80000000u | D3DSPR_ATTROUT | D3DSP_WRITEMASK_ALL,
+        0x80000000u | D3DSPR_INPUT | D3DSP_NOSWIZZLE | D3DVSDE_DIFFUSE, D3DSIO_END
+    };
+    DWORD original = 0, replacement = 0, block = 0, bound = 0;
+    const float green[4]{0, 1, 0, 1};
+    if (FAILED(device->CreateVertexShader(kCombinedDeclaration, kCombinedProgram, &original, D3DUSAGE_SOFTWAREPROCESSING)) ||
+        !original || FAILED(device->SetVertexShader(original)) || FAILED(device->SetVertexShaderConstant(0, green, 1)) ||
+        FAILED(device->CreateStateBlock(D3DSBT_ALL, &block)) ||
+        FAILED(device->SetVertexShader(kFvf))) return false;
+    const HRESULT removed = device->DeleteVertexShader(original);
+    const HRESULT created = device->CreateVertexShader(kCombinedDeclaration, replacement_program, &replacement, D3DUSAGE_SOFTWAREPROCESSING);
+    DWORD before_pixel = 0;
+    const bool before_drawn = SUCCEEDED(created) && replacement && SUCCEEDED(device->SetVertexShader(replacement)) &&
+                              SampleShaderColor(device, before_pixel);
+    const HRESULT applied = device->ApplyStateBlock(block);
+    const HRESULT got = device->GetVertexShader(&bound);
+    HRESULT function_hr = E_FAIL;
+    const char* function = "unavailable";
+    if (SUCCEEDED(created) && replacement && SUCCEEDED(got) && bound == replacement) {
+        DWORD size = 0;
+        function_hr = device->GetVertexShaderFunction(bound, nullptr, &size);
+        if (SUCCEEDED(function_hr) && size <= 1024 && size % sizeof(DWORD) == 0) {
+            std::vector<DWORD> words(size / sizeof(DWORD));
+            function_hr = device->GetVertexShaderFunction(bound, words.data(), &size);
+            if (SUCCEEDED(function_hr) && size == sizeof(replacement_program) &&
+                std::memcmp(words.data(), replacement_program, size) == 0) function = "replacement";
+            else if (SUCCEEDED(function_hr) && size == sizeof(kCombinedProgram) &&
+                     std::memcmp(words.data(), kCombinedProgram, size) == 0) function = "original";
+            else if (SUCCEEDED(function_hr)) function = "other";
+        }
+    }
+    DWORD pixel = 0;
+    const bool drawn = SUCCEEDED(applied) && SUCCEEDED(got) && SUCCEEDED(created) && bound == replacement &&
+                       SampleShaderColor(device, pixel);
+    const bool cleanup = SUCCEEDED(device->SetVertexShader(kFvf)) && SUCCEEDED(device->DeleteStateBlock(block)) &&
+        (FAILED(removed) ? SUCCEEDED(device->DeleteVertexShader(original)) : true) &&
+        (SUCCEEDED(created) && replacement ? SUCCEEDED(device->DeleteVertexShader(replacement)) : true);
+    std::printf("shader_stateblock_lifetime delete=0x%08lx create=0x%08lx apply=0x%08lx get=0x%08lx "
+                "same_handle=%u bound_old=%u bound_new=%u function_hr=0x%08lx function=%s "
+                "before_draw=%u before_pixel=0x%06lx draw=%u pixel=0x%06lx cleanup=%s\n",
+                static_cast<unsigned long>(static_cast<std::uint32_t>(removed)),
+                static_cast<unsigned long>(static_cast<std::uint32_t>(created)),
+                static_cast<unsigned long>(static_cast<std::uint32_t>(applied)),
+                static_cast<unsigned long>(static_cast<std::uint32_t>(got)),
+                static_cast<unsigned>(SUCCEEDED(created) && replacement && replacement == original),
+                static_cast<unsigned>(SUCCEEDED(got) && bound == original),
+                static_cast<unsigned>(SUCCEEDED(got) && SUCCEEDED(created) && replacement && bound == replacement),
+                static_cast<unsigned long>(static_cast<std::uint32_t>(function_hr)), function,
+                static_cast<unsigned>(before_drawn), static_cast<unsigned long>(before_pixel),
+                static_cast<unsigned>(drawn), static_cast<unsigned long>(pixel), cleanup ? "PASS" : "FAIL");
+    return cleanup;
+}
+
 bool CapturePreparedBufferDraw(IDirect3DDevice8* device, IDirect3DDevice8* native,
                                t3render::buffers::BufferProxy& buffers, D3DPRESENT_PARAMETERS& pp) {
     if (!t3render::CaptureConfigured()) return false;
@@ -2009,6 +2089,7 @@ bool Render(HWND window, bool facade_mode, const wchar_t* output) {
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
     if (!CheckTextureStateBlock(draw_device) || !CheckSurfaceTransfers(draw_device, facade_mode)) return false;
     if (facade_mode && !CheckFailedStateBlock(draw_device, native_owner, buffers)) return false;
+    if (!ObserveShaderStateBlockLifetime(draw_device)) return false;
 #endif
     return true;
 }

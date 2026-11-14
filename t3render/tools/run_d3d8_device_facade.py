@@ -22,6 +22,12 @@ import trace_to_up_packet
 HEADER = b"P6\n256 256\n255\n"
 PPM_SIZE = len(HEADER) + 256 * 256 * 3
 HEX_HRESULT = re.compile(r"0x[0-9a-fA-F]{8}\Z")
+SHADER_STATEBLOCK = re.compile(
+    r"shader_stateblock_lifetime delete=(0x[0-9a-fA-F]{8}) create=(0x[0-9a-fA-F]{8}) "
+    r"apply=(0x[0-9a-fA-F]{8}) get=(0x[0-9a-fA-F]{8}) same_handle=([01]) "
+    r"bound_old=([01]) bound_new=([01]) function_hr=(0x[0-9a-fA-F]{8}) "
+    r"function=(unavailable|original|replacement|other) before_draw=([01]) before_pixel=(0x[0-9a-fA-F]{6}) "
+    r"draw=([01]) pixel=(0x[0-9a-fA-F]{6}) cleanup=PASS\Z")
 PRIVATE_KINDS = ("vertex", "index", "texture", "backbuffer", "surface_level", "cube", "volume_texture", "volume")
 PRIVATE_RECORD = re.compile(
     r"private_data kind=(?P<kind>[a-z_]+) "
@@ -66,6 +72,23 @@ def expected_parity():
 
 def successful_hresult(value):
     return isinstance(value, str) and HEX_HRESULT.fullmatch(value) is not None and int(value, 16) < 0x80000000
+
+
+def inspect_shader_stateblock(lines):
+    matches = [SHADER_STATEBLOCK.fullmatch(line) for line in lines if line.startswith("shader_stateblock_lifetime ")]
+    if len(matches) != 1 or matches[0] is None:
+        raise RunError("shader state-block lifetime observation is missing or malformed")
+    delete, create, apply, get, same, old, new, function_hr, function, before_draw, before_pixel, draw, pixel = matches[0].groups()
+    if ((same == "1" or new == "1") and not successful_hresult(create) or
+        (old == "1" or new == "1") and not successful_hresult(get) or
+        function != "unavailable" and (new != "1" or not successful_hresult(function_hr)) or
+        before_draw == "1" and not successful_hresult(create) or before_draw == "0" and before_pixel != "0x000000" or
+        draw == "1" and (new != "1" or not successful_hresult(apply)) or draw == "0" and pixel != "0x000000"):
+        raise RunError("shader state-block lifetime observation is inconsistent")
+    return {"delete": delete.lower(), "create": create.lower(), "apply": apply.lower(), "get": get.lower(),
+            "same_handle": same == "1", "bound_old": old == "1", "bound_new": new == "1",
+            "function_hr": function_hr.lower(), "function": function, "before_draw": before_draw == "1",
+            "before_pixel": before_pixel.lower(), "draw": draw == "1", "pixel": pixel.lower()}
 
 
 def inspect_private_data(lines, mode):
@@ -131,6 +154,7 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
             [f"device_facade_fixture=PASS mode={mode}"]):
         raise RunError("COM identity or fixture completion marker is missing")
     if resource_facade:
+        inspect_shader_stateblock(lines)
         # Compare observed blob operations; unknown/COM results intentionally
         # differ and are validated separately as a compatibility gap.
         actual.extend(inspect_private_data(lines, mode))
@@ -444,6 +468,9 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
             images[stage] = read_ppm(ppm, resource_facade)
             result["runs"][stage] = {"log": log.name, "log_sha256": sha256(log), "ppm": ppm.name,
                                      "ppm_sha256": sha256(ppm), "parity_records": len(observations[stage])}
+            if resource_facade:
+                result["runs"][stage]["shader_stateblock"] = inspect_shader_stateblock(
+                    log.read_text(encoding="utf-8", errors="replace").splitlines())
             if resource_facade and stage == "facade":
                 trace = Path(str(ppm) + ".trace.jsonl")
                 inspect_prepared_trace(trace)
@@ -458,6 +485,15 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
             raise RunError("native and facade HRESULT/state observations differ")
         if images["baseline"] != images["facade"]:
             raise RunError("native and facade PPM streams differ")
+        if resource_facade:
+            before = result["runs"]["baseline"]["shader_stateblock"]
+            after = result["runs"]["facade"]["shader_stateblock"]
+            if any(before[name] != after[name] for name in ("delete", "create", "apply", "get")):
+                raise RunError("native and facade shader state-block HRESULTs differ")
+            if before["draw"] and after["draw"] and before["pixel"] != after["pixel"]:
+                raise RunError("native and facade shader state-block sample pixels differ")
+            if before["before_draw"] and after["before_draw"] and before["before_pixel"] != after["before_pixel"]:
+                raise RunError("native and facade replacement shader sample pixels differ")
         if replay:
             stage = "prepared_dx12_replay"
             records = trace_to_up_packet.validated_records(trace)

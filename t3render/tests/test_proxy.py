@@ -47,7 +47,7 @@ class ProxyTest(unittest.TestCase):
 
     def test_declaration_observer_is_bounded_and_opt_in(self):
         for mode in ("decl-opt-out", "decl-in", "decl-create-fail", "decl-null-output", "decl-bad-output",
-                     "decl-incomplete", "decl-collision", "decl-reuse", "decl-reset", "decl-stateblock",
+                     "decl-incomplete", "decl-collision", "decl-reuse", "decl-reset", "decl-stateblock", "decl-reuse-stateblock",
                      "decl-alias", "decl-alias-capacity", "decl-draw-set", "decl-draw-create", "decl-draw-delete", "decl-get-fail",
                      "decl-draw-fail", "decl-inactive", "decl-combined", "decl-get-set", "decl-get-draw", "decl-get-recursive", "decl-get-release",
                      "decl-writer-set", "decl-writer-create", "decl-writer-delete", "decl-writer-state", "decl-writer-alias",

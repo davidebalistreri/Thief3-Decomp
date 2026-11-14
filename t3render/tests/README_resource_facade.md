@@ -296,6 +296,18 @@ does not establish parity for every Reset, state block or concurrent call.
 Local logs and images are under
 `build/t3render-captures/2026-11-14-combined-reset-recovery/`.
 
+The [shader/state-block lifetime observation](../benchmarks/d3d8/2026-11-14-shader-stateblock-reuse/result.json)
+shows why numeric shader handles alone cannot establish the active program.
+On Highball, a state block captured shader A; after A was deleted, shader B
+reused its handle. Before applying the block, B rendered a red sample. After
+applying it, `GetVertexShaderFunction` returned B's program, but the sample was
+green, matching shader A. The native and facade runs showed the same results.
+This is one runtime and state sequence, not a general claim about every D3D8
+implementation. The proxy continues to invalidate shader evidence at state
+blocks; a host regression test covers handle reuse followed by an apply. The
+local evidence is under
+`build/t3render-captures/2026-11-14-shader-stateblock-before-after/`.
+
 The later [state-block observation](../benchmarks/d3d8/2026-11-13-stateblock-facade/result.json)
 exercised Create, Capture, Begin/End, Apply and Delete on the combined facade.
 After VB/IB wrappers became dormant and were reacquired, their `WRITEONLY`

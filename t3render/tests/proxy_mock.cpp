@@ -590,7 +590,7 @@ static int DeclarationBoundaryTest(const std::string& mode) {
  using t3render::ir::ShaderObservationStatus;
  events.reserve(1024);
  enabled=true; declaration_testing=true; declarations_requested=mode!="decl-opt-out" && mode!="decl-program-without-decl";
- vertex_programs_requested=mode=="decl-program-in" || mode=="decl-program-null" ||
+ vertex_programs_requested=mode=="decl-reuse-stateblock" || mode=="decl-program-in" || mode=="decl-program-null" ||
   mode=="decl-program-unsupported" || mode=="decl-program-without-decl";
  buffers_requested=mode=="decl-combined" || mode=="decl-cross-combined-draw";
  capture_device_reentry=mode=="decl-create-callback";
@@ -660,7 +660,7 @@ static int DeclarationBoundaryTest(const std::string& mode) {
  const DWORD program[]={0xfffe0101u,1u,0xc00f0000u,0x90e40000u,0x0000ffffu};
  const DWORD unsupported_program[]={0xfffe0200u};
  const DWORD* function=mode=="decl-program-null" ? nullptr : mode=="decl-program-unsupported" ? unsupported_program :
-  mode.find("decl-program-")==0 ? program : nullptr;
+  (mode.find("decl-program-")==0 || mode=="decl-reuse-stateblock") ? program : nullptr;
  DWORD* output=mode=="decl-null-output" ? nullptr : &handle;
  SetLastError(101);
  auto hr=d->lpVtbl->CreateVertexShader(d,input,function,output,0);
@@ -670,13 +670,13 @@ static int DeclarationBoundaryTest(const std::string& mode) {
  if (mode=="decl-null-output") handle=shader_handle;
  declaration_create_fails=false; declaration_output_unreadable=false;
  if (mode=="decl-collision") { DWORD second=0; assert(d->lpVtbl->CreateVertexShader(d,words,nullptr,&second,0)==S_OK); }
- if (mode=="decl-reuse") {
+ if (mode=="decl-reuse" || mode=="decl-reuse-stateblock") {
   SetLastError(102); assert(d->lpVtbl->DeleteVertexShader(d,handle)==S_OK && shader_input_error==102 && GetLastError()==954);
   assert(d->lpVtbl->CreateVertexShader(d,words,nullptr,&handle,0)==S_OK);
  }
  SetLastError(103); assert(d->lpVtbl->SetVertexShader(d,handle)==S_OK && shader_input_error==103 && GetLastError()==952);
  if (mode=="decl-reset") assert(d->lpVtbl->Reset(d,&params)==12);
- if (mode=="decl-stateblock") assert(d->lpVtbl->ApplyStateBlock(d,7)==23);
+ if (mode=="decl-stateblock" || mode=="decl-reuse-stateblock") assert(d->lpVtbl->ApplyStateBlock(d,7)==23);
  if (mode=="decl-alias") { device_query_alias=true; void* alias=nullptr; assert(d->lpVtbl->QueryInterface(d,IID_IDirect3DDevice8,&alias)==S_OK); }
  wants_draw=mode!="decl-inactive";
  declaration_getter_fails=mode=="decl-get-fail";
@@ -729,7 +729,8 @@ static int DeclarationBoundaryTest(const std::string& mode) {
   if (mode!="decl-get-fail") assert(observed_shader.value==(mode=="decl-get-set" ? 0xf0000002u : handle));
   assert(observed_shader_stable == (!writer_mutation && mode!="decl-get-set" && mode!="decl-get-draw" && mode!="decl-get-recursive" && mode!="decl-draw-set" && mode!="decl-draw-create" && mode!="decl-draw-delete" &&
                                     mode!="decl-get-fail" && mode!="decl-draw-fail" &&
-                                    mode!="decl-null-output" && mode!="decl-bad-output" && mode!="decl-alias" && mode!="decl-stateblock"));
+                                    mode!="decl-null-output" && mode!="decl-bad-output" && mode!="decl-alias" &&
+                                    mode!="decl-stateblock" && mode!="decl-reuse-stateblock"));
   if (writer_mutation || mode.find("decl-program-")==0 || mode=="decl-in" || mode=="decl-reuse" || mode=="decl-draw-set" || mode=="decl-draw-create" ||
       mode=="decl-draw-delete" || mode=="decl-draw-fail") {
    assert(observed_shader.declaration.status==ShaderObservationStatus::Candidate);
@@ -755,9 +756,11 @@ static int DeclarationBoundaryTest(const std::string& mode) {
           t3render::ir::DeclarationStatus::NullAddress : t3render::ir::DeclarationStatus::Complete));
   } else if (mode=="decl-get-set" || mode=="decl-get-draw" || mode=="decl-get-recursive") {
    assert(observed_shader.declaration.status==ShaderObservationStatus::Unsafe && observed_shader.declaration.words.empty());
-  } else if (mode=="decl-null-output" || mode=="decl-bad-output" || mode=="decl-alias" || mode=="decl-stateblock") {
+  } else if (mode=="decl-null-output" || mode=="decl-bad-output" || mode=="decl-alias" || mode=="decl-stateblock" ||
+             mode=="decl-reuse-stateblock") {
    // An unsafe device may fail BeginDraw; candidate bytes must stay absent.
-   assert(observed_shader.declaration.status!=ShaderObservationStatus::Candidate);
+   assert(observed_shader.declaration.status!=ShaderObservationStatus::Candidate &&
+          observed_shader.declaration.words.empty() && observed_shader.declaration.program_words.empty());
   } else assert(observed_shader.declaration.status==ShaderObservationStatus::Unknown);
  }
  return 0;

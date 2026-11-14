@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "tds_bedroom_repeated_unlock_resource_discard",
+  "status": "PARTIAL",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86 virtual desktop",
+  "scene": "SouthQuarter1_int1, Garrett's Building save, bedroom",
+  "proxy_commit": "6286746d",
+  "proxy_sha256": "b7441b6a8af27e6b00092919ec3ff3056bd203dfec81b5049029870e0d2591df",
+  "temporary_proxy_removed": true,
+  "capture": {
+    "frames": 1,
+    "frame": 1392,
+    "present_hresult": 0,
+    "draws": 744,
+    "successful_draws": 744,
+    "indexed_draws": 735,
+    "up_draws": 9,
+    "repeated_unlocks_completed_before_draws": 422,
+    "stable_indexed_buffer_windows": 735,
+    "captured_vertex_payloads": 196,
+    "captured_index_payloads": 345,
+    "draws_with_both_vertex_and_index_payloads": 196,
+    "draws_with_vb_ib_declaration_program_and_constants": 144,
+    "draws_with_same_components_after_ir_validation": 144,
+    "viewport_view_projection_and_render_states_observed": 744,
+    "texture_bindings_observed": 520,
+    "declaration_candidates": 712,
+    "vertex_program_candidates": 144,
+    "vertex_program_unsupported_version": 568,
+    "vertex_constant_samples": 682,
+    "vertex_constants_frame_limit": 62,
+    "raw_trace_sha256": "5f58b21cbec1b12c397e817fd5d5b82baafaedd2bbff59159cb5546f61a8600d",
+    "partial_ir_sha256": "63e1f356cda1f85ae12f8de32021b315c01856a0729daf4443d5aff259946d4d"
+  },
+  "observations": [
+    "The 539 draws with unavailable vertex payloads reference one captured resource identity; the reason for each unavailable shadow is not established.",
+    "The user reported truncated menu labels with the experimental facade and repeated-Unlock flag enabled.",
+    "The bounded repeated-Unlock policy was enabled and recorded; the affected shadow was discarded, not recovered."
+  ],
+  "limitations": [
+    "VB/IB bytes, declarations, programs and constants are observations or candidates, not proof of the GPU inputs. The facade's COM identity and concurrent-call behavior remain unverified.",
+    "539 vertex and 390 index payloads are unavailable; texture contents and pixel shader programs are not captured. This frame and its IR are not replayable.",
+    "The menu rendering regression is unresolved. No synchronized TDS screenshot or DX12 room replay was performed.",
+    "The diagnostic trace and IR contain game-derived data and transient process addresses and are not committed."
+  ],
+  "local_trace": "build/t3render-captures/bedroom-combined-20261114/bedroom-policy.jsonl",
+  "local_partial_ir": "build/t3render-captures/bedroom-combined-20261114/bedroom-policy-ir.json"
+}

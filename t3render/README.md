@@ -91,8 +91,12 @@ bracketed, so this does not establish general concurrency safety. A discarded
 shadow is never restored by later locks.
 The header and per-draw counter explicitly identify this policy. Its
 [Highball fixture](benchmarks/d3d8/2026-11-14-repeated-unlock-policy/result.json)
-checks this restricted sequence; unobserved native aliases, TDS behavior and
-the menu text regression remain unverified.
+checks this restricted sequence; unobserved native aliases, general TDS
+compatibility and the menu text regression remain unverified. A later
+[TDS bedroom test](benchmarks/runtime/2026-11-14-tds-repeated-unlock-policy/result.json)
+used this flag and obtained 144 indexed draws with VB, IB, declaration,
+program and constants candidates in the same record. The frame remains partial
+and non-replayable; the user reported truncated menu text in that run.
 
 Add `-DT3RENDER_BUILD_SMOKE_TEST=ON` at configuration time to build a
 standalone D3D8 program in the `smoke/` subdirectory. It draws four synthetic

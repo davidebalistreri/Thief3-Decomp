@@ -7,6 +7,7 @@
 #include <array>
 
 #include "../ir/vertex_declaration_registry.hpp"
+#include "buffer_diagnostics.hpp"
 
 namespace t3render {
 
@@ -24,6 +25,7 @@ struct BufferObserver {
     const char* failure_status = nullptr; // optional static diagnostic strings
     const char* failure_cause = nullptr;
     unsigned failure_line = 0;
+    buffers::UnlockFailure failure_unlock{};
 };
 
 // Optional getter results sampled outside the writer mutex. The caller owns

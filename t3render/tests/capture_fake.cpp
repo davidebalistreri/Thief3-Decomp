@@ -601,7 +601,10 @@ int main(int argc, char** argv) {
         bindings.device = &device; bindings.vertex_result = E_FAIL; bindings.index_result = E_FAIL;
         if (!emit()) return 8;
         observer.valid = false; observer.failure_status = "device_unsafe";
-        observer.failure_cause = "state_block"; observer.failure_line = 123;
+        observer.failure_cause = "unlock_mismatch"; observer.failure_line = 123;
+        observer.failure_unlock.present = true; observer.failure_unlock.vertex = true;
+        observer.failure_unlock.last_lock_known = true; observer.failure_unlock.last_lock_hr = E_FAIL;
+        observer.failure_unlock.unlock_result_known = true; observer.failure_unlock.unlock_hr_candidate = S_OK;
         if (!emit(false)) return 8;
         bindings.vertex->Release(); bindings.index->Release();
         if (state.vertex_reads != 1 || state.index_reads != 1) return 8;

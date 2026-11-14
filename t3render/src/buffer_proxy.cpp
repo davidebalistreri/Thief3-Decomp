@@ -26,6 +26,7 @@ const char* CauseName(InvalidationCause cause) noexcept {
     case InvalidationCause::StateBlock: return "state_block";
     case InvalidationCause::ProcessVertices: return "process_vertices";
     case InvalidationCause::ExternalPrivateData: return "external_private_data";
+    case InvalidationCause::UnlockMismatch: return "unlock_mismatch";
     }
     return "unknown";
 }
@@ -49,6 +50,8 @@ struct Control {
     ir::BufferToken token{};
     bool pending_lock = false, locked = false, pending_unlock = false, read_only = false;
     bool counted_lock = false;
+    bool last_lock_known = false;
+    std::int32_t last_lock_hr = 0;
     Control* retirement_next = nullptr;
     const void* data = nullptr;
     std::size_t length = 0;
@@ -70,6 +73,8 @@ struct DeviceState {
     bool unsafe = false;
     unsigned poison_line = 0;
     InvalidationCause poison_cause = InvalidationCause::Internal;
+    UnlockFailure unlock_failure;
+    void* unlock_failure_native = nullptr; // identity comparison only; never dereferenced
     bool closing = false;
     bool reset_recovery = false;
     std::uint64_t draw = 0, mutation = 0, reset = 0;
@@ -527,6 +532,8 @@ private:
         if (!id) return;
         std::lock_guard<std::mutex> lock(state_->mutex);
         if (operation != id || !pending_lock) return;
+        last_lock_known = true;
+        last_lock_hr = static_cast<std::int32_t>(hr);
         if (FAILED(hr)) { state_->AbandonLocked(this); return; }
         // A successful native Lock remains open even if its returned pointer
         // is inaccessible to the observer. Do not report later draws stable.
@@ -541,7 +548,22 @@ private:
             state_->PoisonLocked(owner); return 0;
         }
         if (pending_lock || !locked || pending_unlock || !state_->next_operation) {
-            state_->PoisonLocked(owner); return 0;
+            UnlockFailure diagnostic;
+            diagnostic.present = true;
+            diagnostic.vertex = vertex;
+            diagnostic.pending_lock = pending_lock;
+            diagnostic.locked = locked;
+            diagnostic.pending_unlock = pending_unlock;
+            diagnostic.operation_exhausted = !state_->next_operation;
+            diagnostic.last_lock_known = last_lock_known;
+            diagnostic.last_lock_hr = last_lock_hr;
+            state_->PoisonLocked(owner, __LINE__, InvalidationCause::UnlockMismatch);
+            if (device->unsafe && device->poison_cause == InvalidationCause::UnlockMismatch &&
+                !device->unlock_failure.present) {
+                device->unlock_failure = diagnostic;
+                device->unlock_failure_native = native;
+            }
+            return 0;
         }
         operation = state_->next_operation++;
         pending_unlock = true;
@@ -552,7 +574,17 @@ private:
         return operation;
     }
     void FinishUnlock(std::uint64_t id, HRESULT hr) noexcept {
-        if (!id) return;
+        if (!id) {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            const auto found = state_->devices.find(owner);
+            if (found != state_->devices.end() && found->second.poison_cause == InvalidationCause::UnlockMismatch &&
+                found->second.unlock_failure_native == native && found->second.unlock_failure.present &&
+                !found->second.unlock_failure.unlock_result_known) {
+                found->second.unlock_failure.unlock_result_known = true;
+                found->second.unlock_failure.unlock_hr_candidate = static_cast<std::int32_t>(hr);
+            }
+            return;
+        }
         std::lock_guard<std::mutex> lock(state_->mutex);
         if (operation != id || !pending_unlock) return;
         if (FAILED(hr)) { state_->PoisonLocked(owner); return; }
@@ -1091,7 +1123,8 @@ DrawFailure BufferProxy::DescribeDrawFailure(IDirect3DDevice8* owner) noexcept {
     const auto device = state_->devices.find(owner);
     if (device == state_->devices.end()) return {"device_unknown", "unknown", 0};
     if (device->second.unsafe)
-        return {"device_unsafe", CauseName(device->second.poison_cause), device->second.poison_line};
+        return {"device_unsafe", CauseName(device->second.poison_cause), device->second.poison_line,
+                device->second.unlock_failure};
     return {"window_unavailable", "unknown", 0};
 }
 bool BufferProxy::EndDraw(IDirect3DDevice8* owner, std::uint64_t token) noexcept {

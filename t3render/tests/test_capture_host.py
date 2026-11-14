@@ -423,7 +423,10 @@ class CaptureHostTests(unittest.TestCase):
                 self.assertEqual(draw["buffer_data"][component]["status"], "getter_failed")
                 self.assertIsNone(draw["buffer_data"][component]["data"])
         self.assertEqual(draws[3]["buffer_data"]["window_failure"],
-                         {"status": "device_unsafe", "cause": "state_block", "source_line": 123})
+                         {"status": "device_unsafe", "cause": "unlock_mismatch", "source_line": 123,
+                          "unlock": {"resource": "vertex", "pending_lock": False, "locked": False,
+                                     "pending_unlock": False, "operation_exhausted": False,
+                                     "last_lock_hr": -1, "unlock_hr_candidate": 0}})
         self.assertFalse(results[draws[3]["op_id"]]["buffer_stable"])
         for component in ("vertex", "index"):
             self.assertEqual(draws[3]["buffer_data"][component]["status"], "window_unavailable")

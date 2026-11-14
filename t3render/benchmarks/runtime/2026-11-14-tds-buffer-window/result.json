@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "tds_bedroom_combined_buffer_window_diagnostic",
+  "status": "PARTIAL",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86 virtual desktop",
+  "scene": "SouthQuarter1_int1, Garrett's Building save, bedroom",
+  "proxy_commit": "47e1abd9",
+  "proxy_sha256": "ea84fce8721be71fcd5ce5d41933dd3261259a2449a7b5b497d5d613efddd3f7",
+  "temporary_proxy_removed": true,
+  "capture": {
+    "frames": 1,
+    "frame": 1704,
+    "present_hresult": 0,
+    "draws": 336,
+    "indexed_draws": 327,
+    "up_draws": 9,
+    "declaration_candidates": 320,
+    "vertex_program_candidates": 52,
+    "vertex_program_unavailable": 268,
+    "vertex_constant_samples": 336,
+    "stable_shader_windows": 336,
+    "stable_indexed_buffer_windows": 0,
+    "indexed_vb_ib_payloads": 0,
+    "first_buffer_window_failure": {
+      "status": "device_unsafe",
+      "cause": "internal",
+      "file": "t3render/src/buffer_proxy.cpp",
+      "source_line": 544,
+      "condition": "BeginUnlock found a pending or missing observed lock/unlock, or an exhausted operation counter"
+    },
+    "raw_trace_sha256": "eac8f447e37a05fb7ce8a6a40844a50ba2286a3bfed32234604ea37ce6e86a8e"
+  },
+  "limitations": [
+    "This identifies the first invalidation site, not which subcondition fired, the native Unlock HRESULT, or the underlying cause.",
+    "Shader inputs are candidates; texture content and actual buffered geometry are absent. No room replay is possible.",
+    "The earlier reported menu text truncation has not been isolated or corrected."
+  ],
+  "local_results": "build/t3render-captures/bedroom-combined-20261114"
+}

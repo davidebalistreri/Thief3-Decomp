@@ -69,6 +69,12 @@ cause, without restoring or trusting invalidated observations. A user also
 reported truncated menu labels with the experimental facade; its cause remains
 unverified. The temporary DLL was removed after the test.
 
+A [second bedroom capture](benchmarks/runtime/2026-11-14-tds-buffer-window/result.json)
+located the first invalidation in the observer's `BeginUnlock` consistency
+check. This did not identify the subcondition or native result. The diagnostic
+now records those details as observations while retaining fail-closed behavior;
+the native Unlock HRESULT is a candidate if calls overlap.
+
 Add `-DT3RENDER_BUILD_SMOKE_TEST=ON` at configuration time to build a
 standalone D3D8 program in the `smoke/` subdirectory. It draws four synthetic
 triangles, checks one pixel of each and prints a backbuffer hash. Compare that

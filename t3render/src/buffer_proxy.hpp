@@ -6,6 +6,7 @@
 #include <d3d8.h>
 
 #include "../ir/buffer_registry.hpp"
+#include "buffer_diagnostics.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -18,14 +19,6 @@ namespace t3render::buffers {
 
 struct PrivateObjectBridge;
 using SnapshotReader = bool (*)(void* context, const void* source, void* destination, std::size_t length);
-
-enum class InvalidationCause { Internal, Explicit, StateBlock, ProcessVertices, ExternalPrivateData };
-
-struct DrawFailure {
-    const char* status = "unavailable"; // static diagnostic string
-    const char* cause = "unknown";      // static diagnostic string
-    unsigned source_line = 0;           // buffer_proxy.cpp, 0 if unavailable
-};
 
 class BufferProxy final {
 public:

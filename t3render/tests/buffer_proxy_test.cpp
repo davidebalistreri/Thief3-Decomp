@@ -1575,6 +1575,34 @@ void ResetProcessAndFailures() {
     assert(failure->ReadVertex(Owner(), &bad, 0, out, 2) == RegistryResult::Unavailable);
     assert(b->Release() == 0 && bad.destroyed);
 }
+
+void UnlockMismatchDiagnostics() {
+    Reader reader;
+    for (bool failed_lock : {false, true}) {
+        auto proxy = BufferProxy::Create(Reader::Copy, &reader, 256, 8);
+        Vertex native;
+        auto* wrapper = proxy->AdoptVertex(Owner(), &native, 8, true);
+        if (failed_lock) {
+            native.lock_result = E_FAIL;
+            BYTE* data = nullptr;
+            assert(wrapper->Lock(0, 2, &data, 0) == E_FAIL);
+        }
+        native.unlock_result = failed_lock ? E_FAIL : S_OK;
+        SetLastError(91);
+        assert(wrapper->Unlock() == native.unlock_result && GetLastError() == 850);
+        const auto failure = proxy->DescribeDrawFailure(Owner());
+        assert(!std::strcmp(failure.status, "device_unsafe"));
+        assert(!std::strcmp(failure.cause, "unlock_mismatch"));
+        assert(failure.unlock.present && failure.unlock.vertex && !failure.unlock.pending_lock &&
+               !failure.unlock.locked && !failure.unlock.pending_unlock && !failure.unlock.operation_exhausted);
+        assert(failure.unlock.last_lock_known == failed_lock);
+        if (failed_lock) assert(failure.unlock.last_lock_hr == static_cast<std::int32_t>(E_FAIL));
+        assert(failure.unlock.unlock_result_known &&
+               failure.unlock.unlock_hr_candidate == static_cast<std::int32_t>(native.unlock_result));
+        assert(proxy->BeginDraw(Owner()) == 0); // diagnostic evidence never re-enables the window
+        assert(wrapper->Release() == 0 && native.destroyed);
+    }
+}
 }  // namespace
 int main() {
     LifetimeAndIdentity();
@@ -1601,4 +1629,5 @@ int main() {
     CapacityAndUnknownBuffersForward();
     StopObservationKeepsForwarding();
     ResetProcessAndFailures();
+    UnlockMismatchDiagnostics();
 }

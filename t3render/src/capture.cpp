@@ -749,6 +749,19 @@ void CaptureBuffered(std::ostream& out, CaptureState& s, IDirect3DDevice8* devic
         out << ",\"window_failure\":{\"status\":\"" << observer.failure_status
             << "\",\"cause\":\"" << observer.failure_cause << "\",\"source_line\":";
         if (observer.failure_line) out << observer.failure_line; else out << "null";
+        const auto& unlock = observer.failure_unlock;
+        if (unlock.present) {
+            out << ",\"unlock\":{\"resource\":\"" << (unlock.vertex ? "vertex" : "index")
+                << "\",\"pending_lock\":" << (unlock.pending_lock ? "true" : "false")
+                << ",\"locked\":" << (unlock.locked ? "true" : "false")
+                << ",\"pending_unlock\":" << (unlock.pending_unlock ? "true" : "false")
+                << ",\"operation_exhausted\":" << (unlock.operation_exhausted ? "true" : "false")
+                << ",\"last_lock_hr\":";
+            if (unlock.last_lock_known) out << unlock.last_lock_hr; else out << "null";
+            out << ",\"unlock_hr_candidate\":";
+            if (unlock.unlock_result_known) out << unlock.unlock_hr_candidate; else out << "null";
+            out << '}';
+        }
         out << '}';
     }
     out << ",\"vertex\":{";

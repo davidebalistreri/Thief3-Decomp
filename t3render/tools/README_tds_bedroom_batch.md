@@ -66,8 +66,9 @@ later with `trace_to_ir.py`; neither the summary nor IR makes a trace replayable
 
 ## Verification status
 
-The analyzer was checked against prior real single-frame captures, and the
-runner's launch, timing, analysis and cleanup were exercised with a simulated
-game process. **This batch runner has not yet been tested against live TDS.**
-The old experimental proxy's menu text truncation and general COM/gameplay
+The analyzer was checked against prior single-frame captures and the runner
+was exercised with a simulated process. A [live TDS batch](../benchmarks/runtime/2026-11-14-tds-bedroom-batch/result.json)
+subsequently completed three partial frames and removed the temporary proxy.
+Its scene must be confirmed independently; the frames do not establish replay
+parity. The experimental proxy's menu text truncation and general COM/gameplay
 parity remain unresolved.

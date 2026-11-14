@@ -5,6 +5,22 @@ DX12 multi-draw e facade D3D8 sperimentale; RGB sintetico coincidente; 171 test
 passati» e sostituisce il precedente recap diagnostico dove descrive la facade
 come non integrata o gli observer come necessariamente separati.
 
+## Nuova direzione architetturale
+
+T3Render è il futuro renderer API-neutral di T3: D3D12 è il primo backend;
+Vulkan e un eventuale Metal sono obiettivi successivi, non implementazioni
+esistenti. Dopo il checkpoint del frame legacy, la direzione è un
+`T3SceneBridge` prima di D3D8 e una Scene IR semantica, distinta dalla traccia
+diagnostica D3D8. La [roadmap con evidenze, limiti e criteri](SCENE_BRIDGE_ROADMAP.md)
+precisa milestone, dati e convenzioni ancora da verificare. Gameplay,
+collisioni e stealth restano nel motore originale.
+
+L'SDK già legge offline BSP, mesh, istanze e luci, ma non è ancora identificato
+un hook runtime che invii l'intera scena. Un export della mappa non equivale
+a un frame vivo. Il nuovo lavoro di reverse engineering deve seguire le piste
+statiche riportate nella roadmap e verificarle in gioco, senza moltiplicare
+fixture COM non richieste dai dati.
+
 ## Obiettivo e stato pratico
 
 L'obiettivo immediato è **un frame reale della bedroom di Garrett catturato da
@@ -97,24 +113,28 @@ cattura tre frame consecutivi e produce `summary.json` senza byte del gioco.
 Il timer consente all'utente di caricare il save e restare nel gioco; la scena
 non viene riconosciuta automaticamente e va confermata. I tre frame usano la
 **stessa configurazione**, non sono un A/B tra facade diverse. Il runner è stato
-provato con processo simulato e l'analizzatore su tracce TDS esistenti: **non
-è ancora stato collaudato con TDS reale**. Il desktop Wine è meno invasivo del
-fullscreen diretto; non è necessario che il gioco catturi in background.
+provato anche in una [sessione TDS reale](benchmarks/runtime/2026-11-14-tds-bedroom-batch/result.json):
+tre frame acquisiti, proxy rimosso, scena non identificabile dalla traccia.
+Per ciascun frame: 334 draw, 325 indicizzati con finestre stabili, ma soltanto
+un draw con entrambi i buffer e nessuno con tutti i componenti osservati;
+283 osservazioni vertex e 324 index risultano `unknown_resource`. Le dichiarazioni/programmi pre-Reset
+restano ipotesi. Texture, pixel shader e screenshot D3D8 sincronizzato mancano.
+La sessione conferma il limite precedente, non ricostruisce la bedroom. Il
+desktop Wine è meno invasivo del fullscreen diretto.
 
 ## Prossimi passi richiesti
 
-1. Valutare ed eseguire il batch una sola volta con l'utente già pronto a
-   caricare il save. Analizzare insieme i tre frame, distinguendo dati
-   osservati, ipotesi pre-Reset, errori di range e risorse non tracciate.
-2. Individuare nella vita reale dei VB/IB cosa avviene prima del frame: Reset,
-   alias e lock effettivi. Estendere diagnostica o fixture solo per il caso
-   rilevato. Non restaurare byte incerti o dedurre lo stato GPU dal solo
-   successo della `Unlock`; verificare anche il problema dei testi del menu.
-3. Quando un frame ha dati coerenti, aggiungere cattura immagine D3D8
-   sincronizzata e replay DX12 legacy, poi correggere geometria, camera,
-   depth/stati, shader e texture contro lo stesso frame.
-4. Solo dopo una base ripetibile e confrontabile, introdurre PBR, mesh
-   replacement e illuminazione moderna, senza modificare la stealth logic.
+1. Usare la [roadmap](SCENE_BRIDGE_ROADMAP.md) come ordine condiviso. Il
+   checkpoint resta lo stesso frame reale TDS, riprodotto legacy in DX12 e
+   confrontato con immagine D3D8 sincronizzata; senza inventare dati assenti.
+2. Concentrarsi sulle risorse VB/IB risultate `unknown_resource` e sulla
+   provenienza delle dichiarazioni, con indagini mirate e prove automatizzate;
+   non trasformare la facade in una copertura COM generale.
+3. In parallelo, seguire le piste statiche del bridge per BSP/mesh, camera e
+   luci e progettare la Scene IR indipendente da D3D. Una fixture offline dai
+   parser T3SDK resta distinta dalla cattura runtime e non prova parità.
+4. Dopo il replay, verificare read-only il bridge in TDS, quindi rendere la
+   geometria statica; PBR, replacement, lighting e GI seguono la roadmap.
 
 I manifest sotto `benchmarks/` sono nel repository. Le tracce grezze e le IR
 parziali sono locali in `build/t3render-captures/`, contengono dati derivati

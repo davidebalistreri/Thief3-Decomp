@@ -1,0 +1,149 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "tds_three_frame_timed_batch",
+  "status": "PARTIAL",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86 virtual desktop",
+  "scene": "Unconfirmed: user was asked to load Garrett's Building and face the bed; trace does not identify the scene",
+  "proxy_commit": "edb007a5",
+  "proxy_sha256": "370070c69c85cb68fc31b0333f25bbed549251a314ccdbb36a46dd2e2f38c5f7",
+  "temporary_proxy_removed": true,
+  "host_preflight": "NOT_REQUESTED",
+  "highball_preflight": "NOT_REQUESTED",
+  "summary": {
+    "schema": 1,
+    "status": "PARTIAL",
+    "trace_sha256": "4b271701b7b8e91b52d19cd4c206ecbc2d755be22d12d7b7d7bc1477de5c9dcf",
+    "frames_requested": 3,
+    "frames_captured": 3,
+    "declaration_history_requested": true,
+    "best_frame_by_observed_candidates": 2245,
+    "experimental_facade": {
+      "enabled": true,
+      "identity_verified": false,
+      "concurrency_verified": false,
+      "repeated_unlock_resource_discard": true,
+      "repeated_unlock_post_write_recovery": true
+    },
+    "frames": [
+      {
+        "frame": 2245,
+        "draws": 334,
+        "indexed_draws": 325,
+        "stable_indexed_draws": 325,
+        "indexed_with_both_buffers": 1,
+        "color_indexed_with_both_buffers": 1,
+        "indexed_with_all_components": 0,
+        "color_indexed_with_all_components": 0,
+        "post_repeat_vertex_payloads": 0,
+        "post_repeat_index_payloads": 0,
+        "declaration_candidates": 0,
+        "program_candidates": 0,
+        "constant_samples": 334,
+        "pre_reset_declaration_hypotheses": 318,
+        "pre_reset_program_hypotheses": 318,
+        "declarations_after_reset_attempt": 318,
+        "reset_event_recorded": false,
+        "vertex_payloads": {
+          "captured": 42,
+          "unknown:unknown_resource": 283
+        },
+        "index_payloads": {
+          "captured": 1,
+          "unknown:unknown_resource": 324
+        },
+        "buffer_window_failures": {},
+        "lock_failures": [],
+        "present_hr": 0,
+        "reset_during_frame": false,
+        "concurrent_operations": false,
+        "eligible_for_candidate_selection": true
+      },
+      {
+        "frame": 2246,
+        "draws": 334,
+        "indexed_draws": 325,
+        "stable_indexed_draws": 325,
+        "indexed_with_both_buffers": 1,
+        "color_indexed_with_both_buffers": 1,
+        "indexed_with_all_components": 0,
+        "color_indexed_with_all_components": 0,
+        "post_repeat_vertex_payloads": 0,
+        "post_repeat_index_payloads": 0,
+        "declaration_candidates": 0,
+        "program_candidates": 0,
+        "constant_samples": 334,
+        "pre_reset_declaration_hypotheses": 318,
+        "pre_reset_program_hypotheses": 318,
+        "declarations_after_reset_attempt": 318,
+        "reset_event_recorded": false,
+        "vertex_payloads": {
+          "captured": 42,
+          "unknown:unknown_resource": 283
+        },
+        "index_payloads": {
+          "captured": 1,
+          "unknown:unknown_resource": 324
+        },
+        "buffer_window_failures": {},
+        "lock_failures": [],
+        "present_hr": 0,
+        "reset_during_frame": false,
+        "concurrent_operations": false,
+        "eligible_for_candidate_selection": true
+      },
+      {
+        "frame": 2247,
+        "draws": 334,
+        "indexed_draws": 325,
+        "stable_indexed_draws": 325,
+        "indexed_with_both_buffers": 1,
+        "color_indexed_with_both_buffers": 1,
+        "indexed_with_all_components": 0,
+        "color_indexed_with_all_components": 0,
+        "post_repeat_vertex_payloads": 0,
+        "post_repeat_index_payloads": 0,
+        "declaration_candidates": 0,
+        "program_candidates": 0,
+        "constant_samples": 334,
+        "pre_reset_declaration_hypotheses": 318,
+        "pre_reset_program_hypotheses": 318,
+        "declarations_after_reset_attempt": 318,
+        "reset_event_recorded": false,
+        "vertex_payloads": {
+          "captured": 42,
+          "unknown:unknown_resource": 283
+        },
+        "index_payloads": {
+          "captured": 1,
+          "unknown:unknown_resource": 324
+        },
+        "buffer_window_failures": {},
+        "lock_failures": [],
+        "present_hr": 0,
+        "reset_during_frame": false,
+        "concurrent_operations": false,
+        "eligible_for_candidate_selection": true
+      }
+    ],
+    "limitations": [
+      "The bedroom and camera are not identified by the capture; user confirmation is required.",
+      "Buffer and shader candidates are structurally checked, but do not establish GPU inputs or visible draws.",
+      "Payload-reason and reset-attempt counts are reported trace statuses, not validated GPU state.",
+      "Texture contents, pixel shaders and a synchronized D3D8 image are not captured.",
+      "No full TDS-to-DX12 replay or pixel parity is established."
+    ]
+  },
+  "observations": [
+    "Three consecutive frames of one configuration completed in a single live TDS session; this is not an A/B test.",
+    "Each frame has 325 indexed draws with stable windows, one with both buffers and none with all observed buffer/shader components.",
+    "Most indexed vertex and index payloads were reported unknown_resource; pre-reset shader histories are hypotheses, not the GPU state.",
+    "No post-repeated-Unlock-write payload was recovered; this batch does not explain why the resources are unknown."
+  ],
+  "limitations": [
+    "The frame cannot establish the scene, actual GPU inputs, visual replay or pixel parity.",
+    "The game-derived trace and log remain local and are not committed.",
+    "The pre-existing experimental facade menu text regression and gameplay parity remain unresolved."
+  ],
+  "local_trace": "build/t3render-captures/bedroom-batch-20261114-224853/bedroom.jsonl"
+}

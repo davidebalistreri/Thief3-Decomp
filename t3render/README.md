@@ -1,6 +1,9 @@
-# T3Render: D3D8 diagnostic capture
+# T3Render
 
-T3Render is a separate renderer experiment. Its first step observes the
+T3Render is the planned API-neutral renderer for T3, with D3D12 as its first
+backend. See [the semantic scene bridge roadmap](SCENE_BRIDGE_ROADMAP.md) for
+the intended boundary and the evidence still needed. Today T3Render remains a
+diagnostic capture and replay experiment. Its first step observes the
 original D3D8 device; it does not replace the renderer or change the game's
 stealth calculations. A separate DX12 replay covers synthetic single- and multi-draw
 fixtures, including a fixture-owned indexed buffer snapshot; this is not a
@@ -62,10 +65,11 @@ records the tested binary and matching RGB hashes.
 
 A [timed bedroom batch](tools/README_tds_bedroom_batch.md) can collect three
 consecutive frames with one game launch and summarize missing observations.
-It has been simulated, not yet tested against live TDS; it does not produce an
-A/B image or establish a replayable frame.
+It has also been run once against live TDS; the three frames were partial.
+See the [batch manifest](benchmarks/runtime/2026-11-14-tds-bedroom-batch/result.json).
+It does not produce an A/B image or establish a replayable frame.
 
-A subsequent [TDS bedroom capture](benchmarks/runtime/2026-11-14-tds-combined-observer/result.json)
+An earlier [TDS bedroom capture](benchmarks/runtime/2026-11-14-tds-combined-observer/result.json)
 completed one frame but had no stable VB/IB windows. The earlier trace labeled
 prepared getters `getter_failed` even if a missing draw ticket meant they were
 never attempted; independent native binding getters succeeded. New traces mark that case

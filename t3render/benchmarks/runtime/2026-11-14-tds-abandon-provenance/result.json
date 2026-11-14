@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "tds_bedroom_repeated_unlock_abandonment_provenance",
+  "status": "PARTIAL",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86 virtual desktop",
+  "scene": "SouthQuarter1_int1, Garrett's Building save; user confirmed bedroom oriented toward bed",
+  "proxy_commit": "7c3df3cf",
+  "proxy_sha256": "a3883d29b8c92244e01cb3b52e1d2a6b4622947bbae968bf3d6a2389204dee58",
+  "temporary_proxy_removed": true,
+  "capture": {
+    "frames": 1,
+    "frame": 1034,
+    "present_hresult": 0,
+    "draws": 746,
+    "successful_draws": 746,
+    "indexed_draws": 737,
+    "indexed_draws_with_stable_buffer_windows": 737,
+    "repeated_unlocks_completed_before_draws": 422,
+    "vertex_payloads_captured": 198,
+    "vertex_payloads_abandoned_after_repeated_unlock": 539,
+    "index_payloads_captured": 347,
+    "index_payloads_abandoned_after_repeated_unlock": 390,
+    "distinct_abandoned_vertex_resources": 1,
+    "distinct_abandoned_index_resources": 38,
+    "color_writing_draws_with_abandoned_vertex_payload": 539,
+    "indexed_draws_with_both_buffer_payloads": 198,
+    "color_writing_indexed_draws_with_both_buffer_payloads": 52,
+    "color_writing_indexed_draws_with_buffers_declaration_program_and_constants": 18,
+    "raw_trace_sha256": "42a29e05608224c9427f6970097474406a5f2e79e6fec96cb55602bb82769faf",
+    "partial_ir_sha256": "147f3b7a61b294979e44b667d3a136b499e6776700a5bcea48cf2286c3254ee5"
+  },
+  "observations": [
+    "All 539 abandoned vertex observations refer to one 2,621,440-byte managed WRITEONLY vertex buffer and have RGB writes enabled.",
+    "All 539 vertex and 390 index payloads reported repeated_unlock as the first observed abandonment cause; this identifies the observer policy, not the contents consumed by the driver.",
+    "The 18 color-writing draws with buffer, declaration, program and constant samples remain candidates; their visibility and GPU inputs have not been established."
+  ],
+  "limitations": [
+    "Buffer shadows remain unavailable after repeated Unlock; no post-Unlock bytes are established by this capture.",
+    "The trace is partial, lacks texture contents and pixel shader programs, and has no synchronized D3D8 screenshot or DX12 room replay.",
+    "The experimental facade's previously reported truncated menu text is unresolved; this run did not establish whether it changed.",
+    "Game-derived trace and IR remain local and are not committed."
+  ],
+  "local_trace": "build/t3render-captures/2026-11-14-tds-abandon-provenance/bedroom.jsonl",
+  "local_partial_ir": "build/t3render-captures/2026-11-14-tds-abandon-provenance/bedroom-ir.json"
+}

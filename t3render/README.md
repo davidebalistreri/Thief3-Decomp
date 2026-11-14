@@ -112,6 +112,11 @@ policy, `shadow_abandon_cause` records `repeated_unlock`; an omitted cause is
 unknown, not evidence against it. The affected bytes remain unavailable. Older
 traces do not contain this information. The [Highball regression fixture](benchmarks/d3d8/2026-11-14-abandon-provenance/result.json)
 still matches its synthetic native D3D8 image and DX12 replay.
+A [subsequent TDS capture](benchmarks/runtime/2026-11-14-tds-abandon-provenance/result.json)
+classified all 539 missing vertex payloads and 390 missing index payloads as
+abandoned by this policy after observed repeated Unlock calls. The vertex
+payloads shared one managed WRITEONLY buffer; the observations do not establish
+the post-Unlock GPU contents or recover the room.
 
 With `T3RENDER_CAPTURE_DECLARATION_HISTORY=1`, the combined observer now uses
 the same bounded pre-reset history policy as the standard observer. A successful

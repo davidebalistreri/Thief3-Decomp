@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "tds_bedroom_repeat_recovery_lock_range",
+  "status": "PARTIAL",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86 virtual desktop",
+  "scene": "SouthQuarter1_int1, Garrett's Building save; user confirmed bedroom oriented toward bed",
+  "proxy_commit": "edb007a5",
+  "proxy_sha256": "370070c69c85cb68fc31b0333f25bbed549251a314ccdbb36a46dd2e2f38c5f7",
+  "temporary_proxy_removed": true,
+  "capture": {
+    "frames": 1,
+    "frame": 1040,
+    "present_hresult": 0,
+    "draws": 354,
+    "indexed_draws": 345,
+    "indexed_draws_with_stable_buffer_windows": 345,
+    "vertex_payloads_captured": 42,
+    "vertex_payloads_unknown_resource": 303,
+    "index_payloads_captured": 1,
+    "index_payloads_unknown_resource": 344,
+    "post_repeated_unlock_write_payloads": 0,
+    "indexed_draws_with_both_buffer_payloads": 1,
+    "draws_with_unavailable_declaration_after_reset_attempt": 338,
+    "raw_trace_sha256": "051e40f0cd7ec7afbf9a41363c9789256172f6b35c7d81055917c8112186fb98",
+    "partial_ir_sha256": "199fa906105306bc072cdcc6b811aafeea8bca05bd0b03a9b60e39048f321a3e"
+  },
+  "observations": [
+    "The captured indexed draw windows were stable, unlike the previous run, but this does not establish whether the ambiguous-lock guard fixed that run's unrecorded failure.",
+    "Most buffer reads returned unknown_resource and most declarations reported an earlier reset_attempt; no Reset was recorded inside the frame itself.",
+    "No payload carried the post-repeated-unlock-write marker, so this frame does not show whether recovery can reconstruct the missing geometry."
+  ],
+  "limitations": [
+    "The trace does not prove why each buffer is untracked, or identify which declarations the GPU consumed after the earlier reset attempt.",
+    "This frame remains partial and cannot replay the room; texture contents, pixel shader programs and a synchronized D3D8 image are absent.",
+    "The prior menu text truncation remains unverified in this run.",
+    "The game-derived trace and partial IR remain local and are not committed."
+  ],
+  "local_trace": "build/t3render-captures/2026-11-14-tds-repeat-lock-range/bedroom.jsonl",
+  "local_partial_ir": "build/t3render-captures/2026-11-14-tds-repeat-lock-range/bedroom-ir.json"
+}

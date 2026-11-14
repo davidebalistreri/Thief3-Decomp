@@ -104,7 +104,9 @@ Highball fixture](benchmarks/d3d8/2026-11-14-repeat-write-recovery/result.json)
 checks partial and full rewrites; it does not establish whether TDS rewrites
 the missing ranges. An initial [TDS test](benchmarks/runtime/2026-11-14-tds-repeat-write-recovery/result.json)
 instead invalidated the buffer observation before the frame; its rejected lock
-parameters and registry result were not captured.
+parameters and registry result were not captured. A [follow-up](benchmarks/runtime/2026-11-14-tds-repeat-lock-range/result.json)
+had stable buffer windows but mostly untracked resources after an earlier
+reset attempt; it did not expose any recovered post-Unlock payloads.
 The header and per-draw counter explicitly identify this policy. Its
 [Highball fixture](benchmarks/d3d8/2026-11-14-repeated-unlock-policy/result.json)
 checks this restricted sequence; unobserved native aliases, general TDS

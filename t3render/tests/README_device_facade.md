@@ -18,9 +18,10 @@ is released and `E_OUTOFMEMORY` is returned.
 `IUnknown` and the corresponding D3D8 interface resolve to the same facade
 identity. Other IIDs fail closed, even if the native runtime supports them.
 The device retains the factory facade until its own final release, and
-`GetDirect3D` returns that facade after calling native `GetDirect3D` and
-releasing its returned reference. This assumes the native runtime returns the
-creating factory as the device parent; no native identity registry verifies it.
+`GetDirect3D` returns that facade only after verifying that the native parent
+and the creating factory have the same canonical `IUnknown` identity. An alias
+of the same factory is accepted; a different or unidentifiable parent fails
+closed. The temporary native references are released outside any registry lock.
 Invalid output arguments and allocation failures can differ from native COM
 behavior. Callers must hold valid references; a raw pointer is not safe when
 another thread performs its final `Release`.

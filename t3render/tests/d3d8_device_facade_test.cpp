@@ -146,12 +146,18 @@ struct NativeFactory final : IDirect3D8 {
     unsigned adds = 0, releases = 0, queries = 0, creates = 0;
     NativeDevice device;
     HRESULT create_result = S_OK;
-    bool failed_nonnull = false;
+    bool failed_nonnull = false, fail_identity = false;
+    NativeFactory* identity = nullptr;
     ULONG created_adapter = 0;
     DWORD created_behavior = 0;
     D3DPRESENT_PARAMETERS* created_presentation = nullptr;
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** output) override {
-        ++queries; if (!output) return E_POINTER; *output = this; AddRef(); return S_OK;
+        ++queries;
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (fail_identity) return E_FAIL;
+        auto* canonical = identity ? identity : this;
+        canonical->AddRef(); *output = static_cast<IDirect3D8*>(canonical); return S_OK;
     }
     ULONG STDMETHODCALLTYPE AddRef() override { ++adds; return ++refs; }
     ULONG STDMETHODCALLTYPE Release() override { ++releases; SetLastError(333); return --refs; }
@@ -259,8 +265,23 @@ void IdentityLifetimeAndForwarding() {
     assert(factory->Release() == 1 && native.refs == 1 && native.releases == 0);
     IDirect3D8* parent = nullptr;
     assert(device->GetDirect3D(&parent) == S_OK && parent == factory && GetLastError() == 111);
-    assert(native.device.get_parent == 1 && native.refs == 1 && native.adds == 1 && native.releases == 1);
+    assert(native.device.get_parent == 1 && native.refs == 1 && native.adds == 3 && native.releases == 3);
     assert(parent->Release() == 1);
+    NativeFactory alias;
+    alias.identity = &native;
+    native.device.parent = &alias;
+    assert(device->GetDirect3D(&parent) == S_OK && parent == factory && GetLastError() == 111);
+    assert(parent->Release() == 1 && alias.refs == 1 && native.refs == 1);
+    NativeFactory unrelated;
+    native.device.parent = &unrelated;
+    parent = reinterpret_cast<IDirect3D8*>(1);
+    assert(device->GetDirect3D(&parent) == E_FAIL && !parent && GetLastError() == 111);
+    assert(unrelated.refs == 1 && native.refs == 1);
+    native.device.parent = &native;
+    native.fail_identity = true;
+    assert(device->GetDirect3D(&parent) == E_FAIL && !parent && GetLastError() == 111);
+    assert(native.refs == 1);
+    native.fail_identity = false;
     assert(device->GetDirect3D(nullptr) == E_POINTER);
     native.device.get_parent_result = E_FAIL;
     parent = reinterpret_cast<IDirect3D8*>(1);
@@ -272,7 +293,7 @@ void IdentityLifetimeAndForwarding() {
     SetLastError(77);
     assert(device->Release() == 0 && GetLastError() == 222);
     assert(native.device.refs == 0 && native.device.releases == 1);
-    assert(native.refs == 0 && native.releases == 2);
+    assert(native.refs == 0 && native.adds == native.releases - 1);
 }
 } // namespace
 

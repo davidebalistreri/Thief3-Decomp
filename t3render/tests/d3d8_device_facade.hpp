@@ -135,7 +135,22 @@ public:
             SetLastError(after_native);
             return FAILED(hr) ? hr : E_FAIL;
         }
+        // Compare canonical COM identities while both native references are
+        // alive. A different parent must never be silently represented by
+        // this factory facade, even if GetDirect3D itself succeeded.
+        IUnknown* actual_identity = nullptr;
+        IUnknown* expected_identity = nullptr;
+        const HRESULT actual_hr = native_parent->QueryInterface(
+            IID_IUnknown, reinterpret_cast<void**>(&actual_identity));
+        const HRESULT expected_hr = native_factory_->QueryInterface(
+            IID_IUnknown, reinterpret_cast<void**>(&expected_identity));
+        const bool same = !FAILED(actual_hr) && actual_identity && !FAILED(expected_hr) &&
+                          expected_identity && actual_identity == expected_identity;
+        // Failed QI outputs have no ownership guarantee.
+        if (!FAILED(actual_hr) && actual_identity) actual_identity->Release();
+        if (!FAILED(expected_hr) && expected_identity) expected_identity->Release();
         native_parent->Release();
+        if (!same) { SetLastError(after_native); return E_FAIL; }
         if (!factory_->AddRef()) { SetLastError(after_native); return E_FAIL; }
         *output = factory_;
         SetLastError(after_native);
@@ -713,9 +728,9 @@ public:
 private:
     friend class DeviceFixtureFactory;
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
-    DeviceFixture(IDirect3DDevice8* native, IDirect3D8* factory,
+    DeviceFixture(IDirect3DDevice8* native, IDirect3D8* factory, IDirect3D8* native_factory,
                   std::shared_ptr<t3render::buffers::BufferProxy> buffers) noexcept
-        : native_(native), factory_(factory), buffers_(std::move(buffers)) {
+        : native_(native), factory_(factory), native_factory_(native_factory), buffers_(std::move(buffers)) {
         factory_->AddRef();
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
         resources_ = t3render::resource_fixture::Router::Create(native_, this);
@@ -728,7 +743,8 @@ private:
         SetLastError(error);
     }
 #else
-    DeviceFixture(IDirect3DDevice8* native, IDirect3D8* factory) noexcept : native_(native), factory_(factory) {
+    DeviceFixture(IDirect3DDevice8* native, IDirect3D8* factory, IDirect3D8* native_factory) noexcept
+        : native_(native), factory_(factory), native_factory_(native_factory) {
         factory_->AddRef();
     }
 #endif
@@ -757,6 +773,7 @@ private:
     ~DeviceFixture() = default;
     IDirect3DDevice8* const native_;
     IDirect3D8* const factory_;
+    IDirect3D8* const native_factory_; // borrowed; kept alive by factory_
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
     std::shared_ptr<t3render::buffers::BufferProxy> buffers_;
 #endif
@@ -816,9 +833,9 @@ public:
             return FAILED(hr) ? hr : E_FAIL;
         }
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
-        auto* facade = new (std::nothrow) DeviceFixture(native_device, this, buffers_);
+        auto* facade = new (std::nothrow) DeviceFixture(native_device, this, native_, buffers_);
 #else
-        auto* facade = new (std::nothrow) DeviceFixture(native_device, this);
+        auto* facade = new (std::nothrow) DeviceFixture(native_device, this, native_);
 #endif
         if (!facade) {
             native_device->Release();

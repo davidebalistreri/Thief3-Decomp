@@ -35,6 +35,9 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
         lines.append("private_buffer_sources_reset=PASS")
         lines.append("private_external_naive_cycle_and_cleanup=PASS" if mode == "facade" else
                      "private_external_native_dependent_release=PASS")
+        lines.append("private_external_eager_release_and_cleanup=PASS" if mode == "facade" else
+                     "private_external_eager_native_dependent_release=PASS")
+        lines.append(f"private_external_eager_reacquire_provenance={'unavailable' if mode == 'facade' else 'preserved'}")
         lines.extend(("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                       "resource_facade_volume_roundtrips=PASS",
                       "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
@@ -142,6 +145,14 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
                             [line.replace(external, external.replace("=PASS", "=FAIL")) for line in original]):
                 with self.subTest(mode=mode), self.assertRaises(probe.RunError):
                     self.inspect(changed, mode, resource_facade=True)
+            eager = next(line for line in original if line.startswith("private_external_eager_") and
+                         not line.startswith("private_external_eager_reacquire_provenance="))
+            provenance = next(line for line in original if line.startswith("private_external_eager_reacquire_provenance="))
+            for marker in (eager, provenance):
+                for changed in ([line for line in original if line != marker], original + [marker],
+                                [line.replace(marker, marker + "bad") for line in original]):
+                    with self.subTest(mode=mode), self.assertRaises(probe.RunError):
+                        self.inspect(changed, mode, resource_facade=True)
 
     def test_private_blob_hresult_differences_are_compared(self):
         native = fixture_log("baseline", resource_facade=True)

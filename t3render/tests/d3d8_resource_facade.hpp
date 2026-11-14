@@ -87,13 +87,15 @@ protected:
 
 struct State {
     State(IDirect3DDevice8* owner_, IDirect3DDevice8* facade_, std::size_t maximum_,
-          std::shared_ptr<PrivateObjectBridge> bridge_) noexcept
-        : owner(owner_), facade(facade_), maximum(maximum_), bridge(std::move(bridge_)) {}
+          std::shared_ptr<PrivateObjectBridge> bridge_, bool retain_dormant_) noexcept
+        : owner(owner_), facade(facade_), maximum(maximum_), bridge(std::move(bridge_)),
+          retain_dormant(retain_dormant_) {}
     std::mutex mutex;
     IDirect3DDevice8* const owner; // facade must retain this native device
     IDirect3DDevice8* const facade;
     const std::size_t maximum;
     const std::shared_ptr<PrivateObjectBridge> bridge;
+    const bool retain_dormant;
     bool closing = false;
     std::unordered_map<void*, Entry*> identities;
     std::unordered_map<void*, Entry*> wrappers;
@@ -193,6 +195,7 @@ public:
         LastError error;
         ULONG count = 0;
         IDirect3DDevice8* parent = nullptr;
+        bool retire = false;
         {
             std::lock_guard<std::mutex> lock(state_->mutex);
             count = refs_.load(std::memory_order_relaxed);
@@ -201,8 +204,18 @@ public:
                 if (refs_.compare_exchange_weak(count, count - 1, std::memory_order_acq_rel,
                                                 std::memory_order_relaxed)) break;
             }
-            if (count == 1) parent = state_->facade;
+            if (count == 1) {
+                parent = state_->facade;
+                if (!state_->retain_dormant) {
+                    state_->identities.erase(this->identity);
+                    state_->wrappers.erase(this->exposed);
+                    retire = true;
+                }
+            }
         }
+        // In eager mode no registry-owned native reference survives the last
+        // facade reference. Native destruction may reenter the device facade.
+        if (retire) this->DestroyDormant();
         // The parent may destroy the registry and this wrapper on final release.
         if (parent) parent->Release();
         return count - 1;
@@ -602,10 +615,12 @@ public:
     };
     static std::shared_ptr<Router> Create(IDirect3DDevice8* owner, IDirect3DDevice8* facade,
                                          std::size_t maximum = 4096,
-                                         std::shared_ptr<PrivateObjectBridge> bridge = {}) noexcept {
+                                         std::shared_ptr<PrivateObjectBridge> bridge = {},
+                                         bool retain_dormant = true) noexcept {
         LastError error;
         if (!owner || !facade || !maximum) return {};
-        try { return std::shared_ptr<Router>(new Router(std::make_shared<State>(owner, facade, maximum, std::move(bridge)))); }
+        try { return std::shared_ptr<Router>(new Router(std::make_shared<State>(owner, facade, maximum, std::move(bridge),
+                                                                                retain_dormant))); }
         catch (...) { return {}; }
     }
     IDirect3DSurface8* AdoptSurface(IDirect3DSurface8* native) noexcept { return Adopt(state_, native, Kind::Surface); }

@@ -143,8 +143,16 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
             raise RunError("buffer private-data reset observation is missing or conflicting")
         external = ("private_external_naive_cycle_and_cleanup=PASS" if mode == "facade" else
                     "private_external_native_dependent_release=PASS")
-        if [line for line in lines if line.startswith("private_external_")] != [external]:
+        if [line for line in lines if line.startswith("private_external_") and not line.startswith("private_external_eager_")] != [external]:
             raise RunError("external private-data lifetime observation is missing or conflicting")
+        eager = ("private_external_eager_release_and_cleanup=PASS" if mode == "facade" else
+                 "private_external_eager_native_dependent_release=PASS")
+        provenance = "unavailable" if mode == "facade" else "preserved"
+        if ([line for line in lines if line.startswith("private_external_eager_") and
+             not line.startswith("private_external_eager_reacquire_provenance=")] != [eager] or
+            [line for line in lines if line.startswith("private_external_eager_reacquire_provenance=")] !=
+             [f"private_external_eager_reacquire_provenance={provenance}"]):
+            raise RunError("eager-retirement lifetime or provenance observation is missing or conflicting")
         for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                        "resource_facade_volume_roundtrips=PASS",
                        "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",

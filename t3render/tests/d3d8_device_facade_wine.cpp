@@ -709,7 +709,7 @@ bool ObservePrivateResourceLifetime(HWND window, bool facade_mode) {
     return true;
 }
 
-bool ObserveExternalPrivateLifetime(HWND window, bool facade_mode) {
+bool ObserveExternalPrivateLifetime(HWND window, bool facade_mode, bool eager = false) {
     ComPtr<IDirect3D8> native_factory;
     native_factory.value = Direct3DCreate8(D3D_SDK_VERSION);
     if (!native_factory.value) return false;
@@ -721,7 +721,8 @@ bool ObserveExternalPrivateLifetime(HWND window, bool facade_mode) {
     IDirect3D8* selected = native_factory.value;
     if (facade_mode) {
         native_factory->AddRef();
-        facade_factory.value = t3render::fixture::CreateBufferDeviceFacadeFactory(native_factory.value, buffers);
+        facade_factory.value = eager ? t3render::fixture::CreateEagerResourceFacadeFactory(native_factory.value, buffers) :
+                                       t3render::fixture::CreateBufferDeviceFacadeFactory(native_factory.value, buffers);
         if (!facade_factory.value) { native_factory->Release(); return false; }
         selected = facade_factory.value;
     }
@@ -734,6 +735,25 @@ bool ObserveExternalPrivateLifetime(HWND window, bool facade_mode) {
     ComPtr<IDirect3DTexture8> texture;
     if (FAILED(device->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, texture.put())) || !texture.value)
         return false;
+    if (eager) {
+        const GUID provenance_key{0x3ee22a9c, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
+        const BYTE bytes[]{0x12, 0x34};
+        if (FAILED(texture->SetPrivateData(provenance_key, bytes, sizeof(bytes), 0)) ||
+            FAILED(device->SetTexture(0, texture.value))) return false;
+        texture->Release(); texture.value = nullptr;
+        ComPtr<IDirect3DBaseTexture8> binding;
+        ComPtr<IDirect3DTexture8> reacquired;
+        if (FAILED(device->GetTexture(0, binding.put())) || !binding.value ||
+            FAILED(binding->QueryInterface(IID_IDirect3DTexture8, reinterpret_cast<void**>(reacquired.put()))) ||
+            !reacquired.value || FAILED(device->SetTexture(0, nullptr))) return false;
+        binding->Release(); binding.value = nullptr;
+        texture.value = reacquired.value; reacquired.value = nullptr;
+        BYTE copied[sizeof(bytes)]{}; DWORD copied_size = sizeof(copied);
+        const HRESULT read = texture->GetPrivateData(provenance_key, copied, &copied_size);
+        if (facade_mode ? read != E_NOTIMPL :
+            FAILED(read) || copied_size != sizeof(bytes) || std::memcmp(copied, bytes, sizeof(bytes))) return false;
+        std::printf("private_external_eager_reacquire_provenance=%s\n", facade_mode ? "unavailable" : "preserved");
+    }
     auto destroyed = std::make_shared<std::atomic<bool>>(false);
     auto* holder = new (std::nothrow) PrivateDeviceHolder(device.value, destroyed);
     if (!holder) return false;
@@ -745,7 +765,7 @@ bool ObserveExternalPrivateLifetime(HWND window, bool facade_mode) {
         texture->Release(); texture.value = nullptr;
         if (!destroyed->load()) return false;
         device->Release(); device.value = nullptr;
-        std::printf("private_external_native_dependent_release=PASS\n");
+        std::printf("private_external_%snative_dependent_release=PASS\n", eager ? "eager_" : "");
         return true;
     }
     // Direct forwarding is intentionally simulated on a borrowed native
@@ -760,6 +780,18 @@ bool ObserveExternalPrivateLifetime(HWND window, bool facade_mode) {
         holder->Release(); return false;
     }
     holder->Release();
+    if (eager) {
+        native_texture->Release(); native_texture.value = nullptr;
+        const ULONG texture_remaining = texture->Release(); texture.value = nullptr;
+        if (texture_remaining != 0 || !destroyed->load()) return false;
+        const unsigned resources_closed = t3render::fixture::resource_facade_close_successes.load();
+        const unsigned buffers_closed = t3render::fixture::buffer_facade_close_successes.load();
+        const ULONG device_remaining = device->Release(); device.value = nullptr;
+        if (device_remaining != 0 || t3render::fixture::resource_facade_close_successes != resources_closed + 1 ||
+            t3render::fixture::buffer_facade_close_successes != buffers_closed + 1) return false;
+        std::printf("private_external_eager_release_and_cleanup=PASS\n");
+        return true;
+    }
     const ULONG texture_remaining = texture->Release(); texture.value = nullptr;
     if (texture_remaining != 0) return false;
     auto* borrowed = native_texture.value;
@@ -1504,12 +1536,13 @@ int wmain(int argc, wchar_t** argv) {
     if (ok) ok = ObservePrivateResourceLifetime(window, facade_mode);
     if (ok) ok = ObserveTranslatedPrivateLifetime(window, facade_mode);
     if (ok) ok = ObserveExternalPrivateLifetime(window, facade_mode);
+    if (ok) ok = ObserveExternalPrivateLifetime(window, facade_mode, true);
 #endif
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
     if (facade_mode) {
         ok = ok && t3render::fixture::buffer_facade_close_successes ==
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
-             6 &&
+             7 &&
 #else
              1 &&
 #endif
@@ -1518,7 +1551,7 @@ int wmain(int argc, wchar_t** argv) {
     }
 #ifdef T3RENDER_RESOURCE_FACADE_FIXTURE
     if (facade_mode) {
-        ok = ok && t3render::fixture::resource_facade_close_successes == 6 &&
+        ok = ok && t3render::fixture::resource_facade_close_successes == 7 &&
              t3render::fixture::resource_facade_close_failures == 0;
         if (ok) std::printf("resource_facade_final_close=PASS\n");
     }

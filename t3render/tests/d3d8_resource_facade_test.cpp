@@ -699,6 +699,57 @@ void PrivateResourceTranslation() {
     assert(source->Release() == 0 && router->Close() && texture.destroyed && cube.destroyed);
     assert(native.Release() == 0 && facade.Release() == 0);
 }
+
+void EagerResourceRetirement() {
+    {
+        Device native, facade;
+        Texture raw; raw.device = &native;
+        auto router = Router::Create(&native, &facade, 8, {}, false);
+        auto* wrapped = router->AdoptTexture(&raw);
+        const BYTE bytes[]{1, 2}; DWORD size = sizeof(bytes);
+        assert(wrapped && wrapped->SetPrivateData(kExtra, bytes, sizeof(bytes), 0) == S_OK);
+        raw.AddRef(); // an independent native binding keeps the resource alive
+        assert(wrapped->Release() == 0 && raw.refs == 1 && facade.refs == 1);
+        raw.AddRef(); // native getter reference
+        auto* reacquired = router->AdoptTexture(&raw);
+        assert(reacquired && raw.refs == 2);
+        BYTE data[sizeof(bytes)]{};
+        assert(reacquired->GetPrivateData(kExtra, data, &size) == E_NOTIMPL); // provenance was retired
+        assert(reacquired->Release() == 0 && raw.refs == 1);
+        assert(router->Close() && raw.Release() == 0 && raw.destroyed);
+        assert(native.Release() == 0 && facade.Release() == 0);
+    }
+    {
+        Device native, facade;
+        Surface raw; raw.device = &native;
+        auto router = Router::Create(&native, &facade, 8, {}, false);
+        auto* wrapped = router->AdoptSurface(&raw);
+        bool reentered = false;
+        raw.on_release = [&] { reentered = true; assert(router->Close()); };
+        assert(wrapped->Release() == 0 && raw.destroyed && reentered && facade.refs == 1);
+        assert(native.Release() == 0 && facade.Release() == 0);
+    }
+    for (unsigned n = 0; n < 200; ++n) {
+        Device native, facade;
+        Surface raw; raw.device = &native;
+        auto router = Router::Create(&native, &facade, 8, {}, false);
+        auto* wrapped = router->AdoptSurface(&raw);
+        raw.AddRef(); // native binding remains valid while getter races Release
+        std::atomic<bool> go{false};
+        std::thread getter([&] {
+            while (!go.load()) std::this_thread::yield();
+            raw.AddRef();
+            auto* found = router->AdoptSurface(&raw);
+            assert(found);
+            found->Release();
+        });
+        go = true;
+        wrapped->Release();
+        getter.join();
+        assert(raw.refs == 1 && facade.refs == 1 && router->Close());
+        assert(raw.Release() == 0 && native.Release() == 0 && facade.Release() == 0);
+    }
+}
 } // namespace
 
 int main() {
@@ -714,4 +765,5 @@ int main() {
     ConcurrentReacquisition();
     PrivateVertexTranslation();
     PrivateResourceTranslation();
+    EagerResourceRetirement();
 }

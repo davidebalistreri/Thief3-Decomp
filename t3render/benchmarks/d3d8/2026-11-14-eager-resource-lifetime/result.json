@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "test": "synthetic_d3d8_eager_resource_lifetime",
+  "date": "2026-11-14",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r30",
+    "architecture": "x86",
+    "tds_running": false,
+    "fixture_window_shown": false
+  },
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "c9b34ac9769c8b6756885c5b7dba85656bd97378d435e305509c1c93c8ed5c21",
+    "t3render/src/buffer_proxy.cpp": "9cdaee180dbf35476c6100df34c777dc77369ffb59f25e1f1ecd67ee7696da50",
+    "t3render/src/buffer_proxy.hpp": "c69f5533e50a6411db559318796eed0b46b1eee0f0512f164c9fe2c9e0b6ca72",
+    "t3render/src/private_blob.hpp": "aff906733cbfbc136ec7b72aa9f65f1905b246db193e9f8b370688186ee47bfb",
+    "t3render/ir/buffer_registry.cpp": "9e24931212d54e0ee58b7be7313a85510e9fc867f3a3b20297eff3e1f6138b84",
+    "t3render/ir/buffer_shadow.cpp": "9cfed54a6fcf4718e80fd1d8301a8afa5f84852ac70b428938b06d1e64cddafe",
+    "t3render/tests/d3d8_resource_facade.hpp": "52e043d39870add0b62a30db2b638e2876e997b3ba63f111c043ec7d0f222b89",
+    "t3render/tests/d3d8_resource_facade_wine.cpp": "21bdd67358220b05c452d35c84f105ef2a599328490784fe9eeba56d71ce9b54",
+    "t3render/tests/d3d8_device_facade.hpp": "2aea1a7533276d2fd0589cfa9a5f1471d7d212bc2869d3722a9911dcf334b07c",
+    "t3render/tests/d3d8_device_facade_wine.cpp": "d2807d8556d53360751df71de618dec95905cbbc43668200fb9d159457523a36",
+    "t3render/tests/d3d8_resource_facade_test.cpp": "1e51e861928abaceed0d810857c97526e2494c63186889557f4ea1c43a68c355",
+    "t3render/tests/test_d3d8_device_facade_runner.py": "e329d27092e1945afbc04b2aff3ebedddf9dc13a2de101c6d267c12471650f24",
+    "t3render/tools/run_d3d8_device_facade.py": "a8b04fc7df6bd2b81d28181d059084399c76ab025ff83cde6713421c080295d7"
+  },
+  "fixture_sha256": "4ae0c3410cf590dc3997623c29b5e09a217d11cede2632f0eb88e3f2089284df",
+  "result": {
+    "eager_texture_releases_external_device_holder": true,
+    "facade_and_registries_close_without_breaking_cycle": true,
+    "native_binding_reacquires_texture": true,
+    "native_private_data_after_reacquisition": "preserved",
+    "eager_facade_private_data_after_reacquisition": "unavailable",
+    "parity_records_each_default_fixture": 159,
+    "rgb_ppm_sha256_both_default_fixture": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+    "baseline_log_sha256": "c1030d2f4928561a126d4f9f4e962b5c1e039f74c2cc23e744d4c2aa4ef90959",
+    "facade_log_sha256": "957050d1bbf9ee33bd619d129c1ee05e93de1882d2404dc342ca913cddc7a437"
+  },
+  "limitations": [
+    "Opt-in isolated fixture experiment only; not integrated into the proxy or TDS.",
+    "External object forwarding is simulated on a borrowed native texture; the facade still rejects external IUnknown.",
+    "The RGB/state comparison runs the default retaining policy; eager retirement is a separate lifetime experiment.",
+    "Retired source wrapper loses private-data provenance; dormant buffers still retain native references.",
+    "One external-object graph and one Wine runtime; native Windows, state blocks, runtime concurrency and gameplay remain untested."
+  ]
+}

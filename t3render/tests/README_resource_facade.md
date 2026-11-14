@@ -160,6 +160,19 @@ registries closed. Translating known buffer/resource pointers does not solve
 this case: blindly forwarding external objects is unsafe. Full local logs and
 PPMs are under `build/t3render-captures/2026-11-14-private-external-lifetime-v2/`.
 
+The isolated [eager-resource retirement experiment](../benchmarks/d3d8/2026-11-14-eager-resource-lifetime/result.json)
+releases the native resource at its facade's last external Release instead of
+retaining a dormant wrapper. In the same external-object diagnostic, this
+allowed the texture, external holder and device to close without breaking an
+artificial facade cycle. Host tests exercise concurrent getter/final-Release
+and reentrant native destruction. The trade-off is visible: a resource retained
+by a native binding can be wrapped again, but its previous private-data
+provenance is unavailable, while native D3D8 still returns the data. This
+experiment does not enable external objects, does not change the default
+fixture, does not retire dormant VB/IB, and does not solve state-block or game
+compatibility. Logs and PPMs are under
+`build/t3render-captures/2026-11-14-eager-resource-lifetime/`.
+
 The later [state-block observation](../benchmarks/d3d8/2026-11-13-stateblock-facade/result.json)
 exercised Create, Capture, Begin/End, Apply and Delete on the combined facade.
 After VB/IB wrappers became dormant and were reacquired, their `WRITEONLY`

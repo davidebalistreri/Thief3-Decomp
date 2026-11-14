@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "tds_bedroom_combined_vs10_observation",
+  "status": "PARTIAL",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86 virtual desktop",
+  "scene": "SouthQuarter1_int1, Garrett's Building save; user confirmed bedroom oriented toward bed",
+  "proxy_commit": "3121c953",
+  "proxy_sha256": "7849b4941ef872671ac7dc5a71a859528049c9205f15454e8a5d24afc3eaaa50",
+  "temporary_proxy_removed": true,
+  "capture": {
+    "frames": 1,
+    "frame": 988,
+    "present_hresult": 0,
+    "draws": 746,
+    "indexed_draws": 737,
+    "indexed_draws_with_stable_buffer_windows": 737,
+    "declaration_candidates": 714,
+    "vertex_program_candidates_vs_1_0": 568,
+    "vertex_program_candidates_vs_1_1": 146,
+    "color_writing_indexed_draws_with_vs_1_0": 567,
+    "color_writing_indexed_draws_with_vs_1_0_vb_and_ib": 28,
+    "of_those_with_sampled_constants": 18,
+    "of_those_constants_unavailable_due_frame_budget": 10,
+    "vertex_payloads_captured": 198,
+    "vertex_payloads_abandoned": 539,
+    "index_payloads_captured": 347,
+    "index_payloads_abandoned": 390,
+    "raw_trace_sha256": "2a10d4d90550e31f4df3e6c8a608a664c8fac70399f4856e271265932f8044de"
+  },
+  "analysis": [
+    "The 28 color-writing draws with shader and VB/IB candidates share an observed dynamic vertex window. The 18 with constants include ambient, spotlight, omni, diffuse and fog programs; their candidate words exactly match named vertex resources in the local kernel bundle.",
+    "For those 18 draws, a CPU test of the observed position output (four DP4 operations on vertex position and c1-c4) found every triangle trivially outside at least one clip plane. This is an analysis of sampled candidates, not a driver or pixel comparison.",
+    "Color-write enabled alone does not mean a draw contributed visible pixels; no bedroom geometry is claimed from those 18 draws.",
+    "All 539 missing vertex payloads were reported as abandoned and shared the same observed 2,621,440-byte managed WRITEONLY vertex-buffer descriptor. The per-resource reason for abandonment is not yet recorded."
+  ],
+  "limitations": [
+    "Buffer bytes, programs and constants are observations or candidates, not proof of inputs consumed by the GPU.",
+    "The remaining 10 draws with VB/IB and VS 1.0 candidates lack sampled constants because the frame budget was exhausted.",
+    "Pixel programs and texture contents are missing, and no synchronized TDS image exists for pixel comparison.",
+    "The game-derived trace and IR are local and are not committed; the room cannot yet be replayed.",
+    "The prior menu text truncation remains unresolved."
+  ],
+  "local_trace": "build/t3render-captures/2026-11-14-tds-vs10-bedroom/bedroom.jsonl",
+  "local_ir": "build/t3render-captures/2026-11-14-tds-vs10-bedroom/bedroom-ir.json"
+}

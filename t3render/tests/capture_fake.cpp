@@ -317,6 +317,8 @@ int main(int argc, char** argv) {
     presentation.BackBufferHeight = 720;
     presentation.Windowed = TRUE;
     const bool configured = t3render::CaptureConfigured();
+    if (scenario == "history_config")
+        std::cout << "history_requested=" << t3render::CaptureDeclarationHistoryRequested() << '\n';
     if (scenario == "experimental_header") t3render::CaptureExperimentalFacade();
     if (scenario == "experimental_repeated_header") t3render::CaptureExperimentalFacade(true);
     t3render::CaptureDevice(&device, &presentation);

@@ -109,6 +109,12 @@ unknown and a shader word is not a program candidate. The paired draw result
 must still be checked, and these observations cannot identify unobserved aliases
 or prove GPU input. Older traces do not contain this information.
 
+With `T3RENDER_CAPTURE_DECLARATION_HISTORY=1`, the combined observer now uses
+the same bounded pre-reset history policy as the standard observer. A successful
+Reset and a later explicit successful rebind are necessary to expose history;
+the data remain pre-reset hypotheses. A failed Reset or unobserved mutation
+still invalidates them. See the [combined history fixture](benchmarks/d3d8/2026-11-14-combined-history/result.json).
+
 Add `-DT3RENDER_BUILD_SMOKE_TEST=ON` at configuration time to build a
 standalone D3D8 program in the `smoke/` subdirectory. It draws four synthetic
 triangles, checks one pixel of each and prints a backbuffer hash. Compare that
@@ -353,6 +359,10 @@ synthetic `vs_1_0` Highball test matched HRESULTs and RGB with and without the
 standard proxy and the experimental combined facade; it is not a replay of a
 TDS shader. The combined facade invalidated shader evidence after the first
 shader deletion, as required by the handle-reuse policy.
+A subsequent [bedroom capture](benchmarks/runtime/2026-11-14-tds-vs10-bedroom/result.json)
+observed `vs_1_0` program candidates together with buffer and constant samples,
+but the visible room remains unreconstructed: most vertex payloads were
+abandoned and the available samples have not been verified against the GPU.
 A [follow-up](benchmarks/d3d8/2026-11-13-tds-program-history/result.json)
 retained 495 declaration and 94 program hypotheses across successful Reset
 and rebind observations; they remain unverified pre-reset data.

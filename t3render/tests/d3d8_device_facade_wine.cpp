@@ -1122,7 +1122,9 @@ bool CapturePreparedBufferDraw(IDirect3DDevice8* device, IDirect3DDevice8* nativ
 
 bool ObserveCombinedResetEpoch(IDirect3DDevice8* device, IDirect3DDevice8* native,
                                t3render::buffers::BufferProxy& buffers, D3DPRESENT_PARAMETERS& pp) {
-    t3render::fixture::CombinedCaptureObserver observer(native, buffers, pp);
+    // This check runs after the earlier capture ended, so explicitly enable
+    // history in the fixture; the proxy uses the actual capture opt-in.
+    t3render::fixture::CombinedCaptureObserver observer(native, buffers, pp, true);
     if (!observer.valid()) return false;
     auto* facade = static_cast<t3render::fixture::DeviceFixture*>(device);
     facade->SetCombinedObserver(&observer);
@@ -1131,6 +1133,14 @@ bool ObserveCombinedResetEpoch(IDirect3DDevice8* device, IDirect3DDevice8* nativ
     if (FAILED(device->CreateVertexShader(kCombinedDeclaration, kCombinedProgram, &old_shader, D3DUSAGE_SOFTWAREPROCESSING)) ||
         !old_shader || FAILED(device->SetVertexShader(old_shader)) ||
         observer.ShaderStatusForFixture(old_shader) != t3render::ir::ShaderObservationStatus::Candidate) return false;
+    if (FAILED(device->Reset(&pp)) || FAILED(device->SetVertexShader(old_shader))) return false;
+    const auto history = observer.ShaderObservationForFixture(old_shader);
+    if (history.status != t3render::ir::ShaderObservationStatus::Unavailable ||
+        history.reason != t3render::ir::ShaderUnavailableReason::ResetAttempt ||
+        history.pre_reset_words != std::vector<std::uint32_t>(std::begin(kCombinedDeclaration), std::end(kCombinedDeclaration)) ||
+        history.pre_reset_program_words != std::vector<std::uint32_t>(std::begin(kCombinedProgram), std::end(kCombinedProgram)) ||
+        !history.program_words.empty()) return false;
+    std::printf("combined_pre_reset_shader_history=PASS\n");
     D3DPRESENT_PARAMETERS invalid = pp;
     invalid.SwapEffect = static_cast<D3DSWAPEFFECT>(0);
     if (SUCCEEDED(device->Reset(&invalid)) || observer.ShaderWindowAvailableForFixture() ||

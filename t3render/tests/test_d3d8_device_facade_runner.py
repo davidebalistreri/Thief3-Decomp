@@ -52,6 +52,7 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
             lines.append("combined_capture_shader_pixel=PASS")
             lines.append("combined_external_shader_invalidation=PASS")
             lines.append("combined_reset_shader_and_fresh_buffer_epoch=PASS")
+            lines.append("combined_pre_reset_shader_history=PASS")
             lines.append("combined_stateblock_shader_buffer_reacquisition=PASS")
             lines.append("combined_stateblock_shader_reuse_invalidates=PASS")
             lines.append("combined_unknown_stateblocks_invalidate=PASS")

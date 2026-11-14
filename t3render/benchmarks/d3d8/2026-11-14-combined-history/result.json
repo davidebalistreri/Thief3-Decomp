@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "combined_pre_reset_shader_history",
+  "status": "PASS",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86",
+  "fixture_sha256": "8abef2ab10c2a8d6020037a469db402a62d1b8b35ad871a6c56c0649cd1c8994",
+  "baseline_facade_ppm_sha256": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+  "synchronized_d3d8_dx12_ppm_sha256": "5f46fcdfe5237797a1425f91d3abc19689c225e67e38b5ecbf7f25b39db16c85",
+  "observation": "A successful Reset and explicit rebind retained the fixture declaration and VS 1.1 program only as pre-reset hypotheses; the current program remained unavailable. A failed Reset recovery was exercised separately.",
+  "local_results": "build/t3render-captures/2026-11-14-combined-history-v4",
+  "limitations": [
+    "The fixture explicitly forces history after its capture ended; configuration gating is host-tested separately.",
+    "This is a serial synthetic fixture, not proof of TDS shader identity or game-frame replay.",
+    "The matched DX12 image is the earlier fixture's separate synthetic draw, not a replay of pre-reset history."
+  ]
+}

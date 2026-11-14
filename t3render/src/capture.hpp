@@ -78,6 +78,8 @@ struct DrawCall {
 };
 
 bool CaptureConfigured();
+// Configuration only. History is never a post-reset program candidate.
+bool CaptureDeclarationHistoryRequested();
 // Marks the opt-in experimental facade before the first frame is opened.
 void CaptureExperimentalFacade(bool repeated_unlock_policy = false);
 // Advisory only: a concurrent Present may change the active window.

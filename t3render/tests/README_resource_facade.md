@@ -297,6 +297,14 @@ does not establish parity for every Reset, state block or concurrent call.
 Local logs and images are under
 `build/t3render-captures/2026-11-14-combined-reset-recovery/`.
 
+An additional [combined history test](../benchmarks/d3d8/2026-11-14-combined-history/result.json)
+checks that a successful Reset followed by an explicit rebind exposes the old
+declaration and program only as pre-reset hypotheses; a failed Reset remains
+conservative. Its fixture forces history because the earlier capture has
+already ended. In the proxy, both the declaration and history capture flags
+must be set before device creation. This does not prove post-reset shader
+identity or TDS equivalence.
+
 The [shader/state-block lifetime observation](../benchmarks/d3d8/2026-11-14-shader-stateblock-reuse/result.json)
 shows why numeric shader handles alone cannot establish the active program.
 On Highball, a state block captured shader A; after A was deleted, shader B

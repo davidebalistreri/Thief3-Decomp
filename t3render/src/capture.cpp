@@ -1276,6 +1276,15 @@ bool CaptureConfigured() {
     } catch (...) { Fail(); return false; }
 }
 
+bool CaptureDeclarationHistoryRequested() {
+    try {
+        auto& s = State();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        Initialize(s);
+        return s.enabled && s.declaration_requested && s.history_requested;
+    } catch (...) { Fail(); return false; }
+}
+
 void CaptureExperimentalFacade(bool repeated_unlock_policy) {
     try {
         auto& s = State();

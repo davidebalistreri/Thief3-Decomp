@@ -187,6 +187,16 @@ class CaptureHostTests(unittest.TestCase):
                          ("observation_error", "complete"))
         self.assertNotIn("reason", draws[3]["vertex_declaration"])
 
+    def test_combined_history_configuration_requires_both_flags(self):
+        for declarations, history, expected in (("0", "0", "0"), ("1", "0", "0"),
+                                                ("0", "1", "0"), ("1", "1", "1")):
+            with self.subTest(declarations=declarations, history=history):
+                output = self.run_capture("history_config", frame="1", extra={
+                    "T3RENDER_CAPTURE_DECLARATIONS": declarations,
+                    "T3RENDER_CAPTURE_DECLARATION_HISTORY": history})
+                self.assertIn("history_requested=" + expected, output)
+                self.path.unlink(missing_ok=True)
+
     def test_shader_candidate_is_paired_with_result_and_reuses_sampled_getter(self):
         self.run_capture("shader", frame="1", extra={"T3RENDER_CAPTURE_DECLARATIONS": "1"})
         records = self.records()

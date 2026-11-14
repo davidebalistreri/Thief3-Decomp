@@ -16,8 +16,8 @@ class CombinedCaptureObserver final {
 public:
     enum class StateBlockAction { Unsupported, Create, Apply, Capture, Delete };
     CombinedCaptureObserver(IDirect3DDevice8* native, buffers::BufferProxy& buffers,
-                            const D3DPRESENT_PARAMETERS& presentation) noexcept
-        : native_(native), buffers_(buffers), device_(shaders_.OpenDevice()) {
+                            const D3DPRESENT_PARAMETERS& presentation, bool fixture_force_history = false) noexcept
+        : native_(native), buffers_(buffers), shaders_(ShaderLimits(fixture_force_history)), device_(shaders_.OpenDevice()) {
         if (writer_active_) { shaders_.MarkUnsafe(device_); deferred_abandon_ = true; }
         else { WriterScope scope; CaptureDevice(native_, &presentation); }
     }
@@ -40,6 +40,15 @@ public:
         const auto status = shaders_.Observe(ticket, value).status;
         return shaders_.End(ticket) ? status : ir::ShaderObservationStatus::Unsafe;
     }
+#ifndef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+    ir::ShaderObservation ShaderObservationForFixture(DWORD value) noexcept {
+        if (reset_recovery_) return {};
+        const auto ticket = shaders_.BeginDraw(device_);
+        if (!ticket) return {};
+        auto result = shaders_.Observe(ticket, value);
+        return shaders_.End(ticket) ? result : ir::ShaderObservation{};
+    }
+#endif
     ir::ShaderTicket BeginReset() noexcept {
         const DWORD before = GetLastError();
         if (writer_active_) { Unsupported(); SetLastError(before); return {}; }
@@ -232,6 +241,16 @@ public:
         return Draw(call, [&] { return native_->DrawIndexedPrimitiveUP(type, minimum, vertices, count, indices, format, data, stride); });
     }
 private:
+    static ir::ShaderRegistryLimits ShaderLimits(bool fixture_force_history) noexcept {
+        const DWORD error = GetLastError();
+        ir::ShaderRegistryLimits limits;
+        if (fixture_force_history || CaptureDeclarationHistoryRequested()) {
+            limits.preserve_reset_history = true;
+            limits.words_per_device = 8192; // matches the advertised 32 KiB history limit
+        }
+        SetLastError(error);
+        return limits;
+    }
     template<class Forward>
     HRESULT Draw(DrawCall call, Forward forward) noexcept {
         const DWORD before = GetLastError();

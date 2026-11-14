@@ -253,6 +253,9 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
         reset_epoch = ["combined_reset_shader_and_fresh_buffer_epoch=PASS"] if mode == "facade" else []
         if [line for line in lines if line.startswith("combined_reset_shader_and_fresh_buffer_epoch=")] != reset_epoch:
             raise RunError("combined observer reset epoch is missing or conflicting")
+        history = ["combined_pre_reset_shader_history=PASS"] if mode == "facade" else []
+        if [line for line in lines if line.startswith("combined_pre_reset_shader_history=")] != history:
+            raise RunError("combined pre-reset shader history is missing or conflicting")
         stateblock = ["combined_stateblock_shader_buffer_reacquisition=PASS"] if mode == "facade" else []
         if [line for line in lines if line.startswith("combined_stateblock_shader_buffer_reacquisition=")] != stateblock:
             raise RunError("combined observer state-block reacquisition is missing or conflicting")

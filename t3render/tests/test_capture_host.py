@@ -539,11 +539,15 @@ class CaptureHostTests(unittest.TestCase):
     def test_shadow_failure_reasons_do_not_publish_partial_bytes(self):
         self.run_capture("shadow_reason", frame="1", extra={"T3RENDER_CAPTURE_BUFFERS": "1"})
         draws = [item for item in self.records() if item["event"] == "draw"]
-        self.assertEqual(len(draws), 2)
+        self.assertEqual(len(draws), 3)
         for part, reason in (("vertex", "abandoned"), ("index", "unknown_data")):
             failed = draws[0]["buffer_data"][part]
             self.assertEqual((failed["status"], failed["shadow_reason"], failed["data"]), ("unknown", reason, None))
-            captured = draws[1]["buffer_data"][part]
+            repeated = draws[1]["buffer_data"][part]
+            self.assertEqual((repeated["status"], repeated["shadow_reason"], repeated["data"]), ("unknown", reason, None))
+            self.assertEqual(repeated.get("shadow_abandon_cause"), "repeated_unlock" if part == "vertex" else None)
+            self.assertNotIn("shadow_abandon_cause", failed)
+            captured = draws[2]["buffer_data"][part]
             self.assertEqual(captured["status"], "captured")
             self.assertNotIn("shadow_reason", captured)
 

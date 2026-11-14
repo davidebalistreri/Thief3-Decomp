@@ -107,7 +107,11 @@ buffer reads and, for an unsupported vertex program, the first observed word if
 readable. These are diagnostic metadata only: an unknown buffer remains
 unknown and a shader word is not a program candidate. The paired draw result
 must still be checked, and these observations cannot identify unobserved aliases
-or prove GPU input. Older traces do not contain this information.
+or prove GPU input. If the first observed abandonment was the repeated-Unlock
+policy, `shadow_abandon_cause` records `repeated_unlock`; an omitted cause is
+unknown, not evidence against it. The affected bytes remain unavailable. Older
+traces do not contain this information. The [Highball regression fixture](benchmarks/d3d8/2026-11-14-abandon-provenance/result.json)
+still matches its synthetic native D3D8 image and DX12 replay.
 
 With `T3RENDER_CAPTURE_DECLARATION_HISTORY=1`, the combined observer now uses
 the same bounded pre-reset history policy as the standard observer. A successful

@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "test": "abandon_provenance_regression",
+  "status": "PASS",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86",
+  "fixture_sha256": "be69bb908862270919289f4ab36276dda54d0d46a5de2a3c7f9512176a196521",
+  "baseline_facade_ppm_sha256": "b46022280ee05510a0d2b1539340308bb59b3ba7760a5f6de1c2632784e4972d",
+  "synthetic_d3d8_dx12_ppm_sha256": "5f46fcdfe5237797a1425f91d3abc19689c225e67e38b5ecbf7f25b39db16c85",
+  "local_results": "build/t3render-captures/2026-11-14-abandon-provenance-fixture",
+  "limitations": [
+    "Fixture parity is synthetic; it does not establish TDS visual or gameplay parity.",
+    "The synchronized DX12 image is a fixture draw, not a replay of TDS geometry.",
+    "Abandonment provenance is exercised by host tests and requires a new TDS capture to classify the bedroom buffer."
+  ]
+}

@@ -118,7 +118,7 @@ void PartialWritesAndStaging() {
 }
 
 void DiscardReadOnlyAndFailures() {
-    BufferRegistry registry(128, 4);
+    BufferRegistry registry(128, 5);
     const auto token = Register(registry, 1, 8);
     const std::array<std::uint8_t, 8> original{1, 2, 3, 4, 5, 6, 7, 8};
     std::array<std::uint8_t, 8> out{};
@@ -157,6 +157,16 @@ void DiscardReadOnlyAndFailures() {
     assert(registry.Abandon(unknown) == R::Ok);
     assert(registry.Read(unknown, 0, out.data(), 1) == R::Unavailable);
     assert(registry.used_bytes() == 0);
+    t3render::ir::BufferAbandonCause cause = t3render::ir::BufferAbandonCause::RepeatedUnlock;
+    assert(registry.Abandon(unknown, cause) == R::Ok);
+    assert(registry.AbandonCause(unknown, cause) == R::Ok && cause == t3render::ir::BufferAbandonCause::Unknown);
+    const auto repeated = Register(registry, 5, 8);
+    assert(registry.AbandonCause(repeated, cause) == R::InvalidOperation);
+    assert(registry.Abandon(repeated, t3render::ir::BufferAbandonCause::RepeatedUnlock) == R::Ok);
+    assert(registry.Abandon(repeated) == R::Ok);
+    assert(registry.AbandonCause(repeated, cause) == R::Ok && cause == t3render::ir::BufferAbandonCause::RepeatedUnlock);
+    assert(registry.Release(repeated) == R::Ok);
+    assert(registry.AbandonCause(repeated, cause) == R::UnknownResource);
 }
 
 void GlobalBudgetAndOverflow() {

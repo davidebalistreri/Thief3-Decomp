@@ -18,6 +18,8 @@ struct BufferToken {
 };
 
 enum class BufferAvailability { Tracked, BudgetExceeded, TooLarge, AllocationFailed, Abandoned };
+// First observed cause only; this is diagnostic and never restores bytes.
+enum class BufferAbandonCause { Unknown, RepeatedUnlock };
 enum class BufferLock { ReadOnly, Write, Discard };
 enum class RegistryResult {
     Ok, InvalidIdentity, AlreadyTracked, CapacityExceeded, GenerationExhausted,
@@ -73,7 +75,8 @@ public:
     RegistryResult EndUnlock(BufferToken token, bool succeeded) noexcept;
     // Use after unknown aliases, external writes or any event which makes
     // future tracking unreliable. Abandon is permanent for this generation.
-    RegistryResult Abandon(BufferToken token) noexcept;
+    RegistryResult Abandon(BufferToken token, BufferAbandonCause cause = BufferAbandonCause::Unknown) noexcept;
+    RegistryResult AbandonCause(BufferToken token, BufferAbandonCause& cause) const noexcept;
     RegistryResult Read(BufferToken token, std::size_t offset, void* destination,
                         std::size_t length) const noexcept;
 
@@ -86,6 +89,7 @@ private:
         std::uint64_t generation = 0;
         std::size_t size = 0;
         BufferAvailability availability = BufferAvailability::AllocationFailed;
+        BufferAbandonCause abandon_cause = BufferAbandonCause::Unknown;
         std::unique_ptr<BufferShadow> shadow;
         bool locked = false;
         BufferLock kind = BufferLock::ReadOnly;
@@ -97,7 +101,7 @@ private:
     RegistryResult Find(BufferToken token, Entry*& entry) noexcept;
     RegistryResult Find(BufferToken token, const Entry*& entry) const noexcept;
     void ClearStaging(Entry& entry) noexcept;
-    void AbandonEntry(Entry& entry) noexcept;
+    void AbandonEntry(Entry& entry, BufferAbandonCause cause = BufferAbandonCause::Unknown) noexcept;
 
     const std::size_t byte_budget_;
     const std::size_t max_resources_;

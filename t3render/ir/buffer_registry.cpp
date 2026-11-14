@@ -76,7 +76,8 @@ void BufferRegistry::ClearStaging(Entry& entry) noexcept {
     entry.staging_size = 0;
 }
 
-void BufferRegistry::AbandonEntry(Entry& entry) noexcept {
+void BufferRegistry::AbandonEntry(Entry& entry, BufferAbandonCause cause) noexcept {
+    if (entry.availability != BufferAvailability::Abandoned) entry.abandon_cause = cause;
     ClearStaging(entry);
     if (entry.shadow) {
         used_bytes_ -= entry.shadow->storage_bytes();
@@ -196,11 +197,20 @@ RegistryResult BufferRegistry::EndUnlock(BufferToken token, bool succeeded) noex
     return outcome;
 }
 
-RegistryResult BufferRegistry::Abandon(BufferToken token) noexcept {
+RegistryResult BufferRegistry::Abandon(BufferToken token, BufferAbandonCause cause) noexcept {
     Entry* entry = nullptr;
     const auto result = Find(token, entry);
-    if (result == RegistryResult::Ok) AbandonEntry(*entry);
+    if (result == RegistryResult::Ok) AbandonEntry(*entry, cause);
     return result;
+}
+
+RegistryResult BufferRegistry::AbandonCause(BufferToken token, BufferAbandonCause& cause) const noexcept {
+    const Entry* entry = nullptr;
+    const auto result = Find(token, entry);
+    if (result != RegistryResult::Ok) return result;
+    if (entry->availability != BufferAvailability::Abandoned) return RegistryResult::InvalidOperation;
+    cause = entry->abandon_cause;
+    return RegistryResult::Ok;
 }
 
 RegistryResult BufferRegistry::Read(BufferToken token, std::size_t offset, void* destination,

@@ -1644,13 +1644,17 @@ void RepeatedUnlockExperiment() {
             assert(proxy->ReadIndex(&native, &indices, 0, observed, 3) == RegistryResult::Ok);
             const auto ticket = proxy->BeginDraw(&native);
             assert(ticket && proxy->PrepareVertexGetter(&native, &affected, ticket).ReadDetailed(&native, &affected, 0, observed, 3) ==
-                   t3render::buffers::ShadowReadStatus::Abandoned);
+                   t3render::buffers::ShadowReadStatus::AbandonedRepeatedUnlock);
             assert(proxy->EndDraw(&native, ticket));
             // Re-locking the discarded source remains forwardable but cannot
             // resurrect its old shadow or invalidate unrelated buffers.
             Fill(a, 0, data, 3);
             assert(proxy->ReadVertex(&native, &affected, 0, observed, 3) == RegistryResult::Unavailable);
             assert(proxy->ReadIndex(&native, &indices, 0, observed, 3) == RegistryResult::Ok);
+            const auto later = proxy->BeginDraw(&native);
+            assert(later && proxy->PrepareVertexGetter(&native, &affected, later).ReadDetailed(&native, &affected, 0, observed, 3) ==
+                   t3render::buffers::ShadowReadStatus::AbandonedRepeatedUnlock);
+            assert(proxy->EndDraw(&native, later));
             assert(a->Unlock() == S_OK && proxy->GetRepeatedUnlockStats(&native).completed == 2);
             // A third Unlock without a new matched pair fails closed.
             assert(a->Unlock() == S_OK && !proxy->BeginDraw(&native));

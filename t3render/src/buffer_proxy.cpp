@@ -127,8 +127,8 @@ struct BufferProxy::State {
         item->matched_unlock_completed = false; item->repeated_unlock_pending = false;
         item->data = nullptr; item->length = 0; item->operation = 0;
     }
-    void AbandonLocked(Control* item) noexcept {
-        shadows.Abandon(item->token);
+    void AbandonLocked(Control* item, ir::BufferAbandonCause cause = ir::BufferAbandonCause::Unknown) noexcept {
+        shadows.Abandon(item->token, cause);
         ClearLockLocked(item);
     }
     void PoisonAllLocked(unsigned line = T3RENDER_CALL_LINE) noexcept {
@@ -565,7 +565,7 @@ private:
                 // The repeated call can touch the source resource, so discard
                 // its bytes before forwarding. The mutation ticket detects
                 // observed overlaps; uncaptured draws are not bracketed.
-                state_->AbandonLocked(this);
+                state_->AbandonLocked(this, ir::BufferAbandonCause::RepeatedUnlock);
                 operation = state_->next_operation++;
                 pending_unlock = true;
                 repeated_unlock_pending = true;
@@ -1029,7 +1029,13 @@ ir::RegistryResult ReadPrepared(const std::shared_ptr<BufferProxy::State>& state
                 *detail = ShadowReadStatus::Unavailable; break;
             }
             switch (availability) {
-            case ir::BufferAvailability::Abandoned: *detail = ShadowReadStatus::Abandoned; break;
+            case ir::BufferAvailability::Abandoned: {
+                ir::BufferAbandonCause cause{};
+                *detail = state->shadows.AbandonCause(token, cause) == ir::RegistryResult::Ok &&
+                          cause == ir::BufferAbandonCause::RepeatedUnlock
+                              ? ShadowReadStatus::AbandonedRepeatedUnlock : ShadowReadStatus::Abandoned;
+                break;
+            }
             case ir::BufferAvailability::BudgetExceeded: *detail = ShadowReadStatus::BudgetExceeded; break;
             case ir::BufferAvailability::TooLarge: *detail = ShadowReadStatus::TooLarge; break;
             case ir::BufferAvailability::AllocationFailed: *detail = ShadowReadStatus::AllocationFailed; break;

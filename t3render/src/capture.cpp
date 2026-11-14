@@ -530,6 +530,7 @@ constexpr D3DTEXTURESTAGESTATETYPE kStageStates[] = {
 struct UpBytes {
     const char* status = "unreadable";
     const char* shadow_reason = nullptr;
+    const char* shadow_abandon_cause = nullptr;
     uint64_t byte_count = 0;
     bool byte_count_known = false;
     std::string hex;
@@ -631,6 +632,7 @@ void BytesJson(std::ostream& out, const UpBytes& data) {
         out << '"' << data.hex << '"';
     else out << "null";
     if (data.shadow_reason) out << ",\"shadow_reason\":\"" << data.shadow_reason << '\"';
+    if (data.shadow_abandon_cause) out << ",\"shadow_abandon_cause\":\"" << data.shadow_abandon_cause << '\"';
 }
 
 const char* ShadowReason(buffers::ShadowReadStatus status) noexcept {
@@ -639,6 +641,7 @@ const char* ShadowReason(buffers::ShadowReadStatus status) noexcept {
     case ShadowReadStatus::UnknownResource: return "unknown_resource";
     case ShadowReadStatus::UnknownData: return "unknown_data";
     case ShadowReadStatus::Abandoned: return "abandoned";
+    case ShadowReadStatus::AbandonedRepeatedUnlock: return "abandoned";
     case ShadowReadStatus::BudgetExceeded: return "budget_exceeded";
     case ShadowReadStatus::TooLarge: return "too_large";
     case ShadowReadStatus::AllocationFailed: return "allocation_failed";
@@ -675,6 +678,8 @@ UpBytes ReadShadow(CaptureState& s, const BufferObserver& observer, IDirect3DDev
         const auto observed = detailed(observer.context, device, resource, static_cast<size_t>(offset), copy.data(), size);
         read = observed == buffers::ShadowReadStatus::Captured;
         if (!read) result.shadow_reason = ShadowReason(observed);
+        if (observed == buffers::ShadowReadStatus::AbandonedRepeatedUnlock)
+            result.shadow_abandon_cause = "repeated_unlock";
     } else read = reader(observer.context, device, resource, static_cast<size_t>(offset), copy.data(), size);
     if (!read) {
         result.status = "unknown"; return result;

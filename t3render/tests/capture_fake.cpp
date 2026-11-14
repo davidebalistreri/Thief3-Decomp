@@ -151,6 +151,7 @@ struct Device : IDirect3DDevice8 {
 struct ObserverState {
     Device* expected = nullptr;
     bool vertex_known = true, index_known = true;
+    bool repeated_unlock = false;
     unsigned vertex_reads = 0, index_reads = 0;
 };
 
@@ -181,8 +182,10 @@ bool ReadObservedIndex(void* context, IDirect3DDevice8* device, IDirect3DIndexBu
 
 t3render::buffers::ShadowReadStatus DetailedVertex(void* context, IDirect3DDevice8* device, IDirect3DVertexBuffer8* buffer,
                                                    std::size_t offset, void* destination, std::size_t length) {
-    return ReadObservedVertex(context, device, buffer, offset, destination, length)
-        ? t3render::buffers::ShadowReadStatus::Captured : t3render::buffers::ShadowReadStatus::Abandoned;
+    if (ReadObservedVertex(context, device, buffer, offset, destination, length))
+        return t3render::buffers::ShadowReadStatus::Captured;
+    return static_cast<ObserverState*>(context)->repeated_unlock
+        ? t3render::buffers::ShadowReadStatus::AbandonedRepeatedUnlock : t3render::buffers::ShadowReadStatus::Abandoned;
 }
 t3render::buffers::ShadowReadStatus DetailedIndex(void* context, IDirect3DDevice8* device, IDirect3DIndexBuffer8* buffer,
                                                   std::size_t offset, void* destination, std::size_t length) {
@@ -638,6 +641,10 @@ int main(int argc, char** argv) {
         call.buffer_observer = &observer;
         state.vertex_known = false; state.index_known = false;
         auto token = t3render::CaptureDraw(&device, call);
+        if (!token) return 8;
+        t3render::CaptureBufferedDrawResult(&device, token, S_OK, true);
+        state.repeated_unlock = true;
+        token = t3render::CaptureDraw(&device, call);
         if (!token) return 8;
         t3render::CaptureBufferedDrawResult(&device, token, S_OK, true);
         state.vertex_known = true; state.index_known = true;

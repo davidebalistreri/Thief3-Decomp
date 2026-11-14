@@ -737,9 +737,14 @@ bool ObserveExternalPrivateLifetime(HWND window, bool facade_mode, bool eager = 
         return false;
     if (eager) {
         const GUID provenance_key{0x3ee22a9c, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
+        const GUID object_key{0x3ee22a9d, 0x15cf, 0x4f15, {0xa1, 1, 2, 3, 4, 5, 6, 7}};
         const BYTE bytes[]{0x12, 0x34};
-        if (FAILED(texture->SetPrivateData(provenance_key, bytes, sizeof(bytes), 0)) ||
+        ComPtr<IDirect3DCubeTexture8> target;
+        if (FAILED(device->CreateCubeTexture(2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, target.put())) || !target.value ||
+            FAILED(texture->SetPrivateData(provenance_key, bytes, sizeof(bytes), 0)) ||
+            FAILED(texture->SetPrivateData(object_key, target.value, sizeof(IUnknown*), D3DSPD_IUNKNOWN)) ||
             FAILED(device->SetTexture(0, texture.value))) return false;
+        target->Release(); target.value = nullptr;
         texture->Release(); texture.value = nullptr;
         ComPtr<IDirect3DBaseTexture8> binding;
         ComPtr<IDirect3DTexture8> reacquired;
@@ -750,9 +755,32 @@ bool ObserveExternalPrivateLifetime(HWND window, bool facade_mode, bool eager = 
         texture.value = reacquired.value; reacquired.value = nullptr;
         BYTE copied[sizeof(bytes)]{}; DWORD copied_size = sizeof(copied);
         const HRESULT read = texture->GetPrivateData(provenance_key, copied, &copied_size);
-        if (facade_mode ? read != E_NOTIMPL :
-            FAILED(read) || copied_size != sizeof(bytes) || std::memcmp(copied, bytes, sizeof(bytes))) return false;
-        std::printf("private_external_eager_reacquire_provenance=%s\n", facade_mode ? "unavailable" : "preserved");
+        if (FAILED(read) || copied_size != sizeof(bytes) || std::memcmp(copied, bytes, sizeof(bytes))) return false;
+        std::printf("private_external_eager_reacquire_provenance=preserved\n");
+        // Reacquire the source a second time through a state block, then
+        // recover the resource-valued entry as a facade, not a native alias.
+        DWORD block = 0;
+        if (FAILED(device->SetTexture(0, texture.value)) || FAILED(device->CreateStateBlock(D3DSBT_ALL, &block)) ||
+            FAILED(device->SetTexture(0, nullptr))) return false;
+        texture->Release(); texture.value = nullptr;
+        if (FAILED(device->ApplyStateBlock(block)) || FAILED(device->GetTexture(0, binding.put())) || !binding.value ||
+            FAILED(binding->QueryInterface(IID_IDirect3DTexture8, reinterpret_cast<void**>(reacquired.put()))) ||
+            !reacquired.value || FAILED(device->SetTexture(0, nullptr)) || FAILED(device->DeleteStateBlock(block))) return false;
+        binding->Release(); binding.value = nullptr;
+        texture.value = reacquired.value; reacquired.value = nullptr;
+        ComPtr<IUnknown> target_unknown;
+        ComPtr<IDirect3DCubeTexture8> target_recovered;
+        ComPtr<IDirect3DDevice8> target_device;
+        DWORD target_size = sizeof(target_unknown.value);
+        if (FAILED(texture->GetPrivateData(object_key, target_unknown.put(), &target_size)) || !target_unknown.value ||
+            target_size != sizeof(target_unknown.value) ||
+            FAILED(target_unknown->QueryInterface(IID_IDirect3DCubeTexture8, reinterpret_cast<void**>(target_recovered.put()))) ||
+            !target_recovered.value || FAILED(target_recovered->GetDevice(target_device.put())) ||
+            !EqualIdentity(target_device.value, device.value)) return false;
+        target_device->Release(); target_device.value = nullptr;
+        target_recovered->Release(); target_recovered.value = nullptr;
+        target_unknown->Release(); target_unknown.value = nullptr;
+        std::printf("private_external_eager_stateblock_and_resource=PASS\n");
     }
     auto destroyed = std::make_shared<std::atomic<bool>>(false);
     auto* holder = new (std::nothrow) PrivateDeviceHolder(device.value, destroyed);

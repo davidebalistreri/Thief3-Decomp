@@ -147,11 +147,13 @@ def inspect_log(path, mode, buffer_facade=False, resource_facade=False):
             raise RunError("external private-data lifetime observation is missing or conflicting")
         eager = ("private_external_eager_release_and_cleanup=PASS" if mode == "facade" else
                  "private_external_eager_native_dependent_release=PASS")
-        provenance = "unavailable" if mode == "facade" else "preserved"
+        provenance = "preserved"
         if ([line for line in lines if line.startswith("private_external_eager_") and
-             not line.startswith("private_external_eager_reacquire_provenance=")] != [eager] or
+             not line.startswith(("private_external_eager_reacquire_provenance=", "private_external_eager_stateblock_and_resource="))] != [eager] or
             [line for line in lines if line.startswith("private_external_eager_reacquire_provenance=")] !=
-             [f"private_external_eager_reacquire_provenance={provenance}"]):
+             [f"private_external_eager_reacquire_provenance={provenance}"] or
+            [line for line in lines if line.startswith("private_external_eager_stateblock_and_resource=")] !=
+             ["private_external_eager_stateblock_and_resource=PASS"]):
             raise RunError("eager-retirement lifetime or provenance observation is missing or conflicting")
         for marker in ("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                        "resource_facade_volume_roundtrips=PASS",
@@ -273,6 +275,7 @@ def execute(engine, bottle, fixture, output, timeout, buffer_facade=False, resou
                                  "Only known same-device buffer/resource IUnknown values are translated; external COM values and unknown interfaces fail closed.",
                                  "One diagnostic intentionally stores a wrapped IUnknown on a borrowed native texture, then breaks the cycle; this is not an application path.",
                                  "Another diagnostic deliberately stores an external COM object holding the facade device in a borrowed native texture, then breaks its cycle.",
+                                 "The separate eager-retirement diagnostic attaches a reserved-GUID marker to native resources; it is not production-transparent.",
                                  "Two reset scenarios were exercised; runtime concurrency and comprehensive state-block behavior remain untested.",
                                  "Six synthetic triangles and selected fixed-function states only; no gameplay parity."]
     stage = "setup"

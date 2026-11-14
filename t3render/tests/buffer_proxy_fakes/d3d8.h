@@ -7,6 +7,7 @@ inline constexpr IID IID_IDirect3DVertexBuffer8{3};
 inline constexpr IID IID_IDirect3DIndexBuffer8{4};
 inline constexpr IID IID_IDirect3DDevice8{5};
 inline constexpr HRESULT D3DERR_INVALIDCALL = -5;
+inline constexpr HRESULT D3DERR_NOTFOUND = -7;
 inline constexpr DWORD D3DLOCK_READONLY = 0x10;
 inline constexpr DWORD D3DLOCK_DISCARD = 0x2000;
 inline constexpr DWORD D3DLOCK_NOOVERWRITE = 0x1000;

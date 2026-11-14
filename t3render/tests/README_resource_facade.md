@@ -165,13 +165,28 @@ releases the native resource at its facade's last external Release instead of
 retaining a dormant wrapper. In the same external-object diagnostic, this
 allowed the texture, external holder and device to close without breaking an
 artificial facade cycle. Host tests exercise concurrent getter/final-Release
-and reentrant native destruction. The trade-off is visible: a resource retained
-by a native binding can be wrapped again, but its previous private-data
-provenance is unavailable, while native D3D8 still returns the data. This
-experiment does not enable external objects, does not change the default
-fixture, does not retire dormant VB/IB, and does not solve state-block or game
+and reentrant native destruction. In that version, a resource retained by a
+native binding could be wrapped again, but its previous private-data provenance
+was unavailable, while native D3D8 still returned the data. That version did
+not enable external objects, did not change the default
+fixture, did not retire dormant VB/IB, and did not solve state-block or game
 compatibility. Logs and PPMs are under
 `build/t3render-captures/2026-11-14-eager-resource-lifetime/`.
+
+The [persistent marker experiment](../benchmarks/d3d8/2026-11-14-eager-private-marker/result.json)
+attaches a COM marker under a reserved native private-data GUID. The marker owns
+no source, facade or device reference; its registry is non-owning. In the eager
+fixture a blob and a cube reference survived source-wrapper retirement and
+reacquisition, including through a state block, while the external-holder
+diagnostic still cleaned up without breaking an artificial cycle. A host test
+checks reserved-GUID collisions, failed writes, concurrent initialization,
+reentrancy and marker lifetime. The reserved GUID is deliberately rejected at
+the facade, and an existing native value at that GUID is never overwritten.
+This changes native private data and is not transparent to every application;
+external `IUnknown` values are still rejected. Native alias escapes, dormant
+buffer ownership, reset variants, concurrency in the runtime, Windows and TDS
+remain unverified. Logs and PPMs are under
+`build/t3render-captures/2026-11-14-eager-private-marker-v3/`.
 
 The later [state-block observation](../benchmarks/d3d8/2026-11-13-stateblock-facade/result.json)
 exercised Create, Capture, Begin/End, Apply and Delete on the combined facade.

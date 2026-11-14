@@ -406,6 +406,23 @@ void FailClosedAndLifetime() {
     }
     {
         Device native, facade;
+        Texture raw; raw.device = &native;
+        auto router = Router::Create(&native, &facade, 8, {}, false);
+        auto* wrapped = router->AdoptTexture(&raw);
+        unsigned writes = 0;
+        raw.on_private_get = [&](REFGUID key, void*, DWORD* count) {
+            assert(IsEqualIID(key, kPrivateMarkerGuid));
+            if (count) *count = 3;
+            return S_OK; // foreign private data at the reserved GUID
+        };
+        raw.on_private_set = [&](REFGUID, const void*, DWORD, DWORD) { ++writes; return S_OK; };
+        const BYTE value = 1;
+        assert(wrapped->SetPrivateData(kExtra, &value, sizeof(value), 0) == E_NOTIMPL && writes == 0);
+        assert(wrapped->Release() == 0 && raw.destroyed && router->Close());
+        assert(native.Release() == 0 && facade.Release() == 0);
+    }
+    {
+        Device native, facade;
         Surface raw; raw.device = &native;
         auto router = Router::Create(&native, &facade);
         auto* wrapped = router->AdoptSurface(&raw);
@@ -707,16 +724,45 @@ void EagerResourceRetirement() {
         auto router = Router::Create(&native, &facade, 8, {}, false);
         auto* wrapped = router->AdoptTexture(&raw);
         const BYTE bytes[]{1, 2}; DWORD size = sizeof(bytes);
+        IUnknown* marker = nullptr;
+        bool blob_stored = false, nested_rejected = false;
+        raw.on_private_get = [&](REFGUID key, void* output, DWORD* count) {
+            if (IsEqualIID(key, kPrivateMarkerGuid)) {
+                if (!marker) return D3DERR_NOTFOUND;
+                if (count) *count = sizeof(IUnknown*);
+                return S_OK;
+            }
+            if (!blob_stored) return D3DERR_NOTFOUND;
+            if (!count) return E_POINTER;
+            if (output && *count >= sizeof(bytes)) std::memcpy(output, bytes, sizeof(bytes));
+            *count = sizeof(bytes); return S_OK;
+        };
+        raw.on_private_set = [&](REFGUID key, const void* data, DWORD count, DWORD flags) {
+            if (IsEqualIID(key, kPrivateMarkerGuid)) {
+                assert(!marker && flags == D3DSPD_IUNKNOWN && count == sizeof(IUnknown*));
+                nested_rejected = wrapped->SetPrivateData(kExtra, bytes, sizeof(bytes), 0) == E_NOTIMPL;
+                marker = const_cast<IUnknown*>(static_cast<const IUnknown*>(data));
+                marker->AddRef(); return S_OK;
+            }
+            assert(data == bytes && count == sizeof(bytes) && flags == 0);
+            blob_stored = true; return S_OK;
+        };
+        raw.on_release = [&] {
+            if (raw.destroyed && marker) { marker->Release(); marker = nullptr; }
+        };
         assert(wrapped && wrapped->SetPrivateData(kExtra, bytes, sizeof(bytes), 0) == S_OK);
+        assert(marker && nested_rejected);
+        assert(wrapped->SetPrivateData(kPrivateMarkerGuid, bytes, sizeof(bytes), 0) == E_NOTIMPL);
         raw.AddRef(); // an independent native binding keeps the resource alive
         assert(wrapped->Release() == 0 && raw.refs == 1 && facade.refs == 1);
         raw.AddRef(); // native getter reference
         auto* reacquired = router->AdoptTexture(&raw);
         assert(reacquired && raw.refs == 2);
         BYTE data[sizeof(bytes)]{};
-        assert(reacquired->GetPrivateData(kExtra, data, &size) == E_NOTIMPL); // provenance was retired
+        assert(reacquired->GetPrivateData(kExtra, data, &size) == S_OK && size == sizeof(bytes) &&
+               !std::memcmp(data, bytes, sizeof(bytes)));
         assert(reacquired->Release() == 0 && raw.refs == 1);
-        assert(router->Close() && raw.Release() == 0 && raw.destroyed);
+        assert(router->Close() && raw.Release() == 0 && raw.destroyed && !marker);
         assert(native.Release() == 0 && facade.Release() == 0);
     }
     {

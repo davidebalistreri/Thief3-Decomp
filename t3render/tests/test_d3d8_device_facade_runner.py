@@ -37,7 +37,8 @@ def fixture_log(mode, buffer_facade=False, resource_facade=False):
                      "private_external_native_dependent_release=PASS")
         lines.append("private_external_eager_release_and_cleanup=PASS" if mode == "facade" else
                      "private_external_eager_native_dependent_release=PASS")
-        lines.append(f"private_external_eager_reacquire_provenance={'unavailable' if mode == 'facade' else 'preserved'}")
+        lines.append("private_external_eager_reacquire_provenance=preserved")
+        lines.append("private_external_eager_stateblock_and_resource=PASS")
         lines.extend(("resource_facade_textured_pixels=PASS", "resource_facade_stateblock_texture_identities=PASS",
                       "resource_facade_volume_roundtrips=PASS",
                       "resource_facade_surface_copy_and_target=PASS", "resource_facade_swapchain_roundtrips=PASS",
@@ -146,9 +147,10 @@ class DeviceFacadeRunnerTests(unittest.TestCase):
                 with self.subTest(mode=mode), self.assertRaises(probe.RunError):
                     self.inspect(changed, mode, resource_facade=True)
             eager = next(line for line in original if line.startswith("private_external_eager_") and
-                         not line.startswith("private_external_eager_reacquire_provenance="))
+                         not line.startswith(("private_external_eager_reacquire_provenance=", "private_external_eager_stateblock_and_resource=")))
             provenance = next(line for line in original if line.startswith("private_external_eager_reacquire_provenance="))
-            for marker in (eager, provenance):
+            stateblock = "private_external_eager_stateblock_and_resource=PASS"
+            for marker in (eager, provenance, stateblock):
                 for changed in ([line for line in original if line != marker], original + [marker],
                                 [line.replace(marker, marker + "bad") for line in original]):
                     with self.subTest(mode=mode), self.assertRaises(probe.RunError):

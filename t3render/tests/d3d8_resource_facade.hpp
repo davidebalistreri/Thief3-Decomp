@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <d3d8.h>
 #include "../src/private_blob.hpp"
+#include "d3d8_private_marker.hpp"
 
 #ifdef max
 #pragma push_macro("max")
@@ -87,15 +88,16 @@ protected:
 
 struct State {
     State(IDirect3DDevice8* owner_, IDirect3DDevice8* facade_, std::size_t maximum_,
-          std::shared_ptr<PrivateObjectBridge> bridge_, bool retain_dormant_) noexcept
+          std::shared_ptr<PrivateObjectBridge> bridge_, bool retain_dormant_)
         : owner(owner_), facade(facade_), maximum(maximum_), bridge(std::move(bridge_)),
-          retain_dormant(retain_dormant_) {}
+          retain_dormant(retain_dormant_), markers(retain_dormant_ ? nullptr : std::make_shared<PrivateMarkerStore>(maximum_)) {}
     std::mutex mutex;
     IDirect3DDevice8* const owner; // facade must retain this native device
     IDirect3DDevice8* const facade;
     const std::size_t maximum;
     const std::shared_ptr<PrivateObjectBridge> bridge;
     const bool retain_dormant;
+    const std::shared_ptr<PrivateMarkerStore> markers;
     bool closing = false;
     std::unordered_map<void*, Entry*> identities;
     std::unordered_map<void*, Entry*> wrappers;
@@ -253,6 +255,7 @@ public:
     }
     HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID guid, const void* data, DWORD size, DWORD flags) override {
         const GUID key = guid;
+        if (!this->state_->retain_dormant && IsEqualIID(key, kPrivateMarkerGuid)) return E_NOTIMPL;
         if (flags == D3DSPD_IUNKNOWN && size == sizeof(IUnknown*)) {
             LastError error;
             PrivateObjectPin pin;
@@ -260,17 +263,30 @@ public:
             if (!recognized && this->state_->bridge) recognized = this->state_->bridge->Pin(data, pin);
             if (!recognized || !pin.native || !pin.guard || pin.kind == t3render::buffers::PrivateDataKind::Blob)
                 return E_NOTIMPL;
+            auto* provenance = PrivateState(true);
+            if (!provenance) return E_NOTIMPL;
             error.restore();
-            const HRESULT hr = private_blobs_.SetTyped(key, pin.kind,
+            const HRESULT hr = provenance->SetTyped(key, pin.kind,
                 [&] { return this->real_->SetPrivateData(key, pin.native, size, flags); });
             error.capture();
             return hr;
         }
-        return private_blobs_.Set(key, flags, [&] { return this->real_->SetPrivateData(key, data, size, flags); });
+        if (flags != 0) return E_NOTIMPL;
+        LastError error;
+        auto* provenance = PrivateState(true);
+        if (!provenance) return E_NOTIMPL;
+        error.restore();
+        const HRESULT hr = provenance->Set(key, flags, [&] { return this->real_->SetPrivateData(key, data, size, flags); });
+        error.capture(); return hr;
     }
     HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID guid, void* data, DWORD* size) override {
         const GUID key = guid;
-        return private_blobs_.GetTyped(key, [&](t3render::buffers::PrivateDataKind kind) {
+        if (!this->state_->retain_dormant && IsEqualIID(key, kPrivateMarkerGuid)) return E_NOTIMPL;
+        LastError outer_error;
+        auto* provenance = PrivateState(false);
+        if (!provenance) return E_NOTIMPL;
+        outer_error.restore();
+        const HRESULT result = provenance->GetTyped(key, [&](t3render::buffers::PrivateDataKind kind) {
             if (kind == t3render::buffers::PrivateDataKind::Blob)
                 return this->real_->GetPrivateData(key, data, size);
             const IID* resource_iid = PrivateResourceIid(kind);
@@ -296,13 +312,26 @@ public:
             std::memcpy(data, &mapped, sizeof(mapped));
             return hr;
         });
+        outer_error.capture(); return result;
     }
     HRESULT STDMETHODCALLTYPE FreePrivateData(REFGUID guid) override {
         const GUID key = guid;
-        return private_blobs_.Free(key, [&] { return this->real_->FreePrivateData(key); });
+        if (!this->state_->retain_dormant && IsEqualIID(key, kPrivateMarkerGuid)) return E_NOTIMPL;
+        LastError error;
+        auto* provenance = PrivateState(false);
+        if (!provenance) return E_NOTIMPL;
+        error.restore();
+        const HRESULT hr = provenance->Free(key, [&] { return this->real_->FreePrivateData(key); });
+        error.capture(); return hr;
     }
 private:
+    t3render::buffers::PrivateBlobState* PrivateState(bool create) noexcept {
+        if (this->state_->retain_dormant) return &private_blobs_;
+        return marker_cache_.Acquire(*this->state_->markers, this->real_, create,
+                                     [](IUnknown* native) { return Identity(native); });
+    }
     t3render::buffers::PrivateBlobState private_blobs_;
+    PrivateMarkerCache marker_cache_;
 };
 
 template<class Interface>

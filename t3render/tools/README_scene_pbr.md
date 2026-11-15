@@ -207,6 +207,21 @@ all other options unchanged, the D3D12 preview changes 36,489 pixels with
 mean absolute RGB difference 0.166 on a 0–255 scale. These figures do not
 establish runtime parity.
 
+## Bedroom prop materials
+
+`--bedroom-prop-materials` opts into two Godot wood mappings on the selected
+scope: `StaticMeshActor__258 / GENrafters1 / GENbeamA_D` uses `beam_wood_v2`,
+and `D_1224__21 / GENxGOODScrateB / HSEGoodnessA_D` uses
+`furniture_wood_v2`. The qualified actor, mesh and material must all match;
+other actors and materials are unchanged. The manifest records the selected
+actors and texture hashes. These resource bindings are offline candidates,
+and the material conversion uses constant AO and inferred tangents.
+
+On frame 1001 both candidates match; 48 rafter triangles use flat-normal
+fallback. With all other options unchanged, the D3D12 preview changes 22,153
+pixels with mean absolute RGB difference 0.147 on a 0–255 scale. The frame
+does not provide a close view of either prop.
+
 ## Volumetric preview
 
 `--volumetric` integrates a homogeneous participating medium from the camera
@@ -370,6 +385,7 @@ Add `--arch-high build/assets/godot/remaster/garrett_home/highpoly/generated/ros
 for the bedroom arch's generated rosette and jambs.
 Add `--bedroom-details build/assets/godot/remaster/garrett_home/highpoly/generated/bedroom_details.glb`
 for optional bed-relative artistic trim and decoration.
+Add `--bedroom-prop-materials` for the selected bedroom rafter and crate wood.
 
 Run `t3render_scene_pbr_d3d12 <packet> --output <new.ppm> [--indirect] [--gtao] [--volumetric] [--reflections] [--filmic]` in a D3D12
 environment. The packet, manifest and PPM use exclusive creation. See the

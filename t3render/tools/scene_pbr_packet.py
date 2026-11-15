@@ -134,7 +134,7 @@ def shadow_owners(scene, lights, actors):
 def create_packet(scene, light_scene, calibration, resolver, remaster, render_pass=None, stage=None,
                   shadows=None, actors=None, offline=None, offline_raw=None, caster_resolve=None,
                   flame_glb=None, flame_radiance=8, bed_glb=None, candlestick_glb=None, arch_glb=None,
-                  details_glb=None):
+                  details_glb=None, prop_materials=False):
     render_pass, stage = legacy.select_scope(scene, render_pass, stage)
     legacy.select_scope(light_scene)
     if (light_scene.source.kind != "runtime" or scene.source.frame_id != light_scene.source.frame_id or
@@ -151,6 +151,8 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
         raise ValueError("generated arch requires bedroom remaster materials")
     if details_glb is not None and remaster is None:
         raise ValueError("generated bedroom details require bedroom remaster materials")
+    if type(prop_materials) is not bool or (prop_materials and remaster is None):
+        raise ValueError("bedroom prop materials require bedroom remaster materials")
     if candlestick_glb is not None and flame_glb is not None and candlestick_glb != flame_glb:
         raise ValueError("candlestick and flame geometry must use the same GLB")
     scale = scene.conventions.meters_per_unit
@@ -269,13 +271,19 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
             frames, _ = legacy.tangent_frames(vertices, indices, geometry.tangents, matrix)
         ranges = (remaster.partition(submission.target_kind, material, vertices) if remaster is not None
                   else [(0, len(vertices), None)])
+        if prop_materials and submission.target_kind == "mesh_instance":
+            replacement = remaster.prop_material(scene, instance, resource, material)
+            if replacement is not None:
+                ranges = [(0, len(vertices), replacement)]
         if (arch_report is not None and submission.target_kind == "mesh_instance" and
                 submission.target_id == arch_report["target_id"] and submission.section == arch_report["preserved_section"]):
             ranges = [(0, len(vertices), "stone_wall_v2")]
         for first, end, replacement in ranges:
             if replacement:
-                albedo, normal, roughness, ao = (remaster.resolve(replacement, channel)
-                                                  for channel in ("albedo", "normal", "roughness", "ao"))
+                albedo, normal, roughness = (remaster.resolve(replacement, channel)
+                                               for channel in ("albedo", "normal", "roughness"))
+                ao = (default_ao if replacement in ("beam_wood_v2", "furniture_wood_v2")
+                      else remaster.resolve(replacement, "ao"))
                 if any(mip[3::4].count(255) != len(mip)//4 for mip in albedo["mips"]):
                     raise ValueError("PBR replacement albedo must be opaque")
             else:
@@ -520,6 +528,11 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
         stats["generated_arch"] = arch_report
     if detail_report is not None:
         stats["generated_bedroom_details"] = detail_report
+    if prop_materials:
+        stats["bedroom_prop_materials"] = [
+            {"target_id": record["target_id"], "material": record["material"], "replacement": record["replacement"]}
+            for record in records if record["replacement"] in ("beam_wood_v2", "furniture_wood_v2")
+            and record["target_kind"] == "mesh_instance"]
     return bytes(body), stats
 
 
@@ -543,6 +556,7 @@ def main(argv=None):
     parser.add_argument("--candlestick-high", type=Path, help="generated Godot high-poly candlestick GLB")
     parser.add_argument("--arch-high", type=Path, help="generated Godot rosette and jamb GLB")
     parser.add_argument("--bedroom-details", type=Path, help="generated Godot bed-relative visual details")
+    parser.add_argument("--bedroom-prop-materials", action="store_true", help="apply named Godot wood materials to scoped bedroom props")
     parser.add_argument("--flame-radiance", type=float, help="artistic linear flame radiance (default: 8)")
     parser.add_argument("--shadow-map-size", type=int)
     parser.add_argument("--shadow-near-m", type=float)
@@ -562,6 +576,8 @@ def main(argv=None):
             raise ValueError("--arch-high requires --bedroom-remaster-materials")
         if args.bedroom_details is not None and args.bedroom_remaster_materials is None:
             raise ValueError("--bedroom-details requires --bedroom-remaster-materials")
+        if args.bedroom_prop_materials and args.bedroom_remaster_materials is None:
+            raise ValueError("--bedroom-prop-materials requires --bedroom-remaster-materials")
         if not args.shadows and (args.offline_shadow_casters or args.candle_flames is not None or any(x is not None for x in (args.shadow_map_size,
                 args.shadow_near_m, args.shadow_far_m, args.shadow_bias_m, args.shadow_softness))):
             raise ValueError("shadow parameters require --shadows")
@@ -613,7 +629,8 @@ def main(argv=None):
                                         arch_glb=preview.read_limited(args.arch_high, flames.MAX_GLB_BYTES)
                                         if args.arch_high is not None else None,
                                         details_glb=preview.read_limited(args.bedroom_details, flames.MAX_GLB_BYTES)
-                                        if args.bedroom_details is not None else None)
+                                        if args.bedroom_details is not None else None,
+                                        prop_materials=args.bedroom_prop_materials)
         finally:
             for bundle in bundles:
                 bundle.close()
@@ -646,6 +663,8 @@ def main(argv=None):
             manifest["limitations"].append("Generated rosette and jambs modify a scoped candidate arch; material mapping and UV-inferred tangents are approximations.")
         if args.bedroom_details is not None:
             manifest["limitations"].append("Bedroom details are offline artistic additions anchored to the submitted bed, not runtime observations; their shadows and materials are preview approximations.")
+        if args.bedroom_prop_materials:
+            manifest["limitations"].append("Bedroom prop wood materials are offline replacements for scoped candidate actors; UV tangents and material parameters are approximations.")
         legacy.write_pair(args.output, body, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))
     except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, struct.error) as exc:

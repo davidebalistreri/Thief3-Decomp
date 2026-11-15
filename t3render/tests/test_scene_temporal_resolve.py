@@ -184,6 +184,12 @@ class TemporalResolveTests(unittest.TestCase):
                 bad = copy.deepcopy(manifest); bad[key] = invalid
                 with self.subTest(override=key, invalid=invalid), self.assertRaisesRegex(ValueError, "provenance"):
                     temporal.validate_runtime(old, source, json.dumps(bad).encode())
+        changed_mode = copy.deepcopy(new_runtime[1]); changed_mode["bedroom_prop_materials"] = []
+        with self.assertRaisesRegex(ValueError, "material"):
+            temporal.compatible(old, new, old_runtime, (new_runtime[0], changed_mode))
+        bad = copy.deepcopy(manifest); bad["bedroom_prop_materials"] = None
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            temporal.validate_runtime(old, source, json.dumps(bad).encode())
         wrong_lights = copy.deepcopy(new_runtime[1])
         wrong_lights["lights"][0]["position"][0] += 1
         with self.assertRaisesRegex(ValueError, "lighting settings"):

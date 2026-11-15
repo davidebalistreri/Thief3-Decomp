@@ -68,6 +68,7 @@ def validate_runtime(temporal, scene_raw, manifest_raw):
                 not isinstance(t.get("name"), str) or not isinstance(t.get("bundle"), str) for t in manifest["textures"]) or
             (manifest.get("shadow_maps") is not None and not isinstance(manifest["shadow_maps"], dict)) or
             (manifest.get("candle_flames") is not None and not isinstance(manifest["candle_flames"], dict)) or
+            ("bedroom_prop_materials" in manifest and not isinstance(manifest["bedroom_prop_materials"], list)) or
             not isinstance(manifest.get("lights"), list) or any(not isinstance(light, dict) or
                 not isinstance(light.get("id"), str) or not isinstance(light.get("position"), list) or
                 len(light["position"]) != 3 or not isinstance(light.get("color_linear"), list) or
@@ -120,6 +121,7 @@ def compatible(previous, current, previous_runtime=None, current_runtime=None):
                 shadow_signature(old_manifest) != shadow_signature(new_manifest) or
                 flame_signature(old_manifest) != flame_signature(new_manifest) or
                 geometry_signature(old_manifest) != geometry_signature(new_manifest) or
+                ("bedroom_prop_materials" in old_manifest) != ("bedroom_prop_materials" in new_manifest) or
                 light_signature(old_manifest) != light_signature(new_manifest)):
             raise ValueError("runtime temporal frames have incompatible material, geometry or lighting settings")
 

@@ -17,7 +17,10 @@ MATERIALS = {"stmwall512d_d": "stone_wall_v2", "hsefloorb_d": "wood_floor_v2"}
 AREAS = {"stone_wall_v2": ((-.25, -.10, -2.10), (4.85, 4.10, 3.35)),
          "wood_floor_v2": ((-6.0, -.08, -1.6), (5.0, .08, 3.2))}
 SOURCE_SIZES = {"stone_wall_v2": 2048, "wood_floor_v2": 1024, "bed_wool_v2": 512, "pillow_linen": 512,
-                "candlestick_metal_v2": 1024, "arch_stone_v2": 1024, "beam_wood_v2": (512, 256)}
+                "candlestick_metal_v2": 1024, "arch_stone_v2": 1024, "beam_wood_v2": (512, 256),
+                "furniture_wood_v2": 1024}
+PROPS = {("D_1224__21", "genxgoodscrateb", "hsegoodnessa_d"): "furniture_wood_v2",
+         ("StaticMeshActor__258", "genrafters1", "genbeama_d"): "beam_wood_v2"}
 MAX_PNG_BYTES = 16 * 1024 * 1024
 TEXTURE_SIZE = 1024
 
@@ -92,6 +95,13 @@ class BedroomSelection:
             else:
                 result.append((start, start + 3, label))
         return result
+
+    def prop_material(self, scene, instance, resource, material):
+        """Resolve only the named Godot prop targets in the qualified map."""
+        prefix = f"actor:{MAP}:{scene.source.fingerprints.get('map')}:"
+        if not instance.id.startswith(prefix):
+            return None
+        return PROPS.get((instance.id[len(prefix):], resource.name.lower(), material.lower()))
 
 
 class GodotTextures:

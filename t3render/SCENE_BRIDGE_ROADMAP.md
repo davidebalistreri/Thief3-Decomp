@@ -1,6 +1,6 @@
 # T3Render: dal replay D3D8 alla scena semantica
 
-Decisione del 14 novembre 2026. T3Render è il nuovo renderer di T3; D3D12 è il
+Aggiornamento del 15 novembre 2026. T3Render è il nuovo renderer di T3; D3D12 è il
 primo backend previsto, non il suo modello di dati. Vulkan è un backend futuro
 per Windows/Linux/SteamOS; Metal nativo resta un'opzione successiva. Nessun
 backend aggiuntivo è attualmente implementato o garantito.
@@ -10,19 +10,25 @@ ha prodotto un backbuffer D3D8 sincronizzato e una ricostruzione DX12 parziale
 con bedroom riconoscibile, geometria e camera della stessa trace. Le differenze
 restano esplicite: materiali e illuminazione diagnostici, pass mancanti e
 nessuna parità completa. La [ricerca bridge](T3SCENEBRIDGE_RESEARCH.md)
-identifica una raccolta candidata pre-draw, ancora da verificare runtime.
+documenta anche una raccolta pre-draw osservata a runtime e i limiti della
+correlazione con il letto.
 
 ## Obiettivo e confine tra i due percorsi
 
-Il checkpoint corrente rimane un **frame reale della bedroom catturato da TDS,
-ricostruito offline in DX12 e confrontato con la cattura D3D8 dello stesso
-frame**. Geometria e camera precedono depth, blend, shader e texture. Il
-confronto deve riportare ciò che manca; un'immagine riconoscibile ma parziale
-non è parità. Questo checkpoint consolida la conoscenza della pipeline legacy,
-ma non dimostra che tutto il renderer o le sue modalità siano stati ricostruiti.
+Il frame reale **3377** della bedroom è il benchmark legacy: conserva la
+cattura D3D8, la ricostruzione DX12 e il confronto dello stesso frame. Il
+replay resta un oracle diagnostico; estenderlo solo quando serve a spiegare
+discrepanze concrete. Geometria e camera hanno preceduto materiali e luce, e
+l'immagine riconoscibile resta parziale: non dimostra parità del renderer.
+La priorità è ora SceneBridge → Scene IR → T3Render.
+
+Una [prima preview offline](tools/README_scene_ir_preview.md) usa la Scene IR
+per letto e BSP, con una camera osservata separatamente nel frame 2661. Le
+immagini sono diagnostiche, a colori piatti, e non dimostrano che gli oggetti
+offline fossero visibili o invariati in quel frame runtime.
 
 La traccia D3D8 conserva draw, stati e provenienza dei dati per diagnosi e
-replay legacy. La futura **Scene IR** descrive invece oggetti, geometria,
+replay legacy. La [**Scene IR v0**](ir/README_scene_ir.md) descrive invece oggetti, geometria,
 materiali, luci e camera: non è uno specchio degli stati D3D8. Un adattatore
 può condividere risorse o rappresentazioni numeriche con il replay, ma non
 trasforma dati ignoti in fatti né usa la traccia come contratto permanente per
@@ -35,7 +41,7 @@ T3 runtime ──> T3SceneBridge ──> Scene IR ──> T3Render ──> D3D12
 T3SDK asset parsers ───────────> importer offline ──> Scene IR (fixture locale)
 ```
 
-L'importer offline può preparare fixture mentre si lavora al checkpoint, ma un
+L'[importer offline](tools/README_scene_ir_import.md) prepara fixture, ma un
 export della mappa non è un frame live: non contiene necessariamente la camera,
 visibilità, modifiche del salvataggio o luci del momento. Non chiamarlo replay
 TDS né misurare la sua parità contro un frame non sincronizzato.
@@ -60,17 +66,17 @@ TDS né misurare la sua parità contro un frame non sincronizzato.
 - In analisi statica del `T3Main.exe` x86 Steam documentato in
   [`docs/target.md`](../docs/target.md), SHA-256
   `09e0be902062c53cbb1736cffa1bd3ec883bd5e864f8e7f3f99bc0d06f6ad0f8`,
-  Hopper/REA trova che `0x10928760` inizializza contatori nominati «Visible
+  Hopper/REA ha individuato che `0x10928760` inizializza contatori nominati «Visible
   Lights/Object», «Visible Objects/Light», «Shadow Casting Lts/Obj»,
   «Shadow Casting Objs/Lt» e «Objects rendered»
   (dossier `ev_40fe44fa00b851712b2546f384895f1950512e9eae20e1a613f14c3d0fe8244d`).
   I riferimenti a quei contatori portano a `0x10926800`
   (`ev_cd33f1335672a5d8f872ba0b37bdc3a2168bd9a6431d459ab2613c3478f67418`;
   vedi anche `config/PC_20040610/symbols.txt`). È una **pista per la ricerca**,
-  non la dimostrazione di un punto di submission o di una firma valida: il
-  decompilatore ha limiti sui confini delle funzioni e le chiamate indirette.
-  Nessun hook è stato installato. Seguire controlli di visibilità, chiamanti e
-  chiamate virtuali fino alle risorse; verificare poi a runtime.
+  non la dimostrazione di una submission specifica: il decompilatore ha limiti
+  sui confini delle funzioni e le chiamate indirette. Il probe read-only del
+  frame 2661 e i suoi limiti sono descritti nella
+  [ricerca bridge](T3SCENEBRIDGE_RESEARCH.md#probe-runtime-bedroom-frame-2661).
 - Nella facade sperimentale, un reset con ticket accettato chiama
   `BufferProxy::BeginFacadeReset`, che rilascia i token delle shadow dei buffer
   e cancella le shadow persistenti prima della chiamata nativa
@@ -82,10 +88,12 @@ TDS né misurare la sua parità contro un frame non sincronizzato.
   hardpoint (`docs/assets.md`); non è identificato come submission della luce.
   Intensità/raggio fisici e mappatura del light model T3 restano da calibrare.
 
-## Contratto iniziale della Scene IR (proposta da verificare)
+## Contratto iniziale della Scene IR
 
-La prima versione sarà circoscritta alla geometria statica e versionata. Non
-assumere che ogni campo dell'engine sia già noto.
+La versione 0 è circoscritta alla geometria statica e versionata. Il contratto
+implementato e i test sono descritti in [Scene IR v0](ir/README_scene_ir.md).
+Le voci seguenti includono requisiti futuri; non assumere che ogni campo
+dell'engine o ogni conversione sia già noto.
 
 - **Scene snapshot**: versione, identità della mappa e della sorgente,
   generazione/lifetime, frame ID e provenienza `offline` o `runtime`;

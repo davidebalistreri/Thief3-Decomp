@@ -49,6 +49,14 @@ runner terminates TDS only if the process at capture time is still the same;
 Steam is left running. Without that option, close TDS normally after the
 terminal reports completion. The runner will wait and remove the proxy.
 
+Add `--scene-bridge` to request the experimental read-only Flesh probe during
+the same capture. It requires the verified x86 executable and entry prologue;
+the trace header records whether installation succeeded. Frame synchronization
+is limited to the observed Present interval and thread; camera, pass and actor
+identity require separate checks. Probe data includes transient addresses and
+stays in the local trace. Frame numbers are process-local: a new capture does
+not become golden frame 3377 simply because it uses the same room.
+
 The runner refuses an already-running TDS or existing `System/d3d8.dll`. It
 installs the exact built DLL temporarily and removes it only after the game has
 exited and its hash and file identity still match. If interrupted or if cleanup cannot be

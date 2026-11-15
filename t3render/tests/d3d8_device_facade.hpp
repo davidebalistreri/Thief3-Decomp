@@ -301,7 +301,7 @@ public:
     HRESULT STDMETHODCALLTYPE Reset(D3DPRESENT_PARAMETERS * pPresentationParameters) override {
 #ifdef T3RENDER_COMBINED_CAPTURE_FIXTURE
         auto* observer = combined_observer_;
-        const auto shader_ticket = observer ? observer->BeginReset() : t3render::ir::ShaderTicket{};
+        const auto shader_ticket = observer ? observer->BeginReset() : t3render::fixture::CombinedCaptureObserver::ResetTicket{};
 #endif
 #ifdef T3RENDER_BUFFER_FACADE_FIXTURE
         const DWORD before = GetLastError();

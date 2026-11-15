@@ -45,6 +45,13 @@ The output is labelled `DIAGNOSTIC`. For the recorded run the local comparison
 is `build/t3render-reconstruction/comparison-3377-cull.png` (D3D8 left, DX12
 right), built by placing the synchronized PPM and DX12 PPM side by side.
 
+Frame 3377 is the frozen diagnostic oracle. Verify its local trace, D3D8 image,
+DX12 packet, DX12 image and comparison against the committed manifests with
+`python3 -B t3render/tools/verify_bedroom_golden.py`. This also checks the
+recorded Present outcome and the camera and buffer observations for the bed and
+BSP draw candidates. The source files remain local and are not a runtime scene
+snapshot or proof of GPU inputs.
+
 An alternative [offline asset packet](offline_mesh_reconstruction.py) combines
 explicit actor and BSP candidates with the same sampled camera. It reads
 `t3mesh.py` and `t3bsp.py` assets and requires unique matching section signatures;

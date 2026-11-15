@@ -16,6 +16,7 @@ namespace t3render::fixture {
 class CombinedCaptureObserver final {
 public:
     enum class StateBlockAction { Unsupported, Create, Apply, Capture, Delete };
+    struct ResetTicket { ir::ShaderTicket shader{}; std::uint64_t capture = 0; };
     CombinedCaptureObserver(IDirect3DDevice8* native, buffers::BufferProxy& buffers,
                             const D3DPRESENT_PARAMETERS& presentation, bool fixture_force_history = false) noexcept
         : native_(native), buffers_(buffers), shaders_(ShaderLimits(fixture_force_history)), device_(shaders_.OpenDevice()) {
@@ -50,7 +51,7 @@ public:
         return shaders_.End(ticket) ? result : ir::ShaderObservation{};
     }
 #endif
-    ir::ShaderTicket BeginReset() noexcept {
+    ResetTicket BeginReset() noexcept {
         const DWORD before = GetLastError();
         if (writer_active_) { Unsupported(); SetLastError(before); return {}; }
         {
@@ -59,15 +60,17 @@ public:
             state_blocks_enabled_ = false;
         }
         const auto ticket = shaders_.BeginReset(device_);
+        std::uint64_t capture_ticket;
+        { WriterScope scope; capture_ticket = CaptureResetBegin(native_, static_cast<std::uint32_t>(GetCurrentThreadId())); }
         SetLastError(before);
-        return ticket;
+        return {ticket, capture_ticket};
     }
-    void EndReset(ir::ShaderTicket ticket, HRESULT hr, const D3DPRESENT_PARAMETERS* presentation) noexcept {
+    void EndReset(ResetTicket ticket, HRESULT hr, const D3DPRESENT_PARAMETERS* presentation) noexcept {
         const DWORD before = GetLastError();
-        const bool stable = shaders_.EndReset(ticket, static_cast<std::uint32_t>(hr));
+        const bool stable = shaders_.EndReset(ticket.shader, static_cast<std::uint32_t>(hr));
         reset_recovery_ = FAILED(hr) || !stable;
         if (writer_active_) deferred_abandon_ = true;
-        else { WriterScope scope; CaptureReset(native_, presentation, hr); }
+        else { WriterScope scope; CaptureResetEnd(native_, ticket.capture, presentation, hr); }
         SetLastError(before);
     }
     void Unsupported(buffers::InvalidationCause cause = buffers::InvalidationCause::Explicit) noexcept {
@@ -197,11 +200,25 @@ public:
             return native_->Present(source, dest, window, dirty);
         }
         const DWORD before = GetLastError();
-        { WriterScope scope; CaptureFrameImage(native_, ReadFrameImage, source != nullptr, dest != nullptr); }
+        std::uint64_t present_ticket;
+        {
+            WriterScope scope;
+            present_ticket = CapturePresentBegin(native_, static_cast<std::uint32_t>(GetCurrentThreadId()));
+            CaptureFrameImage(native_, ReadFrameImage, source != nullptr, dest != nullptr);
+        }
         SetLastError(before);
         const HRESULT hr = native_->Present(source, dest, window, dirty);
         const DWORD after = GetLastError();
-        { WriterScope scope; CapturePresent(native_, hr); }
+        { WriterScope scope; CapturePresentEnd(native_, present_ticket, hr); }
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+        // The hook leaves its pinned thunk/trampoline alive for in-flight
+        // calls; disable it only after the capture lock has been released.
+        static std::atomic<bool> disabled{false};
+        if (CaptureBridgeShouldDisable() && !disabled.exchange(true)) {
+            scene_bridge::ProbeStatus status{};
+            (void)scene_bridge::DisableProbe(&status);
+        }
+#endif
         SetLastError(after);
         return hr;
     }

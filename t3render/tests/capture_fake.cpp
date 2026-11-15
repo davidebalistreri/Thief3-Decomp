@@ -102,7 +102,12 @@ struct Device : IDirect3DDevice8 {
         out->m[3][0] = type == D3DTS_VIEW ? 12 : 34;
         return S_OK;
     }
-    HRESULT GetViewport(D3DVIEWPORT8* out) override { ++getters; *out = viewport; return S_OK; }
+    HRESULT GetViewport(D3DVIEWPORT8* out) override {
+        ++getters;
+        if (std::getenv("T3_TEST_BRIDGE_REENTER")) (void)t3render::CaptureBridgeBegin(GetCurrentThreadId());
+        *out = viewport;
+        return S_OK;
+    }
     HRESULT GetRenderState(D3DRENDERSTATETYPE name, DWORD* out) override {
         ++getters;
         // Some real runtimes accept unknown numeric IDs, so in this mode the
@@ -217,7 +222,16 @@ void SimulatedDraw(IDirect3DDevice8* device, const t3render::DrawCall& draw) {
 }  // namespace
 
 thread_local DWORD fake_last_error = ERROR_SUCCESS;
+thread_local DWORD fake_thread_id = 11;
+thread_local DWORD fake_thread_birth = 1234;
 DWORD GetLastError() { return fake_last_error; }
+DWORD GetCurrentThreadId() { return fake_thread_id; }
+HANDLE GetCurrentThread() { return 456; }
+BOOL GetThreadTimes(HANDLE thread, FILETIME* created, FILETIME*, FILETIME*, FILETIME*) {
+    if (thread != 456 || !fake_thread_birth) return FALSE;
+    *created = {fake_thread_birth, 0};
+    return TRUE;
+}
 void SetLastError(DWORD value) { fake_last_error = value; }
 
 DWORD GetEnvironmentVariableW(const wchar_t* name, wchar_t* buffer, DWORD size) {
@@ -345,7 +359,82 @@ int main(int argc, char** argv) {
     fake_index[32] = 3; fake_index[36] = 4; fake_index[40] = 5;
 
     bool second_used = false;
-    if (scenario == "frame_image") {
+    if (scenario.rfind("bridge_", 0) == 0) {
+        using t3render::scene_bridge::ProbeStatus;
+        const bool install_failure = scenario == "bridge_install_failure";
+        t3render::CaptureBridgeInstallResult(install_failure ? ProbeStatus::PrologueMismatch : ProbeStatus::Installed);
+        auto present = [&](IDirect3DDevice8* target = nullptr) {
+            if (!target) target = &device;
+            const auto token = t3render::CapturePresentBegin(target, fake_thread_id);
+            t3render::CapturePresentEnd(target, token, S_OK);
+        };
+        if (scenario == "bridge_prior_reentry") t3render::CaptureBridgeMarkReentered();
+        if (scenario != "bridge_missing_pre") present();
+        IDirect3DDevice8* scene_device = &device;
+        if (scenario == "bridge_device_replace") {
+            t3render::CaptureDeviceReleased(&device);
+            t3render::CaptureDevice(&unrelated, &presentation);
+            second_used = true;
+            scene_device = &unrelated;
+            if (t3render::CaptureBridgeBegin(fake_thread_id)) return 8;
+            fake_thread_birth = 4321;
+            present(scene_device);
+        }
+        t3render::scene_bridge::ProbeSnapshot snapshot{};
+        snapshot.thread_id = fake_thread_id;
+        snapshot.self = 0x1234;
+        snapshot.pass = {2, true};
+        snapshot.count = {1, true};
+        snapshot.entries_attempted = 1;
+        snapshot.entries[0].address = {0x5678, true};
+        snapshot.entries[0].owner_name_available = true;
+        std::strcpy(snapshot.entries[0].owner_name, "synthetic\"actor");
+        if (install_failure) {
+            if (t3render::CaptureBridgeBegin(fake_thread_id)) return 8;
+            SimulatedDraw(scene_device, draw);
+            present(scene_device);
+        } else {
+            const auto token = t3render::CaptureBridgeBegin(fake_thread_id);
+            if (!token) return 8;
+            if (scenario == "bridge_overlap_draw") SimulatedDraw(scene_device, draw);
+            if (scenario == "bridge_overlap_present" || scenario == "bridge_unfinished") {
+                const auto present_ticket = t3render::CapturePresentBegin(scene_device, fake_thread_id);
+                if (scenario == "bridge_overlap_present") t3render::CaptureBridgeEnd(token, snapshot);
+                SimulatedDraw(scene_device, draw);
+                t3render::CapturePresentEnd(scene_device, present_ticket, S_OK);
+                if (scenario == "bridge_unfinished") t3render::CaptureBridgeEnd(token, snapshot);
+            } else {
+                t3render::CaptureBridgeEnd(token, snapshot);
+                if (scenario == "bridge_reentered") t3render::CaptureBridgeMarkReentered();
+                if (scenario == "bridge_capacity") {
+                    for (unsigned i = 1; i < 16; ++i) {
+                        const auto another = t3render::CaptureBridgeBegin(fake_thread_id);
+                        if (!another) return 8;
+                        t3render::CaptureBridgeEnd(another, snapshot);
+                    }
+                    if (t3render::CaptureBridgeBegin(fake_thread_id)) return 8;
+                }
+                if (scenario == "bridge_thread_change") fake_thread_id = 12;
+                if (scenario == "bridge_birth_change") fake_thread_birth = 9876;
+                if (scenario == "bridge_image_good") {
+                    SimulatedDraw(scene_device, draw);
+                    const auto present_ticket = t3render::CapturePresentBegin(scene_device, fake_thread_id);
+                    t3render::CaptureFrameImage(scene_device, FakeFrameImage, false, false);
+                    t3render::CapturePresentEnd(scene_device, present_ticket, S_OK);
+                } else if (scenario == "bridge_present_draw" || scenario == "bridge_reset_pending") {
+                    const auto reset_ticket = scenario == "bridge_reset_pending" ?
+                        t3render::CaptureResetBegin(scene_device, fake_thread_id) : 0;
+                    const auto present_ticket = t3render::CapturePresentBegin(scene_device, fake_thread_id);
+                    SimulatedDraw(scene_device, draw);
+                    t3render::CapturePresentEnd(scene_device, present_ticket, S_OK);
+                    if (reset_ticket) t3render::CaptureResetEnd(scene_device, reset_ticket, &presentation, S_OK);
+                } else {
+                    SimulatedDraw(scene_device, draw);
+                    present(scene_device);
+                }
+            }
+        }
+    } else if (scenario == "frame_image") {
         t3render::CaptureFrameImage(&unrelated, FakeFrameImage, false, false);
         t3render::CaptureFrameImage(&device, FakeFrameImage, false, false); // frame 0 is not selected
         t3render::CapturePresent(&device, S_OK);

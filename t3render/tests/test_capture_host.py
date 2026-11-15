@@ -3,6 +3,7 @@
 This validates host-side behavior, not the Windows ABI, DLL hook, or TDS.
 """
 import importlib.util
+import copy
 import json
 import os
 from pathlib import Path
@@ -56,13 +57,119 @@ class CaptureHostTests(unittest.TestCase):
             env["T3RENDER_CAPTURE_KEY"] = key
         if extra:
             env.update(extra)
-        result = subprocess.run([str(self.binary), scenario], env=env, text=True, capture_output=True)
+        result = subprocess.run([str(self.binary), scenario], env=env, text=True, capture_output=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("state=unchanged", result.stdout)
         return result.stdout
 
     def records(self):
         return [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines()]
+
+    def test_bridge_same_present_interval_same_thread_is_recorded(self):
+        self.run_capture("bridge_good", frame="1", extra={"T3RENDER_SCENE_BRIDGE": "1"})
+        records = self.records()
+        self.assertEqual(records[0]["scene_bridge"]["install_status"], "installed")
+        self.assertEqual([r["event"] for r in records], ["header", "frame_begin", "scene_bridge_observation",
+                         "draw", "draw_result", "scene_bridge_frame", "frame_end", "capture_end"])
+        observation = records[2]
+        self.assertEqual(observation["frame"], 1)
+        self.assertEqual(observation["pass"], 2)
+        self.assertEqual(observation["entries"][0]["owner_name"], 'synthetic"actor')
+        frame = records[-3]
+        self.assertEqual(frame["status"], "synchronized")
+        self.assertTrue(frame["same_thread"])
+        self.assertEqual((frame["started"], frame["completed"], frame["pending"]), (1, 1, 0))
+        self.assertEqual(trace_summary.summarize(self.path)["frame_count"], 1)
+
+    def test_bridge_and_screenshot_share_one_frame_and_present(self):
+        self.run_capture("bridge_image_good", frame="1", extra={"T3RENDER_SCENE_BRIDGE": "1",
+                                                                 "T3RENDER_CAPTURE_SCREENSHOTS": "1"})
+        records = self.records()
+        self.assertEqual([r["event"] for r in records], ["header", "frame_begin", "scene_bridge_observation",
+                         "draw", "draw_result", "frame_image", "scene_bridge_frame", "frame_end", "capture_end"])
+        self.assertTrue(all(r.get("frame") == 1 for r in records[1:-1]))
+        self.assertEqual(records[-3]["status"], "synchronized")
+        self.assertEqual(trace_summary.summarize(self.path)["frame_count"], 1)
+
+    def test_bridge_ambiguous_windows_never_claim_synchronization(self):
+        for scenario, frame in (("bridge_overlap_present", "1"), ("bridge_unfinished", "1"),
+                                ("bridge_overlap_draw", "1"), ("bridge_thread_change", "1"),
+                                ("bridge_birth_change", "1"), ("bridge_missing_pre", "0"),
+                                ("bridge_present_draw", "1"), ("bridge_reset_pending", "1")):
+            with self.subTest(scenario=scenario):
+                self.path.unlink(missing_ok=True)
+                self.run_capture(scenario, frame=frame, extra={"T3RENDER_SCENE_BRIDGE": "1"})
+                event = next(r for r in self.records() if r["event"] == "scene_bridge_frame")
+                self.assertEqual(event["status"], "unknown")
+                self.assertEqual(trace_summary.summarize(self.path)["frame_count"], 1)
+
+    def test_bridge_replacement_device_requires_its_own_previous_present(self):
+        self.run_capture("bridge_device_replace", frame="1", extra={"T3RENDER_SCENE_BRIDGE": "1"})
+        event = next(r for r in self.records() if r["event"] == "scene_bridge_frame")
+        self.assertEqual(event["status"], "synchronized")
+        self.assertTrue(event["previous_present_observed"])
+        self.assertEqual(trace_summary.summarize(self.path)["frame_count"], 1)
+
+    def test_bridge_capacity_limit_marks_frame_unknown(self):
+        self.run_capture("bridge_capacity", frame="1", extra={"T3RENDER_SCENE_BRIDGE": "1"})
+        records = self.records()
+        self.assertEqual(records[0]["scene_bridge"]["probe_limit"], 16)
+        self.assertEqual(sum(r["event"] == "scene_bridge_observation" for r in records), 16)
+        frame = next(r for r in records if r["event"] == "scene_bridge_frame")
+        self.assertEqual((frame["status"], frame["started"], frame["completed"], frame["dropped"]),
+                         ("unknown", 16, 16, 1))
+        self.assertEqual(trace_summary.summarize(self.path)["frame_count"], 1)
+
+    def test_bridge_install_failure_is_visible(self):
+        self.run_capture("bridge_install_failure", frame="1", extra={"T3RENDER_SCENE_BRIDGE": "1"})
+        records = self.records()
+        self.assertEqual(records[0]["scene_bridge"]["install_status"], "prologue_mismatch")
+        self.assertEqual(next(r for r in records if r["event"] == "scene_bridge_frame")["status"], "not_installed")
+        self.assertEqual(trace_summary.summarize(self.path)["frame_count"], 1)
+
+    def test_bridge_reentrant_driver_query_is_dropped_without_deadlock(self):
+        self.run_capture("bridge_good", frame="1", extra={"T3RENDER_SCENE_BRIDGE": "1",
+                                                            "T3_TEST_BRIDGE_REENTER": "1"})
+        event = next(r for r in self.records() if r["event"] == "scene_bridge_frame")
+        self.assertEqual(event["status"], "unknown")
+        self.assertTrue(event["operation_overlap"])
+        self.assertGreater(event["dropped"], 0)
+        self.assertEqual(trace_summary.summarize(self.path)["frame_count"], 1)
+
+    def test_nested_probe_marks_only_its_present_interval_unknown(self):
+        for scenario, expected in (("bridge_reentered", "unknown"), ("bridge_prior_reentry", "synchronized")):
+            with self.subTest(scenario=scenario):
+                self.path.unlink(missing_ok=True)
+                self.run_capture(scenario, frame="1", extra={"T3RENDER_SCENE_BRIDGE": "1"})
+                records = self.records()
+                self.assertEqual(records[0]["scene_bridge"]["reentry_detection"], "saturating_counter_v1")
+                event = next(r for r in records if r["event"] == "scene_bridge_frame")
+                self.assertEqual(event["status"], expected)
+                self.assertEqual(event["probe_reentered"], scenario == "bridge_reentered")
+                self.assertEqual(event["probe_overlap"], scenario == "bridge_reentered")
+                self.assertEqual(trace_summary.summarize(self.path)["frame_count"], 1)
+
+    def test_bridge_summary_rejects_inconsistent_synchronization_claims(self):
+        self.run_capture("bridge_good", frame="1", extra={"T3RENDER_SCENE_BRIDGE": "1"})
+        original = self.records()
+        for mutation in ("different_draw_thread", "pending_reset", "failed_present", "wrong_frame", "scan_limit",
+                         "unreported_reentry", "missing_reentry"):
+            with self.subTest(mutation=mutation):
+                records = copy.deepcopy(original)
+                draw = next(r for r in records if r["event"] == "draw")
+                observation = next(r for r in records if r["event"] == "scene_bridge_observation")
+                bridge = next(r for r in records if r["event"] == "scene_bridge_frame")
+                end = next(r for r in records if r["event"] == "frame_end")
+                if mutation == "different_draw_thread": draw["thread_id"] += 1
+                elif mutation == "pending_reset": bridge["reset_pending"] = True
+                elif mutation == "failed_present": end["present_hr"] = -1
+                elif mutation == "wrong_frame": observation["frame"] += 1
+                elif mutation == "scan_limit": observation["target"]["objects_scanned"] = 65537
+                elif mutation == "unreported_reentry": bridge["probe_reentered"] = True
+                elif mutation == "missing_reentry": del bridge["probe_reentered"]
+                self.path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+                with self.assertRaises(trace_summary.TraceError):
+                    trace_summary.summarize(self.path)
 
     def test_image_is_associated_once_with_each_selected_frame_before_present(self):
         self.run_capture("frame_image", frame="1", extra={"T3RENDER_CAPTURE_SCREENSHOTS": "1",

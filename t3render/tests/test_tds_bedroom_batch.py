@@ -210,6 +210,11 @@ class CaptureBatchTests(unittest.TestCase):
         self.assertEqual(config["T3RENDER_CAPTURE_FRAMES"], "3")
         self.assertEqual(config["T3RENDER_CAPTURE_DECLARATION_HISTORY"], "1")
         self.assertTrue(config["T3RENDER_CAPTURE_PATH"].startswith("Z:\\"))
+        self.assertNotIn("T3RENDER_SCENE_BRIDGE", env)
+        enabled, selected = batch.env_for(self.root / "engine", self.root / "bottle", self.root / "output", 3,
+                                          scene_bridge=True)
+        self.assertEqual(enabled["T3RENDER_SCENE_BRIDGE"], "1")
+        self.assertEqual(selected["T3RENDER_SCENE_BRIDGE"], "1")
 
     def test_simulated_run_captures_analyzes_and_removes_proxy(self):
         engine, bottle = self.root / "engine", self.root / "bottle"
@@ -270,6 +275,7 @@ class CaptureBatchTests(unittest.TestCase):
              mock.patch.object(batch, "game_pids", side_effect=[[], [], [42], [42], [42]]), \
              mock.patch.object(batch, "wait_for_one_game"), \
              mock.patch.object(batch, "process_start", return_value="same"), \
+             mock.patch.object(batch, "terminate_game", side_effect=batch.BatchError("process identity changed")), \
              mock.patch.object(batch, "complete_trace", return_value=False), \
              mock.patch.object(batch.subprocess, "Popen"):
             with self.assertRaises(batch.BatchError):
@@ -279,6 +285,30 @@ class CaptureBatchTests(unittest.TestCase):
         with mock.patch.object(batch, "game_pids", return_value=[]):
             batch.cleanup(output / "deployment.json")
         self.assertFalse((system / "d3d8.dll").exists())
+
+    def test_analysis_failure_closes_same_game_before_removing_proxy(self):
+        engine, bottle = self.root / "engine", self.root / "bottle"
+        system = bottle / "drive_c/Steam/Thief/System"
+        system.mkdir(parents=True)
+        proxy = self.root / "proxy.dll"
+        proxy.write_bytes(b"fixture proxy")
+        output = self.root / "result"
+        resolved = tuple(p.resolve() for p in (engine, bottle, system, proxy, output))
+        with mock.patch.object(batch, "validate_paths", return_value=resolved), \
+             mock.patch.object(batch, "game_pids", side_effect=[[], [], [42], []]), \
+             mock.patch.object(batch, "wait_for_one_game"), \
+             mock.patch.object(batch, "process_start", return_value="same"), \
+             mock.patch.object(batch, "terminate_game") as terminate, \
+             mock.patch.object(batch, "loader_verified", return_value=True), \
+             mock.patch.object(batch, "complete_trace", return_value=True), \
+             mock.patch.object(batch.analyze_tds_capture, "analyze", side_effect=ValueError("invalid trace")), \
+             mock.patch.object(batch.subprocess, "Popen"):
+            with self.assertRaises(batch.BatchError):
+                batch.execute(*map(str, resolved), delay=0, timeout=10, frames=1, terminate=True)
+        terminate.assert_called_once()
+        self.assertEqual(terminate.call_args.args[1:], (42, "same"))
+        self.assertFalse((system / "d3d8.dll").exists())
+        self.assertTrue(json.loads((output / "deployment.json").read_text())["temporary_proxy_removed"])
 
 
 if __name__ == "__main__":

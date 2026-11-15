@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
@@ -40,7 +41,33 @@ constexpr uint64_t kVertexConstantRegisters = 96;
 constexpr uint64_t kVertexConstantFrameWords = 262144;
 constexpr DWORD kClearRectLimit = 256;
 constexpr size_t kPendingOperationLimit = 4096;
+constexpr size_t kBridgeObservationLimit = 16;
+// Nested hook entries can occur while the writer mutex is held. Report them
+// without acquiring a lock; saturation fails closed for all later frames.
+static_assert(std::atomic<std::uint32_t>::is_always_lock_free, "probe reentry counter must be lock-free");
+std::atomic<std::uint32_t> bridge_reentry_count{0};
 enum class OperationKind { Draw, Clear };
+
+struct BridgeObservation {
+    uint64_t frame = 0, before_operation = 0;
+    std::uint32_t thread_id = 0;
+    uint64_t thread_birth = 0;
+};
+
+struct BridgeThread {
+    std::uint32_t id = 0;
+    uint64_t birth = 0;
+};
+
+BridgeThread CurrentBridgeThread() noexcept {
+    FILETIME created{}, exited{}, kernel{}, user{};
+    BridgeThread result;
+    result.id = static_cast<std::uint32_t>(GetCurrentThreadId());
+    if (!result.id || !GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) return {};
+    result.birth = (static_cast<uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+    if (!result.birth) return {};
+    return result;
+}
 
 // The writer owns no D3D objects; resource interfaces returned by getters are
 // released immediately. All state is protected because Present can be called
@@ -61,6 +88,27 @@ struct CaptureState {
     bool vertex_constants_requested = false;
     bool frame_images_requested = false;
     bool frame_image_attempted = false;
+    bool bridge_requested = false;
+    bool bridge_install_known = false;
+    scene_bridge::ProbeStatus bridge_install_status = scene_bridge::ProbeStatus::InvalidArguments;
+    bool bridge_epoch_unknown = false;
+    bool bridge_previous_present_known = false;
+    std::uint32_t bridge_previous_present_thread = 0;
+    uint64_t bridge_previous_present_birth = 0;
+    uint64_t bridge_next_ticket = 1;
+    std::uint32_t bridge_reentry_baseline = 0;
+    uint64_t bridge_present_ticket = 0;
+    std::uint32_t bridge_present_thread = 0;
+    uint64_t bridge_present_birth = 0;
+    uint64_t bridge_reset_ticket = 0, bridge_reset_birth = 0;
+    std::uint32_t bridge_reset_thread = 0;
+    bool bridge_reset_seen = false;
+    std::unordered_map<uint64_t, BridgeObservation> bridge_pending;
+    uint64_t bridge_started = 0, bridge_completed = 0, bridge_dropped = 0;
+    bool bridge_probe_overlap = false, bridge_present_overlap = false, bridge_operation_overlap = false;
+    std::uint32_t bridge_draw_thread = 0, bridge_probe_thread = 0;
+    uint64_t bridge_draw_birth = 0, bridge_probe_birth = 0;
+    bool bridge_draw_multithread = false, bridge_probe_multithread = false;
     bool experimental_facade = false;
     bool experimental_repeated_unlock = false;
     bool experimental_repeat_recovery = false;
@@ -90,6 +138,26 @@ struct CaptureState {
 
     ~CaptureState() {
         if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    }
+};
+
+// Driver getters/readback run under the writer mutex. If a callback into the
+// engine reaches the probe on this same thread, taking that mutex recursively
+// would deadlock. Decline it and mark the interval ambiguous when the native
+// query returns; no game state is changed.
+thread_local unsigned bridge_query_depth = 0;
+thread_local bool bridge_reentered_query = false;
+struct BridgeQueryGuard {
+    CaptureState& state;
+    explicit BridgeQueryGuard(CaptureState& value) noexcept : state(value) { ++bridge_query_depth; }
+    ~BridgeQueryGuard() {
+        if (--bridge_query_depth == 0 && bridge_reentered_query) {
+            bridge_reentered_query = false;
+            if (state.bridge_requested && state.triggered && state.frame == state.target) {
+                state.bridge_operation_overlap = true;
+                ++state.bridge_dropped;
+            }
+        }
     }
 };
 
@@ -139,6 +207,27 @@ std::ostringstream Json() {
     return out;
 }
 
+const char* BridgeStatusName(scene_bridge::ProbeStatus status) noexcept {
+    using scene_bridge::ProbeStatus;
+    switch (status) {
+        case ProbeStatus::Installed: return "installed";
+        case ProbeStatus::Disabled: return "disabled";
+        case ProbeStatus::InvalidArguments: return "invalid_arguments";
+        case ProbeStatus::AlreadyAttempted: return "already_attempted";
+        case ProbeStatus::UnsupportedProcessor: return "unsupported_processor";
+        case ProbeStatus::ExecutableIdentityUnavailable: return "executable_identity_unavailable";
+        case ProbeStatus::ExecutableMismatch: return "executable_mismatch";
+        case ProbeStatus::ImageMismatch: return "image_mismatch";
+        case ProbeStatus::PrologueMismatch: return "prologue_mismatch";
+        case ProbeStatus::ModulePinFailed: return "module_pin_failed";
+        case ProbeStatus::HookEngineFailed: return "hook_engine_failed";
+        case ProbeStatus::HookCreateFailed: return "hook_create_failed";
+        case ProbeStatus::HookEnableFailed: return "hook_enable_failed";
+        case ProbeStatus::HookDisableFailed: return "hook_disable_failed";
+    }
+    return "unknown";
+}
+
 void Number(std::ostream& out, float value) {
     if (std::isfinite(value)) out << value;
     else out << "null";  // JSON does not have NaN or infinity
@@ -147,6 +236,119 @@ void Number(std::ostream& out, float value) {
 void Id(std::ostream& out, const void* pointer) {
     if (!pointer) { out << "null"; return; }
     out << '"' << "0x" << std::hex << reinterpret_cast<uintptr_t>(pointer) << std::dec << '"';
+}
+
+void BridgeValue(std::ostream& out, const scene_bridge::ProbeValue& value) {
+    if (value.available) out << value.value;
+    else out << "null";
+}
+
+void BridgeBits(std::ostream& out, const std::uint32_t* data, size_t count, bool available) {
+    if (!available) { out << "null"; return; }
+    out << '[';
+    for (size_t i = 0; i < count; ++i) { if (i) out << ','; out << data[i]; }
+    out << ']';
+}
+
+void BridgeText(std::ostream& out, const char* text, size_t capacity, bool available) {
+    if (!available) { out << "null"; return; }
+    static constexpr char hex[] = "0123456789abcdef";
+    out << '"';
+    for (size_t i = 0; i < capacity && text[i]; ++i) {
+        const auto c = static_cast<unsigned char>(text[i]);
+        if (c == '"' || c == '\\') out << '\\' << static_cast<char>(c);
+        else if (c < 32 || c >= 127) out << "\\u00" << hex[c >> 4] << hex[c & 15];
+        else out << static_cast<char>(c);
+    }
+    out << '"';
+}
+
+void BridgeCamera(std::ostream& out, const scene_bridge::ProbeCamera& camera) {
+    out << "{\"address\":"; BridgeValue(out, camera.address);
+    out << ",\"stable\":" << (camera.stable ? "true" : "false") << ",\"source_matrix_bits\":";
+    BridgeBits(out, camera.source_matrix_bits, 16, camera.source_matrix_available);
+    out << ",\"projection_bits\":"; BridgeBits(out, camera.projection_bits, 16, camera.projection_available);
+    out << ",\"derived_matrix_bits\":"; BridgeBits(out, camera.derived_matrix_bits, 16, camera.derived_matrix_available);
+    out << ",\"combined_matrix_bits\":"; BridgeBits(out, camera.combined_matrix_bits, 16, camera.combined_matrix_available);
+    out << ",\"viewport_bits\":"; BridgeBits(out, camera.viewport_bits, 6, camera.viewport_available);
+    out << '}';
+}
+
+void BridgeEntry(std::ostream& out, const scene_bridge::ProbeEntry& entry) {
+    out << "{\"list_index\":" << entry.list_index << ",\"address\":"; BridgeValue(out, entry.address);
+    out << ",\"vtable\":"; BridgeValue(out, entry.vtable);
+    out << ",\"type\":"; BridgeValue(out, entry.type);
+    out << ",\"flags\":"; BridgeValue(out, entry.flags);
+    out << ",\"owner_candidate\":"; BridgeValue(out, entry.owner_candidate);
+    out << ",\"owner_object_index\":"; BridgeValue(out, entry.owner_object_index);
+    out << ",\"owner_fname\":"; BridgeValue(out, entry.owner_fname);
+    out << ",\"owner_class\":"; BridgeValue(out, entry.owner_class);
+    out << ",\"owner_backlink\":"; BridgeValue(out, entry.owner_backlink);
+    out << ",\"owner_table_member\":" << (entry.owner_table_member ? "true" : "false")
+        << ",\"owner_stable\":" << (entry.owner_stable ? "true" : "false") << ",\"owner_name\":";
+    BridgeText(out, entry.owner_name, sizeof(entry.owner_name), entry.owner_name_available);
+    out << ",\"owner_location_bits\":"; BridgeBits(out, entry.owner_location_bits, 3, entry.owner_location_available);
+    out << ",\"owner_rotation_bits\":"; BridgeBits(out, entry.owner_rotation_bits, 3, entry.owner_rotation_available);
+    out << ",\"object_matrix_bits\":"; BridgeBits(out, entry.object_matrix_bits, 16, entry.object_matrix_available);
+    out << '}';
+}
+
+void BridgeNamedObject(std::ostream& out, const scene_bridge::ProbeNamedObject& object) {
+    out << "{\"address\":"; BridgeValue(out, object.address);
+    out << ",\"index\":"; BridgeValue(out, object.index);
+    out << ",\"fname\":"; BridgeValue(out, object.fname);
+    out << ",\"outer\":"; BridgeValue(out, object.outer);
+    out << ",\"member\":" << (object.member ? "true" : "false")
+        << ",\"stable\":" << (object.stable ? "true" : "false") << ",\"name\":";
+    BridgeText(out, object.name, sizeof(object.name), object.name_available);
+    out << '}';
+}
+
+const char* BridgeAssetStatusName(scene_bridge::AssetStatus status) noexcept {
+    using scene_bridge::AssetStatus;
+    switch (status) {
+        case AssetStatus::Unknown: return "unknown";
+        case AssetStatus::Unreadable: return "unreadable";
+        case AssetStatus::DescriptorUnsupported: return "descriptor_unsupported";
+        case AssetStatus::LocalPropertyMissing: return "local_property_missing";
+        case AssetStatus::PropertyMalformed: return "property_malformed";
+        case AssetStatus::ObjectNotUnique: return "object_not_unique";
+        case AssetStatus::ProxyMismatch: return "proxy_mismatch";
+        case AssetStatus::ResourceMismatch: return "resource_mismatch";
+        case AssetStatus::Candidate: return "candidate";
+    }
+    return "unknown";
+}
+
+void BridgeAsset(std::ostream& out, const scene_bridge::AssetCandidate& asset) {
+    out << "{\"status\":\"" << BridgeAssetStatusName(asset.status) << "\",\"descriptor_match\":"
+        << (asset.descriptor_match ? "true" : "false") << ",\"local_property_found\":"
+        << (asset.local_property_found ? "true" : "false") << ",\"proxy_live_member\":"
+        << (asset.proxy_live_member ? "true" : "false") << ",\"proxy_vtable_match\":"
+        << (asset.proxy_vtable_match ? "true" : "false") << ",\"resource_vtable_match\":"
+        << (asset.resource_vtable_match ? "true" : "false") << ",\"stable\":"
+        << (asset.stable ? "true" : "false") << ",\"name\":";
+    BridgeText(out, asset.name, sizeof(asset.name), asset.name_available);
+    out << '}';
+}
+
+void BridgeTarget(std::ostream& out, const scene_bridge::ProbeTarget& target) {
+    out << "{\"object_scan_complete\":" << (target.object_scan_complete ? "true" : "false")
+        << ",\"list_scan_complete\":" << (target.list_scan_complete ? "true" : "false")
+        << ",\"object_scan_truncated\":" << (target.object_scan_truncated ? "true" : "false")
+        << ",\"list_scan_truncated\":" << (target.list_scan_truncated ? "true" : "false")
+        << ",\"objects_scanned\":" << target.objects_scanned << ",\"actors_named_target\":" << target.actors_named_target
+        << ",\"list_scanned\":" << target.list_scanned << ",\"list_occurrences\":" << target.list_occurrences
+        << ",\"entry\":";
+    if (target.entry_available) BridgeEntry(out, target.entry); else out << "null";
+    out << ",\"owner_class\":"; BridgeNamedObject(out, target.owner_class);
+    out << ",\"outer_count\":" << target.outer_count
+        << ",\"outer_truncated\":" << (target.outer_truncated ? "true" : "false") << ",\"outer\":[";
+    for (std::size_t i = 0; i < target.outer_count; ++i) {
+        if (i) out << ',';
+        BridgeNamedObject(out, target.outer[i]);
+    }
+    out << "],\"asset\":"; BridgeAsset(out, target.asset); out << '}';
 }
 
 template<typename T> struct ComRef {
@@ -170,6 +372,7 @@ void Initialize(CaptureState& s) {
     s.vertex_programs_requested = Environment(L"T3RENDER_CAPTURE_VERTEX_PROGRAMS") == L"1";
     s.vertex_constants_requested = Environment(L"T3RENDER_CAPTURE_VERTEX_CONSTANTS") == L"1";
     s.frame_images_requested = Environment(L"T3RENDER_CAPTURE_SCREENSHOTS") == L"1";
+    s.bridge_requested = Environment(L"T3RENDER_SCENE_BRIDGE") == L"1";
     // Missing means the legacy single frame; an explicitly empty, truncated,
     // or malformed value must not silently start a capture.
     wchar_t frames[2]{};
@@ -237,6 +440,14 @@ bool Open(CaptureState& s) {
     if (s.vertex_constants_requested) out << ",\"vertex_constant_capture\":{\"requested\":true,\"registers_per_observation\":"
         << kVertexConstantRegisters << ",\"words_per_frame\":" << kVertexConstantFrameWords << '}';
     if (s.frame_images_requested) out << ",\"frame_images\":{\"requested\":true,\"timing\":\"before_present\"}";
+    if (s.bridge_requested) out << ",\"scene_bridge\":{\"requested\":true,\"install_status\":\""
+                                << (s.bridge_install_known ? BridgeStatusName(s.bridge_install_status) : "not_reported")
+                                << "\",\"probe_limit\":" << kBridgeObservationLimit << ",\"entries_per_probe\":"
+                                << scene_bridge::kMaxProbeEntries
+                                << ",\"target_object_limit\":" << scene_bridge::kMaxTargetObjects
+                                << ",\"target_list_limit\":" << scene_bridge::kMaxTargetListEntries
+                                << ",\"reentry_detection\":\"saturating_counter_v1\""
+                                << ",\"synchronization\":\"present_interval_and_thread_only\"}";
     if (s.experimental_facade) {
         out << ",\"experimental_facade\":{\"enabled\":true,\"identity_verified\":false,\"concurrency_verified\":false";
         if (s.experimental_repeated_unlock) out << ",\"repeated_unlock_resource_discard\":true";
@@ -978,8 +1189,9 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
     if (up) CaptureUp(s, draw, vertex, index, vertex_count, vertex_offset, index_count,
                       vertex_count_known, offset_known, index_count_known);
     auto out = Json();
-    out << "{\"event\":\"draw\",\"frame\":" << s.frame << ",\"op_id\":" << operation
-        << ",\"call\":\"" << CallName(draw.kind)
+    out << "{\"event\":\"draw\",\"frame\":" << s.frame << ",\"op_id\":" << operation;
+    if (s.bridge_requested) out << ",\"thread_id\":" << GetCurrentThreadId();
+    out << ",\"call\":\"" << CallName(draw.kind)
         << "\",\"primitive_type\":" << static_cast<unsigned>(draw.primitive_type)
         << ",\"start_vertex\":" << draw.start_vertex << ",\"min_vertex_index\":" << draw.min_vertex_index
         << ",\"num_vertices\":" << draw.num_vertices << ",\"start_index\":" << draw.start_index
@@ -1240,6 +1452,8 @@ uint64_t BeginOperation(CaptureState& s, OperationKind kind) {
         Stop(s);
         return 0;
     }
+    if (s.bridge_requested && !s.bridge_pending.empty()) s.bridge_operation_overlap = true;
+    if (s.bridge_requested && s.bridge_present_ticket) s.bridge_present_overlap = true;
     if (!s.pending_operations.empty()) s.concurrent_operations = true;
     const uint64_t token = s.next_operation++;
     s.pending_operations.emplace(token, kind);
@@ -1324,6 +1538,154 @@ bool CaptureConfigured() {
     } catch (...) { Fail(); return false; }
 }
 
+void CaptureBridgeInstallResult(scene_bridge::ProbeStatus status) noexcept {
+    try {
+        auto& s = State();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        Initialize(s);
+        if (s.enabled && s.bridge_requested && !s.begun && s.file == INVALID_HANDLE_VALUE) {
+            s.bridge_install_known = true;
+            s.bridge_install_status = status;
+        }
+    } catch (...) { Fail(); }
+}
+
+bool CaptureBridgeShouldDisable() noexcept {
+    try {
+        auto& s = State();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        return s.bridge_requested && s.bridge_install_known &&
+            s.bridge_install_status == scene_bridge::ProbeStatus::Installed && !s.enabled;
+    } catch (...) { return false; }
+}
+
+void CaptureBridgeMarkReentered() noexcept {
+    auto value = bridge_reentry_count.load(std::memory_order_relaxed);
+    while (value != std::numeric_limits<std::uint32_t>::max() &&
+           !bridge_reentry_count.compare_exchange_weak(value, value + 1, std::memory_order_relaxed)) {}
+}
+
+std::uint64_t CaptureBridgeBegin(std::uint32_t thread_id) noexcept {
+    if (bridge_query_depth) { bridge_reentered_query = true; return 0; }
+    try {
+        const auto thread = CurrentBridgeThread();
+        auto& s = State();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (!s.enabled || s.complete || !s.bridge_requested || !s.bridge_install_known ||
+            s.bridge_install_status != scene_bridge::ProbeStatus::Installed || !s.device || !s.triggered ||
+            s.frame != s.target) return 0;
+        if (!thread_id || thread_id != thread.id || !thread.birth || s.bridge_present_ticket ||
+            s.bridge_started >= kBridgeObservationLimit ||
+            !s.bridge_next_ticket || s.bridge_next_ticket == std::numeric_limits<uint64_t>::max()) {
+            ++s.bridge_dropped;
+            if (s.bridge_present_ticket) s.bridge_present_overlap = true;
+            return 0;
+        }
+        Begin(s);
+        if (!s.enabled) return 0;
+        if (!s.bridge_pending.empty()) s.bridge_probe_overlap = true;
+        if (!s.pending_operations.empty()) s.bridge_operation_overlap = true;
+        if (s.bridge_reset_ticket) s.bridge_operation_overlap = true;
+        const auto ticket = s.bridge_next_ticket++;
+        s.bridge_pending.emplace(ticket, BridgeObservation{s.frame, s.next_operation, thread_id, thread.birth});
+        ++s.bridge_started;
+        return ticket;
+    } catch (...) { Fail(); return 0; }
+}
+
+void CaptureBridgeEnd(std::uint64_t ticket, const scene_bridge::ProbeSnapshot& snapshot) noexcept {
+    if (!ticket) return;
+    try {
+        const auto thread = CurrentBridgeThread();
+        auto& s = State();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        const auto item = s.bridge_pending.find(ticket);
+        if (!s.enabled || s.complete || item == s.bridge_pending.end() || item->second.frame != s.frame) return;
+        const BridgeObservation observation = item->second;
+        s.bridge_pending.erase(item);
+        if (snapshot.thread_id != observation.thread_id || thread.id != observation.thread_id ||
+            thread.birth != observation.thread_birth) s.bridge_probe_multithread = true;
+        if (!s.bridge_probe_thread) {
+            s.bridge_probe_thread = observation.thread_id; s.bridge_probe_birth = observation.thread_birth;
+        } else if (s.bridge_probe_thread != observation.thread_id || s.bridge_probe_birth != observation.thread_birth) {
+            s.bridge_probe_multithread = true;
+        }
+        if (s.bridge_present_ticket) s.bridge_present_overlap = true;
+        if (!s.pending_operations.empty()) s.bridge_operation_overlap = true;
+        if (snapshot.entries_attempted > scene_bridge::kMaxProbeEntries || snapshot.target.outer_count > 4) {
+            ++s.bridge_dropped; return;
+        }
+        auto out = Json();
+        out << "{\"event\":\"scene_bridge_observation\",\"frame\":" << observation.frame
+            << ",\"ticket\":" << ticket << ",\"thread_id\":" << observation.thread_id
+            << ",\"next_d3d_operation\":" << observation.before_operation
+            << ",\"self\":" << snapshot.self << ",\"caller\":" << snapshot.caller
+            << ",\"known_caller\":" << (snapshot.known_caller ? "true" : "false") << ",\"pass\":";
+        BridgeValue(out, snapshot.pass);
+        out << ",\"pass_stable\":" << (snapshot.pass_stable ? "true" : "false");
+        out << ",\"configured_camera\":"; BridgeCamera(out, snapshot.configured_camera);
+        out << ",\"current_camera\":"; BridgeCamera(out, snapshot.current_camera);
+        out << ",\"culling_camera\":"; BridgeCamera(out, snapshot.culling_camera);
+        out << ",\"count\":"; BridgeValue(out, snapshot.count);
+        out << ",\"array\":"; BridgeValue(out, snapshot.array);
+        out << ",\"object_table_complete\":" << (snapshot.object_table_complete ? "true" : "false")
+            << ",\"entries_attempted\":" << snapshot.entries_attempted
+            << ",\"entries_truncated\":" << (snapshot.entries_truncated ? "true" : "false")
+            << ",\"entries\":[";
+        for (size_t i = 0; i < snapshot.entries_attempted; ++i) {
+            if (i) out << ',';
+            BridgeEntry(out, snapshot.entries[i]);
+        }
+        out << "],\"target\":"; BridgeTarget(out, snapshot.target); out << "}\n";
+        if (Write(s, out.str())) ++s.bridge_completed;
+    } catch (...) { Fail(); }
+}
+
+std::uint64_t CapturePresentBegin(IDirect3DDevice8* device, std::uint32_t thread_id) noexcept {
+    try {
+        const auto thread = CurrentBridgeThread();
+        auto& s = State();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (!s.enabled || s.complete || !s.bridge_requested || !device || device != s.device) return 0;
+        if (!thread_id || thread_id != thread.id || !thread.birth || s.bridge_present_ticket || !s.bridge_next_ticket ||
+            s.bridge_next_ticket == std::numeric_limits<uint64_t>::max()) {
+            s.bridge_epoch_unknown = true;
+            s.bridge_present_overlap = true;
+            return 0;
+        }
+        const auto ticket = s.bridge_next_ticket++;
+        s.bridge_present_ticket = ticket;
+        s.bridge_present_thread = thread_id;
+        s.bridge_present_birth = thread.birth;
+        if (!s.bridge_pending.empty()) s.bridge_present_overlap = true;
+        if (s.bridge_reset_ticket) { s.bridge_present_overlap = true; s.bridge_reset_seen = true; }
+        return ticket;
+    } catch (...) { Fail(); return 0; }
+}
+
+std::uint64_t CaptureResetBegin(IDirect3DDevice8* device, std::uint32_t thread_id) noexcept {
+    try {
+        const auto thread = CurrentBridgeThread();
+        auto& s = State();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (!s.enabled || s.complete || !s.bridge_requested || !device || device != s.device) return 0;
+        if (!thread_id || thread_id != thread.id || !thread.birth || s.bridge_reset_ticket ||
+            !s.bridge_next_ticket || s.bridge_next_ticket == std::numeric_limits<uint64_t>::max()) {
+            s.bridge_epoch_unknown = true;
+            s.bridge_reset_seen = true;
+            return 0;
+        }
+        const auto ticket = s.bridge_next_ticket++;
+        s.bridge_reset_ticket = ticket;
+        s.bridge_reset_thread = thread_id;
+        s.bridge_reset_birth = thread.birth;
+        s.bridge_reset_seen = true;
+        if (s.bridge_present_ticket) s.bridge_present_overlap = true;
+        if (!s.bridge_pending.empty()) s.bridge_operation_overlap = true;
+        return ticket;
+    } catch (...) { Fail(); return 0; }
+}
+
 bool CaptureDeclarationHistoryRequested() {
     try {
         auto& s = State();
@@ -1353,7 +1715,7 @@ void CaptureDevice(IDirect3DDevice8* device, const D3DPRESENT_PARAMETERS* presen
         if (!s.enabled || !device || s.device) return;
         s.device = device;
         if (presentation) { s.presentation = *presentation; s.has_presentation = true; }
-        s.has_caps = SUCCEEDED(device->GetDeviceCaps(&s.caps));
+        { BridgeQueryGuard guard(s); s.has_caps = SUCCEEDED(device->GetDeviceCaps(&s.caps)); }
     } catch (...) { Fail(); }
 }
 
@@ -1386,6 +1748,26 @@ void CaptureDeviceReleased(IDirect3DDevice8* device) {
         s.caps = {};
         s.has_caps = false;
         s.frame = 0;
+        // Frame zero of a replacement device has no observed prior Present.
+        // Keep the monotonically increasing ticket sequence so a callback
+        // from the retired device can never match a new observation.
+        s.bridge_epoch_unknown = false;
+        s.bridge_previous_present_known = false;
+        s.bridge_previous_present_thread = 0;
+        s.bridge_previous_present_birth = 0;
+        s.bridge_present_ticket = 0;
+        s.bridge_present_thread = 0;
+        s.bridge_present_birth = 0;
+        s.bridge_reset_ticket = 0;
+        s.bridge_reset_thread = 0;
+        s.bridge_reset_birth = 0;
+        s.bridge_reset_seen = false;
+        s.bridge_pending.clear();
+        s.bridge_started = s.bridge_completed = s.bridge_dropped = 0;
+        s.bridge_probe_overlap = s.bridge_present_overlap = s.bridge_operation_overlap = false;
+        s.bridge_draw_thread = s.bridge_probe_thread = 0;
+        s.bridge_draw_birth = s.bridge_probe_birth = 0;
+        s.bridge_draw_multithread = s.bridge_probe_multithread = false;
         s.draws = 0;
         s.up_bytes = 0;
         s.buffer_bytes = 0;
@@ -1441,7 +1823,15 @@ uint64_t CaptureDraw(IDirect3DDevice8* device, const DrawCall& draw) {
         if (!s.enabled || s.complete || !device || device != s.device || !s.triggered || s.frame != s.target) return 0;
         Begin(s);
         if (!s.enabled) return 0;
+        if (s.bridge_requested) {
+            const auto thread = CurrentBridgeThread();
+            if (!thread.id || !thread.birth) s.bridge_draw_multithread = true;
+            else if (!s.bridge_draw_thread) { s.bridge_draw_thread = thread.id; s.bridge_draw_birth = thread.birth; }
+            else if (s.bridge_draw_thread != thread.id || s.bridge_draw_birth != thread.birth)
+                s.bridge_draw_multithread = true;
+        }
         const uint64_t token = BeginOperation(s, OperationKind::Draw);
+        BridgeQueryGuard guard(s);
         if (!token || !Draw(s, device, draw, token)) return 0;
         return token;
     } catch (...) { Fail(); return 0; }
@@ -1508,7 +1898,7 @@ void CaptureFrameImage(IDirect3DDevice8* device, FrameImageCallback callback, bo
         if (!s.enabled) return;
         s.frame_image_attempted = true;
         FrameImageResult result;
-        if (s.pending_operations.empty()) result = callback(device, s.path, s.frame);
+        if (s.pending_operations.empty()) { BridgeQueryGuard guard(s); result = callback(device, s.path, s.frame); }
         else result.stage = "pending_operations";
         auto out = Json();
         out << "{\"event\":\"frame_image\",\"frame\":" << s.frame
@@ -1522,11 +1912,26 @@ void CaptureFrameImage(IDirect3DDevice8* device, FrameImageCallback callback, bo
     } catch (...) { Fail(); }
 }
 
-void CapturePresent(IDirect3DDevice8* device, HRESULT result) {
+void CapturePresentEnd(IDirect3DDevice8* device, uint64_t ticket, HRESULT result) {
     try {
         auto& s = State();
         std::lock_guard<std::mutex> lock(s.mutex);
         if (!s.enabled || s.complete || !device || device != s.device) return;
+        bool present_tracked = false;
+        std::uint32_t reentry_count = 0;
+        bool probe_reentered = false;
+        if (s.bridge_requested) {
+            reentry_count = bridge_reentry_count.load(std::memory_order_relaxed);
+            probe_reentered = reentry_count == std::numeric_limits<std::uint32_t>::max() ||
+                reentry_count != s.bridge_reentry_baseline;
+            if (probe_reentered && s.triggered && s.frame == s.target) s.bridge_probe_overlap = true;
+            const auto thread = CurrentBridgeThread();
+            present_tracked = ticket && ticket == s.bridge_present_ticket &&
+                s.bridge_present_thread && s.bridge_present_thread == thread.id &&
+                s.bridge_present_birth && s.bridge_present_birth == thread.birth;
+            if (!present_tracked) s.bridge_epoch_unknown = true;
+            if (!s.bridge_pending.empty()) s.bridge_present_overlap = true;
+        }
         if (s.triggered && s.frame == s.target) {
             Begin(s);
             if (!s.enabled) return;
@@ -1537,6 +1942,47 @@ void CapturePresent(IDirect3DDevice8* device, HRESULT result) {
                 Write(s, incomplete.str());
                 Stop(s);
                 return;
+            }
+            if (s.bridge_requested) {
+                const bool installed = s.bridge_install_known &&
+                    s.bridge_install_status == scene_bridge::ProbeStatus::Installed;
+                const bool same_thread = s.bridge_previous_present_known && s.bridge_previous_present_thread &&
+                    s.bridge_present_thread == s.bridge_previous_present_thread &&
+                    s.bridge_present_thread == s.bridge_probe_thread &&
+                    s.bridge_present_thread == s.bridge_draw_thread && s.bridge_present_birth &&
+                    s.bridge_present_birth == s.bridge_previous_present_birth &&
+                    s.bridge_present_birth == s.bridge_probe_birth && s.bridge_present_birth == s.bridge_draw_birth &&
+                    !s.bridge_probe_multithread &&
+                    !s.bridge_draw_multithread;
+                const bool synchronized = installed && s.bridge_completed && present_tracked && SUCCEEDED(result) &&
+                    !s.bridge_epoch_unknown && s.bridge_previous_present_known && same_thread && !s.had_reset &&
+                    !s.concurrent_operations && !s.bridge_probe_overlap && !s.bridge_present_overlap &&
+                    !s.bridge_operation_overlap && !s.bridge_reset_seen && !s.bridge_reset_ticket &&
+                    !s.bridge_dropped && s.bridge_pending.empty() &&
+                    s.bridge_started == s.bridge_completed;
+                const char* status = !installed ? "not_installed" : !s.bridge_started && !s.bridge_dropped && !probe_reentered ?
+                    "no_observation" : synchronized ? "synchronized" : "unknown";
+                auto bridge = Json();
+                bridge << "{\"event\":\"scene_bridge_frame\",\"frame\":" << s.frame
+                       << ",\"status\":\"" << status << "\",\"previous_present_observed\":"
+                       << (s.bridge_previous_present_known ? "true" : "false")
+                       << ",\"previous_present_thread\":" << s.bridge_previous_present_thread
+                       << ",\"present_thread\":" << s.bridge_present_thread
+                       << ",\"draw_thread\":" << s.bridge_draw_thread
+                       << ",\"probe_thread\":" << s.bridge_probe_thread
+                       << ",\"same_thread\":" << (same_thread ? "true" : "false")
+                       << ",\"present_tracked\":" << (present_tracked ? "true" : "false")
+                       << ",\"epoch_unknown\":" << (s.bridge_epoch_unknown ? "true" : "false")
+                       << ",\"probe_overlap\":" << (s.bridge_probe_overlap ? "true" : "false")
+                       << ",\"probe_reentered\":" << (probe_reentered ? "true" : "false")
+                       << ",\"present_overlap\":" << (s.bridge_present_overlap ? "true" : "false")
+                       << ",\"operation_overlap\":" << (s.bridge_operation_overlap ? "true" : "false")
+                       << ",\"reset_seen\":" << (s.bridge_reset_seen ? "true" : "false")
+                       << ",\"reset_pending\":" << (s.bridge_reset_ticket ? "true" : "false")
+                       << ",\"started\":" << s.bridge_started << ",\"completed\":" << s.bridge_completed
+                       << ",\"pending\":" << s.bridge_pending.size() << ",\"dropped\":" << s.bridge_dropped
+                       << "}\n";
+                if (!Write(s, bridge.str())) return;
             }
             auto out = Json();
             out << "{\"event\":\"frame_end\",\"frame\":" << s.frame
@@ -1565,9 +2011,34 @@ void CapturePresent(IDirect3DDevice8* device, HRESULT result) {
             s.had_reset = false;
             s.concurrent_operations = false;
             s.frame_image_attempted = false;
+            s.bridge_pending.clear();
+            s.bridge_started = s.bridge_completed = s.bridge_dropped = 0;
+            s.bridge_probe_overlap = s.bridge_present_overlap = s.bridge_operation_overlap = false;
+            s.bridge_reset_seen = s.bridge_reset_ticket != 0;
+            s.bridge_draw_thread = s.bridge_probe_thread = 0;
+            s.bridge_draw_birth = s.bridge_probe_birth = 0;
+            s.bridge_draw_multithread = s.bridge_probe_multithread = false;
+            if (s.bridge_requested) {
+                s.bridge_reentry_baseline = reentry_count;
+                s.bridge_previous_present_known = present_tracked && SUCCEEDED(result) && !s.bridge_epoch_unknown;
+                s.bridge_previous_present_thread = s.bridge_previous_present_known ? s.bridge_present_thread : 0;
+                s.bridge_previous_present_birth = s.bridge_previous_present_known ? s.bridge_present_birth : 0;
+                if (present_tracked) { s.bridge_present_ticket = 0; s.bridge_present_thread = 0; s.bridge_present_birth = 0; }
+            }
             ++s.frame;
             s.target = s.frame;
             return;
+        }
+        if (s.bridge_requested) {
+            s.bridge_reentry_baseline = reentry_count;
+            s.bridge_previous_present_known = present_tracked && SUCCEEDED(result) && !s.bridge_epoch_unknown;
+            s.bridge_previous_present_thread = s.bridge_previous_present_known ? s.bridge_present_thread : 0;
+            s.bridge_previous_present_birth = s.bridge_previous_present_known ? s.bridge_present_birth : 0;
+            if (present_tracked) { s.bridge_present_ticket = 0; s.bridge_present_thread = 0; s.bridge_present_birth = 0; }
+            // A reset completed before this boundary does not taint the next
+            // interval; one still in flight does.
+            s.bridge_reset_seen = s.bridge_reset_ticket != 0;
+            s.bridge_present_overlap = s.bridge_reset_ticket != 0;
         }
         if (s.key_trigger) CheckKey(s);
         if (s.file_trigger) CheckTriggerFile(s);
@@ -1576,11 +2047,26 @@ void CapturePresent(IDirect3DDevice8* device, HRESULT result) {
     } catch (...) { Fail(); }
 }
 
-void CaptureReset(IDirect3DDevice8* device, const D3DPRESENT_PARAMETERS* presentation, HRESULT result) {
+void CapturePresent(IDirect3DDevice8* device, HRESULT result) {
+    CapturePresentEnd(device, 0, result);
+}
+
+void CaptureResetEnd(IDirect3DDevice8* device, uint64_t ticket,
+                     const D3DPRESENT_PARAMETERS* presentation, HRESULT result) {
     try {
+        const auto thread = CurrentBridgeThread();
         auto& s = State();
         std::lock_guard<std::mutex> lock(s.mutex);
         if (!s.enabled || s.complete || !device || device != s.device) return;
+        if (s.bridge_requested) {
+            const bool tracked = ticket && ticket == s.bridge_reset_ticket &&
+                s.bridge_reset_thread == thread.id && s.bridge_reset_birth && s.bridge_reset_birth == thread.birth;
+            if (!tracked) s.bridge_epoch_unknown = true;
+            if (tracked) { s.bridge_reset_ticket = 0; s.bridge_reset_thread = 0; s.bridge_reset_birth = 0; }
+            s.bridge_reset_seen = true;
+            if (s.bridge_present_ticket) s.bridge_present_overlap = true;
+            if (!s.bridge_pending.empty()) s.bridge_operation_overlap = true;
+        }
         if (SUCCEEDED(result) && presentation) {
             s.presentation = *presentation;
             s.has_presentation = true;
@@ -1594,6 +2080,10 @@ void CaptureReset(IDirect3DDevice8* device, const D3DPRESENT_PARAMETERS* present
             << static_cast<int32_t>(result) << ",\"replayable\":false}\n";
         Write(s, out.str());
     } catch (...) { Fail(); }
+}
+
+void CaptureReset(IDirect3DDevice8* device, const D3DPRESENT_PARAMETERS* presentation, HRESULT result) {
+    CaptureResetEnd(device, 0, presentation, result);
 }
 
 }  // namespace t3render

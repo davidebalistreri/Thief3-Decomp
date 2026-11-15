@@ -12,6 +12,7 @@
 #define T3RENDER_RESOURCE_FACADE_FIXTURE
 #define T3RENDER_COMBINED_CAPTURE_FIXTURE
 #include "../tests/d3d8_device_facade.hpp"
+#include "scene_bridge_probe.hpp"
 #endif
 
 #include <algorithm>
@@ -1348,6 +1349,21 @@ extern "C" IDirect3D8* WINAPI Proxy_Direct3DCreate8(UINT sdk_version) {
         auto* facade = policy_ready ? t3render::fixture::CreateExperimentalCombinedFacadeFactory(factory, manager) : nullptr;
         if (facade) {
             t3render::CaptureExperimentalFacade(repeated_unlock, repeat_recovery);
+            wchar_t bridge_option[2]{};
+            if (GetEnvironmentVariableW(L"T3RENDER_SCENE_BRIDGE", bridge_option, 2) == 1 && bridge_option[0] == L'1') {
+                // Direct3DCreate8 runs outside DllMain. Only the verified,
+                // explicitly requested combined capture installs this probe.
+                static std::once_flag bridge_once;
+                Observe([&] {
+                    std::call_once(bridge_once, [] {
+                        t3render::scene_bridge::ProbeStatus status = t3render::scene_bridge::ProbeStatus::InvalidArguments;
+                        (void)t3render::scene_bridge::InstallProbe(t3render::CaptureBridgeBegin,
+                                                                  t3render::CaptureBridgeEnd,
+                                                                  t3render::CaptureBridgeMarkReentered, &status);
+                        t3render::CaptureBridgeInstallResult(status);
+                    });
+                });
+            }
             return facade;
         }
         t3render::CaptureAbandonDevice(nullptr);

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "scene_bridge_probe.hpp"
+
 #include <windows.h>
 #include <d3d8.h>
 #include <cstddef>
@@ -118,7 +120,20 @@ void CaptureShaderDrawResult(IDirect3DDevice8*, std::uint64_t, HRESULT, int buff
 std::uint64_t CaptureClear(IDirect3DDevice8*, DWORD, const D3DRECT*, DWORD, D3DCOLOR, float, DWORD);
 void CaptureClearResult(IDirect3DDevice8*, std::uint64_t, HRESULT);
 void CaptureFrameImage(IDirect3DDevice8*, FrameImageCallback, bool source_rect, bool dest_rect);
+// Bounded, opt-in scene observations are bracketed independently of Present.
+// All identifiers are diagnostic only, local to this process/capture.
+std::uint64_t CaptureBridgeBegin(std::uint32_t thread_id) noexcept;
+void CaptureBridgeEnd(std::uint64_t ticket, const scene_bridge::ProbeSnapshot&) noexcept;
+void CaptureBridgeMarkReentered() noexcept;
+void CaptureBridgeInstallResult(scene_bridge::ProbeStatus) noexcept;
+bool CaptureBridgeShouldDisable() noexcept;
+// A Present window must begin before readback/native Present and end only
+// after native Present returns. A zero ticket means synchronization is unknown.
+std::uint64_t CapturePresentBegin(IDirect3DDevice8*, std::uint32_t thread_id) noexcept;
+void CapturePresentEnd(IDirect3DDevice8*, std::uint64_t ticket, HRESULT);
 void CapturePresent(IDirect3DDevice8*, HRESULT);
+std::uint64_t CaptureResetBegin(IDirect3DDevice8*, std::uint32_t thread_id) noexcept;
+void CaptureResetEnd(IDirect3DDevice8*, std::uint64_t ticket, const D3DPRESENT_PARAMETERS*, HRESULT);
 void CaptureReset(IDirect3DDevice8*, const D3DPRESENT_PARAMETERS*, HRESULT);
 
 }  // namespace t3render

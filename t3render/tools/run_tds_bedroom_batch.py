@@ -137,7 +137,7 @@ def validate_paths(engine, bottle, system, proxy, output):
     return engine, bottle, system, proxy, output
 
 
-def env_for(engine, bottle, output, frames):
+def env_for(engine, bottle, output, frames, scene_bridge=False):
     capture = {"T3RENDER_CAPTURE_PATH": windows_path(output / "bedroom.jsonl"),
                "T3RENDER_CAPTURE_TRIGGER_PATH": windows_path(output / "capture.ready"),
                "T3RENDER_CAPTURE_FRAMES": str(frames), "T3RENDER_CAPTURE_BUFFERS": "1",
@@ -146,6 +146,8 @@ def env_for(engine, bottle, output, frames):
                "T3RENDER_CAPTURE_VERTEX_PROGRAMS": "1", "T3RENDER_CAPTURE_VERTEX_CONSTANTS": "1",
                "T3RENDER_EXPERIMENTAL_COMBINED": "1", "T3RENDER_EXPERIMENTAL_REPEATED_UNLOCK": "1",
                "T3RENDER_EXPERIMENTAL_REPEAT_RECOVERY": "1"}
+    if scene_bridge:
+        capture["T3RENDER_SCENE_BRIDGE"] = "1"
     env = {k: v for k, v in os.environ.items() if not k.startswith("T3RENDER_") and
            k not in ("WINEDLLPATH", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH")}
     frameworks = engine / "frameworks"
@@ -197,7 +199,7 @@ def loader_verified(log, windows_dll):
 
 
 def execute(engine, bottle, system, proxy, output, delay, timeout, frames, terminate,
-            preflight=False, fixture=None, replay=None):
+            preflight=False, fixture=None, replay=None, scene_bridge=False):
     engine, bottle, system, proxy, output = validate_paths(engine, bottle, system, proxy, output)
     if not math.isfinite(delay) or not math.isfinite(timeout) or delay < 0 or timeout <= delay or frames not in (1, 2, 3):
         raise BatchError("require nonnegative delay, a longer finite timeout and 1–3 frames")
@@ -219,7 +221,7 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
         raise BatchError("game System already contains d3d8.dll; no file was changed")
     output.mkdir()
     target = system / "d3d8.dll"
-    env, capture = env_for(engine, bottle, output, frames)
+    env, capture = env_for(engine, bottle, output, frames, scene_bridge=scene_bridge)
     executable = "C:\\" + str((system / "T3Main.exe").relative_to((bottle / "drive_c").resolve())).replace("/", "\\")
     deployment = {"schema": 1, "proxy": str(target), "sha256": digest(proxy),
                   "capture_config": capture, "proxy_installed": False, "temporary_proxy_removed": None}
@@ -227,6 +229,9 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
     installed = False
     launcher = None
     game_seen = False
+    trigger_pid = None
+    trigger_start = None
+    termination_done = False
     status = "FAILED"
     reason = ""
     host_preflight = "NOT_REQUESTED"
@@ -301,6 +306,7 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
         print(f"Cattura completata: {frames} frame. Analisi: {output / 'summary.json'}", flush=True)
         if terminate:
             terminate_game(time.monotonic() + 10, trigger_pid, trigger_start)
+            termination_done = True
         else:
             print("Chiudi TDS normalmente per rimuovere il proxy temporaneo.", flush=True)
             while game_pids():
@@ -308,6 +314,13 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
     except (BatchError, OSError, ValueError, subprocess.SubprocessError, KeyboardInterrupt) as exc:
         reason = str(exc) or type(exc).__name__
     finally:
+        if installed and terminate and not termination_done and trigger_pid is not None and trigger_start:
+            try:
+                # On a post-trigger failure, close only the same process that
+                # was identified at the trigger. Never terminate a replacement.
+                terminate_game(time.monotonic() + 10, trigger_pid, trigger_start)
+            except (BatchError, OSError) as exc:
+                reason = (reason + "; " if reason else "") + str(exc)
         if installed:
             try:
                 # If process inspection fails, leave the proxy in place.
@@ -321,6 +334,7 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
             (output / "deployment.json").write_text(json.dumps(deployment, indent=2) + "\n", encoding="utf-8")
         result = {"schema": 1, "status": status, "error": reason or None,
                   "scene_confirmation": "unconfirmed", "frames_requested": frames,
+                  "scene_bridge_requested": scene_bridge,
                   "host_preflight": host_preflight, "highball_preflight": highball_preflight,
                   "proxy_installed": deployment["proxy_installed"],
                   "temporary_proxy_removed": deployment["temporary_proxy_removed"],
@@ -360,6 +374,7 @@ def main(argv=None):
     run.add_argument("--delay", type=float, default=120, help="seconds after TDS starts before triggering")
     run.add_argument("--timeout", type=float, default=360, help="maximum seconds from launch to complete capture")
     run.add_argument("--frames", type=int, choices=(1, 2, 3), default=3)
+    run.add_argument("--scene-bridge", action="store_true", help="enable the experimental read-only scene bridge probe")
     run.add_argument("--terminate-after-capture", action="store_true", help="close the one TDS test process after capture")
     run.add_argument("--preflight", action="store_true", help="run the host test suite before launching TDS")
     run.add_argument("--fixture", help="synthetic x86 Highball fixture (requires --dx12-replay)")
@@ -374,7 +389,7 @@ def main(argv=None):
         else:
             execute(args.engine, args.bottle, args.system, args.proxy, args.output_dir,
                     args.delay, args.timeout, args.frames, args.terminate_after_capture,
-                    args.preflight, args.fixture, args.dx12_replay)
+                    args.preflight, args.fixture, args.dx12_replay, args.scene_bridge)
     except (BatchError, OSError, ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

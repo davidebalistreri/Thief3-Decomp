@@ -22,6 +22,72 @@ def _is_int(value):
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _uint(value, bits=32):
+    return _is_int(value) and 0 <= value < (1 << bits)
+
+
+def _nullable_uint(value):
+    return value is None or _uint(value)
+
+
+def _bridge_bits(value, count):
+    return value is None or (isinstance(value, list) and len(value) == count and all(_uint(v) for v in value))
+
+
+def _bridge_camera(value):
+    return (isinstance(value, dict) and _nullable_uint(value.get("address")) and
+            type(value.get("stable")) is bool and _bridge_bits(value.get("source_matrix_bits"), 16) and
+            _bridge_bits(value.get("projection_bits"), 16) and _bridge_bits(value.get("derived_matrix_bits"), 16) and
+            _bridge_bits(value.get("combined_matrix_bits"), 16) and
+            _bridge_bits(value.get("viewport_bits"), 6))
+
+
+def _bridge_entry(value):
+    if not isinstance(value, dict):
+        return False
+    if not _uint(value.get("list_index")) or any(not _nullable_uint(value.get(k)) for k in ("address", "vtable", "type", "flags", "owner_candidate",
+                                                      "owner_object_index", "owner_fname", "owner_class", "owner_backlink")):
+        return False
+    name = value.get("owner_name")
+    return (type(value.get("owner_table_member")) is bool and type(value.get("owner_stable")) is bool and
+            (name is None or isinstance(name, str) and len(name) < 64 and all(32 <= ord(c) < 127 for c in name)) and
+            _bridge_bits(value.get("owner_location_bits"), 3) and _bridge_bits(value.get("owner_rotation_bits"), 3) and
+            _bridge_bits(value.get("object_matrix_bits"), 16))
+
+
+def _bridge_named(value):
+    if not isinstance(value, dict) or any(not _nullable_uint(value.get(k)) for k in ("address", "index", "fname", "outer")):
+        return False
+    name = value.get("name")
+    return (type(value.get("member")) is bool and type(value.get("stable")) is bool and
+            (name is None or isinstance(name, str) and len(name) < 64 and all(32 <= ord(c) < 127 for c in name)))
+
+
+def _bridge_target(value):
+    if not isinstance(value, dict):
+        return False
+    flags = ("object_scan_complete", "list_scan_complete", "object_scan_truncated", "list_scan_truncated", "outer_truncated")
+    counts = ("objects_scanned", "actors_named_target", "list_scanned", "list_occurrences", "outer_count")
+    entries = value.get("outer")
+    return (all(type(value.get(k)) is bool for k in flags) and all(_uint(value.get(k)) for k in counts) and
+            isinstance(entries, list) and len(entries) == value["outer_count"] and len(entries) <= 4 and
+            all(_bridge_named(e) for e in entries) and _bridge_named(value.get("owner_class")) and
+            (value.get("entry") is None or _bridge_entry(value["entry"])) and _bridge_asset(value.get("asset")))
+
+
+def _bridge_asset(value):
+    statuses = {"unknown", "unreadable", "descriptor_unsupported", "local_property_missing", "property_malformed",
+                "object_not_unique", "proxy_mismatch", "resource_mismatch", "candidate"}
+    flags = ("descriptor_match", "local_property_found", "proxy_live_member", "proxy_vtable_match",
+             "resource_vtable_match", "stable")
+    if not isinstance(value, dict) or value.get("status") not in statuses or any(type(value.get(k)) is not bool for k in flags):
+        return False
+    name = value.get("name")
+    if name is not None and (not isinstance(name, str) or len(name) >= 128 or not all(32 <= ord(c) < 127 for c in name)):
+        return False
+    return value["status"] != "candidate" or (all(value[k] for k in flags) and bool(name))
+
+
 def _object(pairs):
     result = {}
     for key, value in pairs:
@@ -45,6 +111,8 @@ def summarize(path):
     capture_ended = False
     operation_results = False
     frame_images = False
+    bridge_capability = None
+    bridge_tickets = set()
     clear_rect_limit = None
     requested_frames = None
     lines = 0
@@ -63,6 +131,8 @@ def summarize(path):
                     raise TraceError(f"line {lines}: event must be a non-empty string")
                 if capture_ended:
                     raise TraceError(f"line {lines}: event after capture_end")
+                if current is not None and current["bridge_finished"] and event != "frame_end":
+                    raise TraceError(f"line {lines}: event after scene bridge frame result")
 
                 if not header_seen:
                     if event != "header":
@@ -86,6 +156,25 @@ def summarize(path):
                         if item["frame_images"] != {"requested": True, "timing": "before_present"}:
                             raise TraceError(f"line {lines}: invalid frame image capability")
                         frame_images = True
+                    if "scene_bridge" in item:
+                        bridge_capability = item["scene_bridge"]
+                        statuses = {"installed", "disabled", "invalid_arguments", "already_attempted",
+                                    "unsupported_processor", "executable_identity_unavailable", "executable_mismatch",
+                                    "image_mismatch", "prologue_mismatch", "module_pin_failed", "hook_engine_failed",
+                                    "hook_create_failed", "hook_enable_failed", "hook_disable_failed", "not_reported"}
+                        if (not isinstance(bridge_capability, dict) or bridge_capability.get("requested") is not True or
+                            bridge_capability.get("install_status") not in statuses or
+                            bridge_capability.get("synchronization") != "present_interval_and_thread_only" or
+                            not _is_int(bridge_capability.get("probe_limit")) or
+                            not 0 < bridge_capability["probe_limit"] <= 128 or
+                            not _is_int(bridge_capability.get("entries_per_probe")) or
+                            not 0 < bridge_capability["entries_per_probe"] <= 128 or
+                            not _is_int(bridge_capability.get("target_object_limit")) or
+                            not 0 < bridge_capability["target_object_limit"] <= 65536 or
+                            not _is_int(bridge_capability.get("target_list_limit")) or
+                            not 0 < bridge_capability["target_list_limit"] <= 8192 or
+                            bridge_capability.get("reentry_detection") not in (None, "saturating_counter_v1")):
+                            raise TraceError(f"line {lines}: invalid scene bridge capability")
                     header_seen = True
                 elif event == "header":
                     raise TraceError(f"line {lines}: duplicate header")
@@ -114,7 +203,80 @@ def summarize(path):
                         if frames and frame != frames[-1]["frame"] + 1:
                             raise TraceError(f"line {lines}: requested capture frames are not consecutive")
                     current = {"frame": frame, "draws": 0, "calls": Counter(), "pending": {},
-                               "last_op": 0, "overlap": False, "image_seen": False}
+                               "last_op": 0, "overlap": False, "image_seen": False,
+                               "bridge_finished": False, "bridge_frame": None, "bridge_count": 0,
+                               "bridge_threads": set(), "bridge_draw_threads": set(), "bridge_order_valid": True}
+                elif event == "scene_bridge_observation":
+                    if (bridge_capability is None or bridge_capability["install_status"] != "installed" or
+                            current is None or item.get("frame") != current["frame"] or current["bridge_finished"]):
+                        raise TraceError(f"line {lines}: scene observation outside an installed capture frame")
+                    ticket, thread, next_op = item.get("ticket"), item.get("thread_id"), item.get("next_d3d_operation")
+                    if (not _uint(ticket, 64) or not ticket or ticket in bridge_tickets or not _uint(thread) or not thread or
+                            not _uint(next_op, 64) or not next_op or not _uint(item.get("self")) or
+                            not _uint(item.get("caller")) or type(item.get("known_caller")) is not bool or
+                            type(item.get("pass_stable")) is not bool or
+                            any(not _nullable_uint(item.get(k)) for k in ("pass", "count", "array")) or
+                            any(not _bridge_camera(item.get(k)) for k in ("configured_camera", "current_camera", "culling_camera"))):
+                        raise TraceError(f"line {lines}: invalid scene observation metadata")
+                    entries = item.get("entries")
+                    if (type(item.get("object_table_complete")) is not bool or type(item.get("entries_truncated")) is not bool or
+                            not _uint(item.get("entries_attempted")) or not isinstance(entries, list) or
+                            len(entries) != item["entries_attempted"] or len(entries) > bridge_capability["entries_per_probe"] or
+                            any(not _bridge_entry(e) for e in entries) or not _bridge_target(item.get("target"))):
+                        raise TraceError(f"line {lines}: invalid bounded scene entries")
+                    target = item["target"]
+                    if (target["objects_scanned"] > bridge_capability["target_object_limit"] or
+                            target["list_scanned"] > bridge_capability["target_list_limit"] or
+                            target["actors_named_target"] > target["objects_scanned"] or
+                            target["list_occurrences"] > target["list_scanned"] or
+                            (target["object_scan_complete"] and target["object_scan_truncated"]) or
+                            (target["list_scan_complete"] and target["list_scan_truncated"])):
+                        raise TraceError(f"line {lines}: invalid target scan counts")
+                    bridge_tickets.add(ticket)
+                    current["bridge_count"] += 1
+                    current["bridge_threads"].add(thread)
+                    if current["image_seen"] or current["pending"] or next_op <= current["last_op"]:
+                        current["bridge_order_valid"] = False
+                    if current["bridge_count"] > bridge_capability["probe_limit"]:
+                        raise TraceError(f"line {lines}: scene observation limit exceeded")
+                elif event == "scene_bridge_frame":
+                    if (bridge_capability is None or current is None or item.get("frame") != current["frame"] or
+                            current["bridge_finished"]):
+                        raise TraceError(f"line {lines}: invalid scene bridge frame result")
+                    statuses = {"synchronized", "unknown", "no_observation", "not_installed"}
+                    flags = ("previous_present_observed", "same_thread", "present_tracked", "epoch_unknown",
+                             "probe_overlap", "present_overlap", "operation_overlap", "reset_seen", "reset_pending")
+                    threads = ("previous_present_thread", "present_thread", "draw_thread", "probe_thread")
+                    counts = ("started", "completed", "pending", "dropped")
+                    reentry_capable = bridge_capability.get("reentry_detection") == "saturating_counter_v1"
+                    if ((reentry_capable and type(item.get("probe_reentered")) is not bool) or
+                            (not reentry_capable and "probe_reentered" in item) or
+                            (item.get("probe_reentered") is True and item.get("probe_overlap") is not True)):
+                        raise TraceError(f"line {lines}: invalid scene probe reentry metadata")
+                    if (item.get("status") not in statuses or any(type(item.get(k)) is not bool for k in flags) or
+                            any(not _uint(item.get(k)) for k in threads) or any(not _uint(item.get(k), 64) for k in counts) or
+                            item["started"] > bridge_capability["probe_limit"] or
+                            item["completed"] != current["bridge_count"] or
+                            item["started"] < item["completed"] + item["pending"]):
+                        raise TraceError(f"line {lines}: invalid scene bridge frame metadata")
+                    if item["status"] == "not_installed" and bridge_capability["install_status"] == "installed":
+                        raise TraceError(f"line {lines}: inconsistent scene bridge install status")
+                    if item["status"] == "no_observation" and (item["started"] or item["dropped"]):
+                        raise TraceError(f"line {lines}: inconsistent empty scene observation")
+                    if item["status"] == "synchronized":
+                        thread = item["present_thread"]
+                        if (bridge_capability["install_status"] != "installed" or not item["previous_present_observed"] or
+                                not item["same_thread"] or not item["present_tracked"] or item["epoch_unknown"] or
+                                item["probe_overlap"] or item["present_overlap"] or item["operation_overlap"] or
+                                item["reset_seen"] or item["reset_pending"] or
+                                not item["completed"] or item["started"] != item["completed"] or item["pending"] or
+                                item["dropped"] or not thread or any(item[k] != thread for k in threads) or
+                                current["bridge_threads"] != {thread} or current["bridge_draw_threads"] != {thread} or
+                                not current["bridge_order_valid"] or
+                                current["pending"] or current["overlap"] or not current["draws"]):
+                            raise TraceError(f"line {lines}: unsupported synchronized scene claim")
+                    current["bridge_finished"] = True
+                    current["bridge_frame"] = item
                 elif event == "frame_image":
                     if not frame_images or current is None or item.get("frame") != current["frame"] or current["image_seen"]:
                         raise TraceError(f"line {lines}: image must appear once in its matching frame")
@@ -210,6 +372,11 @@ def summarize(path):
                         if not isinstance(call, str) or not call:
                             raise TraceError(f"line {lines}: draw call must be a non-empty string")
                         current["draws"] += 1
+                        if bridge_capability is not None:
+                            thread = item.get("thread_id")
+                            if not _uint(thread):
+                                raise TraceError(f"line {lines}: scene capture draw requires a thread ID")
+                            current["bridge_draw_threads"].add(thread)
                         current["calls"][call] += 1
                         calls[call] += 1
                     elif event in ("draw_result", "clear_result"):
@@ -237,6 +404,13 @@ def summarize(path):
                             raise TraceError(f"line {lines}: concurrent_operations must be a boolean")
                         if current["overlap"] and item.get("concurrent_operations") is not True:
                             raise TraceError(f"line {lines}: overlapping operations were not flagged")
+                        if bridge_capability is not None and not current["bridge_finished"]:
+                            raise TraceError(f"line {lines}: scene bridge frame result is missing")
+                        bridge_frame = current["bridge_frame"]
+                        if bridge_frame and bridge_frame["status"] == "synchronized" and (
+                                not -(1 << 31) <= hr < (1 << 32) or (hr & 0x80000000) != 0 or
+                                item.get("had_reset") is not False or item.get("concurrent_operations") is not False):
+                            raise TraceError(f"line {lines}: frame outcome invalidates synchronized scene claim")
                         if "concurrent_operations" in item:
                             current["concurrent_operations"] = item["concurrent_operations"]
                         current["present_hr"] = hr
@@ -245,6 +419,12 @@ def summarize(path):
                         del current["last_op"]
                         del current["overlap"]
                         del current["image_seen"]
+                        del current["bridge_finished"]
+                        del current["bridge_frame"]
+                        del current["bridge_count"]
+                        del current["bridge_threads"]
+                        del current["bridge_draw_threads"]
+                        del current["bridge_order_valid"]
                         frames.append(current)
                         current = None
                 events[event] += 1

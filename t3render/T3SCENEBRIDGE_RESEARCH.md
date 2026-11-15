@@ -1,7 +1,9 @@
 # T3SceneBridge: ricerca statica iniziale
 
-Stato al 14 novembre 2026. Questa è ricerca sul binario, non uno snapshot
-runtime né una Scene IR. Nessun hook è stato installato. Il target è il
+La sezione iniziale descrive la ricerca statica del 14 novembre 2026, non uno
+snapshot runtime né una Scene IR. La successiva
+[osservazione runtime](#probe-runtime-bedroom-frame-2661) documenta il probe
+e i suoi limiti. Il target è il
 `T3Main.exe` Steam x86 descritto in [target.md](../docs/target.md), SHA-256
 `09e0be902062c53cbb1736cffa1bd3ec883bd5e864f8e7f3f99bc0d06f6ad0f8`.
 I risultati REA sotto usano Hopper; sono statici e non attestano l'esecuzione.
@@ -236,3 +238,149 @@ e al suo asset/transform/skin; risolvere sezioni e materiali con
 `t3mesh.py`; quindi confrontare lo stesso pass e lo stesso intervallo di
 Present con la trace. Un export della mappa, una posizione vicina o un
 puntatore isolato non provano questi collegamenti.
+
+## Elemento Flesh, actor e risorsa mesh: evidenze statiche
+
+Analisi aggiuntiva sullo stesso binario SHA-256 sopra; non è una verifica
+runtime. Per gli oggetti creati dal percorso individuato, il collegamento
+bidirezionale è più forte di una corrispondenza per posizione:
+
+1. `0x1097a990` riceve l'actor e legge `actor+0xb4`. Nel ramo in cui il
+   getter `0x10991eb0` trova una mesh e il campo è nullo, alloca un oggetto
+   di `0x128` byte e chiama il costruttore `0x10976b20`; a `0x1097aaa3` e
+   `0x1097aaac` scrive rispettivamente `actor+0xb4 = oggetto` e
+   `oggetto+0x54 = actor`. Un altro ramo ripete gli store a `0x1097aee8` e
+   `0x1097aeef`. Il costruttore scrive vtable `0x10e4e8c0` e tipo 4 a
+   `oggetto+0x44` (`ev_a7a92347de2d97fa82f9b2d3d2bfa8c5ae70a209e7b1d660b3774b37187ebeb8`,
+   `ev_8b4dcfe898fc3e74147a5c41c87146d059ab9b326059694787b48d09b47552af`).
+2. `0x109209e0` inserisce l'oggetto nel registro `0x10f2c740+0x30`;
+   `0x1097afb0`, durante la rimozione, ricerca proprio `actor+0xb4` nella
+   lista di `0x10f2c734+0x50`, lo rimuove se presente e azzera entrambi i
+   collegamenti prima dell'eventuale rilascio. Questo collega la famiglia di
+   oggetti actor alla stessa raccolta percorsa da `0x10926800`, non dimostra
+   che un dato actor vi sia presente in un determinato frame
+   (`ev_6f7e01f7e2098843809d33f6288565f4fab07662634397f861ced9baa2303790`,
+   `ev_99ce64640e1e5fdd6e2d7fd0d47c0b4dfc098f9b1fe98c40bc26e70d2bd8b9f3`).
+3. Sempre in `0x1097a990`, una chiamata a `0x109769f0` usa
+   `actor+0x2c` (Location) e una matrice 3×3 ricavata dalla virtuale
+   dell'actor per costruire 16 float a `oggetto+0x04`. La traslazione è a
+   `oggetto+0x34`, `+0x38`, `+0x3c`; la conversione completa della matrice
+   e il suo eventuale uso nei singoli pass devono ancora essere verificati
+   (`ev_d2baa4a4de38c510b7611c27d3c7b2b89b12704120630237f64ec29ef5257ce7`).
+
+Il getter mesh `0x10991eb0` richiede a `0x1098e330` la proprietà
+`0x4002002b`. Il tipo atteso è `UStaticMesh`: il suo costruttore a
+`0x10971ca0` imposta vtable `0x10e4dfa8`, mentre
+`UStaticMesh::Serialize` (`0x10972150`) legge il nome asset, richiede una
+risorsa di tipo 4 al resource manager e salva il risultato a `proxy+0x58`.
+Per la classe di risorsa il costruttore `0x10dc8020` usa la vtable
+`0x10ec0e20` e passa il nome al costruttore base `0x10dc6b50`, che lo copia
+nel `cString` a `risorsa+0x08`. Il metodo `0x10dc6e20` usa quella stringa
+per ottenere il basename senza estensione; la lunghezza della stringa è
+memorizzata quattro byte prima del puntatore ai caratteri
+([cString](../include/Game/cString.h)). I nomi vanno letti con limiti e
+conservati prima della normalizzazione; un puntatore, una classe o una vtable
+diversi restano `unknown`. Evidenze:
+`ev_243849bfa153cfc23202956a948a8be087dade2e46c1a9fe59eb2f3df4a307fe`,
+`ev_e09a547735faeb39515a0f2f861479594745d2ccd1447458760283cd6bff3196`,
+`ev_6ef34c6ea2c9d5b0110d262452adf1baaebfc376d1b07c9633b6c9d3db9d20bb`,
+`ev_0ed267532bcff8f303f2e2ae03f1d5aa6f043595f11c3d57628d68ebfcf17ad3`,
+`ev_3b20d6ba2de2b0f7c6138a48e86845ac969165ec855f9884a9cb83c814e97555`,
+`ev_6899ba4f98f68e6d19dd80178000f5b1e553569ed82fd420805e1c866c6c7b76`.
+
+Nel GMP offline verificato, l'actor `StaticMeshActor__1520` è export 119 e
+la sua proprietà `StaticMesh` punta all'export 1406, chiamato
+`StaticMesh__3203`; quest'ultimo contiene `INNbed1A1`, mentre `ObjectMesh`
+dell'actor contiene nome `INNbed1A1` e skin `SQ1int`. Sono valori offline,
+non prova che il save runtime conservi la stessa proprietà o lo stesso nome.
+Il riscontro del frame 3377 sopra associa con forza la geometria al GMP, ma
+non prova ancora questa relazione actor/property durante l'esecuzione.
+
+Per un probe strettamente read-only, `0x10ad3df0` mostra come cercare
+direttamente il valore della proprietà nel property hash: `actor+0x28`
+identifica otto bucket `u16`; per ID `0x2b` si parte dal bucket 3 e si
+seguono slot da 8 byte nel pool `0x10f7b5c8`: `next:u16`,
+`id_e_flag:u16`, `value:u32`. L'ID è `id_e_flag & 0x7fff`; con bit
+`0x8000` il dato è inline a `slot+4`, altrimenti `slot+4` punta ai dati.
+Il pool e i suoi limiti sono documentati in [handoff](../docs/handoff.md).
+La lettura è una *candidata* per la proprietà dell'actor, non una promessa di
+risolvere tutte le proprietà ereditate. In particolare, il getter effettivo
+chiama un metodo virtuale del descrittore; l'implementazione di
+`UObjectProperty` a `0x10aeecc0` ha un ramo che può creare oggetti quando
+il flag `+0x3c & 0x400000` è impostato. Non chiamare il getter dal hook per
+la sola osservazione (`ev_ad3680e2ab4b5c6237b12c09a61c7f51acf925d2de164369729f586d673f3568`,
+`ev_a9e56ae2de5ba8b765bff5ee1ed087806e901e18e3278ce5884cc05cb56e5ec7`).
+
+Una futura prova deve limitare profondità e ciclo delle liste, controllare
+build e vtable, risolvere l'actor tra gli UObject vivi e verificare
+`actor+0xb4 == elemento` nello stesso callback prima di leggere i campi;
+validare analogamente tipo/vtable/array e nome della mesh, rileggere dati
+critici e segnalare esplicitamente ogni dato incompleto. Per interpretare il
+valore raw come equivalente alla copia del getter vanno inoltre verificati il
+descrittore, il tipo, la dimensione e il flag sopra. Servono marker di pass,
+thread, generazione e relazione esplicita con `Present`: puntatori riusati,
+reload, concorrenza e una callback in un altro frame invalidano la prova.
+Non serializzare i puntatori nella Scene IR.
+
+## Probe runtime bedroom: frame 2661
+
+La campagna `scene-bridge-bed-20261115-001` ha prodotto una trace locale
+completa con SHA-256
+`51e097188c226c5cb6137115bc1ad1ce2e13537deea3a031df50d06624f9e9f2`.
+Nei frame 2661–2663 il probe è installato e i due campionamenti per frame
+ricadono nello stesso intervallo fra `Present` e sullo stesso thread dei draw;
+non sono riportati overlap o Reset. Questo stato non prova, da solo, che una
+camera o un actor siano associati a uno specifico draw. Il probe usato per
+questa cattura sopprimeva gli ingressi ricorsivi senza segnalarli: l'assenza
+di ricorsione non è quindi dimostrata. Questo limite non invalida le altre
+osservazioni riportate.
+
+Nel frame 2661, al pass 0, le scansioni bounded riportano un solo
+`StaticMeshActor__1520` nella tabella osservata e una sua sola occorrenza
+nella lista di 47 elementi. Membership, backlink, classe e letture ripetute
+sono coerenti; la location è `[3398, 1513.9998779, 272]`, il rotator
+`[0, 0, 0]`. La proprietà **locale** letta senza getter porta al nome risorsa
+candidato `innbed1a1`, uguale a `INNbed1A1` senza distinguere maiuscole.
+Restano possibili modifiche concorrenti non intercettate e riuso degli
+indirizzi; la ricerca non risolve le proprietà ereditate. Nel pass 1 la lista
+osservata ha 4 elementi e non contiene il backlink del letto.
+
+I draw 8/9, successivi alla callback del pass 0, hanno world bit-identica alla
+matrice dell'elemento e view/projection bit-identiche ai campi camera `+0xe4`
+e `+0x64`. I 14 draw candidati associati offline alle due sezioni hanno
+posizioni, UV0 e indici delle shadow identici ai dati `INNbed1A1` letti da
+`t3mesh.py`; la skin `SQ1int` fornisce rispettivamente i materiali
+`GENgoodnessA_D` e `GENiFABRICwoolA2_D`. La skin e i nomi dei materiali qui
+provengono dall'asset offline; la trace non è un readback GPU e non dimostra
+che una specifica chiamata dell'actor abbia emesso quei draw.
+
+La camera configurata e quella corrente coincidono nel probe, mentre il
+puntatore alternativo di culling è nullo. Il viewport conservato nella camera
+è `[0, 0, 1024, 768, 0, 1]`; quello dei draw 8/9 è
+`[0, 0, 1024, 768, 0, 0.5]`. Non sono uguali. La proiezione catturata è
+compatibile con la convenzione D3D a profondità clip `0..1`, near 1 e far
+circa 32000; l'inversione numerica dei coefficienti float dà circa 32019.
+
+**Spiegazione statica candidata del viewport.** Nel binario verificato,
+`0x10926f20` chiama `GetViewport` a `0x10927126`, copia il risultato,
+sostituisce MinZ e MaxZ con i campi `+0x10` e `+0x14` dell'argomento di
+configurazione e chiama `SetViewport` a `0x10927177`. La call al probe è
+successiva, a `0x109271a9`, e ritorna a `0x109271ae`. Questo percorso può
+quindi modificare la profondità sul device senza modificare la copia nella
+camera. La trace osserva i viewport diversi, ma non intercetta la `SetViewport`,
+il suo HRESULT o i valori dell'argomento: associare quella specifica chiamata
+al valore `0.5` è un'inferenza, non un evento runtime catturato. Evidenza
+statica delle istruzioni: `ev_086a364883326e32434d954f8ee5b036d2faa7acabd574ee30f65fb82dc11c98`.
+
+Con il percorso del gioco in `T3RENDER_GAME_DIR`, dalla root di `t3sdk`:
+
+```sh
+python3 -B t3render/tools/analyze_scene_bridge.py \
+  build/t3render-captures/scene-bridge-bed-20261115-001/bedroom.jsonl \
+  --frame 2661 --draw 8 --pass 0
+python3 -B t3render/tools/correlate_trace_actor.py \
+  build/t3render-captures/scene-bridge-bed-20261115-001/bedroom.jsonl \
+  build/assets/godot/SouthQuarter1_int1/SouthQuarter1_int1.actors.json \
+  SouthQuarter1_int1 --game-dir "$T3RENDER_GAME_DIR" \
+  --actor StaticMeshActor__1520 --frame 2661
+```

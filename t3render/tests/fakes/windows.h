@@ -12,6 +12,7 @@ using BOOL = std::int32_t;
 using HRESULT = std::int32_t;
 using HANDLE = int;
 using SIZE_T = std::size_t;
+struct FILETIME { DWORD dwLowDateTime, dwHighDateTime; };
 
 struct MEMORY_BASIC_INFORMATION {
     void* BaseAddress;
@@ -52,6 +53,9 @@ constexpr DWORD ERROR_ENVVAR_NOT_FOUND = 203;
 DWORD GetEnvironmentVariableW(const wchar_t*, wchar_t*, DWORD);
 DWORD GetFileAttributesW(const wchar_t*);
 DWORD GetLastError();
+DWORD GetCurrentThreadId();
+HANDLE GetCurrentThread();
+BOOL GetThreadTimes(HANDLE, FILETIME*, FILETIME*, FILETIME*, FILETIME*);
 void SetLastError(DWORD);
 HANDLE CreateFileW(const wchar_t*, DWORD, DWORD, void*, DWORD, DWORD, void*);
 BOOL WriteFile(HANDLE, const void*, DWORD, DWORD*, void*);

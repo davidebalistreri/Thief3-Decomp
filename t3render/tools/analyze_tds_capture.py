@@ -138,6 +138,9 @@ def analyze(path):
                            "_unknown_provenance": {}}
                 if obj(header.get("frame_images")).get("requested") is True:
                     current["frame_image"] = {"status": "not_recorded"}
+                if obj(header.get("scene_bridge")).get("requested") is True:
+                    current["scene_bridge"] = {"status": "not_recorded", "observations": 0,
+                                               "reported_entries": 0, "truncated_observations": 0}
                 pending = {}
             elif kind == "draw" and current is not None:
                 current["draws"] += 1
@@ -225,6 +228,20 @@ def analyze(path):
                     current["post_repeat_index_payloads"] += bool(index.get("status") == "captured" and index.get("shadow_observation") == "post_repeated_unlock_write")
             elif kind == "reset" and current is not None:
                 current["reset_event_recorded"] = True
+            elif kind == "scene_bridge_observation" and current is not None and "scene_bridge" in current:
+                bridge = current["scene_bridge"]
+                bridge["observations"] += 1
+                entries = event.get("entries")
+                bridge["reported_entries"] += len(entries) if isinstance(entries, list) else 0
+                bridge["truncated_observations"] += event.get("entries_truncated") is True
+            elif kind == "scene_bridge_frame" and current is not None and "scene_bridge" in current:
+                bridge = current["scene_bridge"]
+                bridge["status"] = named(event.get("status"), {"synchronized", "unknown", "no_observation", "not_installed"})
+                for field in ("started", "completed", "pending", "dropped"):
+                    bridge[field] = uint(event.get(field), 64)
+                for field in ("same_thread", "present_tracked", "epoch_unknown", "probe_overlap", "present_overlap",
+                              "operation_overlap"):
+                    bridge[field] = event.get(field) if type(event.get(field)) is bool else None
             elif kind == "frame_image" and current is not None:
                 current["frame_image"] = image_result(path, event)
             elif kind == "frame_end" and current is not None:
@@ -254,8 +271,17 @@ def analyze(path):
                 frame["color_indexed_with_both_buffers"] > 0]
     best = max(eligible, key=lambda f: (f["color_indexed_with_all_components"],
                                         f["color_indexed_with_both_buffers"])) if eligible else None
+    bridge_header = obj(header.get("scene_bridge"))
+    bridge_requested = bridge_header.get("requested") is True
+    bridge_statuses = {"installed", "disabled", "invalid_arguments", "already_attempted", "unsupported_processor",
+                       "executable_identity_unavailable", "executable_mismatch", "image_mismatch", "prologue_mismatch",
+                       "module_pin_failed", "hook_engine_failed", "hook_create_failed", "hook_enable_failed",
+                       "hook_disable_failed", "not_reported"}
     return {"schema": 1, "status": "PARTIAL", "trace_sha256": digest(path),
             "frames_requested": header.get("requested_frames"), "frames_captured": framing["frame_count"],
+            "scene_bridge": {"requested": bridge_requested,
+                             "install_status": named(bridge_header.get("install_status"), bridge_statuses)
+                             if bridge_requested else None},
             "declaration_history_requested": obj(header.get("declaration_history")).get("requested") is True,
             "best_frame_by_observed_candidates": best["frame"] if best else None,
             "experimental_facade": {k: facade.get(k) if type(facade.get(k)) is bool else None for k in
@@ -268,6 +294,7 @@ def analyze(path):
                             "Buffer provenance counts only intercepted operations; pointers are grouped within each frame and are not proof of distinct COM identities.",
                             "Texture contents and pixel shaders are not captured.",
                             "An optional image is a pre-Present backbuffer; presentation transforms and concurrent Present calls are not validated.",
+                            "Scene bridge synchronization describes the Present interval and thread, not proof of camera, pass, actor or mesh identity.",
                             "No full TDS-to-DX12 replay or pixel parity is established."]}
 
 

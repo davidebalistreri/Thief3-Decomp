@@ -93,12 +93,17 @@ set_target_properties(t3render PROPERTIES OUTPUT_NAME d3d8 PREFIX "")
 # standard DLL is unchanged; this DLL requires a runtime environment flag.
 option(T3RENDER_BUILD_EXPERIMENTAL_COMBINED_PROXY "Build the experimental combined facade proxy" OFF)
 if(T3RENDER_BUILD_EXPERIMENTAL_COMBINED_PROXY)
+  set(t3render_minhook "${CMAKE_CURRENT_SOURCE_DIR}/../sdk/third_party/minhook")
   add_library(t3render_experimental_combined_proxy SHARED
-    src/proxy.cpp src/buffer_proxy.cpp src/vtable_layout.c src/capture.cpp src/frame_image.cpp ${t3render_exports})
+    src/proxy.cpp src/buffer_proxy.cpp src/vtable_layout.c src/capture.cpp src/frame_image.cpp
+    src/scene_bridge_probe.cpp
+    ${t3render_minhook}/src/buffer.c ${t3render_minhook}/src/hook.c
+    ${t3render_minhook}/src/trampoline.c ${t3render_minhook}/src/hde/hde32.c ${t3render_exports})
   target_compile_features(t3render_experimental_combined_proxy PRIVATE cxx_std_17)
+  target_include_directories(t3render_experimental_combined_proxy PRIVATE ${t3render_minhook}/include)
   target_compile_definitions(t3render_experimental_combined_proxy PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
     T3RENDER_EXPERIMENTAL_COMBINED_PROXY)
-  target_link_libraries(t3render_experimental_combined_proxy PRIVATE dxguid t3render_ir)
+  target_link_libraries(t3render_experimental_combined_proxy PRIVATE dxguid advapi32 t3render_ir)
   if(MSVC)
     target_compile_options(t3render_experimental_combined_proxy PRIVATE /W4 /utf-8)
     set_property(TARGET t3render_experimental_combined_proxy PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -110,6 +115,22 @@ if(T3RENDER_BUILD_EXPERIMENTAL_COMBINED_PROXY)
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/experimental_combined_proxy"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/experimental_combined_proxy"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/experimental_combined_proxy")
+
+  # Synthetic target only: the bypass for a test function is never compiled
+  # into the game proxy. Exercise the x86 hook's ABI before a live capture.
+  if(MINGW)
+    add_executable(t3render_scene_bridge_hook_fixture EXCLUDE_FROM_ALL
+      tests/scene_bridge_hook_fixture.cpp src/scene_bridge_probe.cpp
+      ${t3render_minhook}/src/buffer.c ${t3render_minhook}/src/hook.c
+      ${t3render_minhook}/src/trampoline.c ${t3render_minhook}/src/hde/hde32.c)
+    target_compile_features(t3render_scene_bridge_hook_fixture PRIVATE cxx_std_17)
+    target_compile_definitions(t3render_scene_bridge_hook_fixture PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+      T3RENDER_SCENE_BRIDGE_TEST_FIXTURE)
+    target_include_directories(t3render_scene_bridge_hook_fixture PRIVATE ${t3render_minhook}/include)
+    target_link_libraries(t3render_scene_bridge_hook_fixture PRIVATE advapi32)
+    target_compile_options(t3render_scene_bridge_hook_fixture PRIVATE -Wall -Wextra -msse2)
+    target_link_options(t3render_scene_bridge_hook_fixture PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
 endif()
 
 # A separate, explicit test artifact only. The normal t3render target above is

@@ -16,6 +16,7 @@ SCALE = 0.01905
 MATERIALS = {"stmwall512d_d": "stone_wall_v2", "hsefloorb_d": "wood_floor_v2"}
 AREAS = {"stone_wall_v2": ((-.25, -.10, -2.10), (4.85, 4.10, 3.35)),
          "wood_floor_v2": ((-6.0, -.08, -1.6), (5.0, .08, 3.2))}
+SOURCE_SIZES = {"stone_wall_v2": 2048, "wood_floor_v2": 1024, "bed_wool_v2": 512, "pillow_linen": 512}
 MAX_PNG_BYTES = 16 * 1024 * 1024
 TEXTURE_SIZE = 1024
 
@@ -105,7 +106,7 @@ class GodotTextures:
         self.cache = {}
 
     def resolve(self, name, kind):
-        if name not in AREAS or kind not in ("albedo", "normal", "roughness", "ao"):
+        if name not in SOURCE_SIZES or kind not in ("albedo", "normal", "roughness", "ao"):
             raise ValueError("unknown bedroom override texture")
         key = (name, kind)
         if key in self.cache:
@@ -118,7 +119,7 @@ class GodotTextures:
         try:
             info = subprocess.run(["magick", "identify", "-format", "%m %w %h\\n", "png:-"], input=raw,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=30).stdout
-            expected = 2048 if name == "stone_wall_v2" else 1024
+            expected = SOURCE_SIZES[name]
             if info != f"PNG {expected} {expected}\n".encode():
                 raise ValueError(f"unexpected override PNG dimensions or frames: {path}")
             linear = kind == "albedo" and self.linear_albedo_mips

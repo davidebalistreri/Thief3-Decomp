@@ -115,6 +115,30 @@ the same indirect/GTAO preview without flames, 62 pixels change and the mean
 absolute RGB difference is 0.0006 on a 0–255 scale. The small projected flames
 and incomplete screen-space bounce are not a final candle-lighting solution.
 
+## Semantic high-poly bed
+
+`--bed-high <bed_high.glb>` opts into the generated Godot bed replacement and
+requires `--bedroom-remaster-materials`. It selects the submitted
+`StaticMeshActor__1520 / INNbed1A1` semantic anchor, checks the local mesh
+bounds against the source asset and uses the observed actor transform. The
+original bed sections and its offline caster candidates are excluded; the
+generated geometry casts according to the fingerprinted offline actor flag.
+Removing the option restores the original preview. This affects only the
+render packet, not gameplay, collisions or the original game renderer.
+
+The six generated material sections use the existing floor wood, wool and
+pillow textures plus simple seam colors. Their mapping and normal strengths
+approximate the Godot materials; vertex tangent frames are inferred from UVs
+with a flat-normal fallback. They are not a full Godot shader conversion. The
+local GLB hash, semantic resource identity, triangle count and fallback count
+are recorded in the manifest; runtime asset files are not committed.
+
+For frame 1001 the generated bed has 20,420 triangles, with 384 tangent
+fallback triangles. Against the same filmic PBR preview with the original bed,
+258,815 pixels change and mean absolute RGB difference is 2.720 on a 0–255
+scale. The replacement is a visual reconstruction, not proof of geometric
+parity with the original bed.
+
 ## Volumetric preview
 
 `--volumetric` integrates a homogeneous participating medium from the camera
@@ -269,6 +293,8 @@ Add `--offline-shadow-casters` as well to opt into offline candidates.
 Add `--candle-flames build/assets/godot/remaster/garrett_home/highpoly/generated/candlestick_high.glb`
 to include the generated flame geometry. This requires the existing Godot
 replacement asset and shadows; its packet and manifest remain under `build/`.
+Add `--bed-high build/assets/godot/remaster/garrett_home/highpoly/generated/bed_high.glb`
+to use the generated high-poly bed instead of the original bed sections.
 
 Run `t3render_scene_pbr_d3d12 <packet> --output <new.ppm> [--indirect] [--gtao] [--volumetric] [--reflections] [--filmic]` in a D3D12
 environment. The packet, manifest and PPM use exclusive creation. See the
@@ -345,3 +371,8 @@ without shadow maps was also rendered with the option enabled.
 with the corresponding base image. Local GPU checks observed a colored
 reflection, reduced response at intermediate roughness, and no response for
 a fully rough or oppositely oriented receiver.
+
+`test_scene_pbr_bed.py` covers semantic selection, observed and mirrored
+transforms, material bindings, source bounds, shadow flags and restoring the
+original packet. The offline-caster tests also check that all original bed
+sections are excluded when the generated replacement is active.

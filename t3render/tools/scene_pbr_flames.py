@@ -15,23 +15,24 @@ MAX_FLAME_INSTANCES = 16
 MAX_FLAME_TRIANGLES = 10000
 
 
-def read_geometry(raw):
+def read_geometry(raw, material_name="CandleFlame", include_uv=False, max_vertices=MAX_VERTICES, max_indices=MAX_INDICES):
+    """Read a named, bounded triangle primitive from a generated local GLB."""
     if not isinstance(raw, bytes) or len(raw) > MAX_GLB_BYTES or len(raw) < 28:
-        raise ValueError("invalid or oversized candle GLB")
+        raise ValueError("invalid or oversized generated GLB")
     magic, version, size = struct.unpack_from("<4sII", raw)
     if (magic, version, size) != (b"glTF", 2, len(raw)):
-        raise ValueError("invalid candle GLB header")
+        raise ValueError("invalid generated GLB header")
     json_size, json_type = struct.unpack_from("<II", raw, 12)
     offset = 20 + json_size
     if json_type != 0x4e4f534a or json_size % 4 or offset + 8 > len(raw):
-        raise ValueError("invalid candle GLB JSON chunk")
+        raise ValueError("invalid generated GLB JSON chunk")
     bin_size, bin_type = struct.unpack_from("<II", raw, offset)
     if bin_type != 0x004e4942 or bin_size % 4 or offset + 8 + bin_size != len(raw):
-        raise ValueError("invalid candle GLB binary chunk")
+        raise ValueError("invalid generated GLB binary chunk")
     data = json.loads(raw[20:offset], object_pairs_hook=preview._pairs, parse_constant=preview._invalid_number)
     blob = raw[offset+8:]
     if not isinstance(data, dict):
-        raise ValueError("invalid candle GLB JSON")
+        raise ValueError("invalid generated GLB JSON")
     asset, buffers = data.get("asset"), data.get("buffers")
     nodes, meshes, scenes = data.get("nodes"), data.get("meshes"), data.get("scenes")
     if (not isinstance(asset, dict) or asset.get("version") != "2.0" or
@@ -41,47 +42,47 @@ def read_geometry(raw):
             not 0 <= len(blob)-buffers[0]["byteLength"] <= 3 or
             not isinstance(nodes, list) or len(nodes) != 1 or not isinstance(meshes, list) or len(meshes) != 1 or
             not isinstance(meshes[0], dict)):
-        raise ValueError("unsupported candle GLB structure")
+        raise ValueError("unsupported generated GLB structure")
     node = nodes[0]
     if not isinstance(node, dict) or type(node.get("mesh")) is not int or node["mesh"] != 0 or set(node) - {"name", "mesh"}:
-        raise ValueError("candle GLB must have one untransformed mesh node")
+        raise ValueError("generated GLB must have one untransformed mesh node")
     if (type(data.get("scene")) is not int or data["scene"] != 0 or not isinstance(scenes, list) or
             len(scenes) != 1 or not isinstance(scenes[0], dict) or scenes[0].get("nodes") != [0]):
-        raise ValueError("candle GLB scene must contain exactly the mesh node")
+        raise ValueError("generated GLB scene must contain exactly the mesh node")
     materials = data.get("materials", [])
     if not isinstance(materials, list):
-        raise ValueError("invalid candle GLB materials")
-    matches = [i for i, material in enumerate(materials) if isinstance(material, dict) and material.get("name") == "CandleFlame"]
+        raise ValueError("invalid generated GLB materials")
+    matches = [i for i, material in enumerate(materials) if isinstance(material, dict) and material.get("name") == material_name]
     if len(matches) != 1:
-        raise ValueError("candle GLB needs one CandleFlame material")
+        raise ValueError(f"generated GLB needs one {material_name} material")
     primitives = meshes[0].get("primitives", [])
     if not isinstance(primitives, list):
-        raise ValueError("invalid candle GLB primitives")
+        raise ValueError("invalid generated GLB primitives")
     matches = [item for item in primitives if isinstance(item, dict) and
                type(item.get("material")) is int and item["material"] == matches[0]]
     if len(matches) != 1 or matches[0].get("mode", 4) != 4 or matches[0].get("targets") or matches[0].get("extensions"):
-        raise ValueError("candle GLB needs one triangle flame primitive")
+        raise ValueError("generated GLB needs one triangle primitive for each requested material")
     primitive = matches[0]
 
     def accessor(index, shape, components, limit):
         accessors, views = data.get("accessors", []), data.get("bufferViews", [])
         if not isinstance(accessors, list) or not isinstance(views, list) or type(index) is not int or not 0 <= index < len(accessors):
-            raise ValueError("invalid candle accessor")
+            raise ValueError("invalid generated GLB accessor")
         item = accessors[index]
         if (not isinstance(item, dict) or item.get("type") != shape or item.get("componentType") not in components or
                 item.get("normalized", False) is not False or item.get("sparse") is not None or
                 item.get("extensions") is not None or
                 type(item.get("count")) is not int or not 1 <= item["count"] <= limit):
-            raise ValueError("unsupported candle accessor")
+            raise ValueError("unsupported generated GLB accessor")
         view_index = item.get("bufferView")
         if type(view_index) is not int or not 0 <= view_index < len(views):
-            raise ValueError("invalid candle buffer view")
+            raise ValueError("invalid generated GLB buffer view")
         view = views[view_index]
         if not isinstance(view, dict) or view.get("extensions") is not None:
-            raise ValueError("unsupported candle buffer view")
+            raise ValueError("unsupported generated GLB buffer view")
         component = item["componentType"]
         fmt = {5123: "H", 5125: "I", 5126: "f"}[component]
-        width = 3 if shape == "VEC3" else 1
+        width = {"VEC3": 3, "VEC2": 2, "SCALAR": 1}[shape]
         element = struct.calcsize("<" + fmt * width)
         start, length, inner = view.get("byteOffset", 0), view.get("byteLength"), item.get("byteOffset", 0)
         stride = view.get("byteStride", element)
@@ -92,20 +93,22 @@ def read_geometry(raw):
                 (start+inner) % component_size or stride % component_size or
                 start + length > data["buffers"][0]["byteLength"] or
                 inner + (item["count"]-1)*stride + element > length):
-            raise ValueError("candle accessor exceeds buffer bounds")
+            raise ValueError("generated GLB accessor exceeds buffer bounds")
         return [struct.unpack_from("<" + fmt * width, blob, start+inner+i*stride) for i in range(item["count"])]
 
     attrs = primitive.get("attributes", {})
-    if not isinstance(attrs, dict):
-        raise ValueError("invalid candle primitive attributes")
-    positions = accessor(attrs.get("POSITION"), "VEC3", (5126,), MAX_VERTICES)
-    normals = accessor(attrs.get("NORMAL"), "VEC3", (5126,), MAX_VERTICES)
-    indices = [x[0] for x in accessor(primitive.get("indices"), "SCALAR", (5123, 5125), MAX_INDICES)]
+    if not isinstance(attrs, dict) or set(attrs) - {"POSITION", "NORMAL", "TEXCOORD_0"}:
+        raise ValueError("invalid generated GLB primitive attributes")
+    positions = accessor(attrs.get("POSITION"), "VEC3", (5126,), max_vertices)
+    normals = accessor(attrs.get("NORMAL"), "VEC3", (5126,), max_vertices)
+    uv = accessor(attrs.get("TEXCOORD_0"), "VEC2", (5126,), max_vertices) if include_uv else None
+    indices = [x[0] for x in accessor(primitive.get("indices"), "SCALAR", (5123, 5125), max_indices)]
     if (len(positions) != len(normals) or len(indices) % 3 or any(x >= len(positions) for x in indices) or
             any(not math.isfinite(x) or abs(x) > 10 for point in positions for x in point) or
-            any(not all(math.isfinite(x) for x in n) or not .98 <= sum(x*x for x in n) <= 1.02 for n in normals)):
-        raise ValueError("invalid candle flame geometry")
-    return positions, normals, indices
+            any(not all(math.isfinite(x) for x in n) or not .98 <= sum(x*x for x in n) <= 1.02 for n in normals) or
+            (uv is not None and (len(uv) != len(positions) or any(not math.isfinite(x) or abs(x) > 10000 for item in uv for x in item)))):
+        raise ValueError("invalid generated GLB geometry")
+    return (positions, normals, uv, indices) if include_uv else (positions, normals, indices)
 
 
 def select(scene, lights, actors, glb, emission, render_pass, stage):

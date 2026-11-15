@@ -122,6 +122,15 @@ class OfflineCasterSelectionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "exceeds bounds"):
                 select(scene, lights, offline, raw, actors)
 
+    def test_generated_bed_excludes_the_entire_original_offline_caster(self):
+        scene, lights, _, offline, raw, actors = fixture()
+        anchor = scene.mesh_instances[0].id
+        casters, stats = candidates.select(scene, offline, raw, actors, Resolver().resolve,
+                                           [{"position": lights.lights[0].position}], pbr.shadow_parameters(SHADOW),
+                                           [{"lamp"}], 4, 1, replaced_instances={anchor})
+        self.assertFalse(any(item["target_id"] == anchor for item in casters))
+        self.assertEqual(stats["counts"]["replaced_by_generated_mesh"], 3)
+
 
 class OfflineCasterPacketTests(unittest.TestCase):
     setUpClass = classmethod(packet_tests.PbrPacketTests.setUpClass.__func__)

@@ -17,7 +17,8 @@ MAX_CASTERS = 8192
 MAX_TRIANGLES = 100000
 
 
-def select(scene, offline, offline_raw, actors, resolve_diffuse, lights, shadow, owners, render_pass, stage):
+def select(scene, offline, offline_raw, actors, resolve_diffuse, lights, shadow, owners, render_pass, stage,
+           replaced_instances=()):
     if (not isinstance(offline_raw, bytes) or
             hashlib.sha256(offline_raw).hexdigest() != scene.source.fingerprints.get("offline_scene") or
             SceneSnapshot.from_json(offline_raw) != offline or
@@ -110,6 +111,9 @@ def select(scene, offline, offline_raw, actors, resolve_diffuse, lights, shadow,
             raise ValueError("offline BSP caster differs from the scoped block")
         add_sections("bsp_block", block.id, block.geometry, preview.IDENTITY, (), "offline_bsp")
     for instance in offline.mesh_instances:
+        if instance.id in replaced_instances:
+            counts["replaced_by_generated_mesh"] += len(offline_meshes[instance.resource_id].geometry.sections)
+            continue
         name = instance.id.rsplit(":", 1)[-1]
         actor = actors.get(name)
         if not isinstance(actor, dict) or actor.get("base") != "StaticMeshActor":

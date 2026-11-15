@@ -71,6 +71,9 @@ class GpuHistoryParserTests(unittest.TestCase):
         current = bytearray(previous)
         struct.pack_into("<f", current, 20, .5)
         self.assertEqual(self.parse(previous, bytes(current), history).returncode, 2)
+        current = bytearray(previous)
+        current[240] ^= 1  # First texture byte changes while all geometry remains valid.
+        self.assertEqual(self.parse(previous, bytes(current), history).returncode, 2)
 
     def test_rejects_bad_digest_metadata_and_nonfinite_pixels(self):
         packet = packet_tests.gpu_fixture.fixture()

@@ -76,7 +76,8 @@ class FlameGeometryTests(unittest.TestCase):
                    lambda d: d["accessors"][1].update(componentType=5123),
                    lambda d: d.update(asset=[]), lambda d: d.update(scenes=[None]),
                    lambda d: d["bufferViews"][0].update(byteStride=13),
-                   lambda d: d["meshes"][0]["primitives"][0].update(attributes=[]))
+                   lambda d: d["meshes"][0]["primitives"][0].update(attributes=[]),
+                   lambda d: d["meshes"][0]["primitives"][0]["attributes"].update(JOINTS_0=0))
         for change in changes:
             with self.subTest(change=change), self.assertRaises(ValueError):
                 flames.read_geometry(glb(change))

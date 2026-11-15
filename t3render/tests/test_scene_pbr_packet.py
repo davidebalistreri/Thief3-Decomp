@@ -15,6 +15,7 @@ sys.path.insert(0, str(HERE.parent / "tools"))
 import scene_pbr_packet as pbr
 import scene_pbr_fixture as gpu_fixture
 import scene_pbr_shadow_fixture as shadow_fixture
+import scene_pbr_indirect_fixture as indirect_fixture
 from scene_ir import VisualLight
 from test_scene_material_overrides import FakeRemaster, scene_fixture
 from test_scene_textured_packet import Resolver
@@ -331,6 +332,24 @@ class PbrPacketTests(unittest.TestCase):
         set_pixel(two, 32, 32, (24, 24, 24))
         with self.assertRaisesRegex(ValueError, "light-specific"):
             shadow_fixture.verify(base, two, two_lights=True)
+
+    def test_indirect_gpu_fixture_checks_colored_bounce_orientation_and_occlusion(self):
+        for kind in indirect_fixture.KINDS:
+            self.assertEqual(self.parse(indirect_fixture.fixture(kind)).returncode, 0)
+        header = b"P6\n64 64\n255\n"
+        base = bytearray(header+bytes(64*64*3))
+        source = len(header)+(32*64+16)*3
+        base[source:source+3] = bytes((100, 10, 5))
+        bounce = bytearray(base)
+        receiver = len(header)+(32*64+35)*3
+        bounce[receiver:receiver+3] = bytes((40, 1, 0))
+        indirect_fixture.verify(base, bounce, "facing")
+        indirect_fixture.verify(base, base, "flat")
+        indirect_fixture.verify(base, base, "blocker")
+        indirect_fixture.verify(base, base, "unlit")
+        for kind, image in (("facing", base), ("flat", bounce), ("blocker", bounce), ("unlit", bounce)):
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                indirect_fixture.verify(base, image, kind)
 
 
 if __name__ == "__main__":

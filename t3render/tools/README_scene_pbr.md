@@ -32,11 +32,35 @@ Reinhard and sRGB display pass. The PPM is an SDR preview of the HDR buffer.
 
 This is a first PBR preview, not a physically calibrated lighting solution:
 source strengths, color and exposure are artistic; the SDK metre scale and
-tangent basis are assumptions. Metallic materials, GI, emissive
+tangent basis are assumptions. Metallic materials, emissive
 lighting, volumetrics, reflections and temporal effects are absent. The
 render is a partial runtime-selected scene, and offline asset bindings for
 some actors remain candidates. Height maps are not used. The legacy renderer
 and its benchmark remain independent.
+
+## Screen-space diffuse bounce
+
+The optional renderer flag `--indirect` adds one approximate diffuse bounce
+before exposure and tonemapping. The geometry pass records camera-relative
+positions, geometric normals, albedo and directly lit diffuse radiance in
+half-float buffers. The display pass gathers 24 nearby visible samples,
+weights their colors by estimated surface area, distance and both surface
+orientations, and rejects sampled foreground blockers. It does not feed the
+constant ambient term, specular highlights or emission back into the bounce.
+
+This is a bounded screen-space approximation, not complete GI: the gather
+uses at most 64 pixels and 3 metres, only the first visible layer, and two
+blocker checks. Hidden and off-screen surfaces, multiple bounces, temporal
+history and moving objects are unavailable. Thin or unsampled blockers can
+leak light, and finite sampling can produce noise or flicker. Surface area,
+the Fresnel-weighted source diffuse and unit scale are approximations; light
+and exposure remain artistic preview inputs. The effect is off by default.
+
+On the frame-1001 shadow preview it changes 65,004 pixels, with mean absolute
+RGB difference 0.066 on a 0–255 scale and a maximum channel increase of 80.
+This is a subtle, incomplete local bounce rather than a claim of visual parity
+or a calibrated GI solution. With the flag omitted, the same frame was
+byte-identical to the previous version.
 
 ## Point-light shadow maps
 
@@ -148,7 +172,7 @@ To build the shadowed alternative, append `--shadows` and choose a different
 output path; all other arguments and the calibration stay the same.
 Add `--offline-shadow-casters` as well to opt into offline candidates.
 
-Run `t3render_scene_pbr_d3d12 <packet> --output <new.ppm>` in a D3D12
+Run `t3render_scene_pbr_d3d12 <packet> --output <new.ppm> [--indirect]` in a D3D12
 environment. The packet, manifest and PPM use exclusive creation. See the
 [Highball setup](README_synthetic_replay.md#repeat-on-highball); TDS does not
 need to be running.
@@ -186,3 +210,10 @@ range fallback and an off-axis receiver self-shadow case.
 add `--baseline` to omit that blocker while keeping the visible geometry
 identical. The local GPU test passed with the blocker shadowing the receiver
 and leaving an unoccluded sample unchanged.
+
+`scene_pbr_indirect_fixture.py create <new.bin> --kind <kind>` produces a
+synthetic receiver and source. Render each packet both with and without
+`--indirect`, then run `scene_pbr_indirect_fixture.py verify <indirect.ppm>
+--reference <base.ppm> --kind <kind>`. The local GPU checks passed for
+`facing`, `flat`, `blocker` and `unlit`: colored transfer, source orientation,
+an intervening blocker and absence of feedback from ambient-only light.

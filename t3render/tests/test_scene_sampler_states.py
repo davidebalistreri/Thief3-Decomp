@@ -1,5 +1,8 @@
+import argparse
+import contextlib
 import copy
 import hashlib
+import io
 import json
 from pathlib import Path
 import shutil
@@ -43,6 +46,61 @@ def stage(texture=True):
 
 
 class SamplerObservationTests(unittest.TestCase):
+    def test_sampler_scope_requires_one_valid_stage_pair(self):
+        self.assertEqual(packet.parse_sampler_scope("4:0"), (4, 0))
+        for value in ("-1:0", "4:-1", "4:8", "1", "1:2:3", "4294967296:0", " 4:0", "٤:0"):
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                packet.parse_sampler_scope(value)
+
+    def test_cli_rejects_missing_duplicate_or_conflicting_sampler_scopes(self):
+        offline, records = fixture()
+        scene, _ = scoped.build(offline, records, 3, 4, 1, 4, "b" * 64, "c" * 64)
+        with tempfile.TemporaryDirectory(prefix="t3render-sampler-cli-") as directory:
+            root = Path(directory)
+            scene_path, offline_path, output = root / "scene.json", root / "offline.json", root / "packet.bin"
+            scene_path.write_text(scene.to_json())
+            offline_path.write_text(offline.to_json())
+            base = [str(scene_path), "--output", str(output)]
+            trace = ["--state-trace", str(root / "trace.jsonl"), "--offline-scene", str(offline_path)]
+            cases = [(["--sampler-scope", "1:2"], "require a state trace"),
+                     (trace + ["--sampler-scope", "1:2", "--sampler-scope", "1:0"], "must be unique"),
+                     (trace + ["--sampler-scope", "1:2", "--sampler-candidate-stage", "2"], "exclude the global"),
+                     (trace + ["--sampler-scope", "9:0"], "must identify a selected scene")]
+            for args, expected in cases:
+                error = io.StringIO()
+                with self.subTest(args=args), contextlib.redirect_stderr(error):
+                    self.assertEqual(packet.main(base + args), 1)
+                    self.assertIn(expected, error.getvalue())
+                    self.assertFalse(output.exists())
+
+    def test_scoped_sampler_defaults_only_unselected_draws(self):
+        offline, records = fixture()
+        base, _ = scoped.build(offline, records, 3, 4, 1, 4, "b" * 64, "c" * 64)
+        data = base.to_dict()
+        for submission in data["submissions"]:
+            submission.update(stage=3, draw_id=submission["draw_id"] + 100)
+        other = packet.SceneSnapshot.from_dict(data)
+        states = {s.draw_id: dict(legacy.DEFAULT) for s in (*base.submissions, *other.submissions)}
+        candidate = legacy.sampler_candidate({"stages": [stage()]}, 2)
+        candidates = {s.draw_id: {"status": "not_selected"} for s in base.submissions}
+        candidates.update({s.draw_id: candidate for s in other.submissions})
+        class DxtResolver(Resolver):
+            def resolve(self, name):
+                return dict(super().resolve(name), format="DXT1")
+        _, info = packet.create_packet(base, DxtResolver(), draw_states=states, sampler_candidates=candidates,
+                                       additional_scenes=[other])
+        self.assertEqual([d["sampler"]["status"] for d in info["draws"]],
+                         ["preview_default"] * 4 + ["metadata_match_not_identity"] * 4)
+        self.assertEqual([d["sampler"]["mip_lod_bias"] for d in info["draws"]], [0] * 4 + [-1] * 4)
+        candidates[other.submissions[0].draw_id] = None
+        with self.assertRaisesRegex(ValueError, "invalid sampler"):
+            packet.create_packet(base, DxtResolver(), draw_states=states, sampler_candidates=candidates,
+                                 additional_scenes=[other])
+        del candidates[other.submissions[0].draw_id]
+        with self.assertRaisesRegex(ValueError, "sampler candidate missing"):
+            packet.create_packet(base, DxtResolver(), draw_states=states, sampler_candidates=candidates,
+                                 additional_scenes=[other])
+
     def test_sampler_candidate_is_metadata_only_and_distinguishes_unavailable(self):
         observed = legacy.sampler_candidate({"stages": [stage()]}, 2)
         self.assertEqual(observed["lod_bias"], -1)

@@ -250,6 +250,28 @@ identical v3 packets and renderer, this changes 638,471 of 786,432 pixels, with
 mean absolute channel difference 4.10/255. This A/B measurement is not a D3D8
 parity claim; lighting and shader behavior remain missing.
 
+For a composed preview, the repeatable `--sampler-scope
+SUBMISSION_STAGE:TEXTURE_STAGE` selects a sampler separately for each chosen
+submission stage. Unselected stages retain the labeled bias-0 preview default;
+missing scenes, duplicate submission stages and combinations with the global
+sampler option are rejected. The metadata and sampler checks above still apply.
+
+In the frame-1001 four-stage fog preview, `--sampler-scope 4:0` finds a
+metadata-compatible texture and bias -1 for all 51 stage-4 draws. The resulting
+DX12 image differs from the bias-0 preview at 352,161 pixels; mean absolute RGB
+error against the synchronized screenshot changes from `(7.491, 5.977, 4.358)`
+to `(7.483, 5.965, 4.341)` on a 0–255 scale. This small whole-image change
+does not imply parity: the wall region is slightly worse, texture identity and
+UV routing remain hypotheses, and missing geometry, lights and HUD affect the
+comparison. The sampled stage is not automatically selected for other passes.
+
+With the same four-stage packet and `--direct-preview-gain 2`, the whole-image
+error becomes `(6.251, 5.187, 4.465)`. For the wall rectangle `(600,160)` to
+`(800,320)`, it changes from `(11.810, 7.541, 1.642)` to `(7.739, 6.289,
+7.309)`: red and green improve while blue becomes worse. This is a sensitivity
+experiment, not a calibrated runtime intensity or justification to change the
+default gain.
+
 ## Reproduce
 
 Build with an existing Windows x86 CMake toolchain:

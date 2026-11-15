@@ -164,6 +164,17 @@ def match_sampler(candidate, texture):
     return {"status": "metadata_match_not_identity", "stage": candidate["stage"], "mip_lod_bias": bias}
 
 
+def parse_sampler_scope(value):
+    """Select one texture sampler for a particular submission stage."""
+    parts = value.split(":")
+    if len(parts) != 2 or any(not part.isascii() or not part.isdecimal() for part in parts):
+        raise argparse.ArgumentTypeError("expected submission-stage:texture-stage")
+    submission_stage, texture_stage = map(int, parts)
+    if submission_stage > 0xffffffff or texture_stage >= 8:
+        raise argparse.ArgumentTypeError("submission stage or texture stage is out of range")
+    return submission_stage, texture_stage
+
+
 def select_scope(scene, render_pass=None, stage=None):
     if scene.version != 1 or scene.source.kind != "runtime" or scene.source.camera_synchronized is not True:
         raise ValueError("textured preview requires a synchronized scoped runtime SceneIR v1")
@@ -321,8 +332,9 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             raise ValueError("fog candidates require source-alpha blending with depth testing and no depth writes")
         if sampler_candidates is not None and submission.draw_id not in sampler_candidates:
             raise ValueError("sampler candidate missing for submitted draw")
-        sampler = (match_sampler(sampler_candidates[submission.draw_id], tex) if sampler_candidates is not None else
-                   {"status": "preview_default", "stage": None, "mip_lod_bias": 0.0})
+        candidate = sampler_candidates[submission.draw_id] if sampler_candidates is not None else {"status": "not_selected"}
+        sampler = ({"status": "preview_default", "stage": None, "mip_lod_bias": 0.0}
+                   if candidate == {"status": "not_selected"} else match_sampler(candidate, tex))
         color = ambient_candidates.get(submission.draw_id) if ambient_candidates is not None else None
         if ambient_candidates is not None and submission.draw_id in ambient_candidates and (
                 not isinstance(color, (tuple, list)) or len(color) != 4 or any(
@@ -465,6 +477,9 @@ def main(argv=None):
     parser.add_argument("--offline-scene", type=Path, help="original fixture used to revalidate scoped state")
     parser.add_argument("--sampler-candidate-stage", type=int,
                         help="hypothesize a metadata-compatible texture stage; requires --state-trace")
+    parser.add_argument("--sampler-scope", type=parse_sampler_scope, action="append", default=[],
+                        metavar="SUBMISSION_STAGE:TEXTURE_STAGE",
+                        help="hypothesize a texture sampler only for this submission stage; repeatable")
     parser.add_argument("--ambient-candidate-stage", type=int,
                         help="use a pre-Reset ambient shader hypothesis for this submission stage")
     parser.add_argument("--direct-candidate-stage", type=int,
@@ -490,6 +505,11 @@ def main(argv=None):
             raise ValueError("composed previews require a state trace and offline scene")
         if args.sampler_candidate_stage is not None and (args.state_trace is None or not 0 <= args.sampler_candidate_stage < 8):
             raise ValueError("sampler candidate requires a state trace and stage 0..7")
+        if args.sampler_scope and (args.state_trace is None or args.sampler_candidate_stage is not None):
+            raise ValueError("sampler scopes require a state trace and exclude the global sampler candidate")
+        sampler_scopes = dict(args.sampler_scope)
+        if len(sampler_scopes) != len(args.sampler_scope):
+            raise ValueError("sampler submission stages must be unique")
         if args.ambient_candidate_stage is not None and (args.state_trace is None or args.ambient_candidate_stage < 0):
             raise ValueError("ambient candidate requires a state trace and a nonnegative stage")
         needs_actors = args.direct_candidate_stage is not None or args.fog_candidate_stage is not None
@@ -503,19 +523,25 @@ def main(argv=None):
         if args.spot_projector_candidate is not None and not args.spot_candidates:
             raise ValueError("projector texture candidate requires spotlight candidates")
         states = None
-        samplers = {} if args.sampler_candidate_stage is not None else None
+        samplers = {} if args.sampler_candidate_stage is not None or sampler_scopes else None
         if args.state_trace is not None:
             selected_pass, selected_stage = select_scope(scene, args.render_pass, args.stage)
             offline_bytes = preview.read_limited(args.offline_scene, preview.MAX_INPUT)
             offline = SceneSnapshot.from_json(offline_bytes)
             states = {}
-            for current, scope in [(scene, (selected_pass, selected_stage))] + [
-                    (other, select_scope(other)) for other in extra_scenes]:
+            scoped_scenes = [(scene, (selected_pass, selected_stage))] + [
+                    (other, select_scope(other)) for other in extra_scenes]
+            if sampler_scopes and not set(sampler_scopes) <= {scope[1] for _, scope in scoped_scenes}:
+                raise ValueError("sampler submission stage must identify a selected scene")
+            for current, scope in scoped_scenes:
+                sampler_stage = args.sampler_candidate_stage if not sampler_scopes else sampler_scopes.get(scope[1])
                 current_states = legacy_states.from_trace(current, offline, offline_bytes, args.state_trace, *scope,
-                                                          sampler_stage=args.sampler_candidate_stage, samplers=samplers)
+                                                          sampler_stage=sampler_stage, samplers=samplers)
                 if states.keys() & current_states.keys():
                     raise ValueError("composed scenes contain duplicate draw IDs")
                 states.update(current_states)
+                if samplers is not None and sampler_stage is None:
+                    samplers.update({draw_id: {"status": "not_selected"} for draw_id in current_states})
             if extra_scenes:
                 legacy_states.validate_composition_interval(scene, args.state_trace, states)
         game = game_dir(args.game_dir)

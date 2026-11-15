@@ -34,3 +34,12 @@ colors use `t3map.py`'s approximate conversion; uncalibrated radius and
 intensity are null. BF marks legacy hidden geometry; v0 does not encode its
 visibility, so consumers must handle it explicitly. No remaster materials or
 runtime state are inferred.
+
+For an actor with a static mesh, the light position is the unique
+`hp_lighttarget` plus `LightHardpointOffset`, rotated and translated without
+applying `DrawScale`, as documented in `docs/assets.md`. A missing, ambiguous or
+invalid hardpoint/rotation leaves the light's position null and is recorded in
+limitations. An unattached light without a mesh uses its actor position only
+when no nonzero hardpoint offset is present. Older fixtures used the mesh actor
+origin instead; regenerate them to obtain corrected light positions. This is an
+offline asset calculation, not observation of a saved runtime state.

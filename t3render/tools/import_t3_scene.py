@@ -61,6 +61,37 @@ def actor_transform(actor):
             *location, 1]
 
 
+def light_position(actor, mesh):
+    """Resolve a light in native T3 coordinates; never apply actor DrawScale to its hardpoint."""
+    location = actor.get("location")
+    light = actor.get("light")
+    if not _vector(location, 3) or not isinstance(light, dict):
+        return None
+    offset = light.get("hardpoint_offset")
+    if offset is None:
+        offset = (0, 0, 0)
+    if not _vector(offset, 3):
+        return None
+    if not actor.get("mesh"):
+        return list(location) if not any(offset) else None
+    if mesh is None:
+        return None
+    hardpoints = getattr(mesh, "hardpoints", None)
+    if not isinstance(hardpoints, (list, tuple)):
+        return None
+    matches = [hp for hp in hardpoints if isinstance(getattr(hp, "name", None), str)
+               and hp.name.lower() == "hp_lighttarget"]
+    rotation = actor.get("rotation")
+    if (len(matches) != 1 or not _vector(getattr(matches[0], "position", None), 3) or
+            not isinstance(rotation, (list, tuple)) or len(rotation) != 3 or
+            any(type(angle) is not int for angle in rotation)):
+        return None
+    local = [matches[0].position[i] + offset[i] for i in range(3)]
+    matrix = rotator_matrix(*rotation)
+    position = [location[j] + sum(local[i] * matrix[i][j] for i in range(3)) for j in range(3)]
+    return position if all(_valid_number(x) for x in position) else None
+
+
 def geometry(render, material_ids):
     if len(material_ids) != len(render.sections):
         raise ValueError("section material count does not match geometry")
@@ -109,6 +140,7 @@ def make_scene(export, blocks, bundles, fingerprints):
         "Material names and skins are offline references; runtime material bindings are not established.",
         "BF is a legacy hidden material; its visibility is not encoded in SceneIR v0.",
         "Light colors are the approximate t3map conversion; radius and intensity are not physically calibrated.",
+        "Mesh-actor light positions use the offline hp_lighttarget and offset, rotated without DrawScale; unresolved positions are null.",
         "The SDK scale of 0.01905 meters per T3 unit is inferred from 16 units per foot in a 4x8 asset; it is not runtime calibrated.",
     ]
     scene = {
@@ -160,6 +192,7 @@ def make_scene(export, blocks, bundles, fingerprints):
         name = actor["name"]
         mesh_name = actor.get("mesh")
         attached = bool(actor.get("attached_to"))
+        resolved = None
         if isinstance(mesh_name, str) and mesh_name:
             if attached:
                 limitations.append(f"Mesh actor omitted (unresolved attachment): {name} -> {actor['attached_to']}")
@@ -194,14 +227,15 @@ def make_scene(export, blocks, bundles, fingerprints):
             if attached:
                 limitations.append(f"Light omitted (unresolved attachment): {name} -> {actor['attached_to']}")
                 counts["attached_lights"] += 1
-            elif not _vector(actor.get("location"), 3):
-                limitations.append(f"Light omitted (invalid position): {name}")
-                counts["invalid_lights"] += 1
             else:
                 color = light.get("color") if _vector(light.get("color"), 3) else None
                 enabled = light.get("on") if type(light.get("on")) is bool else None
                 kind = light.get("kind") if isinstance(light.get("kind"), str) and light.get("kind") else None
-                scene["lights"].append({"id": f"light:{prefix}:{name}", "kind": kind, "position": actor["location"],
+                position = light_position(actor, resolved[0] if resolved else None)
+                if position is None:
+                    limitations.append(f"Light position unresolved (location, offset or mesh hardpoint): {name}")
+                    counts["unresolved_light_positions"] += 1
+                scene["lights"].append({"id": f"light:{prefix}:{name}", "kind": kind, "position": position,
                                         "color": color, "radius": None, "intensity": None, "enabled": enabled})
 
     for index, block in enumerate(blocks):

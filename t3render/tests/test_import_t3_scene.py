@@ -35,7 +35,7 @@ def mesh():
         indices=[0, 1, 2, 1, 3, 2],
         sections=[section("First", 0, 3), section("Second", 3, 3)],
     )
-    return types.SimpleNamespace(name="Bed", render=data, skins=[
+    return types.SimpleNamespace(name="Bed", render=data, hardpoints=[], skins=[
         types.SimpleNamespace(name="Default", materials=["A", "B"]),
         types.SimpleNamespace(name="Alternate", materials=["C", "D"]),
     ])
@@ -89,6 +89,30 @@ class OfflineImporterTest(unittest.TestCase):
         self.assertFalse(doc["lights"][0]["enabled"])
         self.assertIsNone(doc["lights"][0]["radius"])
         self.assertIsNone(doc["lights"][0]["intensity"])
+        self.assertIsNone(doc["lights"][0]["position"])
+        self.assertEqual(counts["unresolved_light_positions"], 1)
+
+    def test_light_hardpoint_rotates_without_draw_scale(self):
+        model = mesh()
+        model.hardpoints = [types.SimpleNamespace(name="HP_LightTarget", position=(0, 2, 3))]
+        item = actor("lamp", rotation=[0, 16384, 0], draw_scale=5,
+                     light={"kind": "omni", "hardpoint_offset": [1, 0, 0], "color": [1, .5, .2], "on": True})
+        position = importer.light_position(item, model)
+        for actual, expected in zip(position, (8, 21, 33)):
+            self.assertTrue(math.isclose(actual, expected, abs_tol=1e-9))
+        model.hardpoints.append(types.SimpleNamespace(name="hp_lighttarget", position=(0, 0, 0)))
+        self.assertIsNone(importer.light_position(item, model))
+        model.hardpoints.pop()
+        item["rotation"] = [0, .5, 0]
+        self.assertIsNone(importer.light_position(item, model))
+
+    def test_standalone_lights_and_unresolved_meshes_are_not_conflated(self):
+        standalone = actor("light", mesh=None, light={"kind": "omni"})
+        self.assertEqual(importer.light_position(standalone, None), [10, 20, 30])
+        standalone["light"]["hardpoint_offset"] = [1, 0, 0]
+        self.assertIsNone(importer.light_position(standalone, None))
+        with_mesh = actor("light", light={"kind": "omni"})
+        self.assertIsNone(importer.light_position(with_mesh, None))
 
     def test_transform_uses_t3_units_row_vectors_and_rotation(self):
         doc, _ = self.make()

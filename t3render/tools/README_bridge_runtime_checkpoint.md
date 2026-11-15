@@ -1,5 +1,39 @@
 # Runtime bridge checkpoint: frame 2722
 
+## Light position candidates: frame 1001
+
+The offline importer now places mesh-actor lights at `hp_lighttarget` plus
+offset, rotated without `DrawScale`. Against a regenerated fixture, stage-3
+bed draws yield four unique positional candidates: `Light__15` (draws 78/79),
+`D_384__13` (115/116), `D_384__5` (134/135) and `D_384__0` (180/181).
+For each pair, sampled vertex constant register 20 agrees with an offline light
+position within 0.01 T3 units; the largest observed distance is 0.00195 units.
+The pre-Reset shader program hypotheses also exactly match uniquely named omni
+or spot vertex resources in the fingerprinted kernel bundle. Register 21's
+coefficient is recorded without claiming its meaning or calibration.
+
+These are **candidates**, not observed runtime light objects: program identities
+are pre-Reset hypotheses, constants are not GPU readback, the match uses offline
+positions, and no live light color, enabled state or radius was sampled. The
+result is not inserted into the runtime SceneIR light list. It narrows a future
+semantic light verification without reopening general renderer research.
+
+With a newly regenerated offline fixture and a stage-3 scoped snapshot:
+
+```sh
+python3 -B t3render/tools/correlate_runtime_light_candidates.py \
+  build/t3render-captures/scene-bridge-submission-20261115-001/bedroom.jsonl \
+  --scene build/t3render-offline/bedroom-runtime-1001-lightstage.scene.json \
+  --offline-scene build/t3render-offline/SouthQuarter1_int1.lights.scene.json \
+  --kernel "$T3_GAME_DIR/Content/T3/Maps/Kernel_GFXALL.ibt" \
+  --pass 0 --stage 3 \
+  --output build/t3render-offline/bedroom-runtime-1001-light-candidates.json
+```
+
+The tool revalidates the snapshot and trace, checks frame-wide observation
+budgets, and rejects ambiguous positions and duplicate shader matches. Output
+stays local and contains no process addresses or shader bytes.
+
 ## Scoped SceneIR v1: frame 1001
 
 The bridge v0 contract is frozen at the verified per-section `+0x24`

@@ -266,6 +266,9 @@ environment. The packet, manifest and PPM use exclusive creation. See the
 [Highball setup](README_synthetic_replay.md#repeat-on-highball); TDS does not
 need to be running.
 
+For the separate static-camera temporal prototype and its GPU buffer export,
+see [offline temporal accumulation](README_scene_temporal.md).
+
 ## Verification
 
 `python3 -B -m unittest discover -s t3render/tests -p test_scene_pbr_packet.py`

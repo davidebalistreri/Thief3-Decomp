@@ -34,6 +34,38 @@ it is unlit and does not establish parity. The packet exporter revalidates the
 expanded snapshot before attaching captured draw states. The generated scene,
 sidecar, packet and images remain local under `build/`.
 
+### Quantized rotator candidates
+
+`--allow-quantized-rotators` is a separate opt-in for scoped actors whose
+offline and runtime matrices differ only under a two-bit rotator truncation
+hypothesis. It requires `--include-asset-candidates`: the offline matrix must
+match the observed owner location and unquantized owner rotation, while the
+runtime matrix must independently match that location and the rotation with
+its low two bits cleared. Both checks use the existing 0.001 T3-unit
+translation and 0.000001 matrix tolerances. Uniform signed scale is retained;
+missing owner fields, incompatible scale or changed position fail closed.
+The serialized transform remains the observed runtime matrix. The hypothesis
+does not prove the engine's rotation implementation or the runtime mesh binding.
+
+In frame 1001 this identifies `D_548__0` (the archery target) and `D_77__7`
+(an arrow) in addition to the previous candidates. Their largest runtime versus
+quantized matrix errors are approximately `4.1e-8` and `2.1e-8`; their
+unquantized offline matrices differ by up to `8.8e-5` and `9.5e-5`. Stage
+1/3/4/6 snapshots contain 54/124/54/54 draws respectively. The training dummy
+`D_1997__0` is still omitted because its offline fixture excludes an unresolved
+self-attachment; it is not silently reconstructed here. Snapshots and manifests
+list the candidate actors and retain the offline provenance limitation.
+
+Generate the four snapshots with the existing corrected offline fixture,
+frame 1001, `--include-asset-candidates --allow-quantized-rotators`, and
+stage/anchor pairs `1/8`, `3/78`, `4/302`, `6/362`. The normal-mapped four-stage
+preview contains 286 draws and 18,672 triangles. Its 1024×768 comparison against
+the synchronized screenshot changes whole-image mean absolute RGB error from
+`(7.475, 5.966, 4.338)` to `(7.457, 5.960, 4.335)`; in rectangle
+`(115,215)`–`(196,390)` around the target it changes from `(12.191, 8.473,
+5.256)` to `(11.177, 8.139, 5.049)`. The target remains too dark and these
+metrics do not validate the offline resource or material binding.
+
 ## Light position candidates: frame 1001
 
 The offline importer now places mesh-actor lights at `hp_lighttarget` plus

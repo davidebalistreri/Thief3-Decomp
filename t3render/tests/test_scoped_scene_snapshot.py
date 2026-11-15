@@ -188,6 +188,56 @@ class ScopedSceneSnapshotTests(unittest.TestCase):
         self.assertEqual(candidate.transform, tuple(observed["transforms"]["world"][0]))
         self.assertEqual(manifest["candidate_transform_tolerances"]["translation_t3_units"], 0.001)
 
+    def test_quantized_rotator_candidate_requires_owner_transform_and_is_opt_in(self):
+        rotation = (0, -12171, 8)
+        location = (3140.000244140625, 1500., 272.)
+        def matrix(rot):
+            rows = builder.rotator_matrix(*rot)
+            return [*rows[0], 0, *rows[1], 0, *rows[2], 0, *location, 1]
+        offline = matrix(rotation)
+        runtime = matrix(tuple(value & ~3 for value in rotation))
+        entry = {"owner_location_bits": bits(location),
+                 "owner_rotation_bits": [value & 0xffffffff for value in rotation]}
+        self.assertFalse(builder.candidate_transform_matches(offline, runtime))
+        self.assertTrue(builder.quantized_rotator_matches(offline, runtime, entry))
+        negative_offline, negative_runtime = list(offline), list(runtime)
+        for index in (0, 1, 2, 4, 5, 6, 8, 9, 10):
+            negative_offline[index] *= -2
+            negative_runtime[index] *= -2
+        self.assertTrue(builder.quantized_rotator_matches(negative_offline, negative_runtime, entry))
+        for change in ("rotation", "location", "offline", "runtime", "missing"):
+            observed, old, actual = copy.deepcopy(entry), list(offline), list(runtime)
+            if change == "rotation": observed["owner_rotation_bits"][1] += 4
+            if change == "location": observed["owner_location_bits"] = bits([location[0]+1, *location[1:]])
+            if change == "offline": old[0] += .01
+            if change == "runtime": actual[5] += .01
+            if change == "missing": observed.pop("owner_rotation_bits")
+            with self.subTest(change=change):
+                self.assertFalse(builder.quantized_rotator_matches(old, actual, observed))
+
+        scene, records = candidate_fixture()
+        data = scene.to_dict()
+        data["mesh_instances"][1]["transform"] = offline
+        scene = builder.SceneSnapshot.from_dict(data)
+        observation = next(row for row in records if row["event"] == "scene_bridge_observation")
+        owner = observation["entries"][2]
+        owner.update(entry, object_matrix_bits=bits(runtime))
+        begin = next(row for row in records if row["event"] == "scene_bridge_submission_begin" and row["ticket"] == 15)
+        begin["matrix_bits"] = bits(runtime)
+        draw = next(row for row in records if row["event"] == "draw" and row["op_id"] == 6)
+        # The trace compares float32 bits, so use the same representable values.
+        draw["transforms"]["world"][0] = builder.bridge.decode_floats(bits(runtime), 16)
+        strict, _ = builder.build(scene, records, 3, 4, 1, 4, "b" * 64, "c" * 64, include_asset_candidates=True)
+        candidate, manifest = builder.build(scene, records, 3, 4, 1, 4, "b" * 64, "c" * 64,
+                                            include_asset_candidates=True, allow_quantized_rotators=True)
+        self.assertNotIn(6, [item.draw_id for item in strict.submissions])
+        self.assertIn(6, [item.draw_id for item in candidate.submissions])
+        self.assertEqual(manifest["quantized_rotator_candidates"], ["actor:StaticMeshActor__258"])
+        self.assertIn(builder.QUANTIZED_LIMITATION, candidate.source.limitations)
+        self.assertEqual(candidate.mesh_instances[1].transform, tuple(draw["transforms"]["world"][0]))
+        with self.assertRaisesRegex(ValueError, "require offline asset"):
+            builder.build(scene, records, 3, 4, 1, 4, "b" * 64, "c" * 64, allow_quantized_rotators=True)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,7 @@ import build_bridge_runtime_snapshot as builder
 import compare_bridge_fixture as comparison
 import scene_ir_to_d3d12_packet as packet
 import verify_bridge_submission as verifier
+from t3common import rotator_matrix
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ir"))
 from scene_ir import SceneSnapshot  # noqa: E402
@@ -27,6 +28,8 @@ CANDIDATE_LIMITATION = ("Additional mesh actors have scoped runtime ownership an
                         "geometry and materials are offline candidates, not observed runtime bindings.")
 TRANSLATION_TOLERANCE_T3 = 0.001
 MATRIX_TOLERANCE = 0.000001
+QUANTIZED_LIMITATION = ("Offline actor rotations may be matched to observed owner rotators after truncating "
+                        "their two least significant bits; this quantization is a candidate, not an engine guarantee.")
 
 
 def candidate_transform_matches(offline, runtime):
@@ -37,7 +40,28 @@ def candidate_transform_matches(offline, runtime):
                for index, (a, b) in enumerate(zip(offline, runtime)))
 
 
-def candidate_mesh_draws(scene, records, render_pass, stage):
+def quantized_rotator_matches(offline, runtime, entry):
+    """Require both matrices to agree with the observed owner rotator and location."""
+    location = bridge.decode_floats(entry.get("owner_location_bits"), 3)
+    rotation = bridge.decode_rotator(entry.get("owner_rotation_bits"))
+    if location is None or rotation is None or runtime is None or len(offline) != 16 or len(runtime) != 16:
+        return False
+    raw = rotator_matrix(*rotation)
+    quantized = rotator_matrix(*(value & ~3 for value in rotation))
+    scale = sum(offline[i] * raw[0][i] for i in range(3))
+    if abs(scale) < 1e-10:
+        return False
+    for matrix in (offline, runtime):
+        if any(abs(matrix[i]) > MATRIX_TOLERANCE for i in (3, 7, 11)) or abs(matrix[15] - 1) > MATRIX_TOLERANCE:
+            return False
+        if any(abs(matrix[12+i] - location[i]) > TRANSLATION_TOLERANCE_T3 for i in range(3)):
+            return False
+    return all(abs(offline[4*i+j] - scale*raw[i][j]) <= MATRIX_TOLERANCE and
+               abs(runtime[4*i+j] - scale*quantized[i][j]) <= MATRIX_TOLERANCE
+               for i in range(3) for j in range(3))
+
+
+def candidate_mesh_draws(scene, records, render_pass, stage, *, allow_quantized_rotators=False):
     """Match submitted actors to offline assets without claiming their live mesh binding."""
     instances = {}
     for instance in scene.mesh_instances:
@@ -62,7 +86,10 @@ def candidate_mesh_draws(scene, records, render_pass, stage):
         if len(entries) != 1:
             continue
         transform = bridge.decode_floats(entries[0].get("object_matrix_bits"), 16)
-        if not candidate_transform_matches(instance.transform, transform):
+        strict = candidate_transform_matches(instance.transform, transform)
+        quantized = (not strict and allow_quantized_rotators and
+                     quantized_rotator_matches(instance.transform, transform, entries[0]))
+        if not strict and not quantized:
             continue
         geometry = meshes[instance.resource_id].geometry
         index = proof["section"]
@@ -82,12 +109,14 @@ def candidate_mesh_draws(scene, records, render_pass, stage):
             continue
         result.append({"kind": "static_mesh_candidate", "draw": draw["op_id"], "section": index,
                        "stage": stage, "target_id": instance.id, "resource_id": instance.resource_id,
-                       "same_frame_lock_shadow": "unverified"})
+                       "same_frame_lock_shadow": "unverified", "quantized_rotator": quantized})
     return result
 
 
 def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, scene_digest,
-          *, include_asset_candidates=False):
+          *, include_asset_candidates=False, allow_quantized_rotators=False):
+    if allow_quantized_rotators and not include_asset_candidates:
+        raise ValueError("quantized rotators require offline asset candidates")
     report = verifier.verify(scene, records, frame, render_pass, trace_digest, scene_digest)
     if report["status"] != "validated" or stage not in report["validated_stages"]:
         raise ValueError("selected frame, pass and stage lack validated mesh and BSP submissions")
@@ -96,7 +125,8 @@ def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, 
     if len(anchors) != 1:
         raise ValueError("anchor must be a verified mesh submission in the selected stage")
     if include_asset_candidates:
-        verified.extend(candidate_mesh_draws(scene, records, render_pass, stage))
+        verified.extend(candidate_mesh_draws(scene, records, render_pass, stage,
+                                             allow_quantized_rotators=allow_quantized_rotators))
         verified.sort(key=lambda item: item["draw"])
 
     def observation(draw_id):
@@ -177,7 +207,11 @@ def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, 
     if include_asset_candidates:
         data["source"]["limitations"].append(CANDIDATE_LIMITATION)
         data["source"]["limitations"].append(
-            "Offline actor transforms matched within 0.001 T3 units of translation and 0.000001 in other matrix entries.")
+            "Offline actor transforms matched within 0.001 T3 units of translation and 0.000001 in other matrix entries."
+            if not allow_quantized_rotators else
+            "Candidate transforms use direct matching or the separately identified quantized-rotator hypothesis.")
+    if allow_quantized_rotators:
+        data["source"]["limitations"].append(QUANTIZED_LIMITATION)
     data["camera"] = {"source": {"kind": "runtime", "frame_id": frame, "fingerprint": trace_digest},
                       "view": view, "projection": projection,
                       "viewport": {"x": viewport["x"], "y": viewport["y"], "width": viewport["width"],
@@ -188,6 +222,10 @@ def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, 
                             item["target_id"] in selected_instances})
     if include_asset_candidates:
         data["source"]["limitations"].append("Offline asset candidate actors: " + (", ".join(candidate_ids) or "none"))
+    quantized_ids = sorted({item["target_id"] for item in verified if item.get("quantized_rotator") and
+                            item["target_id"] in selected_instances})
+    if allow_quantized_rotators:
+        data["source"]["limitations"].append("Quantized rotator candidate actors: " + (", ".join(quantized_ids) or "none"))
     data["mesh_instances"] = [x for x in data["mesh_instances"] if x["id"] in selected_instances]
     selected_resources = {x["resource_id"] for x in data["mesh_instances"]}
     data["static_mesh_resources"] = [x for x in data["static_mesh_resources"] if x["id"] in selected_resources]
@@ -211,6 +249,8 @@ def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, 
         manifest["offline_asset_candidates"] = candidate_ids
         manifest["candidate_transform_tolerances"] = {"translation_t3_units": TRANSLATION_TOLERANCE_T3,
                                                        "other_matrix_entries": MATRIX_TOLERANCE}
+    if allow_quantized_rotators:
+        manifest["quantized_rotator_candidates"] = quantized_ids
     return snapshot, manifest
 
 
@@ -224,6 +264,8 @@ def main(argv=None):
     parser.add_argument("--anchor-draw", required=True, type=int)
     parser.add_argument("--include-asset-candidates", action="store_true",
                         help="include scoped actors with matching offline mesh candidates")
+    parser.add_argument("--allow-quantized-rotators", action="store_true",
+                        help="also include candidates matching the observed two-bit rotator truncation hypothesis")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
@@ -248,7 +290,8 @@ def main(argv=None):
         scene = SceneSnapshot.from_json(raw)
         snapshot, manifest = build(scene, records, args.frame, args.render_pass, args.stage,
                                    args.anchor_draw, trace_digest, hashlib.sha256(raw).hexdigest(),
-                                   include_asset_candidates=args.include_asset_candidates)
+                                   include_asset_candidates=args.include_asset_candidates,
+                                   allow_quantized_rotators=args.allow_quantized_rotators)
         body = snapshot.to_json(indent=2) + "\n"
         manifest["snapshot_sha256"] = hashlib.sha256(body.encode()).hexdigest()
         packet.write_pair(args.output, body, manifest)

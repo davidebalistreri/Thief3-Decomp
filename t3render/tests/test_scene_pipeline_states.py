@@ -95,6 +95,13 @@ class LegacyStateTests(unittest.TestCase):
             data["source"]["limitations"].remove(scoped.CANDIDATE_LIMITATION)
             with self.assertRaisesRegex(ValueError, "does not match"):
                 states.from_trace(packet.SceneSnapshot.from_dict(data), offline, offline_bytes, path, 4, 1)
+            quantized, _ = scoped.build(offline, records, 3, 4, 1, 4, digest, offline_digest,
+                                         include_asset_candidates=True, allow_quantized_rotators=True)
+            self.assertEqual(set(states.from_trace(quantized, offline, offline_bytes, path, 4, 1)), {2, 3, 4, 5, 6})
+            data = quantized.to_dict()
+            data["source"]["limitations"].remove(scoped.QUANTIZED_LIMITATION)
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                states.from_trace(packet.SceneSnapshot.from_dict(data), offline, offline_bytes, path, 4, 1)
 
     def test_missing_or_invalid_state_cannot_be_serialized(self):
         scene, records = fixture()

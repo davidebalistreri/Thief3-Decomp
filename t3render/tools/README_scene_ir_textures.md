@@ -285,8 +285,9 @@ requires an exact snapshot produced by `build_scoped_scene_snapshot.py`,
 including its explicit candidate limitations when enabled. It fails on unsupported or
 unobserved states. For all 18 frame-1001 stage-1 draws it observes disabled alpha
 test and blending, depth LESS/write, CCW culling, and no fixed-function fog or lighting. The stage-3
-draws use additive blending, stage 4 uses two-times modulation, and stage 6 uses
-source-alpha blending; these observations do not reconstruct the missing legacy
+draws use additive blending, most stage-4 draws use two-times modulation, the
+candidate candle-wax draw uses source-alpha plus source-color blending, and
+stage 6 uses source-alpha blending; these observations do not reconstruct the missing legacy
 pixel shaders or light contributions. A stage-3 snapshot and packet were also
 revalidated locally: 59 scoped submissions and 1,684 asset-backed triangles.
 It is evidence only: this standalone renderer clears depth, so stage 3's
@@ -294,6 +295,19 @@ It is evidence only: this standalone renderer clears depth, so stage 3's
 the submissions do not yet reproduce lighting. The selected stage-3 draws
 also have stencil testing enabled, which this renderer does not implement. No
 runtime addresses or D3D state enums are added to SceneIR.
+
+The 51 stage-4 draws in the earlier expanded snapshot have 47
+`Diffuse11_Light_Vertex`, three `DiffuseReflect11_Light_Vertex` and one
+`Emit11_Light_Vertex` pre-Reset hypotheses; their sampled `c38.xy` offsets are
+all zero. D3DDisassemble of the separately named `Diffuse11_Light_Pixel` asset
+(SHA-256 `9a0c9146d47d3f4dd67a9d9b66fa8c67488f42909e96905bc3540333d2476626`)
+shows a texture multiplied by pixel constant `c0`, which was not captured.
+The named reflect pixel asset adds an environment-cubemap term and the named
+emit pixel asset takes alpha from texture stage 3 times pixel constant `c5.w`.
+For the candidate candle-wax draw, stages 0 and 3 were bound to the same
+observed texture during that draw; this equality does not identify its bytes.
+The preview currently assumes unit pixel multipliers and omits the environment
+term. These asset programs are not proof of the active post-Reset shaders.
 
 For diagnostics, `--additional-scene` composes separately revalidated stages
 from the same frame, pass, camera and asset fingerprints into one packet, in

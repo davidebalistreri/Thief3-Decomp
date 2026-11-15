@@ -26,6 +26,7 @@ import scene_ir_to_d3d12_packet as preview  # noqa: E402
 import scene_legacy_states as legacy_states  # noqa: E402
 import build_scoped_scene_snapshot as scoped  # noqa: E402
 import scene_light_candidates as scene_lights  # noqa: E402
+import scene_light_preview_overrides as light_overrides  # noqa: E402
 import scene_ambient_candidates as ambient  # noqa: E402
 import scene_direct_candidates as direct  # noqa: E402
 import scene_fog_candidates as fog  # noqa: E402
@@ -489,7 +490,17 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
                 raise ValueError("invalid point-light candidate parameters")
             if struct.unpack("<f", struct.pack("<f", inverse))[0] <= 0:
                 raise ValueError("point-light inverse radius rounds to zero")
-            light_values = (*position, inverse, *rgb, energy * gain)
+            factors = light.get("preview_rgb_multiplier", (1, 1, 1))
+            if (not isinstance(factors, (list, tuple)) or len(factors) != 3 or any(
+                    isinstance(x, bool) or not isinstance(x, (int, float)) or
+                    not 0 <= x <= light_overrides.MAX_MULTIPLIER or not math.isfinite(x) for x in factors)):
+                raise ValueError("invalid light preview RGB multiplier")
+            maximum = max(factors)
+            adjusted_energy = energy * gain * maximum
+            if adjusted_energy > 4:
+                raise ValueError("light preview energy exceeds renderer bounds")
+            adjusted_rgb = tuple(rgb[i] * factors[i] / maximum for i in range(3)) if maximum else (0, 0, 0)
+            light_values = (*position, inverse, *adjusted_rgb, adjusted_energy)
         else:
             light_values = (0,) * 8
         if fog_value is not None:
@@ -638,6 +649,8 @@ def main(argv=None):
     parser.add_argument("--offline-actors", type=Path, help="fingerprinted t3map actor export for candidate light or fog colors")
     parser.add_argument("--direct-preview-gain", type=float, default=1.0,
                         help="uncalibrated visual gain for candidate direct lights (default: 1)")
+    parser.add_argument("--direct-light-overrides", type=Path,
+                        help="optional semantic RGB calibration for offline light hypotheses")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
@@ -673,6 +686,8 @@ def main(argv=None):
                 raise ValueError("direct or fog candidates require a state trace and a nonnegative stage")
         if args.spot_candidates and args.direct_candidate_stage is None:
             raise ValueError("spot candidates require a direct candidate stage")
+        if args.direct_light_overrides is not None and args.direct_candidate_stage is None:
+            raise ValueError("light preview overrides require a direct candidate stage")
         if args.spot_projector_candidate is not None and not args.spot_candidates:
             raise ValueError("projector texture candidate requires spotlight candidates")
         if args.normal_map_candidates and args.direct_candidate_stage is None:
@@ -727,6 +742,7 @@ def main(argv=None):
             current, scope = matching[0]
             ambient_values = ambient.from_trace(current, args.state_trace, kernel_path, *scope)
         direct_values = None
+        light_override_digest = None
         if args.direct_candidate_stage is not None:
             matching = [(current, select_scope(current, args.render_pass, args.stage) if current is scene else select_scope(current))
                         for current in (scene, *extra_scenes)]
@@ -739,6 +755,10 @@ def main(argv=None):
                                               projector_candidate=args.spot_projector_candidate,
                                               preview_normal_maps=args.normal_map_candidates,
                                               preview_shader_basis=args.shader_normal_basis)
+            if args.direct_light_overrides is not None:
+                override_raw = preview.read_limited(args.direct_light_overrides, 1024 * 1024)
+                direct_values = light_overrides.apply(direct_values, light_overrides.parse(override_raw))
+                light_override_digest = hashlib.sha256(override_raw).hexdigest()
         fog_values = None
         if args.fog_candidate_stage is not None:
             matching = [(current, select_scope(current, args.render_pass, args.stage) if current is scene else select_scope(current))
@@ -778,6 +798,9 @@ def main(argv=None):
         if direct_values is not None:
             manifest["limitations"].append("Point-light Lambert shading and squared linear falloff are approximations; the coefficient's radius meaning is unproven.")
             manifest["limitations"].append("Light colors and energies come from offline actor data; runtime light identity, colors, intensity and shadows are unproven.")
+            if light_override_digest is not None:
+                manifest["light_preview_override_sha256"] = light_override_digest
+                manifest["limitations"].append("Semantic RGB multipliers are a user-supplied preview calibration, not observed runtime lighting.")
             if any("projector_candidate" in light for light in direct_values.values()):
                 manifest["limitations"].append("The projected texture is an offline metadata-compatible hypothesis, not an observed GPU texture identity.")
             elif any(light.get("mode") == "spot_approximation" for light in direct_values.values()):

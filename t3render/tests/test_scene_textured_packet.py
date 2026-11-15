@@ -320,6 +320,26 @@ class TexturedScenePacketTests(unittest.TestCase):
         self.assertEqual(raw[:8], b"T3SCN05\0")
         self.assertEqual(info["draws"][0]["direct_candidate"]["mode"], "point_approximation")
         self.assertEqual(self.parse(raw).returncode, 0)
+        neutral, _ = packet.create_packet(scene, Resolver(), draw_states=states,
+                                          direct_candidates={2: dict(light, preview_rgb_multiplier=[1, 1, 1])})
+        self.assertEqual(raw, neutral)
+        adjusted = dict(light, preview_rgb_multiplier=[2, 1.8, 1.2])
+        tinted, details = packet.create_packet(scene, Resolver(), draw_states=states, direct_candidates={2: adjusted})
+        rgb_energy = struct.unpack_from("<4f", tinted, 188 + 92)
+        for actual, expected in zip(rgb_energy, (1, .72, .36, 1)):
+            self.assertAlmostEqual(actual, expected)
+        self.assertEqual(details["draws"][0]["direct_candidate"]["offline_color"], [1, .8, .6])
+        self.assertEqual(self.parse(tinted).returncode, 0)
+        zero, _ = packet.create_packet(scene, Resolver(), draw_states=states,
+                                       direct_candidates={2: dict(light, preview_rgb_multiplier=[0, 0, 0])})
+        self.assertEqual(struct.unpack_from("<4f", zero, 188 + 92), (0, 0, 0, 0))
+        for factors in ([1, 2], [1, -1, 1], [1, True, 1], [float("nan"), 1, 1], [1, 1, 5]):
+            with self.subTest(factors=factors), self.assertRaisesRegex(ValueError, "RGB multiplier"):
+                packet.create_packet(scene, Resolver(), draw_states=states,
+                                     direct_candidates={2: dict(light, preview_rgb_multiplier=factors)})
+        with self.assertRaisesRegex(ValueError, "energy exceeds"):
+            packet.create_packet(scene, Resolver(), draw_states=states,
+                                 direct_candidates={2: dict(light, gain=4, preview_rgb_multiplier=[4, 1, 1])})
         data = scene.to_dict()
         data["bsp_blocks"][0]["geometry"]["normals"] = None
         with self.assertRaisesRegex(ValueError, "normals"):

@@ -167,6 +167,47 @@ texture identity. The synthetic GPU fixtures exercise both projector paths;
 earlier packet fixtures also pass. Circular and textured modes write packet
 versions 6 and 7 respectively; versions 1–5 remain readable.
 
+### Per-light preview calibration
+
+`--direct-light-overrides` optionally applies per-channel multipliers to the
+offline light candidates after their trace and asset revalidation. It is a
+visual calibration, not a measurement of the game's runtime light colors or
+intensities. The input is a JSON document with fully qualified offline light
+IDs; these IDs include the map fingerprint and are independent of draw IDs:
+
+```json
+{
+  "schema": "t3.scene.light-preview-overrides",
+  "version": 1,
+  "lights": [
+    {"light_id": "light:MAP:MAP_SHA256:ACTOR", "rgb_multiplier": [2.0, 1.8, 1.2]}
+  ]
+}
+```
+
+Replace the illustrative ID with the offline ID in a candidate or with the
+`candidate:` prefix removed from a candidate-light SceneIR ID. Multipliers must
+be finite values in `0..4`; combined energy must fit the renderer's existing
+bounds. Duplicate, unmatched or disabled light candidates fail closed. The
+option requires `--direct-candidate-stage`; it changes no SceneIR light and is
+off by default. The packet manifest retains the original offline color,
+records the chosen multipliers per affected draw, and hashes the override file.
+
+For the local frame-1001 comparison, a single-frame experiment assigns
+`(2, 1.8, 1.2)` to the four fingerprint-qualified `D_384__0`, `D_384__5`,
+`D_384__11` and `D_384__13` candidates. Other lights are unchanged. Applied to
+the self-attached four-stage packet with shader-basis, fog, sampler and spot
+hypotheses, this yields 298 draws and 20,168 triangles on Highball/DX12. Only
+RGB/energy fields of 61 candidate-light draws differ from the original packet;
+all other packet bytes match. Against
+the synchronized screenshot, whole-image mean absolute RGB error changes from
+`(7.351, 5.892, 4.294)` to `(6.006, 5.084, 4.228)`; in the half-open wall
+rectangle `(400,145)`–`(850,360)` it changes from `(15.284, 10.558, 3.701)`
+to `(9.983, 7.348, 3.717)`. The floor and dummy rectangles also improve, while
+wall blue is slightly worse. This fit can overfit the captured camera, and
+missing geometry, shadows, flames and HUD still prevent parity. The scene,
+override file, packet and images remain local under `build/`.
+
 ## Distance-fog candidate
 
 `--fog-candidate-stage 6` adds an optional distance-fog preview. It requires

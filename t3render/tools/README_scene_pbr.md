@@ -62,6 +62,27 @@ This is a subtle, incomplete local bounce rather than a claim of visual parity
 or a calibrated GI solution. With the flag omitted, the same frame was
 byte-identical to the previous version.
 
+## Horizon ambient occlusion
+
+`--gtao` independently enables a GTAO-style horizon approximation. Four
+screen-space slices search both directions for nearby occluders, then integrate
+the visible cosine-weighted angular range against the geometric normal. A
+normal-offset bias and distance fade reduce self-occlusion. The search is
+limited to 32 pixels and one metre. It attenuates the ambient term and, when
+`--indirect` is also enabled, the diffuse bounce; direct light and specular
+are not attenuated. The existing material AO remains a separate multiplier.
+
+This is a sparse, first-layer approximation: off-screen or hidden occluders,
+thin geometry between samples and temporal stabilization are unavailable.
+The distance fade, radius, unit scale and normal bias are preview assumptions,
+and may cause halos, light leaks or flicker. It is not a ground-truth or
+production-quality GTAO implementation. It is off by default.
+
+On the frame-1001 preview, GTAO alone changes 119,825 pixels with mean absolute
+RGB difference 0.193 on a 0–255 scale; adding it to the diffuse-bounce preview
+changes 121,881 pixels with mean difference 0.199. Both are measurements of
+this partial scene and artistic lighting, not a comparison against TDS.
+
 ## Point-light shadow maps
 
 `--shadows` opts into a separate shadow-map path in packet version 2. Each
@@ -172,7 +193,7 @@ To build the shadowed alternative, append `--shadows` and choose a different
 output path; all other arguments and the calibration stay the same.
 Add `--offline-shadow-casters` as well to opt into offline candidates.
 
-Run `t3render_scene_pbr_d3d12 <packet> --output <new.ppm> [--indirect]` in a D3D12
+Run `t3render_scene_pbr_d3d12 <packet> --output <new.ppm> [--indirect] [--gtao]` in a D3D12
 environment. The packet, manifest and PPM use exclusive creation. See the
 [Highball setup](README_synthetic_replay.md#repeat-on-highball); TDS does not
 need to be running.
@@ -217,3 +238,8 @@ synthetic receiver and source. Render each packet both with and without
 --reference <base.ppm> --kind <kind>`. The local GPU checks passed for
 `facing`, `flat`, `blocker` and `unlit`: colored transfer, source orientation,
 an intervening blocker and absence of feedback from ambient-only light.
+
+`scene_pbr_gtao_fixture.py` uses the same create/verify workflow with `--gtao`
+for `flat`, `tilted`, `blocker` and `direct`. The local GPU tests verified
+unoccluded flat and slanted surfaces, contact darkening, unchanged direct
+lighting and use alongside `--indirect`.

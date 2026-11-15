@@ -29,7 +29,8 @@ struct Constants {
 };
 static_assert(sizeof(Constants) == 704, "unexpected PBR constant-buffer layout");
 
-int Render(const Frame& frame, const wchar_t* output, bool indirect) {
+int Render(const Frame& frame, const wchar_t* output, bool indirect, bool gtao) {
+    const bool use_gbuffer = indirect || gtao;
     ComPtr<ID3D12Device> device;
     if (!SelectDevice(device)) return 1;
     Module module{LoadLibraryExW(L"d3dcompiler_47.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
@@ -97,7 +98,7 @@ float visibility(float3 world, float3 geometric_normal, float3 to_light, uint li
     return visible/25;
 }
 #endif
-#if T3_INDIRECT
+#if T3_GBUFFER
 struct Output { float4 color:SV_Target0; float4 position:SV_Target1; float4 normal:SV_Target2;
                 float4 diffuse:SV_Target3; float4 albedo:SV_Target4; };
 Output main(float4 uv:TEXCOORD0, float3 world:TEXCOORD1, float3 normal:TEXCOORD2, float4 tangent:TEXCOORD3) {
@@ -124,7 +125,7 @@ float4 main(float4 uv:TEXCOORD0, float3 world:TEXCOORD1, float3 normal:TEXCOORD2
     float3 v=view_delta*rsqrt(max(dot(view_delta,view_delta),0.00000001));
     float nv=saturate(dot(n,v));
     float3 result=albedo*ambient.rgb*ao;
-#if T3_INDIRECT
+#if T3_GBUFFER
     float3 direct_diffuse=0;
 #endif
     float alpha=roughness*roughness; float a2=alpha*alpha; float k=(roughness+1)*(roughness+1)/8;
@@ -148,13 +149,13 @@ float4 main(float4 uv:TEXCOORD0, float3 world:TEXCOORD1, float3 normal:TEXCOORD2
             light_visibility=visibility(world,geometric_normal,l,i);
 #endif
             result+=(diffuse+specular)*radiance*nl*light_visibility;
-#if T3_INDIRECT
+#if T3_GBUFFER
             direct_diffuse+=diffuse*radiance*nl*light_visibility;
 #endif
         }
     }
     // Avoid half-float overflow producing inf/NaN in the display pass.
-#if T3_INDIRECT
+#if T3_GBUFFER
     Output o; o.color=float4(min(max(result,0),65504),1);
     // Camera-relative metres keep half-float precision independent of map origin.
     float3 relative=(world-camera_exposure.xyz)*size_scale_count.z;
@@ -191,7 +192,7 @@ float4 main(uint id:SV_VertexID):SV_Position {
 })";
     static const char tone_ps_source[] = R"(
 Texture2D hdr:register(t4);
-#if T3_INDIRECT
+#if T3_GBUFFER
 Texture2D positions:register(t6); Texture2D normals:register(t7);
 Texture2D diffuse_light:register(t8); Texture2D surface_albedo:register(t9);
 #endif
@@ -253,10 +254,69 @@ float3 indirect_light(int2 pixel) {
     return min(sum*receiver.rgb*receiver.a/pi,65504);
 }
 #endif
+#if T3_GTAO
+float slice_integral(float nv, float nt, float angle) {
+    float s=sin(angle);
+    return max(0,0.5*nv*s*s+nt*(0.5*angle-0.25*sin(2*angle)));
+}
+float ambient_visibility(int2 pixel) {
+    const float half_pi=1.57079632679;
+    int2 size=int2(size_scale_count.xy);
+    float4 p=positions.Load(int3(pixel,0));
+    float distance2=dot(p.xyz,p.xyz);
+    if(p.w<0.5||distance2<0.000001) return 1;
+    float3 v=-p.xyz*rsqrt(distance2);
+    float3 n=normals.Load(int3(pixel,0)).xyz;
+    float nv=max(dot(n,v),0);
+    float3 camera_right=float3(view[0][0],view[1][0],view[2][0]);
+    float3 camera_up=float3(view[0][1],view[1][1],view[2][1]);
+    float radius=clamp(min(size.x,size.y)*0.0625,8,32);
+    float visible=0, full=0;
+    [unroll] for(int slice=0;slice<4;++slice) {
+        float phi=slice*0.78539816339;
+        float2 direction=float2(cos(phi),sin(phi));
+        float3 axis=camera_right*direction.x-camera_up*direction.y;
+        axis-=v*dot(axis,v);
+        float axis2=dot(axis,axis);
+        if(axis2<0.000001) continue;
+        axis*=rsqrt(axis2);
+        [unroll] for(int side=-1;side<=1;side+=2) {
+            float3 tangent=axis*side;
+            float nt=dot(n,tangent);
+            float limit=nt<0?atan2(nv,-nt):half_pi;
+            float horizon=half_pi;
+            [unroll] for(int step=1;step<=6;++step) {
+                float offset=radius*step/6;
+                int2 qpixel=pixel+int2(round(direction*(side*offset)));
+                if(any(qpixel<0)||any(qpixel>=size)||all(qpixel==pixel)) continue;
+                float4 q=positions.Load(int3(qpixel,0));
+                if(q.w<0.5) continue;
+                float3 delta=q.xyz-p.xyz;
+                float d2=dot(delta,delta), x=dot(delta,tangent), z=dot(delta,v);
+                if(d2<0.0004||d2>=1||x<=0||z<=0.025||dot(delta,n)<=0.025) continue;
+                float angle=atan2(x,z-0.025);
+                horizon=min(horizon,lerp(half_pi,angle,saturate(1-sqrt(d2))));
+            }
+            full+=slice_integral(nv,nt,limit);
+            visible+=slice_integral(nv,nt,min(limit,horizon));
+        }
+    }
+    return full>0.00001?saturate(visible/full):1;
+}
+#endif
 float4 main(float4 position:SV_Position):SV_Target {
     float3 c=hdr.Load(int3(position.xy,0)).rgb;
+#if T3_GTAO
+    float visibility=ambient_visibility(int2(position.xy));
+    float4 surface=surface_albedo.Load(int3(position.xy,0));
+    c=max(c-surface.rgb*surface.a*ambient.rgb*(1-visibility),0);
+#endif
 #if T3_INDIRECT
-    c+=indirect_light(int2(position.xy));
+    float3 bounce=indirect_light(int2(position.xy));
+#if T3_GTAO
+    bounce*=visibility;
+#endif
+    c+=bounce;
 #endif
     c=max(c*camera_exposure.w,0);
     c=c/(1+c);
@@ -264,9 +324,11 @@ float4 main(float4 position:SV_Position):SV_Target {
     return float4(saturate(c),1);
 })";
     ComPtr<ID3DBlob> vs, ps, tone_vs, tone_ps, shadow_vs, shadow_ps;
-    const std::string pixel_source = std::string(frame.shadow_size ? "#define T3_SHADOWS 1\n" : "#define T3_SHADOWS 0\n") +
-                                     (indirect ? "#define T3_INDIRECT 1\n" : "#define T3_INDIRECT 0\n") + ps_source;
-    const std::string tone_source = std::string(indirect ? "#define T3_INDIRECT 1\n" : "#define T3_INDIRECT 0\n") + tone_ps_source;
+    const std::string options = std::string(use_gbuffer ? "#define T3_GBUFFER 1\n" : "#define T3_GBUFFER 0\n") +
+                                (indirect ? "#define T3_INDIRECT 1\n" : "#define T3_INDIRECT 0\n") +
+                                (gtao ? "#define T3_GTAO 1\n" : "#define T3_GTAO 0\n");
+    const std::string pixel_source = std::string(frame.shadow_size ? "#define T3_SHADOWS 1\n" : "#define T3_SHADOWS 0\n") + options + ps_source;
+    const std::string tone_source = options + tone_ps_source;
     if (!Compile(compile, vs_source, "vs_5_0", vs) || !Compile(compile, pixel_source.c_str(), "ps_5_0", ps) ||
         (frame.shadow_size && (!Compile(compile, shadow_vs_source, "vs_5_0", shadow_vs) ||
                                !Compile(compile, shadow_ps_source, "ps_5_0", shadow_ps))) ||
@@ -311,7 +373,7 @@ float4 main(float4 position:SV_Position):SV_Target {
     shadow_sampler.MaxAnisotropy = 1; shadow_sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
     shadow_sampler.MaxLOD = D3D12_FLOAT32_MAX; shadow_sampler.ShaderRegister = 1;
     shadow_sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    D3D12_ROOT_SIGNATURE_DESC root_desc{}; root_desc.NumParameters = indirect ? 12 : 8; root_desc.pParameters = params;
+    D3D12_ROOT_SIGNATURE_DESC root_desc{}; root_desc.NumParameters = use_gbuffer ? 12 : 8; root_desc.pParameters = params;
     root_desc.NumStaticSamplers = 2; root_desc.pStaticSamplers = samplers;
     root_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
     ComPtr<ID3DBlob> root_blob, root_errors; ComPtr<ID3D12RootSignature> root;
@@ -340,7 +402,7 @@ float4 main(float4 position:SV_Position):SV_Target {
     desc.DepthStencilState.FrontFace = {D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS};
     desc.DepthStencilState.BackFace = desc.DepthStencilState.FrontFace;
     desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    desc.NumRenderTargets = indirect ? 5 : 1;
+    desc.NumRenderTargets = use_gbuffer ? 5 : 1;
     for (UINT i = 0; i < desc.NumRenderTargets; ++i) desc.RTVFormats[i] = kHdr;
     desc.DSVFormat = DXGI_FORMAT_D32_FLOAT; desc.SampleDesc.Count = 1;
     ComPtr<ID3D12PipelineState> pipeline, tone_pipeline, shadow_pipeline;
@@ -366,7 +428,7 @@ float4 main(float4 position:SV_Position):SV_Target {
     if (!Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.p, pipeline.p,
                                          IID_PPV_ARGS(list.put())), "CreateList")) return 1;
     D3D12_DESCRIPTOR_HEAP_DESC heap_desc{}; heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heap_desc.NumDescriptors = static_cast<UINT>(frame.textures.size()*2+1+(frame.shadow_size ? 1 : 0)+(indirect ? 4 : 0));
+    heap_desc.NumDescriptors = static_cast<UINT>(frame.textures.size()*2+1+(frame.shadow_size ? 1 : 0)+(use_gbuffer ? 4 : 0));
     heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ComPtr<ID3D12DescriptorHeap> srv_heap;
     if (!Check(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(srv_heap.put())), "CreateSrvHeap")) return 1;
@@ -419,14 +481,14 @@ float4 main(float4 position:SV_Position):SV_Target {
         device->CreateShaderResourceView(shadow_map.p, &srv, cpu_srv); cpu_srv.ptr += srv_step;
     }
     ComPtr<ID3D12Resource> gbuffer[4];
-    if (indirect) {
+    if (use_gbuffer) {
         for (auto& image : gbuffer) {
             if (!Check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &hdr_desc,
                       D3D12_RESOURCE_STATE_RENDER_TARGET, &clear, IID_PPV_ARGS(image.put())), "CreateIndirectBuffer")) return 1;
             device->CreateShaderResourceView(image.p, &hdr_srv, cpu_srv); cpu_srv.ptr += srv_step;
         }
     }
-    heap_desc = {}; heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; heap_desc.NumDescriptors = 2+shadow_faces+(indirect ? 4 : 0);
+    heap_desc = {}; heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; heap_desc.NumDescriptors = 2+shadow_faces+(use_gbuffer ? 4 : 0);
     ComPtr<ID3D12DescriptorHeap> rtv_heap, dsv_heap;
     if (!Check(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(rtv_heap.put())), "CreateRtvHeap")) return 1;
     heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; heap_desc.NumDescriptors = frame.shadow_size ? 2 : 1;
@@ -437,7 +499,7 @@ float4 main(float4 position:SV_Position):SV_Target {
     auto dsv = dsv_heap->GetCPUDescriptorHandleForHeapStart();
     device->CreateRenderTargetView(hdr.p, nullptr, hdr_rtv); device->CreateRenderTargetView(target.p, nullptr, output_rtv);
     D3D12_CPU_DESCRIPTOR_HANDLE geometry_rtvs[5] = {hdr_rtv};
-    if (indirect) {
+    if (use_gbuffer) {
         auto handle = hdr_rtv; handle.ptr += UINT64(2+shadow_faces)*rtv_step;
         for (UINT i = 0; i < 4; ++i) {
             geometry_rtvs[i+1] = handle;
@@ -542,8 +604,8 @@ float4 main(float4 position:SV_Position):SV_Target {
     const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(frame.width), static_cast<float>(frame.height), frame.min_depth, frame.max_depth};
     const D3D12_RECT scissor{0, 0, static_cast<LONG>(frame.width), static_cast<LONG>(frame.height)};
     list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &scissor);
-    list->OMSetRenderTargets(indirect ? 5 : 1, geometry_rtvs, FALSE, &dsv);
-    for (UINT i = 0; i < (indirect ? 5u : 1u); ++i) list->ClearRenderTargetView(geometry_rtvs[i], clear.Color, 0, nullptr);
+    list->OMSetRenderTargets(use_gbuffer ? 5 : 1, geometry_rtvs, FALSE, &dsv);
+    for (UINT i = 0; i < (use_gbuffer ? 5u : 1u); ++i) list->ClearRenderTargetView(geometry_rtvs[i], clear.Color, 0, nullptr);
     list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1, 0, 0, nullptr);
     for (const auto& draw : frame.draws) {
         for (UINT i = 0; i < 4; ++i) {
@@ -553,7 +615,7 @@ float4 main(float4 position:SV_Position):SV_Target {
         list->DrawInstanced(draw.vertex_count, 1, draw.first_vertex, 0);
     }
     Transition(list.p, hdr.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    if (indirect) {
+    if (use_gbuffer) {
         auto handle = gpu_base; handle.ptr += UINT64(frame.textures.size()*2+1+(frame.shadow_size ? 1 : 0))*srv_step;
         for (UINT i = 0; i < 4; ++i) {
             Transition(list.p, gbuffer[i].p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -601,11 +663,18 @@ float4 main(float4 position:SV_Position):SV_Target {
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
-    if ((argc != 4 && argc != 5) || std::wcscmp(argv[2], L"--output") || !argv[3][0] ||
-        (argc == 5 && std::wcscmp(argv[4], L"--indirect"))) {
-        std::fwprintf(stderr, L"usage: t3render_scene_pbr_d3d12 <pbr.bin> --output <new-image.ppm> [--indirect]\n"); return 2;
+    const auto usage = []() {
+        std::fwprintf(stderr, L"usage: t3render_scene_pbr_d3d12 <pbr.bin> --output <new-image.ppm> [--indirect] [--gtao]\n");
+        return 2;
+    };
+    if (argc < 4 || argc > 6 || std::wcscmp(argv[2], L"--output") || !argv[3][0]) return usage();
+    bool indirect = false, gtao = false;
+    for (int i = 4; i < argc; ++i) {
+        if (!std::wcscmp(argv[i], L"--indirect") && !indirect) indirect = true;
+        else if (!std::wcscmp(argv[i], L"--gtao") && !gtao) gtao = true;
+        else return usage();
     }
     Frame frame;
     if (!ReadPacket(argv[1], frame)) return 2;
-    return Render(frame, argv[3], argc == 5);
+    return Render(frame, argv[3], indirect, gtao);
 }

@@ -24,6 +24,7 @@ from t3common import game_dir, resolve_map  # noqa: E402
 from t3texture import TYPE_MATERIAL, TYPE_TEXTURE, decode_rgba, mip_size, parse_material, parse_texture  # noqa: E402
 import scene_ir_to_d3d12_packet as preview  # noqa: E402
 import scene_legacy_states as legacy_states  # noqa: E402
+import build_scoped_scene_snapshot as scoped  # noqa: E402
 import scene_ambient_candidates as ambient  # noqa: E402
 import scene_direct_candidates as direct  # noqa: E402
 import scene_fog_candidates as fog  # noqa: E402
@@ -643,6 +644,8 @@ def main(argv=None):
         scene = SceneSnapshot.from_json(raw)
         extra_raw = [preview.read_limited(path, preview.MAX_INPUT) for path in args.additional_scene]
         extra_scenes = [SceneSnapshot.from_json(data) for data in extra_raw]
+        self_attached_needed = any(scoped.SELF_ATTACHED_LIMITATION in current.source.limitations
+                                   for current in (scene, *extra_scenes))
         if (args.state_trace is None) != (args.offline_scene is None):
             raise ValueError("state trace and offline scene must be supplied together")
         if extra_scenes and args.state_trace is None:
@@ -656,9 +659,11 @@ def main(argv=None):
             raise ValueError("sampler submission stages must be unique")
         if args.ambient_candidate_stage is not None and (args.state_trace is None or args.ambient_candidate_stage < 0):
             raise ValueError("ambient candidate requires a state trace and a nonnegative stage")
-        needs_actors = args.direct_candidate_stage is not None or args.fog_candidate_stage is not None
+        needs_actors = args.direct_candidate_stage is not None or args.fog_candidate_stage is not None or self_attached_needed
         if needs_actors != (args.offline_actors is not None):
-            raise ValueError("direct or fog candidates require offline actors")
+            raise ValueError("direct, fog or self-attached candidates require offline actors")
+        if self_attached_needed and args.state_trace is None:
+            raise ValueError("self-attached candidates require state trace revalidation")
         for candidate_stage in (args.direct_candidate_stage, args.fog_candidate_stage):
             if candidate_stage is not None and (args.state_trace is None or candidate_stage < 0):
                 raise ValueError("direct or fog candidates require a state trace and a nonnegative stage")
@@ -674,6 +679,7 @@ def main(argv=None):
                                            args.direct_candidate_stage in sampler_scopes):
             raise ValueError("normal map candidates select their own sampler for the direct stage")
         states = None
+        game = game_dir(args.game_dir) if self_attached_needed else None
         samplers = {} if args.sampler_candidate_stage is not None or sampler_scopes else None
         if args.state_trace is not None:
             selected_pass, selected_stage = select_scope(scene, args.render_pass, args.stage)
@@ -687,7 +693,8 @@ def main(argv=None):
             for current, scope in scoped_scenes:
                 sampler_stage = args.sampler_candidate_stage if not sampler_scopes else sampler_scopes.get(scope[1])
                 current_states = legacy_states.from_trace(current, offline, offline_bytes, args.state_trace, *scope,
-                                                          sampler_stage=sampler_stage, samplers=samplers)
+                                                          sampler_stage=sampler_stage, samplers=samplers,
+                                                          self_attached_actors=args.offline_actors, self_attached_game=game)
                 if states.keys() & current_states.keys():
                     raise ValueError("composed scenes contain duplicate draw IDs")
                 states.update(current_states)
@@ -695,7 +702,8 @@ def main(argv=None):
                     samplers.update({draw_id: {"status": "not_selected"} for draw_id in current_states})
             if extra_scenes:
                 legacy_states.validate_composition_interval(scene, args.state_trace, states)
-        game = game_dir(args.game_dir)
+        if game is None:
+            game = game_dir(args.game_dir)
         local_path = resolve_map(game, scene.source.map, ".ibt")
         kernel_path = local_path.parent / "Kernel_GFXALL.ibt"
         paths = [("bundle", local_path)]

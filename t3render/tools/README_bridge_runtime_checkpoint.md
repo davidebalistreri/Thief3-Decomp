@@ -51,10 +51,9 @@ In frame 1001 this identifies `D_548__0` (the archery target) and `D_77__7`
 (an arrow) in addition to the previous candidates. Their largest runtime versus
 quantized matrix errors are approximately `4.1e-8` and `2.1e-8`; their
 unquantized offline matrices differ by up to `8.8e-5` and `9.5e-5`. Stage
-1/3/4/6 snapshots contain 54/124/54/54 draws respectively. The training dummy
-`D_1997__0` is still omitted because its offline fixture excludes an unresolved
-self-attachment; it is not silently reconstructed here. Snapshots and manifests
-list the candidate actors and retain the offline provenance limitation.
+1/3/4/6 snapshots contain 54/124/54/54 draws respectively. This option alone
+does not include the self-attached training dummy `D_1997__0`. Snapshots and
+manifests list the candidate actors and retain the offline provenance limitation.
 
 Generate the four snapshots with the existing corrected offline fixture,
 frame 1001, `--include-asset-candidates --allow-quantized-rotators`, and
@@ -65,6 +64,46 @@ the synchronized screenshot changes whole-image mean absolute RGB error from
 `(115,215)`–`(196,390)` around the target it changes from `(12.191, 8.473,
 5.256)` to `(11.177, 8.139, 5.049)`. The target remains too dark and these
 metrics do not validate the offline resource or material binding.
+
+### Self-attached asset candidates
+
+`--allow-self-attached-candidates` separately opts in to actors omitted from
+the offline fixture because they are attached to themselves. It requires
+`--include-asset-candidates`, the fingerprinted actor export and the game
+assets. The loader checks the actor export and bundle fingerprints, resolves
+an unambiguous offline mesh and skin, and rejects resource or material ID
+conflicts. The normal scoped submission, camera, thread and section checks
+still apply. No offline world transform is invented: the snapshot contains the
+observed runtime matrix. The mesh, skin and material bindings remain offline
+candidates, recorded in the snapshot and manifest; they are not proven live
+bindings. The packet exporter revalidates them against the same inputs.
+
+For frame 1001, `D_1997__0` has three scoped stage-1 submissions (draws
+57–59), whose section metadata match the offline `HAMxDUMMYtrainA1` mesh
+(698 vertices, 1,122 indices, three sections). Their contents and runtime asset
+binding have not been verified. For example, with the corrected fixture:
+
+```sh
+python3 -B t3render/tools/build_scoped_scene_snapshot.py \
+  build/t3render-captures/scene-bridge-submission-20261115-001/bedroom.jsonl \
+  --scene build/t3render-offline/SouthQuarter1_int1.lights.scene.json \
+  --frame 1001 --pass 0 --stage 1 --anchor-draw 8 \
+  --include-asset-candidates --allow-quantized-rotators \
+  --allow-self-attached-candidates \
+  --offline-actors build/assets/godot/SouthQuarter1_int1/SouthQuarter1_int1.actors.json \
+  --game-dir "$T3_GAME_DIR" \
+  --output build/t3render-offline/bedroom-runtime-1001-self-stage1.scene.json
+```
+
+Applying the same flags to stage/anchor pairs `1/8`, `3/78`, `4/302`, `6/362`
+produces 57/127/57/57 draws. The composed DX12 preview contains 298 draws and
+20,168 triangles. Against the synchronized 1024×768 screenshot, whole-image
+mean absolute RGB error changes from `(7.457, 5.960, 4.335)` to `(7.351,
+5.892, 4.294)`; in the half-open rectangle `(0,54)`–`(83,336)` covering the
+changed pixels it changes from `(16.076, 11.398, 6.919)` to `(12.518, 9.135,
+5.532)`. The dummy remains too dark; neither the pixel comparison nor the
+candidate proves resource identity or rendering parity. Generated assets and
+images remain local under `build/`.
 
 ## Light position candidates: frame 1001
 

@@ -7,6 +7,7 @@ and which share the anchor's camera and viewport are included. Mesh transforms
 must match the anchor; BSP geometry must be in identity-transformed world space.
 """
 import argparse
+from dataclasses import asdict
 import hashlib
 import json
 import os
@@ -17,11 +18,12 @@ import analyze_scene_bridge as bridge
 import build_bridge_runtime_snapshot as builder
 import compare_bridge_fixture as comparison
 import scene_ir_to_d3d12_packet as packet
+import scene_self_attached_candidates as self_attached
 import verify_bridge_submission as verifier
 from t3common import rotator_matrix
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ir"))
-from scene_ir import SceneSnapshot  # noqa: E402
+from scene_ir import SceneSnapshot, StaticMeshResource  # noqa: E402
 
 
 CANDIDATE_LIMITATION = ("Additional mesh actors have scoped runtime ownership and transforms, but their mesh, "
@@ -30,6 +32,8 @@ TRANSLATION_TOLERANCE_T3 = 0.001
 MATRIX_TOLERANCE = 0.000001
 QUANTIZED_LIMITATION = ("Offline actor rotations may be matched to observed owner rotators after truncating "
                         "their two least significant bits; this quantization is a candidate, not an engine guarantee.")
+SELF_ATTACHED_LIMITATION = ("Self-attached actor transforms are observed runtime matrices; their asset and skin "
+                            "are fingerprinted offline candidates, not observed runtime bindings.")
 
 
 def candidate_transform_matches(offline, runtime):
@@ -61,7 +65,8 @@ def quantized_rotator_matches(offline, runtime, entry):
                for i in range(3) for j in range(3))
 
 
-def candidate_mesh_draws(scene, records, render_pass, stage, *, allow_quantized_rotators=False):
+def candidate_mesh_draws(scene, records, render_pass, stage, *, allow_quantized_rotators=False,
+                         self_attached_assets=None):
     """Match submitted actors to offline assets without claiming their live mesh binding."""
     instances = {}
     for instance in scene.mesh_instances:
@@ -73,9 +78,14 @@ def candidate_mesh_draws(scene, records, render_pass, stage, *, allow_quantized_
         if proof.get("kind") != "static_mesh_candidate" or proof.get("stage") != stage:
             continue
         matches = instances.get(proof["actor"], [])
-        if len(matches) != 1 or matches[0].resource_id not in meshes:
+        extra = (self_attached_assets or {}).get(proof["actor"]) if not matches else None
+        if len(matches) > 1 or (not matches and extra is None):
             continue
-        instance = matches[0]
+        instance = matches[0] if matches else None
+        if instance is not None and instance.resource_id not in meshes:
+            continue
+        resource = meshes[instance.resource_id] if instance is not None else extra["resource"]
+        target_id = instance.id if instance is not None else extra["target_id"]
         observations = [r for r in records if r.get("event") == "scene_bridge_observation" and
                         r.get("ticket") == proof["observation_ticket"]]
         if len(observations) != 1:
@@ -86,12 +96,17 @@ def candidate_mesh_draws(scene, records, render_pass, stage, *, allow_quantized_
         if len(entries) != 1:
             continue
         transform = bridge.decode_floats(entries[0].get("object_matrix_bits"), 16)
-        strict = candidate_transform_matches(instance.transform, transform)
-        quantized = (not strict and allow_quantized_rotators and
-                     quantized_rotator_matches(instance.transform, transform, entries[0]))
-        if not strict and not quantized:
+        if transform is None:
             continue
-        geometry = meshes[instance.resource_id].geometry
+        strict = instance is not None and candidate_transform_matches(instance.transform, transform)
+        quantized = (instance is not None and not strict and allow_quantized_rotators and
+                     quantized_rotator_matches(instance.transform, transform, entries[0]))
+        if extra is not None and (any(abs(transform[i]) > MATRIX_TOLERANCE for i in (3, 7, 11)) or
+                                  abs(transform[15] - 1) > MATRIX_TOLERANCE):
+            continue
+        if extra is None and not strict and not quantized:
+            continue
+        geometry = resource.geometry
         index = proof["section"]
         if index >= len(geometry.sections):
             continue
@@ -108,15 +123,18 @@ def candidate_mesh_draws(scene, records, render_pass, stage, *, allow_quantized_
                 any(i < first or i >= first + count for i in indices)):
             continue
         result.append({"kind": "static_mesh_candidate", "draw": draw["op_id"], "section": index,
-                       "stage": stage, "target_id": instance.id, "resource_id": instance.resource_id,
-                       "same_frame_lock_shadow": "unverified", "quantized_rotator": quantized})
+                       "stage": stage, "target_id": target_id, "resource_id": resource.id,
+                       "same_frame_lock_shadow": "unverified", "quantized_rotator": quantized,
+                       "self_attached": extra is not None})
     return result
 
 
 def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, scene_digest,
-          *, include_asset_candidates=False, allow_quantized_rotators=False):
+          *, include_asset_candidates=False, allow_quantized_rotators=False, self_attached_assets=None):
     if allow_quantized_rotators and not include_asset_candidates:
         raise ValueError("quantized rotators require offline asset candidates")
+    if self_attached_assets is not None and not include_asset_candidates:
+        raise ValueError("self-attached actors require offline asset candidates")
     report = verifier.verify(scene, records, frame, render_pass, trace_digest, scene_digest)
     if report["status"] != "validated" or stage not in report["validated_stages"]:
         raise ValueError("selected frame, pass and stage lack validated mesh and BSP submissions")
@@ -126,7 +144,8 @@ def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, 
         raise ValueError("anchor must be a verified mesh submission in the selected stage")
     if include_asset_candidates:
         verified.extend(candidate_mesh_draws(scene, records, render_pass, stage,
-                                             allow_quantized_rotators=allow_quantized_rotators))
+                                             allow_quantized_rotators=allow_quantized_rotators,
+                                             self_attached_assets=self_attached_assets))
         verified.sort(key=lambda item: item["draw"])
 
     def observation(draw_id):
@@ -198,7 +217,9 @@ def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, 
                       "fingerprints": {**scene.source.fingerprints, "trace": trace_digest, "offline_scene": scene_digest},
                       "limitations": [
                           "Partial selection of verified same-camera submissions, not the complete visible scene.",
-                          "Geometry and qualified IDs come from the offline fixture after runtime metadata matching; runtime resource fingerprints are unknown.",
+                          ("Geometry and qualified IDs come from the offline fixture and fingerprinted SDK assets after runtime metadata matching; runtime resource fingerprints are unknown."
+                           if self_attached_assets is not None else
+                           "Geometry and qualified IDs come from the offline fixture after runtime metadata matching; runtime resource fingerprints are unknown."),
                           "Only listed sections were directly submitted in this pass and stage; unlisted sections have no visibility claim.",
                           "Lock-shadow status is per draw; matching shadows are not GPU readbacks.",
                           "BSP IDs and source indices come from the heuristic offline scanner; metadata matching does not prove payload identity.",
@@ -206,12 +227,20 @@ def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, 
                           "Repeated runtime reads cannot exclude ABA or unobserved writes."]}
     if include_asset_candidates:
         data["source"]["limitations"].append(CANDIDATE_LIMITATION)
-        data["source"]["limitations"].append(
-            "Offline actor transforms matched within 0.001 T3 units of translation and 0.000001 in other matrix entries."
-            if not allow_quantized_rotators else
-            "Candidate transforms use direct matching or the separately identified quantized-rotator hypothesis.")
+        if self_attached_assets is None:
+            data["source"]["limitations"].append(
+                "Offline actor transforms matched within 0.001 T3 units of translation and 0.000001 in other matrix entries."
+                if not allow_quantized_rotators else
+                "Candidate transforms use direct matching or the separately identified quantized-rotator hypothesis.")
+        else:
+            data["source"]["limitations"].append(
+                "Where offline actor transforms exist, they matched within 0.001 T3 units of translation and 0.000001 in other matrix entries."
+                if not allow_quantized_rotators else
+                "Candidates with offline transforms use direct matching or the separately identified quantized-rotator hypothesis.")
     if allow_quantized_rotators:
         data["source"]["limitations"].append(QUANTIZED_LIMITATION)
+    if self_attached_assets is not None:
+        data["source"]["limitations"].append(SELF_ATTACHED_LIMITATION)
     data["camera"] = {"source": {"kind": "runtime", "frame_id": frame, "fingerprint": trace_digest},
                       "view": view, "projection": projection,
                       "viewport": {"x": viewport["x"], "y": viewport["y"], "width": viewport["width"],
@@ -227,6 +256,34 @@ def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, 
     if allow_quantized_rotators:
         data["source"]["limitations"].append("Quantized rotator candidate actors: " + (", ".join(quantized_ids) or "none"))
     data["mesh_instances"] = [x for x in data["mesh_instances"] if x["id"] in selected_instances]
+    self_ids = sorted({item["target_id"] for item in verified if item.get("self_attached") and
+                       item["target_id"] in selected_instances})
+    if self_attached_assets is not None:
+        data["source"]["limitations"].append("Self-attached asset candidate actors: " + (", ".join(self_ids) or "none"))
+        existing_resources = {item["id"]: item for item in data["static_mesh_resources"]}
+        existing_materials = {item["id"]: item for item in data["materials"]}
+        for asset in self_attached_assets.values():
+            target_id = asset["target_id"]
+            if target_id not in self_ids:
+                continue
+            resource = asdict(asset["resource"])
+            prior = existing_resources.get(resource["id"])
+            if prior is not None and StaticMeshResource.parse(prior, "offline.resource") != asset["resource"]:
+                raise ValueError("self-attached candidate conflicts with offline mesh resource")
+            if prior is None:
+                data["static_mesh_resources"].append(resource)
+                existing_resources[resource["id"]] = resource
+            for material_id, name in asset["materials"].items():
+                material = {"id": material_id, "name": name}
+                prior = existing_materials.get(material_id)
+                if prior is not None and prior["name"].lower() != name.lower():
+                    raise ValueError("self-attached candidate conflicts with offline material")
+                if prior is None:
+                    data["materials"].append(material)
+                    existing_materials[material_id] = material
+            data["mesh_instances"].append({"id": target_id, "resource_id": resource["id"],
+                                           "transform": instance_transforms[target_id], "skin": None,
+                                           "material_ids": list(asset["material_ids"])})
     selected_resources = {x["resource_id"] for x in data["mesh_instances"]}
     data["static_mesh_resources"] = [x for x in data["static_mesh_resources"] if x["id"] in selected_resources]
     for item in data["mesh_instances"]:
@@ -251,6 +308,8 @@ def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, 
                                                        "other_matrix_entries": MATRIX_TOLERANCE}
     if allow_quantized_rotators:
         manifest["quantized_rotator_candidates"] = quantized_ids
+    if self_attached_assets is not None:
+        manifest["self_attached_asset_candidates"] = self_ids
     return snapshot, manifest
 
 
@@ -266,6 +325,10 @@ def main(argv=None):
                         help="include scoped actors with matching offline mesh candidates")
     parser.add_argument("--allow-quantized-rotators", action="store_true",
                         help="also include candidates matching the observed two-bit rotator truncation hypothesis")
+    parser.add_argument("--allow-self-attached-candidates", action="store_true",
+                        help="include self-attached actor asset candidates with directly observed runtime transforms")
+    parser.add_argument("--offline-actors", type=Path, help="fingerprinted actor export for self-attached candidates")
+    parser.add_argument("--game-dir", help="game installation used to resolve fingerprinted self-attached assets")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
@@ -288,10 +351,17 @@ def main(argv=None):
             raise ValueError("trace changed while validating")
         raw = packet.read_limited(args.scene, packet.MAX_INPUT)
         scene = SceneSnapshot.from_json(raw)
+        if args.allow_self_attached_candidates != (args.offline_actors is not None):
+            raise ValueError("self-attached candidates require the offline actor export")
+        if args.allow_self_attached_candidates and not args.include_asset_candidates:
+            raise ValueError("self-attached actors require offline asset candidates")
+        assets = (self_attached.load(scene, records, args.offline_actors, self_attached.importer.game_dir(args.game_dir))
+                  if args.allow_self_attached_candidates else None)
         snapshot, manifest = build(scene, records, args.frame, args.render_pass, args.stage,
                                    args.anchor_draw, trace_digest, hashlib.sha256(raw).hexdigest(),
                                    include_asset_candidates=args.include_asset_candidates,
-                                   allow_quantized_rotators=args.allow_quantized_rotators)
+                                   allow_quantized_rotators=args.allow_quantized_rotators,
+                                   self_attached_assets=assets)
         body = snapshot.to_json(indent=2) + "\n"
         manifest["snapshot_sha256"] = hashlib.sha256(body.encode()).hexdigest()
         packet.write_pair(args.output, body, manifest)

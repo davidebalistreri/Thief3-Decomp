@@ -91,7 +91,8 @@ def sampler_candidate(draw, stage):
             "levels": texture["levels"], "format": texture["format"]}
 
 
-def from_trace(scene, offline, offline_bytes, trace, render_pass, stage, *, sampler_stage=None, samplers=None):
+def from_trace(scene, offline, offline_bytes, trace, render_pass, stage, *, sampler_stage=None, samplers=None,
+               self_attached_actors=None, self_attached_game=None):
     """Rebuild the scoped snapshot before pairing any state to its draw."""
     digest = scene.source.fingerprints.get("trace")
     offline_digest = hashlib.sha256(offline_bytes).hexdigest()
@@ -104,10 +105,13 @@ def from_trace(scene, offline, offline_bytes, trace, render_pass, stage, *, samp
                (s.render_pass, s.stage) == (render_pass, stage)]
     if not anchors:
         raise ValueError("state matching requires a scoped mesh anchor")
+    self_assets = (scoped.self_attached.load(offline, records, self_attached_actors, self_attached_game)
+                   if scoped.SELF_ATTACHED_LIMITATION in scene.source.limitations else None)
     rebuilt, _ = scoped.build(offline, records, scene.source.frame_id, render_pass, stage,
                               anchors[0].draw_id, digest, offline_digest,
                               include_asset_candidates=scoped.CANDIDATE_LIMITATION in scene.source.limitations,
-                              allow_quantized_rotators=scoped.QUANTIZED_LIMITATION in scene.source.limitations)
+                              allow_quantized_rotators=scoped.QUANTIZED_LIMITATION in scene.source.limitations,
+                              self_attached_assets=self_assets)
     if rebuilt.to_dict() != scene.to_dict():
         raise ValueError("scene does not match the revalidated scoped capture")
     result = {}

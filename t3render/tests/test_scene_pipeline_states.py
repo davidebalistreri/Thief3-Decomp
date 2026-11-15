@@ -112,6 +112,46 @@ class LegacyStateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid draw state"):
             packet.create_packet(scene, packet_tests.Resolver(), draw_states=invalid)
 
+    def test_self_attached_snapshot_requires_asset_revalidation(self):
+        original, records = candidate_fixture()
+        data = original.to_dict()
+        extra = data["mesh_instances"].pop()
+        offline = packet.SceneSnapshot.from_dict(data)
+        resource = next(x for x in offline.static_mesh_resources if x.id == extra["resource_id"])
+        names = {x.id: x.name for x in offline.materials}
+        assets = {"StaticMeshActor__258": {"target_id": extra["id"], "resource": resource,
+                   "material_ids": tuple(extra["material_ids"]),
+                   "materials": {mid: names[mid] for mid in extra["material_ids"] if mid is not None}}}
+        for row in records:
+            if row.get("event") == "draw":
+                row["render_states"] = observed_state()
+        offline_bytes = offline.to_json().encode()
+        raw = "".join(json.dumps(row) + "\n" for row in records).encode()
+        scene, _ = scoped.build(offline, records, 3, 4, 1, 4, hashlib.sha256(raw).hexdigest(),
+                                hashlib.sha256(offline_bytes).hexdigest(), include_asset_candidates=True,
+                                self_attached_assets=assets)
+        with tempfile.TemporaryDirectory(prefix="t3render-self-state-") as directory:
+            path = Path(directory) / "trace.jsonl"
+            path.write_bytes(raw)
+            with self.assertRaisesRegex(ValueError, "actor export and game directory"):
+                states.from_trace(scene, offline, offline_bytes, path, 4, 1)
+            with mock.patch.object(scoped.self_attached, "load", return_value=assets) as loader:
+                observed = states.from_trace(scene, offline, offline_bytes, path, 4, 1,
+                                             self_attached_actors="actors", self_attached_game="game")
+                self.assertEqual(set(observed), {2, 3, 4, 5, 6})
+                loader.assert_called_once()
+            quantized, _ = scoped.build(offline, records, 3, 4, 1, 4, hashlib.sha256(raw).hexdigest(),
+                                        hashlib.sha256(offline_bytes).hexdigest(), include_asset_candidates=True,
+                                        allow_quantized_rotators=True, self_attached_assets=assets)
+            with mock.patch.object(scoped.self_attached, "load", return_value=assets):
+                self.assertEqual(set(states.from_trace(quantized, offline, offline_bytes, path, 4, 1,
+                                                       self_attached_actors="actors", self_attached_game="game")),
+                                 {2, 3, 4, 5, 6})
+            altered = scene.to_dict()
+            altered["source"]["limitations"].remove(scoped.SELF_ATTACHED_LIMITATION)
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                states.from_trace(packet.SceneSnapshot.from_dict(altered), offline, offline_bytes, path, 4, 1)
+
     def test_composition_refuses_intervening_target_or_depth_clears(self):
         scene = packet_tests.scoped_scene()
         draws = {2: {}, 8: {}}

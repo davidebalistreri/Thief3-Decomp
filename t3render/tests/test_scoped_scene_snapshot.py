@@ -1,4 +1,5 @@
 import copy
+from dataclasses import replace
 import json
 from pathlib import Path
 import sys
@@ -237,6 +238,48 @@ class ScopedSceneSnapshotTests(unittest.TestCase):
         self.assertEqual(candidate.mesh_instances[1].transform, tuple(draw["transforms"]["world"][0]))
         with self.assertRaisesRegex(ValueError, "require offline asset"):
             builder.build(scene, records, 3, 4, 1, 4, "b" * 64, "c" * 64, allow_quantized_rotators=True)
+
+    def test_self_attached_asset_uses_only_observed_runtime_transform(self):
+        original, records = candidate_fixture()
+        data = original.to_dict()
+        offline_instance = data["mesh_instances"].pop()
+        scene = builder.SceneSnapshot.from_dict(data)
+        resource = next(x for x in scene.static_mesh_resources if x.id == offline_instance["resource_id"])
+        material_names = {x.id: x.name for x in scene.materials}
+        assets = {"StaticMeshActor__258": {"target_id": offline_instance["id"], "resource": resource,
+                   "material_ids": tuple(offline_instance["material_ids"]),
+                   "materials": {mid: material_names[mid] for mid in offline_instance["material_ids"] if mid is not None}}}
+        strict, _ = builder.build(scene, records, 3, 4, 1, 4, "b" * 64, "c" * 64, include_asset_candidates=True)
+        snapshot, manifest = builder.build(scene, records, 3, 4, 1, 4, "b" * 64, "c" * 64,
+                                           include_asset_candidates=True, self_attached_assets=assets)
+        self.assertNotIn(6, [item.draw_id for item in strict.submissions])
+        self.assertIn(6, [item.draw_id for item in snapshot.submissions])
+        self.assertEqual(manifest["self_attached_asset_candidates"], [offline_instance["id"]])
+        self.assertIn(builder.SELF_ATTACHED_LIMITATION, snapshot.source.limitations)
+        self.assertIn("Where offline actor transforms exist, they matched within 0.001 T3 units of translation and 0.000001 in other matrix entries.",
+                      snapshot.source.limitations)
+        instance = next(x for x in snapshot.mesh_instances if x.id == offline_instance["id"])
+        draw = next(x for x in records if x.get("event") == "draw" and x.get("op_id") == 6)
+        self.assertEqual(instance.transform, tuple(draw["transforms"]["world"][0]))
+        self.assertIsNone(instance.skin)
+        self.assertEqual(instance.material_ids, tuple(offline_instance["material_ids"]))
+        bad = copy.deepcopy(records)
+        next(x for x in bad if x.get("event") == "draw" and x.get("op_id") == 6)["start_index"] += 3
+        rejected, _ = builder.build(scene, bad, 3, 4, 1, 4, "b" * 64, "c" * 64,
+                                    include_asset_candidates=True, self_attached_assets=assets)
+        self.assertNotIn(6, [item.draw_id for item in rejected.submissions])
+        with self.assertRaisesRegex(ValueError, "require offline asset"):
+            builder.build(scene, records, 3, 4, 1, 4, "b" * 64, "c" * 64, self_attached_assets=assets)
+        conflicting = copy.deepcopy(assets)
+        conflicting["StaticMeshActor__258"]["resource"] = replace(resource, name="Different mesh")
+        with self.assertRaisesRegex(ValueError, "conflicts with offline mesh resource"):
+            builder.build(scene, records, 3, 4, 1, 4, "b" * 64, "c" * 64,
+                          include_asset_candidates=True, self_attached_assets=conflicting)
+        conflicting = copy.deepcopy(assets)
+        conflicting["StaticMeshActor__258"]["materials"]["material:wood"] = "Different material"
+        with self.assertRaisesRegex(ValueError, "conflicts with offline material"):
+            builder.build(scene, records, 3, 4, 1, 4, "b" * 64, "c" * 64,
+                          include_asset_candidates=True, self_attached_assets=conflicting)
 
 
 if __name__ == "__main__":

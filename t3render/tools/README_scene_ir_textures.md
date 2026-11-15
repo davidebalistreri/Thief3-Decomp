@@ -167,6 +167,41 @@ texture identity. The synthetic GPU fixtures exercise both projector paths;
 earlier packet fixtures also pass. Circular and textured modes write packet
 versions 6 and 7 respectively; versions 1–5 remain readable.
 
+## Distance-fog candidate
+
+`--fog-candidate-stage 6` adds an optional distance-fog preview. It requires
+the same revalidated state trace and fingerprinted offline actor export used
+above. Every selected draw must have sampled constants and a unique matching
+pre-Reset `Fog11_Light_Vertex` program hypothesis. Register 26 must match the
+same-frame camera; register 28 must match the offline LevelInfo distance range.
+The actor export must contain exactly one LevelInfo and an explicit RGB color.
+The exporter rejects incomplete observations, mismatched provenance and
+incompatible draw states.
+
+The candidate computes `(distance(world, camera) - start) / (end - start)` at
+each vertex, interpolates it, clamps it in the pixel shader, and blends the
+offline LevelInfo color with source alpha. The original runtime pixel shader,
+its color, and the final fog equation are not observed; this is a diagnostic
+approximation, not verified legacy fog. It does not add D3D types to SceneIR.
+
+For frame 1001, generate a fourth scoped snapshot with `--frame 1001 --pass 0
+--stage 6 --anchor-draw 362 --include-asset-candidates` and the same corrected
+offline fixture and trace as above. Append to the previous command:
+
+```sh
+--additional-scene build/t3render-offline/bedroom-runtime-1001-lights-stage6.scene.json \
+--spot-candidates --spot-projector-candidate genwindowint_p --fog-candidate-stage 6
+```
+
+Use a new output path. The resulting version-8 packet rendered 273 draws,
+including 51 fog candidates, on the local Highball/DX12 path. The whole-image
+mean absolute RGB error against the synchronized screenshot was `(7.49, 5.98,
+4.36)` versus `(7.55, 6.45, 5.78)` without fog on a 0–255 scale. The metric
+includes dark background, missing geometry and HUD; it does not establish
+shader identity or visual parity. The fog-only GPU fixture checks factor
+interpolation, clamping and blending at four pixels. Earlier texture, state,
+sampler and light fixtures also pass; packet versions 1–7 remain readable.
+
 The fixture, packets and rendered images contain game-derived data and stay
 local under `build/`.
 

@@ -26,12 +26,14 @@ import scene_ir_to_d3d12_packet as preview  # noqa: E402
 import scene_legacy_states as legacy_states  # noqa: E402
 import scene_ambient_candidates as ambient  # noqa: E402
 import scene_direct_candidates as direct  # noqa: E402
+import scene_fog_candidates as fog  # noqa: E402
 
 MAGIC = b"T3SCN03\0"
 AMBIENT_MAGIC = b"T3SCN04\0"
 DIRECT_MAGIC = b"T3SCN05\0"
 SPOT_MAGIC = b"T3SCN06\0"
 PROJECTOR_MAGIC = b"T3SCN07\0"
+FOG_MAGIC = b"T3SCN08\0"
 MAX_BYTES = 64 * 1024 * 1024
 MAX_TEXTURES = 64
 MAX_DRAWS = 8192
@@ -178,7 +180,7 @@ def select_scope(scene, render_pass=None, stage=None):
 
 
 def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=None, sampler_candidates=None,
-                  additional_scenes=(), ambient_candidates=None, direct_candidates=None):
+                  additional_scenes=(), ambient_candidates=None, direct_candidates=None, fog_candidates=None):
     render_pass, stage = select_scope(scene, render_pass, stage)
     selections = [(scene, render_pass, stage)]
     if additional_scenes and draw_states is None:
@@ -222,6 +224,14 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             raise ValueError("direct candidates require revalidated submitted draws")
         if ambient_candidates is not None and set(ambient_candidates) & set(direct_candidates):
             raise ValueError("a draw cannot have ambient and direct candidates")
+    if fog_candidates is not None:
+        if draw_states is None or not isinstance(fog_candidates, dict) or not fog_candidates or not (
+                set(fog_candidates) <= {s.draw_id for s, _ in submissions}):
+            raise ValueError("fog candidates require revalidated submitted draws")
+        if ((ambient_candidates is not None and set(fog_candidates) & set(ambient_candidates)) or
+                (direct_candidates is not None and set(fog_candidates) & set(direct_candidates))):
+            raise ValueError("a draw cannot have fog and light candidates")
+    extended_packet = direct_candidates is not None or fog_candidates is not None
     spot_packet = direct_candidates is not None and any(
         isinstance(value, dict) and value.get("mode") == "spot_approximation" for value in direct_candidates.values())
     projector_packet = direct_candidates is not None and any(
@@ -257,6 +267,20 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
                     "point_approximation", "skipped_spot", "spot_approximation"):
                 raise ValueError("invalid direct candidate")
         is_lit = light is not None and light["mode"] in ("point_approximation", "spot_approximation")
+        fog_value = fog_candidates.get(submission.draw_id) if fog_candidates is not None else None
+        if fog_candidates is not None and submission.draw_id in fog_candidates:
+            if not isinstance(fog_value, dict):
+                raise ValueError("invalid fog candidate")
+            camera_pos, fog_start, fog_inverse, fog_color = (fog_value.get("camera_position"), fog_value.get("start"),
+                                                            fog_value.get("inverse_range"), fog_value.get("offline_color"))
+            numbers = (list(camera_pos) if isinstance(camera_pos, (list, tuple)) else []) + [fog_start, fog_inverse] + (
+                      list(fog_color) if isinstance(fog_color, (list, tuple)) else [])
+            if (not isinstance(camera_pos, (list, tuple)) or len(camera_pos) != 3 or
+                    not isinstance(fog_color, (list, tuple)) or len(fog_color) != 3 or any(
+                        isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in numbers) or
+                    any(abs(x) > 1000000 for x in camera_pos) or not 0 <= fog_start <= 1000000 or
+                    not 0 < fog_inverse <= 1 or any(not 0 <= x <= 1 for x in fog_color)):
+                raise ValueError("invalid fog candidate parameters")
         if is_lit and geometry.normals is None:
             raise ValueError("direct-light candidate requires source normals")
         normal_xform = normal_matrix(matrix) if is_lit else None
@@ -273,8 +297,14 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             uv = geometry.uv0[index]
             if (abs(position[3] - 1) > 1e-6 or any(not math.isfinite(v) or abs(v) > 1000000 for v in position[:3] + uv)):
                 raise ValueError("vertex exceeds renderer bounds")
-            normal = transform_normal(geometry.normals[index], normal_xform) if is_lit else (0, 0, 0)
-            vertices.append((*position[:3], *uv, *normal) if direct_candidates is not None else (*position[:3], *uv))
+            if fog_value is not None:
+                amount = (math.dist(position[:3], camera_pos) - fog_start) * fog_inverse
+                if not math.isfinite(amount) or abs(amount) > 1000000:
+                    raise ValueError("fog factor exceeds renderer bounds")
+                normal = (amount, 0, 0)  # Interpolate the legacy vertex fog factor.
+            else:
+                normal = transform_normal(geometry.normals[index], normal_xform) if is_lit else (0, 0, 0)
+            vertices.append((*position[:3], *uv, *normal) if extended_packet else (*position[:3], *uv))
         triangle_count += len(vertices) // 3
         if not vertices or triangle_count > MAX_TRIANGLES:
             raise ValueError("triangle count exceeds renderer bounds")
@@ -285,6 +315,10 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
                 state["blend_enable"] != 1 or state["blend_src"] != 1 or state["blend_dst"] != 1 or
                 state["blend_op"] != 0 or state["color_mask"] != 7):
             raise ValueError("direct candidates require additive RGB with depth testing and no depth writes")
+        if fog_value is not None and (state["depth_enable"] != 1 or state["depth_write"] != 0 or
+                state["blend_enable"] != 1 or state["blend_src"] != 4 or state["blend_dst"] != 5 or
+                state["blend_op"] != 0 or state["color_mask"] != 7 or state["alpha_compare"] != 0):
+            raise ValueError("fog candidates require source-alpha blending with depth testing and no depth writes")
         if sampler_candidates is not None and submission.draw_id not in sampler_candidates:
             raise ValueError("sampler candidate missing for submitted draw")
         sampler = (match_sampler(sampler_candidates[submission.draw_id], tex) if sampler_candidates is not None else
@@ -311,6 +345,8 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             light_values = (*position, inverse, *rgb, energy * gain)
         else:
             light_values = (0,) * 8
+        if fog_value is not None:
+            light_values = (0, 0, 0, 0, *fog_color, 0)
         projector_index = 0
         if light is not None and light["mode"] == "spot_approximation":
             rows = light.get("projector_rows")
@@ -341,7 +377,7 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
                 mode = 5
         else:
             projector = (0,) * 12
-            mode = 2 if is_lit else 3 if light is not None else 1 if color is not None else 0
+            mode = 6 if fog_value is not None else 2 if is_lit else 3 if light is not None else 1 if color is not None else 0
         draws.append((texture_indices[tex_key], vertices, state, sampler, color, mode, light_values, projector, projector_index))
         source_draws.append({"draw": submission.draw_id, "target_kind": submission.target_kind,
                              "target_id": submission.target_id, "section": submission.section,
@@ -352,16 +388,18 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             source_draws[-1]["ambient_candidate"] = list(color)
         if light is not None:
             source_draws[-1]["direct_candidate"] = light
+        if fog_value is not None:
+            source_draws[-1]["fog_candidate"] = fog_value
     camera = scene.camera
     viewport = camera.viewport
     size = (struct.calcsize("<8sIIff32fII") + sum(12 + sum(len(mip) for mip in tex["mips"]) for tex in textures) +
-            sum(56 + (20 if ambient_candidates is not None or direct_candidates is not None else 0) +
-                (32 if direct_candidates is not None else 0) + len(vertices) * (32 if direct_candidates is not None else 20)
-                + (48 if spot_packet else 0) + (4 if projector_packet else 0)
+            sum(56 + (20 if ambient_candidates is not None or extended_packet else 0) +
+                (32 if extended_packet else 0) + len(vertices) * (32 if extended_packet else 20)
+                + (48 if spot_packet or fog_candidates is not None else 0) + (4 if projector_packet or fog_candidates is not None else 0)
                 for _, vertices, _, _, _, _, _, _, _ in draws))
     if size > MAX_BYTES:
         raise ValueError("packet exceeds renderer bounds")
-    magic = (PROJECTOR_MAGIC if projector_packet else SPOT_MAGIC if spot_packet else
+    magic = (FOG_MAGIC if fog_candidates is not None else PROJECTOR_MAGIC if projector_packet else SPOT_MAGIC if spot_packet else
              DIRECT_MAGIC if direct_candidates is not None else AMBIENT_MAGIC if ambient_candidates is not None else MAGIC)
     body = bytearray(struct.pack("<8sIIff32fII", magic,
                                  viewport.width, viewport.height,
@@ -374,16 +412,16 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
     for texture_index, vertices, state, sampler, color, mode, light_values, projector, projector_index in draws:
         body.extend(struct.pack("<13If", texture_index, len(vertices), *(state[key] for key in legacy_states.FIELDS),
                                 sampler["mip_lod_bias"]))
-        if ambient_candidates is not None or direct_candidates is not None:
+        if ambient_candidates is not None or extended_packet:
             body.extend(struct.pack("<I4f", mode, *(color if color is not None else (0, 0, 0, 0))))
-        if direct_candidates is not None:
+        if extended_packet:
             body.extend(struct.pack("<8f", *light_values))
-        if spot_packet:
+        if spot_packet or fog_candidates is not None:
             body.extend(struct.pack("<12f", *projector))
-        if projector_packet:
+        if projector_packet or fog_candidates is not None:
             body.extend(struct.pack("<I", projector_index))
         for vertex in vertices:
-            body.extend(struct.pack("<8f" if direct_candidates is not None else "<5f", *vertex))
+            body.extend(struct.pack("<8f" if extended_packet else "<5f", *vertex))
     if len(body) != size:
         raise ValueError("packet size mismatch")
     stats = {"render_pass": render_pass, "stage": stage, "triangles": triangle_count, "draws": source_draws,
@@ -431,10 +469,12 @@ def main(argv=None):
                         help="use a pre-Reset ambient shader hypothesis for this submission stage")
     parser.add_argument("--direct-candidate-stage", type=int,
                         help="approximate scoped direct-light candidates for this submission stage")
+    parser.add_argument("--fog-candidate-stage", type=int,
+                        help="preview a scoped distance-fog hypothesis for this submission stage")
     parser.add_argument("--spot-candidates", action="store_true",
                         help="also preview validated spotlight projector candidates with an approximate circular mask")
     parser.add_argument("--spot-projector-candidate", help="explicitly hypothesize a metadata-compatible offline projector texture")
-    parser.add_argument("--offline-actors", type=Path, help="fingerprinted t3map actor export for candidate light colors")
+    parser.add_argument("--offline-actors", type=Path, help="fingerprinted t3map actor export for candidate light or fog colors")
     parser.add_argument("--direct-preview-gain", type=float, default=1.0,
                         help="uncalibrated visual gain for candidate direct lights (default: 1)")
     parser.add_argument("--output", type=Path, required=True)
@@ -452,9 +492,12 @@ def main(argv=None):
             raise ValueError("sampler candidate requires a state trace and stage 0..7")
         if args.ambient_candidate_stage is not None and (args.state_trace is None or args.ambient_candidate_stage < 0):
             raise ValueError("ambient candidate requires a state trace and a nonnegative stage")
-        if ((args.direct_candidate_stage is None) != (args.offline_actors is None) or
-                (args.direct_candidate_stage is not None and (args.state_trace is None or args.direct_candidate_stage < 0))):
-            raise ValueError("direct candidates require a state trace, offline actors and a nonnegative stage")
+        needs_actors = args.direct_candidate_stage is not None or args.fog_candidate_stage is not None
+        if needs_actors != (args.offline_actors is not None):
+            raise ValueError("direct or fog candidates require offline actors")
+        for candidate_stage in (args.direct_candidate_stage, args.fog_candidate_stage):
+            if candidate_stage is not None and (args.state_trace is None or candidate_stage < 0):
+                raise ValueError("direct or fog candidates require a state trace and a nonnegative stage")
         if args.spot_candidates and args.direct_candidate_stage is None:
             raise ValueError("spot candidates require a direct candidate stage")
         if args.spot_projector_candidate is not None and not args.spot_candidates:
@@ -504,17 +547,27 @@ def main(argv=None):
             direct_values = direct.from_trace(current, offline, offline_bytes, args.state_trace, kernel_path, args.offline_actors,
                                               *scope, args.direct_preview_gain, preview_spots=args.spot_candidates,
                                               projector_candidate=args.spot_projector_candidate)
+        fog_values = None
+        if args.fog_candidate_stage is not None:
+            matching = [(current, select_scope(current, args.render_pass, args.stage) if current is scene else select_scope(current))
+                        for current in (scene, *extra_scenes)]
+            matching = [(current, scope) for current, scope in matching if scope[1] == args.fog_candidate_stage]
+            if len(matching) != 1:
+                raise ValueError("fog candidate stage must identify exactly one scene")
+            current, scope = matching[0]
+            fog_values = fog.from_trace(current, offline, offline_bytes, args.state_trace, kernel_path,
+                                        args.offline_actors, *scope)
         bundles = []
         try:
             for _, path in paths:
                 bundles.append(IBT(path))
             body, stats = create_packet(scene, TextureResolver(bundles), args.render_pass, args.stage, states, samplers,
                                         additional_scenes=extra_scenes, ambient_candidates=ambient_values,
-                                        direct_candidates=direct_values)
+                                        direct_candidates=direct_values, fog_candidates=fog_values)
         finally:
             for bundle in bundles:
                 bundle.close()
-        manifest = {"schema": "t3.scene.textured-packet", "version": 7 if body[:8] == PROJECTOR_MAGIC else 6 if body[:8] == SPOT_MAGIC else 5 if direct_values is not None else 4 if ambient_values is not None else 3,
+        manifest = {"schema": "t3.scene.textured-packet", "version": 8 if body[:8] == FOG_MAGIC else 7 if body[:8] == PROJECTOR_MAGIC else 6 if body[:8] == SPOT_MAGIC else 5 if direct_values is not None else 4 if ambient_values is not None else 3,
                     "source_frame": scene.source.frame_id,
                     "scene_sha256": hashlib.sha256(raw).hexdigest(), "packet_sha256": hashlib.sha256(body).hexdigest(),
                     "state_source": "revalidated_same_frame_trace" if states is not None else "opaque_preview_defaults",
@@ -523,7 +576,7 @@ def main(argv=None):
                                     "UV0 is used without a flip; clip depth 0..1 and half-pixel correction are assumptions.",
                                     "Sampler candidates match metadata only, not texture identity or shader UV routing.",
                                     "Linear wrap sampler with mips; shader output and culling convention remain approximations.",
-                                    "No stencil, fog, runtime lights, legacy shaders, missing objects or HUD."], **stats}
+                                    "No stencil, verified runtime lights, legacy shaders, missing objects or HUD."], **stats}
         if extra_scenes:
             manifest["additional_scene_sha256"] = [hashlib.sha256(data).hexdigest() for data in extra_raw]
             manifest["additional_source_limitations"] = [list(other.source.limitations) for other in extra_scenes]
@@ -533,12 +586,16 @@ def main(argv=None):
         if direct_values is not None:
             manifest["limitations"].append("Point-light Lambert shading and squared linear falloff are approximations; the coefficient's radius meaning is unproven.")
             manifest["limitations"].append("Light colors and energies come from offline actor data; runtime light identity, colors, intensity and shadows are unproven.")
-            if body[:8] == PROJECTOR_MAGIC:
+            if any("projector_candidate" in light for light in direct_values.values()):
                 manifest["limitations"].append("The projected texture is an offline metadata-compatible hypothesis, not an observed GPU texture identity.")
-            elif body[:8] == SPOT_MAGIC:
+            elif any(light.get("mode") == "spot_approximation" for light in direct_values.values()):
                 manifest["limitations"].append("Spotlight projection uses sampled matrix candidates with an approximate circular mask, not the original projected texture or a verified cone.")
             else:
                 manifest["limitations"].append("Spotlight contributions are omitted.")
+        if fog_values is not None:
+            manifest["limitations"].append("Fog is a vertex-distance hypothesis from a pre-Reset program and sampled constants; its color is from offline LevelInfo, not a verified runtime pixel shader.")
+        else:
+            manifest["limitations"].append("Fog is omitted.")
         write_pair(args.output, body, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))
     except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, struct.error) as exc:

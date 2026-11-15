@@ -20,6 +20,7 @@ import scene_ambient_fixture as ambient_fixture
 import scene_direct_fixture as direct_fixture
 import scene_spot_fixture as spot_fixture
 import scene_projector_fixture as projector_fixture
+import scene_fog_fixture as fog_fixture
 from t3texture import Mip, Texture
 from test_scoped_scene_snapshot import fixture
 
@@ -302,6 +303,46 @@ class TexturedScenePacketTests(unittest.TestCase):
         image[len(header) + (32 * 64 + 24) * 3] = 0
         with self.assertRaisesRegex(ValueError, "wrong pixel"):
             projector_fixture.verify(image)
+
+    def test_fog_packet_validates_factors_states_and_conflicting_candidates(self):
+        scene = scoped_scene()
+        states = {s.draw_id: dict(packet.legacy_states.DEFAULT) for s in scene.submissions}
+        states[2].update(depth_write=0, blend_enable=1, blend_src=4, blend_dst=5, color_mask=7)
+        value = {"camera_position": [0, 0, 0], "start": 1, "inverse_range": .5,
+                 "offline_color": [.25, .5, .75]}
+        raw, info = packet.create_packet(scene, Resolver(), draw_states=states, fog_candidates={2: value})
+        self.assertEqual(raw[:8], b"T3SCN08\0")
+        self.assertEqual(info["draws"][0]["fog_candidate"], value)
+        self.assertEqual(self.parse(raw).returncode, 0)
+        # First geometry position is (0, 0, 0), so its unclamped factor is -0.5.
+        self.assertAlmostEqual(struct.unpack_from("<f", raw, 188 + 160 + 20)[0], -.5)
+        for candidate in ({}, {2: None}, {2: dict(value, inverse_range=0)},
+                          {2: dict(value, offline_color=[1, 2, 3])}, {999: value}):
+            with self.subTest(candidate=candidate), self.assertRaises(ValueError):
+                packet.create_packet(scene, Resolver(), draw_states=states, fog_candidates=candidate)
+        with self.assertRaisesRegex(ValueError, "fog and light"):
+            packet.create_packet(scene, Resolver(), draw_states=states, fog_candidates={2: value},
+                                 ambient_candidates={2: [0, 0, 0, 1]})
+        states[2]["blend_src"] = 1
+        with self.assertRaisesRegex(ValueError, "source-alpha"):
+            packet.create_packet(scene, Resolver(), draw_states=states, fog_candidates={2: value})
+
+    def test_fog_gpu_fixture_and_parser_reject_invalid_state_or_varying(self):
+        raw = fog_fixture.fixture()
+        self.assertEqual(self.parse(raw).returncode, 0)
+        # Second draw begins at byte 528; reject wrong blend factor, shading, or fog varying.
+        for offset, value in ((556, struct.pack("<I", 1)), (584, struct.pack("<I", 7)),
+                              (712, struct.pack("<f", 1)), (708, struct.pack("<I", 0x7fc00000))):
+            self.assertEqual(self.parse(raw[:offset] + value + raw[offset + 4:]).returncode, 2)
+        header = b"P6\n64 64\n255\n"
+        image = bytearray(header + bytes(64 * 64 * 3))
+        for (x, y), color in fog_fixture.EXPECTED.items():
+            offset = len(header) + (y * 64 + x) * 3
+            image[offset:offset + 3] = bytes(color)
+        self.assertEqual(fog_fixture.verify(image), 4)
+        image[len(header) + (32 * 64 + 24) * 3] = 0
+        with self.assertRaisesRegex(ValueError, "wrong pixel"):
+            fog_fixture.verify(image)
 
     def test_exclusive_write_does_not_overwrite_or_leave_first_file(self):
         with tempfile.TemporaryDirectory(prefix="t3render-textured-output-") as directory:

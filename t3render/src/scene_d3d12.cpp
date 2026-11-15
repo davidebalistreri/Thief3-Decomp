@@ -205,7 +205,8 @@ int Render(const Frame& frame, const wchar_t* output) {
         "falloff=saturate(1-max(w,0)*light_position_inverse_radius.w);}"
         "float diffuse_term=saturate(dot(normalize(normal),to_light/max(distance,0.000001)));"
         "c.rgb=light_color_energy.rgb*(light_color_energy.w*diffuse_term*falloff*falloff*cone);}"
-        "if(shading==3)c.rgb=0;return c;}";
+        "if(shading==3)c.rgb=0;"
+        "if(shading==6)c=float4(light_color_energy.rgb,saturate(normal.x));return c;}";
     ComPtr<ID3DBlob> vs, ps;
     if (!Compile(compile, vs_source, "vs_5_0", vs) || !Compile(compile, ps_source, "ps_5_0", ps)) return 1;
 

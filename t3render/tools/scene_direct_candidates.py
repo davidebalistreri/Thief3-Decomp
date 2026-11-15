@@ -99,20 +99,14 @@ def direct_light(draw, outcome, header, frame_begin, cb, pb, hb, shader_index, l
     return result
 
 
-def from_trace(scene, offline, offline_bytes, trace, kernel, actors_path, render_pass, stage, gain,
-               *, preview_spots=False, projector_candidate=None):
-    if (isinstance(gain, bool) or not isinstance(gain, (int, float)) or
-            not math.isfinite(gain) or not 0 <= gain <= 4):
-        raise ValueError("direct preview gain must be between 0 and 4")
-    if projector_candidate is not None and (not preview_spots or not isinstance(projector_candidate, str) or
-                                             not projector_candidate or len(projector_candidate) > 128):
-        raise ValueError("projector texture candidate requires an enabled spotlight preview")
+def offline_actors(scene, offline, offline_bytes, actors_path):
+    """Validate the fixture and actor export before deriving offline properties."""
     digest = scene.source.fingerprints.get("trace")
     if (scene.source.kind != "runtime" or scene.source.camera_synchronized is not True or not digest or
             offline.source.kind != "offline" or scene.source.map != offline.source.map or
             scene.source.fingerprints.get("offline_scene") != hashlib.sha256(offline_bytes).hexdigest() or
             any(scene.source.fingerprints.get(role) != value for role, value in offline.source.fingerprints.items())):
-        raise ValueError("direct candidate requires matching runtime and offline provenance")
+        raise ValueError("runtime and offline provenance do not match")
     raw = preview.read_limited(actors_path, preview.MAX_INPUT)
     if hashlib.sha256(raw).hexdigest() != offline.source.fingerprints.get("actors"):
         raise ValueError("offline actor export fingerprint does not match the scene")
@@ -123,6 +117,19 @@ def from_trace(scene, offline, offline_bytes, trace, kernel, actors_path, render
     actors = {a["name"]: a for a in items}
     if len(actors) != len(items):
         raise ValueError("offline actor names are ambiguous")
+    return actors
+
+
+def from_trace(scene, offline, offline_bytes, trace, kernel, actors_path, render_pass, stage, gain,
+               *, preview_spots=False, projector_candidate=None):
+    if (isinstance(gain, bool) or not isinstance(gain, (int, float)) or
+            not math.isfinite(gain) or not 0 <= gain <= 4):
+        raise ValueError("direct preview gain must be between 0 and 4")
+    if projector_candidate is not None and (not preview_spots or not isinstance(projector_candidate, str) or
+                                             not projector_candidate or len(projector_candidate) > 128):
+        raise ValueError("projector texture candidate requires an enabled spotlight preview")
+    actors = offline_actors(scene, offline, offline_bytes, actors_path)
+    digest = scene.source.fingerprints.get("trace")
     bridge.trace_summary.summarize(trace)
     records = runtime.read_frame(trace, scene.source.frame_id, digest)
     header, frame_begin = bridge.one(records, "header"), bridge.one(records, "frame_begin")

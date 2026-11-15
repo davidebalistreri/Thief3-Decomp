@@ -18,6 +18,7 @@ struct Light {
 struct Draw {
     std::uint32_t textures[4]{}, first_vertex = 0, vertex_count = 0;
     std::uint32_t shadow_mask = 0;
+    float emission[3]{};
 };
 struct ShadowCaster {
     std::uint32_t first_vertex = 0, vertex_count = 0, shadow_mask = 0;
@@ -33,6 +34,7 @@ struct Frame {
     std::vector<Vertex> vertices;
     std::vector<Draw> draws;
     std::vector<ShadowCaster> offline_casters;
+    bool has_emission = false;
 };
 
 inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& output) {
@@ -41,7 +43,7 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
     Frame frame;
     char magic[8];
     if (!reader.bytes(magic, sizeof(magic)) || std::memcmp(magic, "T3PBR0", 6) ||
-        (magic[6] != '1' && magic[6] != '2' && magic[6] != '3') || magic[7] != '\0' ||
+        (magic[6] != '1' && magic[6] != '2' && magic[6] != '3' && magic[6] != '4') || magic[7] != '\0' ||
         !reader.u32(frame.width) || !reader.u32(frame.height) || !frame.width || !frame.height ||
         frame.width > 2048 || frame.height > 2048 || !reader.f32(frame.min_depth) || !reader.f32(frame.max_depth) ||
         frame.min_depth < 0 || frame.max_depth > 1 || frame.min_depth > frame.max_depth) return false;
@@ -63,8 +65,9 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
             !reader.f32(frame.shadow_far_m, 100) || frame.shadow_far_m <= frame.shadow_near_m ||
             !reader.f32(frame.shadow_bias_m, .25f) || frame.shadow_bias_m < 0 ||
             !reader.f32(frame.shadow_softness, 2) || frame.shadow_softness < 0) return false;
-        if (magic[6] == '3' && (!reader.u32(offline_caster_count) || offline_caster_count > kMaxOfflineCasters)) return false;
+        if (magic[6] >= '3' && (!reader.u32(offline_caster_count) || offline_caster_count > kMaxOfflineCasters)) return false;
     }
+    frame.has_emission = magic[6] == '4';
     frame.lights.reserve(light_count);
     for (std::uint32_t i = 0; i < light_count; ++i) {
         Light light;
@@ -102,6 +105,7 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
             draw.vertex_count > scene::kMaxTriangles * 3 - frame.vertices.size() ||
             (frame.shadow_size && (!reader.u32(draw.shadow_mask) || draw.shadow_mask >= (1u << light_count))) ||
             std::size_t(draw.vertex_count) * 48 > reader.remaining()) return false;
+        if (frame.has_emission) for (float& x : draw.emission) if (!reader.f32(x, 1000) || x < 0) return false;
         if (frame.shadow_size) {
             for (std::uint32_t light = 0; light < light_count; ++light) if (draw.shadow_mask & (1u << light)) {
                 shadow_draw_calls += 6;

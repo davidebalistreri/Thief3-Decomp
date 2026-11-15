@@ -66,6 +66,9 @@ cbuffer Scene : register(b0) {
     float4 light_position_radius[16]; float4 light_color_intensity[16];
     float4 shadow_settings;
 };
+#if T3_EMISSION
+cbuffer Emission : register(b2) { float3 emissive_radiance; };
+#endif
 #if T3_SHADOWS
 float visibility(float3 world, float3 geometric_normal, float3 to_light, uint light_index) {
     float3 ray=world-light_position_radius[light_index].xyz;
@@ -127,6 +130,12 @@ float4 main(float4 uv:TEXCOORD0, float3 world:TEXCOORD1, float3 normal:TEXCOORD2
     float3 result=albedo*ambient.rgb*ao;
 #if T3_GBUFFER
     float3 direct_diffuse=0;
+#endif
+#if T3_EMISSION
+    result+=emissive_radiance;
+#if T3_GBUFFER
+    direct_diffuse+=emissive_radiance;
+#endif
 #endif
     float alpha=roughness*roughness; float a2=alpha*alpha; float k=(roughness+1)*(roughness+1)/8;
     [loop] for(uint i=0;i<(uint)size_scale_count.w;i++) {
@@ -326,7 +335,8 @@ float4 main(float4 position:SV_Position):SV_Target {
     ComPtr<ID3DBlob> vs, ps, tone_vs, tone_ps, shadow_vs, shadow_ps;
     const std::string options = std::string(use_gbuffer ? "#define T3_GBUFFER 1\n" : "#define T3_GBUFFER 0\n") +
                                 (indirect ? "#define T3_INDIRECT 1\n" : "#define T3_INDIRECT 0\n") +
-                                (gtao ? "#define T3_GTAO 1\n" : "#define T3_GTAO 0\n");
+                                (gtao ? "#define T3_GTAO 1\n" : "#define T3_GTAO 0\n") +
+                                (frame.has_emission ? "#define T3_EMISSION 1\n" : "#define T3_EMISSION 0\n");
     const std::string pixel_source = std::string(frame.shadow_size ? "#define T3_SHADOWS 1\n" : "#define T3_SHADOWS 0\n") + options + ps_source;
     const std::string tone_source = options + tone_ps_source;
     if (!Compile(compile, vs_source, "vs_5_0", vs) || !Compile(compile, pixel_source.c_str(), "ps_5_0", ps) ||
@@ -342,7 +352,7 @@ float4 main(float4 position:SV_Position):SV_Target {
     Handle event{CreateEventW(nullptr, FALSE, FALSE, nullptr)};
     if (!event.p) return 1;
     D3D12_DESCRIPTOR_RANGE ranges[10]{};
-    D3D12_ROOT_PARAMETER params[12]{};
+    D3D12_ROOT_PARAMETER params[13]{};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; params[0].Descriptor.ShaderRegister = 0;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     for (UINT i = 0; i < 6; ++i) {
@@ -362,6 +372,9 @@ float4 main(float4 position:SV_Position):SV_Target {
         params[i+2].DescriptorTable.NumDescriptorRanges = 1; params[i+2].DescriptorTable.pDescriptorRanges = &ranges[i];
         params[i+2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     }
+    params[12].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[12].Constants.ShaderRegister = 2; params[12].Constants.Num32BitValues = 3;
+    params[12].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_STATIC_SAMPLER_DESC samplers[2]{};
     auto& sampler = samplers[0];
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -373,7 +386,7 @@ float4 main(float4 position:SV_Position):SV_Target {
     shadow_sampler.MaxAnisotropy = 1; shadow_sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
     shadow_sampler.MaxLOD = D3D12_FLOAT32_MAX; shadow_sampler.ShaderRegister = 1;
     shadow_sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    D3D12_ROOT_SIGNATURE_DESC root_desc{}; root_desc.NumParameters = use_gbuffer ? 12 : 8; root_desc.pParameters = params;
+    D3D12_ROOT_SIGNATURE_DESC root_desc{}; root_desc.NumParameters = frame.has_emission ? 13 : use_gbuffer ? 12 : 8; root_desc.pParameters = params;
     root_desc.NumStaticSamplers = 2; root_desc.pStaticSamplers = samplers;
     root_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
     ComPtr<ID3DBlob> root_blob, root_errors; ComPtr<ID3D12RootSignature> root;
@@ -608,6 +621,7 @@ float4 main(float4 position:SV_Position):SV_Target {
     for (UINT i = 0; i < (use_gbuffer ? 5u : 1u); ++i) list->ClearRenderTargetView(geometry_rtvs[i], clear.Color, 0, nullptr);
     list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1, 0, 0, nullptr);
     for (const auto& draw : frame.draws) {
+        if (frame.has_emission) list->SetGraphicsRoot32BitConstants(12, 3, draw.emission, 0);
         for (UINT i = 0; i < 4; ++i) {
             auto handle = gpu_base; handle.ptr += (UINT64(draw.textures[i])*2+(i == 0 ? 1 : 0))*srv_step;
             list->SetGraphicsRootDescriptorTable(i+1, handle);

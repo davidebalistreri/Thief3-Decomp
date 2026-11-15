@@ -19,6 +19,7 @@ import scene_ir_to_textured_packet as legacy
 import scene_legacy_states as states
 import scene_material_overrides as overrides
 import scene_pbr_offline_casters as offline_casters
+import scene_pbr_flames as flames
 from ibt import IBT
 from scene_ir import SceneSnapshot, transform_point
 from t3common import game_dir, resolve_map
@@ -26,6 +27,7 @@ from t3common import game_dir, resolve_map
 MAGIC = b"T3PBR01\0"
 SHADOW_MAGIC = b"T3PBR02\0"
 OFFLINE_CASTER_MAGIC = b"T3PBR03\0"
+EMISSION_MAGIC = b"T3PBR04\0"
 MAX_LIGHTS = 16
 MAX_TRIANGLES = 100000
 MAX_DRAWS = 8192
@@ -126,7 +128,8 @@ def shadow_owners(scene, lights, actors):
 
 
 def create_packet(scene, light_scene, calibration, resolver, remaster, render_pass=None, stage=None,
-                  shadows=None, actors=None, offline=None, offline_raw=None, caster_resolve=None):
+                  shadows=None, actors=None, offline=None, offline_raw=None, caster_resolve=None,
+                  flame_glb=None, flame_radiance=8):
     render_pass, stage = legacy.select_scope(scene, render_pass, stage)
     legacy.select_scope(light_scene)
     if (light_scene.source.kind != "runtime" or scene.source.frame_id != light_scene.source.frame_id or
@@ -147,6 +150,8 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
         raise ValueError("offline shadow casters require shadows, fixture bytes and a material resolver")
     if offline is None and (offline_raw is not None or caster_resolve is not None):
         raise ValueError("offline caster inputs require an offline scene")
+    if flame_glb is not None and shadow is None:
+        raise ValueError("candle flames require shadow maps and fingerprinted offline actors")
     owners = shadow_owners(scene, lights, actors) if shadow is not None else None
     resources = {m.id: m for m in scene.static_mesh_resources}
     instances = {m.id: m for m in scene.mesh_instances}
@@ -242,7 +247,7 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
             triangles += len(part)//3
             if triangles > MAX_TRIANGLES or len(draws) >= MAX_DRAWS:
                 raise ValueError("PBR geometry exceeds bounds")
-            draws.append((tex, part, shadow_mask))
+            draws.append((tex, part, shadow_mask, (0, 0, 0)))
             records.append({"target_kind": identity[0], "target_id": identity[1], "section": identity[2],
                             "material": material, "triangle_range": [first//3, end//3], "reversed_winding": mirrored,
                             "replacement": replacement, "albedo": albedo["name"], "normal": normal["name"],
@@ -252,26 +257,46 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
                 records[-1]["shadow_caster_lights"] = [lights[n]["id"] for n in range(len(lights)) if shadow_mask & (1 << n)]
     if not draws:
         raise ValueError("PBR preview has no opaque submitted geometry")
+    flame_report = None
+    if flame_glb is not None:
+        strength = _number(flame_radiance, 0, 1000, "flame radiance")
+        geometry, digest = flames.select(scene, lights, actors, flame_glb, (strength, strength*.4, strength*.08),
+                                         render_pass, stage)
+        black = _constant("emissive_black", (0, 0, 0, 255))
+        tex = [texture_index(x) for x in (black, flat_normal, default_roughness, default_ao)] if geometry else []
+        for item in geometry:
+            part = item["vertices"]
+            triangles += len(part)//3
+            if triangles > MAX_TRIANGLES or len(draws) >= MAX_DRAWS:
+                raise ValueError("PBR geometry exceeds bounds")
+            draws.append((tex, part, 0, item["emission"]))
+            records.append({"target_kind": "mesh_instance", "target_id": item["target_id"],
+                            "section": "generated_candle_flame", "material": "CandleFlame", "replacement": "candle_flame",
+                            "light_id": item["light_id"], "triangles": len(part)//3, "emission_linear": item["emission"],
+                            "source": item["source"], "shadow_caster_lights": []})
+        flame_report = {"source_sha256": digest, "source": "generated_godot_flame_geometry",
+                        "light_state": "fingerprinted_offline_actor", "radiance_linear": strength,
+                        "instances": len(geometry), "triangles": sum(len(item["vertices"])//3 for item in geometry)}
     casters, caster_stats = [], None
     if offline is not None:
         casters, caster_stats = offline_casters.select(scene, offline, offline_raw, actors, caster_resolve,
                                                         lights, shadow, owners, render_pass, stage)
     if shadow is not None:
-        calls = sum(_bit_count(mask)*6 for _, _, mask in draws)
-        work = sum(_bit_count(mask)*6*(len(vertices)//3) for _, vertices, mask in draws)
+        calls = sum(_bit_count(mask)*6 for _, _, mask, _ in draws)
+        work = sum(_bit_count(mask)*6*(len(vertices)//3) for _, vertices, mask, _ in draws)
         calls += sum(_bit_count(caster["shadow_mask"])*6 for caster in casters)
         work += sum(_bit_count(caster["shadow_mask"])*6*(len(caster["vertices"])//3) for caster in casters)
         if calls > MAX_SHADOW_DRAWS or work > MAX_SHADOW_TRIANGLES:
             raise ValueError("shadow maps exceed renderer work bounds")
     viewport = scene.camera.viewport
-    magic = OFFLINE_CASTER_MAGIC if offline is not None else SHADOW_MAGIC if shadow else MAGIC
+    magic = EMISSION_MAGIC if flame_glb is not None else OFFLINE_CASTER_MAGIC if offline is not None else SHADOW_MAGIC if shadow else MAGIC
     body = bytearray(struct.pack("<8sIIff32f4f4fIII", magic, viewport.width, viewport.height,
                                  viewport.min_depth, viewport.max_depth, *scene.camera.view, *scene.camera.projection,
                                  *camera, scale, *ambient, exposure, len(textures), len(draws), len(lights)))
     if shadow is not None:
         body.extend(struct.pack("<I4f", shadow["size"], shadow["near_m"], shadow["far_m"],
                                 shadow["bias_m"], shadow["softness"]))
-        if offline is not None:
+        if offline is not None or flame_glb is not None:
             body.extend(struct.pack("<I", len(casters)))
     for light in lights:
         body.extend(struct.pack("<8f", *light["position"], light["radius_m"], *light["color_linear"],
@@ -280,10 +305,12 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
         body.extend(struct.pack("<III", tex["width"], tex["height"], len(tex["mips"])))
         for mip in tex["mips"]:
             body.extend(mip)
-    for tex, vertices, shadow_mask in draws:
+    for tex, vertices, shadow_mask, emission in draws:
         body.extend(struct.pack("<5I", *tex, len(vertices)))
         if shadow is not None:
             body.extend(struct.pack("<I", shadow_mask))
+        if flame_glb is not None:
+            body.extend(struct.pack("<3f", *emission))
         for vertex in vertices:
             body.extend(struct.pack("<12f", *vertex))
     for caster in casters:
@@ -309,6 +336,8 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
                     "triangles": len(caster["vertices"])//3,
                     "lights": [lights[n]["id"] for n in range(len(lights)) if caster["shadow_mask"] & (1 << n)]}
                     for caster in casters]}
+    if flame_report is not None:
+        stats["candle_flames"] = flame_report
     return bytes(body), stats
 
 
@@ -327,6 +356,8 @@ def main(argv=None):
     parser.add_argument("--shadows", action="store_true", help="render point-light shadow maps from selected opaque geometry")
     parser.add_argument("--offline-shadow-casters", action="store_true",
                         help="add bounded static caster candidates from the offline fixture")
+    parser.add_argument("--candle-flames", type=Path, help="generated Godot candlestick GLB for semantic emissive flames")
+    parser.add_argument("--flame-radiance", type=float, help="artistic linear flame radiance (default: 8)")
     parser.add_argument("--shadow-map-size", type=int)
     parser.add_argument("--shadow-near-m", type=float)
     parser.add_argument("--shadow-far-m", type=float)
@@ -335,7 +366,9 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        if not args.shadows and (args.offline_shadow_casters or any(x is not None for x in (args.shadow_map_size,
+        if args.flame_radiance is not None and args.candle_flames is None:
+            raise ValueError("--flame-radiance requires --candle-flames")
+        if not args.shadows and (args.offline_shadow_casters or args.candle_flames is not None or any(x is not None for x in (args.shadow_map_size,
                 args.shadow_near_m, args.shadow_far_m, args.shadow_bias_m, args.shadow_softness))):
             raise ValueError("shadow parameters require --shadows")
         scene_raw = preview.read_limited(args.scene, preview.MAX_INPUT)
@@ -375,11 +408,14 @@ def main(argv=None):
                                         offline=offline if args.offline_shadow_casters else None,
                                         offline_raw=offline_raw if args.offline_shadow_casters else None,
                                         caster_resolve=(lambda name: legacy.TextureResolver(bundles).resolve(name))
-                                        if args.offline_shadow_casters else None)
+                                        if args.offline_shadow_casters else None,
+                                        flame_glb=preview.read_limited(args.candle_flames, flames.MAX_GLB_BYTES)
+                                        if args.candle_flames is not None else None,
+                                        flame_radiance=8 if args.flame_radiance is None else args.flame_radiance)
         finally:
             for bundle in bundles:
                 bundle.close()
-        manifest = {"schema": "t3.scene.pbr-packet", "version": 3 if args.offline_shadow_casters else 2 if shadow is not None else 1,
+        manifest = {"schema": "t3.scene.pbr-packet", "version": 4 if args.candle_flames is not None else 3 if args.offline_shadow_casters else 2 if shadow is not None else 1,
                     "source_frame": scene.source.frame_id,
                     "scene_sha256": hashlib.sha256(scene_raw).hexdigest(),
                     "light_scene_sha256": hashlib.sha256(light_raw).hexdigest(),
@@ -398,6 +434,8 @@ def main(argv=None):
                 manifest["limitations"].append("Additional static casters are offline candidates, not frame observations; save-game changes, attachments and dynamic state can make them incorrect or incomplete.")
             else:
                 manifest["limitations"].append("Off-screen casters are unavailable in this preview.")
+        if args.candle_flames is not None:
+            manifest["limitations"].append("Candle flames use generated Godot geometry, artistic emissive radiance and offline on/off state; runtime flame state is not observed.")
         legacy.write_pair(args.output, body, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))
     except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, struct.error) as exc:

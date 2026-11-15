@@ -32,8 +32,8 @@ Reinhard and sRGB display pass. The PPM is an SDR preview of the HDR buffer.
 
 This is a first PBR preview, not a physically calibrated lighting solution:
 source strengths, color and exposure are artistic; the SDK metre scale and
-tangent basis are assumptions. Metallic materials, emissive
-lighting, volumetrics, reflections and temporal effects are absent. The
+tangent basis are assumptions. Metallic materials, volumetrics, reflections
+and temporal effects are absent. The
 render is a partial runtime-selected scene, and offline asset bindings for
 some actors remain candidates. Height maps are not used. The legacy renderer
 and its benchmark remain independent.
@@ -82,6 +82,29 @@ On the frame-1001 preview, GTAO alone changes 119,825 pixels with mean absolute
 RGB difference 0.193 on a 0–255 scale; adding it to the diffuse-bounce preview
 changes 121,881 pixels with mean difference 0.199. Both are measurements of
 this partial scene and artistic lighting, not a comparison against TDS.
+
+## Emissive candle preview
+
+`--shadows --candle-flames <candlestick_high.glb>` reads the `CandleFlame`
+primitive from the locally generated Godot replacement. For a submitted
+`GENxLIGHT2candles` actor, it requires a calibrated same-identity candidate
+light and a matching fingerprinted offline actor. The actor's observed
+transform places the generated geometry; its offline on/off flag and the
+candidate's nonzero preview intensity determine whether the flames appear.
+The manifest records the GLB hash, actor, light and these limitations.
+
+Packet version 4 adds bounded linear HDR emission per draw. Flame radiance is
+artistic, defaults to 8 with warm color `(1, 0.4, 0.08)`, and can be changed
+with `--flame-radiance`. With `--indirect`, visible emissive triangles also
+contribute to the screen-space diffuse bounce. Direct illumination still comes
+from the existing calibrated point-light candidate; it is not inferred from
+the flame geometry. No runtime flame state is observed, and the original
+non-opaque wax section remains omitted. Versions 1–3 remain supported.
+
+The local frame-1001 render adds one pair of flames, 248 triangles. Against
+the same indirect/GTAO preview without flames, 62 pixels change and the mean
+absolute RGB difference is 0.0006 on a 0–255 scale. The small projected flames
+and incomplete screen-space bounce are not a final candle-lighting solution.
 
 ## Point-light shadow maps
 
@@ -192,6 +215,9 @@ python3 -B t3render/tools/scene_pbr_packet.py \
 To build the shadowed alternative, append `--shadows` and choose a different
 output path; all other arguments and the calibration stay the same.
 Add `--offline-shadow-casters` as well to opt into offline candidates.
+Add `--candle-flames build/assets/godot/remaster/garrett_home/highpoly/generated/candlestick_high.glb`
+to include the generated flame geometry. This requires the existing Godot
+replacement asset and shadows; its packet and manifest remain under `build/`.
 
 Run `t3render_scene_pbr_d3d12 <packet> --output <new.ppm> [--indirect] [--gtao]` in a D3D12
 environment. The packet, manifest and PPM use exclusive creation. See the
@@ -243,3 +269,10 @@ an intervening blocker and absence of feedback from ambient-only light.
 for `flat`, `tilted`, `blocker` and `direct`. The local GPU tests verified
 unoccluded flat and slanted surfaces, contact darkening, unchanged direct
 lighting and use alongside `--indirect`.
+
+`scene_pbr_emission_fixture.py` produces on/off version-4 packets. Render each
+with and without `--indirect`; `verify` checks the emissive HDR surface and
+its colored bounce, while `verify --off` checks that ambient-only illumination
+does not produce a bounce. Both controls passed on the local GPU. The portable
+`test_scene_pbr_flames.py` also checks GLB bounds, qualified selection,
+transforms, offline on/off state and version-4 parser limits.

@@ -185,6 +185,16 @@ int Render(const Frame& frame, const wchar_t* output) {
         "struct O{float4 uv:TEXCOORD0;float3 world:TEXCOORD1;float3 normal:TEXCOORD2;float4 tangent:TEXCOORD3;float4 p:SV_Position;};"
         "O main(float3 p:POSITION,float2 uv:TEXCOORD0,float3 n:NORMAL,float4 t:TANGENT){O o;o.p=mul(mul(float4(p,1),view),proj);"
         "o.p.x+=o.p.w/size.x;o.p.y-=o.p.w/size.y;o.uv=float4(uv,0,0);o.world=p;o.normal=n;o.tangent=t;return o;}";
+    static const char volume_vs_source[] =
+        "cbuffer Camera:register(b0){row_major float4x4 view;row_major float4x4 proj;float2 size;}"
+        "cbuffer Alpha:register(b1){uint mode;float reference;float lod_bias;uint shading;float4 ambient_color;"
+        "float4 light_position_inverse_radius;float4 light_color_energy;float4 projector_x;float4 projector_y;float4 projector_w;}"
+        "struct O{float4 uv:TEXCOORD0;float3 world:TEXCOORD1;float3 normal:TEXCOORD2;float4 tangent:TEXCOORD3;float4 p:SV_Position;};"
+        "O main(float3 p:POSITION,float2 uv:TEXCOORD0,float3 n:NORMAL,float4 t:TANGENT){O o;"
+        "bool extrude=shading==13&&dot(n,light_position_inverse_radius.xyz-p)>0;"
+        "o.p=mul(mul(extrude?float4(p-light_position_inverse_radius.xyz,0):float4(p,1),view),proj);"
+        "if(extrude)o.p.z=o.p.w;"
+        "o.p.x+=o.p.w/size.x;o.p.y-=o.p.w/size.y;o.uv=float4(uv,0,0);o.world=p;o.normal=n;o.tangent=t;return o;}";
     static const char ps_source[] =
         "Texture2D diffuse:register(t0);SamplerState samp:register(s0);"
         "Texture2D projector_texture:register(t1);SamplerState projector_sampler:register(s1);"
@@ -218,8 +228,10 @@ int Render(const Frame& frame, const wchar_t* output) {
         "c.rgb=light_color_energy.rgb*(light_color_energy.w*diffuse_term*attenuation*cone);}"
         "if(shading==3)c.rgb=0;"
         "if(shading==6)c=float4(light_color_energy.rgb,saturate(normal.x));return c;}";
-    ComPtr<ID3DBlob> vs, ps;
-    if (!Compile(compile, vs_source, "vs_5_0", vs) || !Compile(compile, ps_source, "ps_5_0", ps)) return 1;
+    ComPtr<ID3DBlob> vs, volume_vs, ps;
+    if (!Compile(compile, vs_source, "vs_5_0", vs) ||
+        (frame.has_stencil && !Compile(compile, volume_vs_source, "vs_5_0", volume_vs)) ||
+        !Compile(compile, ps_source, "ps_5_0", ps)) return 1;
 
     D3D12_COMMAND_QUEUE_DESC queue_desc{}; queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     ComPtr<ID3D12CommandQueue> queue; ComPtr<ID3D12CommandAllocator> allocator; ComPtr<ID3D12Fence> fence;
@@ -241,7 +253,7 @@ int Render(const Frame& frame, const wchar_t* output) {
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[2].Constants.ShaderRegister = 1; params[2].Constants.Num32BitValues = 28;
-    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     params[3].DescriptorTable.NumDescriptorRanges = 1; params[3].DescriptorTable.pDescriptorRanges = &projector_range;
     params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
@@ -284,7 +296,8 @@ int Render(const Frame& frame, const wchar_t* output) {
     pso.DepthStencilState.FrontFace = {D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS};
     pso.DepthStencilState.BackFace = pso.DepthStencilState.FrontFace;
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    pso.NumRenderTargets = 1; pso.RTVFormats[0] = kColor; pso.DSVFormat = DXGI_FORMAT_D32_FLOAT; pso.SampleDesc.Count = 1;
+    const DXGI_FORMAT depth_format = frame.has_stencil ? DXGI_FORMAT_D32_FLOAT_S8X24_UINT : DXGI_FORMAT_D32_FLOAT;
+    pso.NumRenderTargets = 1; pso.RTVFormats[0] = kColor; pso.DSVFormat = depth_format; pso.SampleDesc.Count = 1;
     const D3D12_BLEND color_factors[] = {D3D12_BLEND_ZERO, D3D12_BLEND_ONE, D3D12_BLEND_SRC_COLOR,
         D3D12_BLEND_INV_SRC_COLOR, D3D12_BLEND_SRC_ALPHA, D3D12_BLEND_INV_SRC_ALPHA, D3D12_BLEND_DEST_COLOR,
         D3D12_BLEND_INV_DEST_COLOR, D3D12_BLEND_DEST_ALPHA, D3D12_BLEND_INV_DEST_ALPHA};
@@ -297,16 +310,18 @@ int Render(const Frame& frame, const wchar_t* output) {
         D3D12_COMPARISON_FUNC_EQUAL, D3D12_COMPARISON_FUNC_LESS_EQUAL, D3D12_COMPARISON_FUNC_GREATER,
         D3D12_COMPARISON_FUNC_NOT_EQUAL, D3D12_COMPARISON_FUNC_GREATER_EQUAL, D3D12_COMPARISON_FUNC_ALWAYS};
     const D3D12_CULL_MODE culls[] = {D3D12_CULL_MODE_NONE, D3D12_CULL_MODE_BACK, D3D12_CULL_MODE_FRONT};
-    struct Pipeline { DrawStyle state; ComPtr<ID3D12PipelineState> object; };
+    struct Pipeline { DrawStyle state; unsigned shadow_kind = 0; ComPtr<ID3D12PipelineState> object; };
     std::vector<std::unique_ptr<Pipeline>> pipelines;
     std::vector<std::size_t> draw_pipelines;
     for (const auto& draw : frame.draws) {
         const auto& state = draw.state;
+        const unsigned shadow_kind = draw.shadow_op == 1 ? 1u : draw.shadow_op == 2 ? 2u : 0u;
         std::size_t index = 0;
-        while (index < pipelines.size() && !pipelines[index]->state.same_pipeline(state)) ++index;
+        while (index < pipelines.size() && (!pipelines[index]->state.same_pipeline(state) ||
+                                             pipelines[index]->shadow_kind != shadow_kind)) ++index;
         if (index == pipelines.size()) {
             if (pipelines.size() == 128) { std::fprintf(stderr, "too many pipeline variants\n"); return 1; }
-            auto variant = std::make_unique<Pipeline>(); variant->state = state;
+            auto variant = std::make_unique<Pipeline>(); variant->state = state; variant->shadow_kind = shadow_kind;
             auto description = pso;
             auto& blend = description.BlendState.RenderTarget[0];
             blend.BlendEnable = state.blend_enable != 0;
@@ -318,6 +333,19 @@ int Render(const Frame& frame, const wchar_t* output) {
             description.DepthStencilState.DepthEnable = state.depth_enable != 0;
             description.DepthStencilState.DepthWriteMask = state.depth_write ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
             description.DepthStencilState.DepthFunc = comparisons[state.depth_compare - 1];
+            if (shadow_kind) {
+                auto& ds = description.DepthStencilState;
+                ds.StencilEnable = TRUE;
+                if (shadow_kind == 1) {
+                    description.VS = {volume_vs->GetBufferPointer(), volume_vs->GetBufferSize()};
+                    description.RasterizerState.DepthClipEnable = FALSE;
+                    ds.FrontFace = {D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_DECR, D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS};
+                    ds.BackFace = {D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_INCR, D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS};
+                } else {
+                    ds.FrontFace = {D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_EQUAL};
+                    ds.BackFace = ds.FrontFace;
+                }
+            }
             if (!Check(device->CreateGraphicsPipelineState(&description, IID_PPV_ARGS(variant->object.put())), "CreatePipeline")) return 1;
             pipelines.push_back(std::move(variant));
         }
@@ -344,10 +372,10 @@ int Render(const Frame& frame, const wchar_t* output) {
     }
     const auto default_heap = Heap(D3D12_HEAP_TYPE_DEFAULT), upload_heap = Heap(D3D12_HEAP_TYPE_UPLOAD), read_heap = Heap(D3D12_HEAP_TYPE_READBACK);
     const auto target_desc = Image(frame.width, frame.height, 1, kColor, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
-    const auto depth_desc = Image(frame.width, frame.height, 1, DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    const auto depth_desc = Image(frame.width, frame.height, 1, depth_format, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
     D3D12_CLEAR_VALUE clear{}; clear.Format = kColor; clear.Color[0] = 22.0f / 255; clear.Color[1] = 24.0f / 255;
     clear.Color[2] = 28.0f / 255; clear.Color[3] = 1;
-    D3D12_CLEAR_VALUE depth_clear{}; depth_clear.Format = DXGI_FORMAT_D32_FLOAT; depth_clear.DepthStencil.Depth = 1;
+    D3D12_CLEAR_VALUE depth_clear{}; depth_clear.Format = depth_format; depth_clear.DepthStencil.Depth = 1;
     ComPtr<ID3D12Resource> target, depth;
     if (!Check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &target_desc, D3D12_RESOURCE_STATE_RENDER_TARGET,
              &clear, IID_PPV_ARGS(target.put())), "CreateTarget") ||
@@ -388,12 +416,16 @@ int Render(const Frame& frame, const wchar_t* output) {
     const D3D12_RECT scissor{0, 0, static_cast<LONG>(frame.width), static_cast<LONG>(frame.height)};
     list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &scissor);
     list->OMSetRenderTargets(1, &rtv, FALSE, &dsv); list->ClearRenderTargetView(rtv, clear.Color, 0, nullptr);
-    list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1, 0, 0, nullptr);
+    const auto depth_flags = static_cast<D3D12_CLEAR_FLAGS>(D3D12_CLEAR_FLAG_DEPTH |
+        (frame.has_stencil ? D3D12_CLEAR_FLAG_STENCIL : 0));
+    list->ClearDepthStencilView(dsv, depth_flags, 1, 0, 0, nullptr);
+    if (frame.has_stencil) list->OMSetStencilRef(0);
     const D3D12_VERTEX_BUFFER_VIEW vb{vertices->GetGPUVirtualAddress(), static_cast<UINT>(vertex_bytes), sizeof(Vertex)};
     list->IASetVertexBuffers(0, 1, &vb); list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     const auto gpu_base = srv_heap->GetGPUDescriptorHandleForHeapStart();
     for (std::size_t i = 0; i < frame.draws.size(); ++i) {
         const auto& draw = frame.draws[i];
+        if (draw.shadow_op == 1) list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_STENCIL, 1, 0, 0, nullptr);
         auto handle = gpu_base; handle.ptr += UINT64(draw.texture) * srv_step;
         struct AlphaConstants {
             std::uint32_t mode; float reference, bias; std::uint32_t shading;

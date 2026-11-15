@@ -45,9 +45,12 @@ struct Draw {
     float light_falloff_mix = 0;
     float spot_projector[3][4]{};
     std::uint32_t projector_texture = 0;
+    // 0: ordinary, 1: clear stencil and draw volume, 2: lit where stencil is zero.
+    std::uint32_t shadow_op = 0;
 };
 struct Frame {
     std::uint32_t width = 0, height = 0;
+    bool has_stencil = false;
     float min_depth = 0, max_depth = 1;
     float view[16]{}, projection[16]{};
     std::vector<Texture> textures;
@@ -92,7 +95,7 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
     if (!reader.bytes(magic, sizeof(magic)) || std::memcmp(magic, "T3SCN", 5) || magic[7] != '\0' ||
         magic[5] < '0' || magic[5] > '9' || magic[6] < '0' || magic[6] > '9') return false;
     const unsigned version = unsigned(magic[5] - '0') * 10u + unsigned(magic[6] - '0');
-    if (version < 1 || version > 11 || !reader.u32(frame.width) || !reader.u32(frame.height) || !frame.width || !frame.height ||
+    if (version < 1 || version > 12 || !reader.u32(frame.width) || !reader.u32(frame.height) || !frame.width || !frame.height ||
         frame.width > 2048 || frame.height > 2048 || !reader.f32(frame.min_depth) ||
         !reader.f32(frame.max_depth) || frame.min_depth < 0 || frame.max_depth > 1 ||
         frame.min_depth > frame.max_depth) return false;
@@ -121,6 +124,9 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
         frame.textures.push_back(std::move(texture));
     }
     frame.draws.reserve(draw_count);
+    frame.has_stencil = version >= 12;
+    bool stencil_active = false;
+    float stencil_light[3]{};
     for (std::uint32_t i = 0; i < draw_count; ++i) {
         std::uint32_t texture, count;
         if (!reader.u32(texture) || !reader.u32(count) || texture >= texture_count || !count || count % 3 ||
@@ -138,19 +144,21 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
             if (version >= 3 &&
                 (!reader.f32(s.mip_lod_bias, 16.0f) || s.mip_lod_bias >= 16.0f)) return false;
             if (version >= 4) {
-                const std::uint32_t max_shading = version >= 10 ? 12u : version == 9 ? 9u :
+                const std::uint32_t max_shading = version >= 12 ? 13u : version >= 10 ? 12u : version == 9 ? 9u :
                                                    version == 8 ? 6u : version == 7 ? 5u :
                                                    version == 6 ? 4u : version == 5 ? 3u : 1u;
                 if (!reader.u32(draw.shading) || draw.shading > max_shading) return false;
                 for (float& value : draw.ambient_color)
                     if (!reader.f32(value, 1.0f) || value < 0) return false;
-                if (version >= 11 && (draw.shading == 2 || draw.shading == 4 || draw.shading == 5 || draw.shading >= 7))
+                if (version >= 11 && (draw.shading == 2 || draw.shading == 4 || draw.shading == 5 ||
+                                      (draw.shading >= 7 && draw.shading <= 12)))
                     draw.light_falloff_mix = draw.ambient_color[3];
             }
             if (version >= 5) {
                 for (float& value : draw.light_position) if (!reader.f32(value)) return false;
                 if (!reader.f32(draw.light_inverse_radius, 1.0f) || draw.light_inverse_radius < 0 ||
-                    ((draw.shading == 2 || draw.shading == 4 || draw.shading == 5 || draw.shading >= 7) &&
+                    ((draw.shading == 2 || draw.shading == 4 || draw.shading == 5 ||
+                      (draw.shading >= 7 && draw.shading <= 12)) &&
                      draw.light_inverse_radius == 0)) return false;
                 for (float& value : draw.light_color)
                     if (!reader.f32(value, 1.0f) || value < 0) return false;
@@ -165,11 +173,30 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
             }
             if (version >= 7 &&
                 (!reader.u32(draw.projector_texture) || draw.projector_texture >= texture_count)) return false;
+            if (version >= 12) {
+                if (!reader.u32(draw.shadow_op) || draw.shadow_op > 2) return false;
+                const bool volume = draw.shadow_op == 1;
+                const bool lit = draw.shading == 2 || draw.shading == 4 || draw.shading == 5 ||
+                                 (draw.shading >= 7 && draw.shading <= 12);
+                if (volume != (draw.shading == 13) || (draw.shadow_op == 2 && !lit) ||
+                    (draw.shadow_op >= 2 && !stencil_active) ||
+                    (volume && (s.depth_enable != 1 || s.depth_write != 0 || s.depth_compare != 4 ||
+                                s.cull != 0 || s.blend_enable != 0 || s.alpha_compare != 0 || s.color_mask != 0)) ||
+                    (draw.shadow_op == 2 && (s.depth_enable != 1 || s.depth_write != 0 || s.blend_enable != 1 ||
+                                             s.blend_src != 1 || s.blend_dst != 1 || s.blend_op != 0 || s.color_mask != 7))) return false;
+                if (draw.shadow_op >= 2)
+                    for (unsigned n = 0; n < 3; ++n) if (stencil_light[n] != draw.light_position[n]) return false;
+                if (draw.shadow_op == 1) {
+                    stencil_active = true;
+                    for (unsigned n = 0; n < 3; ++n) stencil_light[n] = draw.light_position[n];
+                }
+                if (draw.shadow_op == 0) stencil_active = false;
+            }
             if (draw.shading == 6 &&
                 (s.depth_enable != 1 || s.depth_write != 0 || s.blend_enable != 1 ||
                  s.blend_src != 4 || s.blend_dst != 5 || s.blend_op != 0 ||
                  s.color_mask != 7 || s.alpha_compare != 0)) return false;
-            if (draw.shading >= 7 &&
+            if (draw.shading >= 7 && draw.shading <= 12 &&
                 (s.depth_enable != 1 || s.depth_write != 0 || s.blend_enable != 1 ||
                  s.blend_src != 1 || s.blend_dst != 1 || s.blend_op != 0 ||
                  s.color_mask != 7 || s.alpha_compare != 0)) return false;
@@ -192,7 +219,7 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
             if (tangent) {
                 if (!reader.f32(vertex.tx, 1.0f) || !reader.f32(vertex.ty, 1.0f) ||
                     !reader.f32(vertex.tz, 1.0f) || !reader.f32(vertex.tangent_sign, 1.0f)) return false;
-                if (draw.shading >= 7) {
+                if (draw.shading >= 7 && draw.shading <= 12) {
                     const float length_squared = vertex.tx*vertex.tx + vertex.ty*vertex.ty + vertex.tz*vertex.tz;
                     const float normal_dot = vertex.nx*vertex.tx + vertex.ny*vertex.ty + vertex.nz*vertex.tz;
                     if (vertex.tangent_sign == 0) {

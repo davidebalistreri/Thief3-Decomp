@@ -27,6 +27,8 @@ import scene_legacy_states as legacy_states  # noqa: E402
 import build_scoped_scene_snapshot as scoped  # noqa: E402
 import scene_light_candidates as scene_lights  # noqa: E402
 import scene_light_preview_overrides as light_overrides  # noqa: E402
+import scene_shadow_candidates as shadow_candidates  # noqa: E402
+import scene_shadow_render as shadow_render  # noqa: E402
 import scene_ambient_candidates as ambient  # noqa: E402
 import scene_direct_candidates as direct  # noqa: E402
 import scene_fog_candidates as fog  # noqa: E402
@@ -40,6 +42,7 @@ FOG_MAGIC = b"T3SCN08\0"
 NORMAL_MAGIC = b"T3SCN09\0"
 SHADER_NORMAL_MAGIC = b"T3SCN10\0"
 FALLOFF_MAGIC = b"T3SCN11\0"
+SHADOW_MAGIC = b"T3SCN12\0"
 MAX_BYTES = 64 * 1024 * 1024
 MAX_TEXTURES = 64
 MAX_DRAWS = 8192
@@ -275,7 +278,8 @@ def select_scope(scene, render_pass=None, stage=None):
 
 
 def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=None, sampler_candidates=None,
-                  additional_scenes=(), ambient_candidates=None, direct_candidates=None, fog_candidates=None):
+                  additional_scenes=(), ambient_candidates=None, direct_candidates=None, fog_candidates=None,
+                  shadow_batches=None):
     render_pass, stage = select_scope(scene, render_pass, stage)
     selections = [(scene, render_pass, stage)]
     if additional_scenes and draw_states is None:
@@ -337,8 +341,11 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
         isinstance(value, dict) and value.get("shader_basis_candidate") is not None for value in direct_candidates.values())
     falloff_packet = direct_candidates is not None and any(
         isinstance(value, dict) and "preview_falloff_mix" in value for value in direct_candidates.values())
-    if falloff_packet:
-        # V11 uses the V10 vertex/projector layout even with flat normals.
+    if shadow_batches is not None and (not isinstance(shadow_batches, dict) or not shadow_batches or
+                                       direct_candidates is None or ambient_candidates is None):
+        raise ValueError("shadow candidates require ambient and direct submitted draws")
+    if falloff_packet or shadow_batches is not None:
+        # V11 and V12 use the V10 vertex/projector layout even with flat normals.
         normal_packet = True
     if projector_packet and any(isinstance(value, dict) and value.get("projector_candidate") is not None and
                                 value.get("mode") != "spot_approximation" for value in direct_candidates.values()):
@@ -553,7 +560,7 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             mode = 6 if fog_value is not None else 2 if is_lit else 3 if light is not None else 1 if color is not None else 0
         if normal_tex is not None:
             mode = ({2: 10, 4: 11, 5: 12} if shader_basis is not None else {2: 7, 4: 8, 5: 9})[mode]
-        draws.append((draw_texture_index, vertices, state, sampler, packet_color, mode, light_values, projector, projector_index))
+        draws.append((draw_texture_index, vertices, state, sampler, packet_color, mode, light_values, projector, projector_index, 0))
         source_draws.append({"draw": submission.draw_id, "target_kind": submission.target_kind,
                              "target_id": submission.target_id, "section": submission.section,
                              "render_pass": submission.render_pass, "stage": submission.stage,
@@ -569,17 +576,61 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
                                                         "basis": "sampled_shader_hypothesis" if shader_basis is not None else "inferred_uv"}
         if fog_value is not None:
             source_draws[-1]["fog_candidate"] = fog_value
+    render_triangles = triangle_count
+    if shadow_batches is not None:
+        selected = set(shadow_batches)
+        seen, active, expanded, expanded_sources = set(), None, [], []
+        for draw, source in zip(draws, source_draws):
+            light = source.get("direct_candidate") or {}
+            identity = light.get("offline_light_id")
+            if identity in selected:
+                batch = shadow_batches[identity]
+                if (not isinstance(batch, dict) or not isinstance(batch.get("vertices"), list) or
+                        not batch["vertices"] or len(batch["vertices"]) % 3 or
+                        not isinstance(batch.get("position"), (tuple, list)) or
+                        tuple(batch["position"]) != tuple(light.get("position", ()))):
+                    raise ValueError("invalid shadow candidate batch")
+                if identity != active:
+                    vertices = batch["vertices"]
+                    if any(not isinstance(v, (tuple, list)) or len(v) != 12 or any(
+                            isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or abs(x) > 1000000
+                            for x in v) or any(v[i] != 0 for i in (3, 4, 8, 9, 10, 11)) or
+                            not .98 <= sum(v[i] * v[i] for i in (5, 6, 7)) <= 1.02 for v in vertices):
+                        raise ValueError("invalid shadow candidate vertices")
+                    triangle_count += len(vertices) // 3
+                    if triangle_count > MAX_TRIANGLES:
+                        raise ValueError("shadow candidates exceed renderer triangle bounds")
+                    state = dict(legacy_states.DEFAULT, depth_write=0, depth_compare=4, cull=0, color_mask=0)
+                    expanded.append((0, vertices, state, {"mip_lod_bias": 0.0}, None, 13,
+                                     (*batch["position"], 0, 0, 0, 0, 0), (0,) * 12, 0, 1))
+                    expanded_sources.append({"kind": "shadow_volume_candidate", "light_id": identity,
+                                             "triangles": len(vertices) // 3,
+                                             "casters": batch.get("casters", []), "skipped": batch.get("skipped", [])})
+                expanded.append((*draw[:-1], 2))
+                expanded_sources.append(source)
+                active = identity
+                seen.add(identity)
+            else:
+                expanded.append(draw)
+                expanded_sources.append(source)
+                active = None
+        if seen != selected:
+            raise ValueError("shadow candidate light has no submitted direct draw")
+        draws, source_draws = expanded, expanded_sources
+        if len(draws) > MAX_DRAWS:
+            raise ValueError("shadow candidates exceed renderer draw bounds")
     camera = scene.camera
     viewport = camera.viewport
     size = (struct.calcsize("<8sIIff32fII") + sum(12 + sum(len(mip) for mip in tex["mips"]) for tex in textures) +
             sum(56 + (20 if ambient_candidates is not None or extended_packet else 0) +
                 (32 if extended_packet else 0) + len(vertices) * (48 if normal_packet else 32 if extended_packet else 20)
                 + (48 if spot_packet or fog_candidates is not None or normal_packet else 0) +
-                (4 if projector_packet or fog_candidates is not None or normal_packet else 0)
-                for _, vertices, _, _, _, _, _, _, _ in draws))
+                (4 if projector_packet or fog_candidates is not None or normal_packet else 0) +
+                (4 if shadow_batches is not None else 0)
+                for _, vertices, _, _, _, _, _, _, _, _ in draws))
     if size > MAX_BYTES:
         raise ValueError("packet exceeds renderer bounds")
-    magic = (FALLOFF_MAGIC if falloff_packet else SHADER_NORMAL_MAGIC if shader_normal_packet else NORMAL_MAGIC if normal_packet else FOG_MAGIC if fog_candidates is not None else PROJECTOR_MAGIC if projector_packet else SPOT_MAGIC if spot_packet else
+    magic = (SHADOW_MAGIC if shadow_batches is not None else FALLOFF_MAGIC if falloff_packet else SHADER_NORMAL_MAGIC if shader_normal_packet else NORMAL_MAGIC if normal_packet else FOG_MAGIC if fog_candidates is not None else PROJECTOR_MAGIC if projector_packet else SPOT_MAGIC if spot_packet else
              DIRECT_MAGIC if direct_candidates is not None else AMBIENT_MAGIC if ambient_candidates is not None else MAGIC)
     body = bytearray(struct.pack("<8sIIff32fII", magic,
                                  viewport.width, viewport.height,
@@ -589,7 +640,7 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
         body.extend(struct.pack("<III", tex["width"], tex["height"], len(tex["mips"])))
         for mip in tex["mips"]:
             body.extend(mip)
-    for texture_index, vertices, state, sampler, color, mode, light_values, projector, projector_index in draws:
+    for texture_index, vertices, state, sampler, color, mode, light_values, projector, projector_index, shadow_op in draws:
         body.extend(struct.pack("<13If", texture_index, len(vertices), *(state[key] for key in legacy_states.FIELDS),
                                 sampler["mip_lod_bias"]))
         if ambient_candidates is not None or extended_packet:
@@ -600,6 +651,8 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             body.extend(struct.pack("<12f", *projector))
         if projector_packet or fog_candidates is not None or normal_packet:
             body.extend(struct.pack("<I", projector_index))
+        if shadow_batches is not None:
+            body.extend(struct.pack("<I", shadow_op))
         for vertex in vertices:
             body.extend(struct.pack("<12f" if normal_packet else "<8f" if extended_packet else "<5f", *vertex))
     if len(body) != size:
@@ -607,6 +660,8 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
     stats = {"render_pass": render_pass, "stage": stage, "triangles": triangle_count, "draws": source_draws,
              "textures": [{key: tex[key] for key in ("name", "bundle", "format", "width", "height")}
                           | {"mips": len(tex["mips"])} for tex in textures]}
+    if shadow_batches is not None:
+        stats.update(render_triangles=render_triangles, shadow_triangles=triangle_count-render_triangles)
     if additional_scenes:
         stats["composed_scopes"] = [{"render_pass": p, "stage": s} for _, p, s in selections]
     return bytes(body), stats
@@ -666,6 +721,10 @@ def main(argv=None):
                         help="uncalibrated visual gain for candidate direct lights (default: 1)")
     parser.add_argument("--direct-light-overrides", type=Path,
                         help="optional semantic RGB calibration for offline light hypotheses")
+    parser.add_argument("--shadow-candidates", type=Path,
+                        help="revalidated SDK shadow volumes for the primary scoped scene")
+    parser.add_argument("--shadow-light", action="append", default=[],
+                        help="offline semantic light ID to shadow; repeatable")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
@@ -703,6 +762,9 @@ def main(argv=None):
             raise ValueError("spot candidates require a direct candidate stage")
         if args.direct_light_overrides is not None and args.direct_candidate_stage is None:
             raise ValueError("light preview overrides require a direct candidate stage")
+        if ((args.shadow_candidates is None) != (not args.shadow_light) or
+                args.shadow_candidates is not None and args.direct_candidate_stage is None):
+            raise ValueError("shadow candidates require direct lighting and selected semantic light IDs")
         if args.spot_projector_candidate is not None and not args.spot_candidates:
             raise ValueError("projector texture candidate requires spotlight candidates")
         if args.normal_map_candidates and args.direct_candidate_stage is None:
@@ -713,7 +775,7 @@ def main(argv=None):
                                            args.direct_candidate_stage in sampler_scopes):
             raise ValueError("normal map candidates select their own sampler for the direct stage")
         states = None
-        game = game_dir(args.game_dir) if self_attached_needed or light_candidates_needed else None
+        game = game_dir(args.game_dir) if self_attached_needed or light_candidates_needed or args.shadow_candidates else None
         samplers = {} if args.sampler_candidate_stage is not None or sampler_scopes else None
         if args.state_trace is not None:
             selected_pass, selected_stage = select_scope(scene, args.render_pass, args.stage)
@@ -784,17 +846,30 @@ def main(argv=None):
             current, scope = matching[0]
             fog_values = fog.from_trace(current, offline, offline_bytes, args.state_trace, kernel_path,
                                         args.offline_actors, *scope)
+        shadow_values = None
+        shadow_digest = None
+        if args.shadow_candidates is not None:
+            candidate_raw = preview.read_limited(args.shadow_candidates, preview.MAX_INPUT)
+            observed = json.loads(candidate_raw, object_pairs_hook=preview._pairs, parse_constant=preview._invalid_number)
+            selected_pass, selected_stage = select_scope(scene, args.render_pass, args.stage)
+            rebuilt = shadow_candidates.extract(scene, raw, offline, offline_bytes, args.state_trace, args.offline_actors,
+                                                game, selected_pass, selected_stage)
+            if observed != json.loads(json.dumps(rebuilt, allow_nan=False)):
+                raise ValueError("shadow candidates do not match the revalidated scene and assets")
+            actors = direct.offline_actors(scene, offline, offline_bytes, args.offline_actors)
+            shadow_values = shadow_render.prepare(rebuilt, direct_values, args.shadow_light, actors)
+            shadow_digest = hashlib.sha256(candidate_raw).hexdigest()
         bundles = []
         try:
             for _, path in paths:
                 bundles.append(IBT(path))
             body, stats = create_packet(scene, TextureResolver(bundles), args.render_pass, args.stage, states, samplers,
                                         additional_scenes=extra_scenes, ambient_candidates=ambient_values,
-                                        direct_candidates=direct_values, fog_candidates=fog_values)
+                                        direct_candidates=direct_values, fog_candidates=fog_values, shadow_batches=shadow_values)
         finally:
             for bundle in bundles:
                 bundle.close()
-        manifest = {"schema": "t3.scene.textured-packet", "version": 11 if body[:8] == FALLOFF_MAGIC else 10 if body[:8] == SHADER_NORMAL_MAGIC else 9 if body[:8] == NORMAL_MAGIC else 8 if body[:8] == FOG_MAGIC else 7 if body[:8] == PROJECTOR_MAGIC else 6 if body[:8] == SPOT_MAGIC else 5 if direct_values is not None else 4 if ambient_values is not None else 3,
+        manifest = {"schema": "t3.scene.textured-packet", "version": 12 if body[:8] == SHADOW_MAGIC else 11 if body[:8] == FALLOFF_MAGIC else 10 if body[:8] == SHADER_NORMAL_MAGIC else 9 if body[:8] == NORMAL_MAGIC else 8 if body[:8] == FOG_MAGIC else 7 if body[:8] == PROJECTOR_MAGIC else 6 if body[:8] == SPOT_MAGIC else 5 if direct_values is not None else 4 if ambient_values is not None else 3,
                     "source_frame": scene.source.frame_id,
                     "scene_sha256": hashlib.sha256(raw).hexdigest(), "packet_sha256": hashlib.sha256(body).hexdigest(),
                     "state_source": "revalidated_same_frame_trace" if states is not None else "opaque_preview_defaults",
@@ -803,23 +878,29 @@ def main(argv=None):
                                     "UV0 is used without a flip; clip depth 0..1 and half-pixel correction are assumptions.",
                                     "Sampler candidates match metadata only, not texture identity or shader UV routing.",
                                     "Linear wrap sampler with mips; shader output and culling convention remain approximations.",
-                                    "No stencil, verified runtime lights, legacy shaders, missing objects or HUD."], **stats}
+                                    ("Candidate stencil shadows are incomplete; runtime lights, legacy shaders, missing objects and HUD are unverified."
+                                     if shadow_values is not None else
+                                     "No stencil, verified runtime lights, legacy shaders, missing objects or HUD.")], **stats}
+        if shadow_values is not None:
+            manifest["shadow_candidates_sha256"] = shadow_digest
+            manifest["limitations"].append("Selected SDK volumes and offline cast flags approximate visible static casters; off-screen/runtime casters and actual stencil submissions are unobserved.")
         if extra_scenes:
             manifest["additional_scene_sha256"] = [hashlib.sha256(data).hexdigest() for data in extra_raw]
             manifest["additional_source_limitations"] = [list(other.source.limitations) for other in extra_scenes]
-            manifest["limitations"].append("Partial selected draws share a depth buffer; omitted draws and stencil operations are not reconstructed.")
+            manifest["limitations"].append("Partial selected draws share a depth buffer; omitted draws and original stencil operations are not reconstructed.")
         if ambient_values is not None:
             manifest["limitations"].append("Ambient RGB uses sampled vertex constants with a pre-Reset shader hypothesis; the active GPU and pixel shaders are unproven.")
         if direct_values is not None:
+            has_falloff = any("preview_falloff_mix" in light for light in direct_values.values())
             manifest["limitations"].append(
                 "Point-light Lambert shading and linear/squared falloff are preview approximations; the coefficient's radius meaning is unproven."
-                if body[:8] == FALLOFF_MAGIC else
+                if has_falloff else
                 "Point-light Lambert shading and squared linear falloff are approximations; the coefficient's radius meaning is unproven.")
             manifest["limitations"].append("Light colors and energies come from offline actor data; runtime light identity, colors, intensity and shadows are unproven.")
             if light_override_digest is not None:
                 manifest["light_preview_override_sha256"] = light_override_digest
                 manifest["limitations"].append("Semantic RGB multipliers are a user-supplied preview calibration, not observed runtime lighting.")
-                if body[:8] == FALLOFF_MAGIC:
+                if has_falloff:
                     manifest["limitations"].append("Falloff mixes between linear and squared linear are preview hypotheses, not observed legacy attenuation.")
             if any("projector_candidate" in light for light in direct_values.values()):
                 manifest["limitations"].append("The projected texture is an offline metadata-compatible hypothesis, not an observed GPU texture identity.")
@@ -835,7 +916,7 @@ def main(argv=None):
             manifest["limitations"].append("Normal maps and tangent space are offline metadata-compatible hypotheses; triangles with ambiguous tangent bases use flat normals.")
             if any(draw.get("normal_map_candidate", {}).get("basis") == "inferred_uv" for draw in stats["draws"]):
                 manifest["limitations"].append("The UV-based normal preview infers bitangent sign per triangle from UV derivatives.")
-        if body[:8] in (SHADER_NORMAL_MAGIC, FALLOFF_MAGIC) and args.shader_normal_basis:
+        if body[:8] in (SHADER_NORMAL_MAGIC, FALLOFF_MAGIC, SHADOW_MAGIC) and args.shader_normal_basis:
             manifest["limitations"].append("The optional shader basis and unnormalized normal sample follow a pre-Reset vertex/pixel asset hypothesis; active runtime programs and light lookup textures are unverified.")
         write_pair(args.output, body, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))

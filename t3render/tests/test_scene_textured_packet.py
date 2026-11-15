@@ -24,6 +24,7 @@ import scene_fog_fixture as fog_fixture
 import scene_normal_fixture as normal_fixture
 import scene_shader_normal_fixture as shader_normal_fixture
 import scene_falloff_fixture as falloff_fixture
+import scene_stencil_fixture as stencil_fixture
 from t3texture import Mip, Texture
 from test_scoped_scene_snapshot import fixture
 
@@ -392,6 +393,40 @@ class TexturedScenePacketTests(unittest.TestCase):
                                      direct_candidates={2: dict(light, preview_falloff_mix=value)})
         for version in (10, 11):
             self.assertEqual(self.parse(falloff_fixture.fixture(version)).returncode, 0)
+
+    def test_stencil_packet_rejects_invalid_scope_and_volume_states(self):
+        raw = stencil_fixture.fixture()
+        self.assertEqual(self.parse(raw).returncode, 0)
+        self.assertEqual(self.parse(stencil_fixture.fixture(False)).returncode, 0)
+        self.assertEqual(self.parse(stencil_fixture.fixture(reset=True)).returncode, 0)
+        volume = 176 + 164 + 6*48
+        lit = volume + 164 + len(stencil_fixture.cube_volume()) * 48
+        for offset, value in ((volume + 56, 12), (volume + 160, 2), (volume + 20, 1),
+                              (volume + 48, 15), (lit + 160, 3)):
+            invalid = raw[:offset] + struct.pack("<I", value) + raw[offset+4:]
+            self.assertEqual(self.parse(invalid).returncode, 2)
+        invalid_light = raw[:lit+76] + struct.pack("<f", .5) + raw[lit+80:]
+        self.assertEqual(self.parse(invalid_light).returncode, 2)
+        self.assertEqual(self.parse(b"T3SCN11\0" + raw[8:]).returncode, 2)
+
+    def test_scoped_light_batches_emit_explicit_stencil_packets(self):
+        scene = scoped_scene()
+        states = {s.draw_id: dict(packet.legacy_states.DEFAULT) for s in scene.submissions}
+        states[2].update(depth_write=0, blend_enable=1, blend_src=1, blend_dst=1, color_mask=7)
+        light = {"offline_light_id": "light:map:lamp", "mode": "point_approximation", "position": [1, 2, 3],
+                 "inverse_radius_candidate": .1, "offline_color": [1, .8, .6], "offline_energy": .5, "gain": 1}
+        vertices = [(*p, 0, 0, *n, 0, 0, 0, 0) for p, n in stencil_fixture.cube_volume()]
+        batch = {"light:map:lamp": {"vertices": vertices, "position": [1, 2, 3], "casters": ["actor:box"], "skipped": []}}
+        raw, info = packet.create_packet(scene, Resolver(), draw_states=states, ambient_candidates={3: [.1, .1, .1, 1]},
+                                         direct_candidates={2: light}, shadow_batches=batch)
+        self.assertEqual(raw[:8], b"T3SCN12\0")
+        self.assertEqual(info["draws"][0]["kind"], "shadow_volume_candidate")
+        self.assertEqual(info["shadow_triangles"], len(vertices)//3)
+        self.assertEqual(self.parse(raw).returncode, 0)
+        invalid = {"light:map:lamp": dict(batch["light:map:lamp"], position=[9, 2, 3])}
+        with self.assertRaisesRegex(ValueError, "shadow candidate batch"):
+            packet.create_packet(scene, Resolver(), draw_states=states, ambient_candidates={3: [.1, .1, .1, 1]},
+                                 direct_candidates={2: light}, shadow_batches=invalid)
 
     def test_spot_packet_and_fixture_validate_projector_and_normals(self):
         scene = scoped_scene()

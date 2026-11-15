@@ -33,6 +33,61 @@ it includes a candle holder and a crate near the bed. The renderer preserves
 the candidate limitations and actor IDs in its packet manifest. The objects
 and textures are not runtime mesh-payload or material-binding proof.
 
+## SDK shadow-volume candidates
+
+`scene_shadow_candidates.py` prepares the original SDK shadow-volume meshes
+for the selected static SceneIR actors and BSP blocks. It revalidates the
+scoped snapshot and trace, fingerprints the offline actor export, map and
+bundles, and compares each render mesh or BSP block with the selected scene
+before taking its volume. Mesh instances use the synchronized runtime
+transform; BSP volumes are already in world space. Negative determinant
+transforms are explicitly marked for a future consumer. Resources are shared
+by semantic ID; the output contains no process addresses or API objects.
+
+These are **offline candidates**, not observed runtime shadow submissions.
+The export includes only selected scene objects, honors the offline actor's
+cast flag and reports missing SDK volumes. It can miss off-screen casters,
+changed gameplay state and other shadow-pass behavior. A few ray checks have
+not explained the dark central beam in the reference image.
+
+For the local frame-1001 capture, first generate a stage-1 snapshot with the
+[quantized and self-attached candidate flags](README_bridge_runtime_checkpoint.md#self-attached-asset-candidates),
+then run:
+
+```sh
+python3 -B t3render/tools/scene_shadow_candidates.py \
+  build/t3render-captures/scene-bridge-submission-20261115-001/bedroom.jsonl \
+  --scene build/t3render-offline/bedroom-runtime-1001-warm-stage1.scene.json \
+  --offline-scene build/t3render-offline/SouthQuarter1_int1.lights.scene.json \
+  --offline-actors build/assets/godot/SouthQuarter1_int1/SouthQuarter1_int1.actors.json \
+  --game-dir "$T3_GAME_DIR" --pass 0 --stage 1 \
+  --output build/t3render-offline/bedroom-runtime-1001-shadow-candidates.json
+```
+
+This yields 33 caster instances sharing 21 resources and 12,512 expanded
+volume triangles, including the SDK's degenerate silhouette triangles. One
+actor is excluded by its offline cast flag and five BSP blocks have no SDK
+volume. The game-derived JSON and its hash sidecar stay local under `build/`.
+
+To test a volume in the composed preview, append `--shadow-candidates` with
+that JSON and `--shadow-light` with a full offline light ID from the direct
+candidate manifest; repeat `--shadow-light` for more lights. The exporter
+revalidates the JSON against the trace, scene and fingerprinted assets, skips
+the offline light owner/parent and enclosing outward shells, and inserts a
+two-sided z-fail stencil batch before each selected light's draws. The preview
+requires the ambient and direct candidates and uses packet v12. Casters and
+light identities remain hypotheses; original runtime stencil operations and
+off-screen casters are not reconstructed. Older packet rendering is unchanged.
+
+On the local frame, one `D_384__5` candidate produced 299 packet draws,
+20,168 render triangles and 12,512 candidate-volume triangles. It changed
+1,966 pixels versus the previous preview; whole-image mean absolute RGB error
+changed from `(4.888, 4.266, 3.786)` to `(4.862, 4.254, 3.788)`, while the
+central beam was unchanged. Trying four lights likewise did not explain the
+beam. A synthetic GPU fixture checks lit and shadowed pixels and verifies that
+stencil is cleared between light batches. This is partial diagnostic evidence,
+not proof of legacy shadow parity.
+
 ## Ambient candidate
 
 With `--ambient-candidate-stage 1`, the exporter requires a state trace and a

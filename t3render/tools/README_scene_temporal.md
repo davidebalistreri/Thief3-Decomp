@@ -41,7 +41,7 @@ light calibration and positions, material and shadow settings, dimensions,
 units and effect flags. These checks do not prove that actor transforms or
 lighting were unchanged between captures. History is rejected per pixel when
 world positions differ by more than 0.05 m. Object motion vectors, animated
-geometry, transparency, temporal denoising and GPU history reuse are absent;
+geometry, transparency and temporal denoising are absent;
 nearest history sampling and a fixed rejection threshold can ghost or flicker.
 This is a static-scene camera-motion prototype, not a production TAA claim.
 

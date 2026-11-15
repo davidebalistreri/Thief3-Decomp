@@ -21,6 +21,7 @@ import scene_material_overrides as overrides
 import scene_pbr_offline_casters as offline_casters
 import scene_pbr_flames as flames
 import scene_pbr_bed as bed
+import scene_pbr_candlestick as candlestick
 from ibt import IBT
 from scene_ir import SceneSnapshot, transform_point
 from t3common import game_dir, resolve_map
@@ -130,7 +131,7 @@ def shadow_owners(scene, lights, actors):
 
 def create_packet(scene, light_scene, calibration, resolver, remaster, render_pass=None, stage=None,
                   shadows=None, actors=None, offline=None, offline_raw=None, caster_resolve=None,
-                  flame_glb=None, flame_radiance=8, bed_glb=None):
+                  flame_glb=None, flame_radiance=8, bed_glb=None, candlestick_glb=None):
     render_pass, stage = legacy.select_scope(scene, render_pass, stage)
     legacy.select_scope(light_scene)
     if (light_scene.source.kind != "runtime" or scene.source.frame_id != light_scene.source.frame_id or
@@ -141,6 +142,10 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
         remaster.validate_scene(scene)
     if bed_glb is not None and remaster is None:
         raise ValueError("generated bed requires bedroom remaster materials")
+    if candlestick_glb is not None and remaster is None:
+        raise ValueError("generated candlestick requires bedroom remaster materials")
+    if candlestick_glb is not None and flame_glb is not None and candlestick_glb != flame_glb:
+        raise ValueError("candlestick and flame geometry must use the same GLB")
     scale = scene.conventions.meters_per_unit
     if scale is None or not .00001 <= scale <= 1:
         raise ValueError("PBR preview requires an explicit scene unit scale")
@@ -177,6 +182,9 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
     bed_parts, bed_report = (bed.select(scene, remaster.anchor_id, bed_glb, render_pass, stage)
                              if bed_glb is not None else ([], None))
     replaced_bed = bed_report["target_id"] if bed_report is not None else None
+    candle_parts, candle_report = (candlestick.select(scene, candlestick_glb, render_pass, stage)
+                                   if candlestick_glb is not None else ([], None))
+    replaced_candles = {item["target_id"] for item in candle_report["instances"]} if candle_report else set()
     seen = set()
     triangles = 0
     for submission in scene.submissions:
@@ -189,6 +197,10 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
         if submission.target_kind == "mesh_instance" and submission.target_id == replaced_bed:
             skipped.append({"target_kind": identity[0], "target_id": identity[1], "section": identity[2],
                             "reason": "replaced_by_generated_bed"})
+            continue
+        if submission.target_kind == "mesh_instance" and submission.target_id in replaced_candles:
+            skipped.append({"target_kind": identity[0], "target_id": identity[1], "section": identity[2],
+                            "reason": "replaced_by_generated_candlestick"})
             continue
         if submission.target_kind == "mesh_instance":
             instance = instances[submission.target_id]
@@ -306,6 +318,39 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
             if shadow is not None:
                 record["shadow_caster_lights"] = [lights[n]["id"] for n in range(len(lights)) if mask & (1 << n)]
             records.append(record)
+    if candle_report is not None:
+        for part in candle_parts:
+            actor_name = part["target_id"].rsplit(":", 1)[-1]
+            mask = 0
+            if shadow is not None:
+                actor = actors.get(actor_name)
+                if (not isinstance(actor, dict) or type(actor.get("casts_shadows")) is not bool or
+                        not isinstance(actor.get("mesh"), str) or actor["mesh"].lower() != "genxlight2candles"):
+                    raise ValueError("generated candlestick caster lacks matching offline mesh and cast flag")
+                if actor["casts_shadows"]:
+                    mask = sum(1 << n for n, ignored in enumerate(owners) if actor_name not in ignored)
+            if part["material"] == "METAL1Goodness_D":
+                albedo, normal, roughness = (remaster.resolve("candlestick_metal_v2", channel)
+                                               for channel in ("albedo", "normal", "roughness"))
+                ao = default_ao
+            else:
+                albedo = _constant("candle_wax", (217, 191, 140, 255))
+                normal, roughness, ao = flat_normal, default_roughness, default_ao
+            if any(mip[3::4].count(255) != len(mip)//4 for mip in albedo["mips"]):
+                raise ValueError("generated candlestick albedo must be opaque")
+            tex = [texture_index(value) for value in (albedo, normal, roughness, ao)]
+            triangles += len(part["vertices"])//3
+            if triangles > MAX_TRIANGLES or len(draws) >= MAX_DRAWS:
+                raise ValueError("PBR geometry exceeds bounds")
+            draws.append((tex, part["vertices"], mask, (0, 0, 0)))
+            record = {"target_kind": "mesh_instance", "target_id": part["target_id"],
+                      "section": "generated:"+part["material"], "material": part["material"],
+                      "replacement": "candlestick_high", "triangles": len(part["vertices"])//3,
+                      "albedo": albedo["name"], "normal": normal["name"], "roughness": roughness["name"],
+                      "ao": ao["name"], "flat_fallback_triangles": part["fallback_triangles"]}
+            if shadow is not None:
+                record["shadow_caster_lights"] = [lights[n]["id"] for n in range(len(lights)) if mask & (1 << n)]
+            records.append(record)
     if not draws:
         raise ValueError("PBR preview has no opaque submitted geometry")
     flame_report = None
@@ -332,7 +377,7 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
     if offline is not None:
         casters, caster_stats = offline_casters.select(scene, offline, offline_raw, actors, caster_resolve,
                                                         lights, shadow, owners, render_pass, stage,
-                                                        replaced_instances={replaced_bed} if replaced_bed else ())
+                                                        replaced_instances=replaced_candles | ({replaced_bed} if replaced_bed else set()))
     if shadow is not None:
         calls = sum(_bit_count(mask)*6 for _, _, mask, _ in draws)
         work = sum(_bit_count(mask)*6*(len(vertices)//3) for _, vertices, mask, _ in draws)
@@ -392,6 +437,8 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
         stats["candle_flames"] = flame_report
     if bed_report is not None:
         stats["generated_bed"] = bed_report
+    if candle_report is not None:
+        stats["generated_candlesticks"] = candle_report
     return bytes(body), stats
 
 
@@ -412,6 +459,7 @@ def main(argv=None):
                         help="add bounded static caster candidates from the offline fixture")
     parser.add_argument("--candle-flames", type=Path, help="generated Godot candlestick GLB for semantic emissive flames")
     parser.add_argument("--bed-high", type=Path, help="generated Godot high-poly bed GLB for the semantic bed anchor")
+    parser.add_argument("--candlestick-high", type=Path, help="generated Godot high-poly candlestick GLB")
     parser.add_argument("--flame-radiance", type=float, help="artistic linear flame radiance (default: 8)")
     parser.add_argument("--shadow-map-size", type=int)
     parser.add_argument("--shadow-near-m", type=float)
@@ -425,6 +473,8 @@ def main(argv=None):
             raise ValueError("--flame-radiance requires --candle-flames")
         if args.bed_high is not None and args.bedroom_remaster_materials is None:
             raise ValueError("--bed-high requires --bedroom-remaster-materials")
+        if args.candlestick_high is not None and args.bedroom_remaster_materials is None:
+            raise ValueError("--candlestick-high requires --bedroom-remaster-materials")
         if not args.shadows and (args.offline_shadow_casters or args.candle_flames is not None or any(x is not None for x in (args.shadow_map_size,
                 args.shadow_near_m, args.shadow_far_m, args.shadow_bias_m, args.shadow_softness))):
             raise ValueError("shadow parameters require --shadows")
@@ -470,7 +520,9 @@ def main(argv=None):
                                         if args.candle_flames is not None else None,
                                         flame_radiance=8 if args.flame_radiance is None else args.flame_radiance,
                                         bed_glb=preview.read_limited(args.bed_high, flames.MAX_GLB_BYTES)
-                                        if args.bed_high is not None else None)
+                                        if args.bed_high is not None else None,
+                                        candlestick_glb=preview.read_limited(args.candlestick_high, flames.MAX_GLB_BYTES)
+                                        if args.candlestick_high is not None else None)
         finally:
             for bundle in bundles:
                 bundle.close()
@@ -497,6 +549,8 @@ def main(argv=None):
             manifest["limitations"].append("Candle flames use generated Godot geometry, artistic emissive radiance and offline on/off state; runtime flame state is not observed.")
         if args.bed_high is not None:
             manifest["limitations"].append("The generated Godot bed visually replaces the observed INNbed1A1 actor; its material mapping, normal strength and UV-inferred tangents are preview approximations.")
+        if args.candlestick_high is not None:
+            manifest["limitations"].append("Generated candlesticks replace scoped candidate actors; metal uses a dielectric approximation, wax is opaque, and UV-inferred tangents are approximate.")
         legacy.write_pair(args.output, body, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))
     except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, struct.error) as exc:

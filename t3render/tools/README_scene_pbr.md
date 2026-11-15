@@ -41,9 +41,8 @@ may require a different artistic exposure.
 
 This is a first PBR preview, not a physically calibrated lighting solution:
 source strengths, color and exposure are artistic; the SDK metre scale and
-tangent basis are assumptions. Metallic materials and temporal effects are
-absent. The
-render is a partial runtime-selected scene, and offline asset bindings for
+tangent basis are assumptions. Metallic response is absent; temporal history
+is an optional separate prototype. The render is a partial runtime-selected scene, and offline asset bindings for
 some actors remain candidates. Height maps are not used. The legacy renderer
 and its benchmark remain independent.
 
@@ -138,6 +137,31 @@ fallback triangles. Against the same filmic PBR preview with the original bed,
 258,815 pixels change and mean absolute RGB difference is 2.720 on a 0–255
 scale. The replacement is a visual reconstruction, not proof of geometric
 parity with the original bed.
+
+## Semantic high-poly candlesticks
+
+`--candlestick-high <candlestick_high.glb>` opts into the generated Godot
+metal and wax geometry for the submitted bedroom `D_384__5` and `D_384__13`
+`GENxLIGHT2candles` candidates. It requires bedroom remaster materials,
+checks the generated local bounds against the candidate mesh and places each
+replacement using its scoped actor transform. The original sections and
+offline caster candidates are excluded. Removing the option restores the
+original preview, without affecting gameplay or the original renderer.
+
+The metal uses `candlestick_metal_v2` albedo, normal and roughness with a
+constant AO; wax uses a simple opaque color. The renderer currently uses a
+dielectric BRDF even for metal. UV-inferred tangent frames have a flat-normal
+fallback. Actor ownership and transforms are scoped runtime observations, but
+the resource binding remains an offline candidate. Existing offline shadow
+flags and owner-light exclusions still apply. The GLB hash, qualified actor
+and resource IDs, triangle and fallback counts are in the packet manifest.
+
+Flames remain a separate `--candle-flames` option, and use offline light state
+and artistic radiance. When both options are set, they must reference the same
+GLB to keep flame and holder geometry aligned. In the frame-1001 preview the
+one selected holder has 4,328 triangles, with 392 tangent fallback triangles.
+With all other preview options unchanged, the D3D12 render changes 3,228
+pixels and has mean absolute RGB difference 0.054 on a 0–255 scale.
 
 ## Volumetric preview
 
@@ -295,6 +319,9 @@ to include the generated flame geometry. This requires the existing Godot
 replacement asset and shadows; its packet and manifest remain under `build/`.
 Add `--bed-high build/assets/godot/remaster/garrett_home/highpoly/generated/bed_high.glb`
 to use the generated high-poly bed instead of the original bed sections.
+Add `--candlestick-high build/assets/godot/remaster/garrett_home/highpoly/generated/candlestick_high.glb`
+to replace the scoped bedroom candlestick metal and wax; optionally use the
+same GLB with `--candle-flames` for emissive flame geometry.
 
 Run `t3render_scene_pbr_d3d12 <packet> --output <new.ppm> [--indirect] [--gtao] [--volumetric] [--reflections] [--filmic]` in a D3D12
 environment. The packet, manifest and PPM use exclusive creation. See the

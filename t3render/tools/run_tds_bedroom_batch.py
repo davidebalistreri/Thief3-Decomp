@@ -137,7 +137,7 @@ def validate_paths(engine, bottle, system, proxy, output):
     return engine, bottle, system, proxy, output
 
 
-def env_for(engine, bottle, output, frames, scene_bridge=False):
+def env_for(engine, bottle, output, frames, scene_bridge=False, submission_scope=False):
     capture = {"T3RENDER_CAPTURE_PATH": windows_path(output / "bedroom.jsonl"),
                "T3RENDER_CAPTURE_TRIGGER_PATH": windows_path(output / "capture.ready"),
                "T3RENDER_CAPTURE_FRAMES": str(frames), "T3RENDER_CAPTURE_BUFFERS": "1",
@@ -148,6 +148,10 @@ def env_for(engine, bottle, output, frames, scene_bridge=False):
                "T3RENDER_EXPERIMENTAL_REPEAT_RECOVERY": "1"}
     if scene_bridge:
         capture["T3RENDER_SCENE_BRIDGE"] = "1"
+    if submission_scope:
+        if not scene_bridge:
+            raise BatchError("submission scope requires the scene bridge probe")
+        capture["T3RENDER_SCENE_BRIDGE_SUBMISSION"] = "1"
     env = {k: v for k, v in os.environ.items() if not k.startswith("T3RENDER_") and
            k not in ("WINEDLLPATH", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH")}
     frameworks = engine / "frameworks"
@@ -199,7 +203,9 @@ def loader_verified(log, windows_dll):
 
 
 def execute(engine, bottle, system, proxy, output, delay, timeout, frames, terminate,
-            preflight=False, fixture=None, replay=None, scene_bridge=False):
+            preflight=False, fixture=None, replay=None, scene_bridge=False, submission_scope=False):
+    if submission_scope and not scene_bridge:
+        raise BatchError("submission scope requires the scene bridge probe")
     engine, bottle, system, proxy, output = validate_paths(engine, bottle, system, proxy, output)
     if not math.isfinite(delay) or not math.isfinite(timeout) or delay < 0 or timeout <= delay or frames not in (1, 2, 3):
         raise BatchError("require nonnegative delay, a longer finite timeout and 1–3 frames")
@@ -221,7 +227,8 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
         raise BatchError("game System already contains d3d8.dll; no file was changed")
     output.mkdir()
     target = system / "d3d8.dll"
-    env, capture = env_for(engine, bottle, output, frames, scene_bridge=scene_bridge)
+    env, capture = env_for(engine, bottle, output, frames, scene_bridge=scene_bridge,
+                           submission_scope=submission_scope)
     executable = "C:\\" + str((system / "T3Main.exe").relative_to((bottle / "drive_c").resolve())).replace("/", "\\")
     deployment = {"schema": 1, "proxy": str(target), "sha256": digest(proxy),
                   "capture_config": capture, "proxy_installed": False, "temporary_proxy_removed": None}
@@ -335,6 +342,7 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
         result = {"schema": 1, "status": status, "error": reason or None,
                   "scene_confirmation": "unconfirmed", "frames_requested": frames,
                   "scene_bridge_requested": scene_bridge,
+                  "submission_scope_requested": submission_scope,
                   "host_preflight": host_preflight, "highball_preflight": highball_preflight,
                   "proxy_installed": deployment["proxy_installed"],
                   "temporary_proxy_removed": deployment["temporary_proxy_removed"],
@@ -375,6 +383,7 @@ def main(argv=None):
     run.add_argument("--timeout", type=float, default=360, help="maximum seconds from launch to complete capture")
     run.add_argument("--frames", type=int, choices=(1, 2, 3), default=3)
     run.add_argument("--scene-bridge", action="store_true", help="enable the experimental read-only scene bridge probe")
+    run.add_argument("--submission-scope", action="store_true", help="tag draws inside the verified section callsite; requires --scene-bridge")
     run.add_argument("--terminate-after-capture", action="store_true", help="close the one TDS test process after capture")
     run.add_argument("--preflight", action="store_true", help="run the host test suite before launching TDS")
     run.add_argument("--fixture", help="synthetic x86 Highball fixture (requires --dx12-replay)")
@@ -389,7 +398,7 @@ def main(argv=None):
         else:
             execute(args.engine, args.bottle, args.system, args.proxy, args.output_dir,
                     args.delay, args.timeout, args.frames, args.terminate_after_capture,
-                    args.preflight, args.fixture, args.dx12_replay, args.scene_bridge)
+                    args.preflight, args.fixture, args.dx12_replay, args.scene_bridge, args.submission_scope)
     except (BatchError, OSError, ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

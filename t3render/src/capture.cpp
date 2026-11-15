@@ -1,6 +1,7 @@
 // Read-only, opt-in D3D8 diagnostic snapshots. A capture is deliberately not a
 // replay: resource contents and calls that do not have getters are unavailable.
 #include "capture.hpp"
+#include "scene_bridge_submission.hpp"
 
 #include <windows.h>
 
@@ -42,6 +43,8 @@ constexpr uint64_t kVertexConstantFrameWords = 262144;
 constexpr DWORD kClearRectLimit = 256;
 constexpr size_t kPendingOperationLimit = 4096;
 constexpr size_t kBridgeObservationLimit = 16;
+constexpr size_t kSubmissionLimit = 4096;
+constexpr size_t kSubmissionDepth = 16;
 // Nested hook entries can occur while the writer mutex is held. Report them
 // without acquiring a lock; saturation fails closed for all later frames.
 static_assert(std::atomic<std::uint32_t>::is_always_lock_free, "probe reentry counter must be lock-free");
@@ -89,6 +92,10 @@ struct CaptureState {
     bool frame_images_requested = false;
     bool frame_image_attempted = false;
     bool bridge_requested = false;
+    bool submission_requested = false;
+    scene_bridge::ProbeStatus submission_install_status = scene_bridge::ProbeStatus::InvalidArguments;
+    uint64_t submission_next_ticket = 1, submission_started = 0, submission_completed = 0;
+    uint64_t submission_pending = 0, submission_dropped = 0;
     bool bridge_install_known = false;
     scene_bridge::ProbeStatus bridge_install_status = scene_bridge::ProbeStatus::InvalidArguments;
     bool bridge_epoch_unknown = false;
@@ -147,6 +154,22 @@ struct CaptureState {
 // query returns; no game state is changed.
 thread_local unsigned bridge_query_depth = 0;
 thread_local bool bridge_reentered_query = false;
+struct SubmissionScope {
+    uint64_t ticket = 0, frame = 0;
+    std::uint32_t thread = 0;
+    scene_bridge::SubmissionSample sample{};
+};
+struct SubmissionStack {
+    unsigned depth = 0;
+    SubmissionScope scopes[kSubmissionDepth]{};
+};
+thread_local SubmissionStack submission_stack;
+
+bool SubmissionRead(void*, std::uint32_t address, void* destination, std::size_t size) noexcept {
+    SIZE_T read = 0;
+    return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(static_cast<std::uintptr_t>(address)),
+                             destination, size, &read) && read == size;
+}
 struct BridgeQueryGuard {
     CaptureState& state;
     explicit BridgeQueryGuard(CaptureState& value) noexcept : state(value) { ++bridge_query_depth; }
@@ -553,7 +576,10 @@ bool Open(CaptureState& s) {
                                 << ",\"mesh_node\":\"actor_node_v1\""
                                 << ",\"mesh_sections\":\"actor_materials_v1\""
                                 << ",\"bsp_candidates\":\"vbsp_array_v1\""
-                                << ",\"synchronization\":\"present_interval_and_thread_only\"}";
+                                << ",\"synchronization\":\"present_interval_and_thread_only\""
+                                << (s.submission_requested ? ",\"submission_scope\":\"section_call_v1\",\"submission_install_status\":\"" : "")
+                                << (s.submission_requested ? BridgeStatusName(s.submission_install_status) : "")
+                                << (s.submission_requested ? "\"" : "") << '}';
     if (s.experimental_facade) {
         out << ",\"experimental_facade\":{\"enabled\":true,\"identity_verified\":false,\"concurrency_verified\":false";
         if (s.experimental_repeated_unlock) out << ",\"repeated_unlock_resource_discard\":true";
@@ -1297,6 +1323,10 @@ bool Draw(CaptureState& s, IDirect3DDevice8* device, const DrawCall& draw, uint6
     auto out = Json();
     out << "{\"event\":\"draw\",\"frame\":" << s.frame << ",\"op_id\":" << operation;
     if (s.bridge_requested) out << ",\"thread_id\":" << GetCurrentThreadId();
+    if (s.submission_requested && submission_stack.depth && submission_stack.depth <= kSubmissionDepth) {
+        const auto& scope = submission_stack.scopes[submission_stack.depth - 1];
+        if (scope.ticket && scope.frame == s.frame) out << ",\"submission_ticket\":" << scope.ticket;
+    }
     out << ",\"call\":\"" << CallName(draw.kind)
         << "\",\"primitive_type\":" << static_cast<unsigned>(draw.primitive_type)
         << ",\"start_vertex\":" << draw.start_vertex << ",\"min_vertex_index\":" << draw.min_vertex_index
@@ -1656,6 +1686,92 @@ void CaptureBridgeInstallResult(scene_bridge::ProbeStatus status) noexcept {
     } catch (...) { Fail(); }
 }
 
+void CaptureSubmissionInstallResult(scene_bridge::ProbeStatus status) noexcept {
+    try {
+        auto& s = State();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        Initialize(s);
+        if (s.enabled && s.bridge_requested && !s.begun && s.file == INVALID_HANDLE_VALUE) {
+            s.submission_requested = true;
+            s.submission_install_status = status;
+        }
+    } catch (...) { Fail(); }
+}
+
+void CaptureSubmissionEnter(std::uint32_t element, std::uint32_t stage, std::uint32_t section) noexcept {
+    if (submission_stack.depth == std::numeric_limits<unsigned>::max()) {
+        CaptureBridgeMarkReentered(); return;
+    }
+    const auto depth = submission_stack.depth++;
+    if (depth >= kSubmissionDepth) { CaptureBridgeMarkReentered(); return; }
+    auto& scope = submission_stack.scopes[depth];
+    scope = {};
+    if (bridge_query_depth) { bridge_reentered_query = true; return; }
+    try {
+        auto& s = State();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (!s.enabled || s.complete || !s.submission_requested ||
+            s.submission_install_status != scene_bridge::ProbeStatus::Installed ||
+            !s.device || !s.triggered || s.frame != s.target) return;
+        const auto thread = CurrentBridgeThread();
+        if (!thread.id || !thread.birth || s.bridge_present_ticket || s.bridge_reset_ticket ||
+            s.submission_started >= kSubmissionLimit || !s.submission_next_ticket ||
+            s.submission_next_ticket == std::numeric_limits<uint64_t>::max()) {
+            ++s.submission_dropped; return;
+        }
+        const scene_bridge::ProbeReader reader{nullptr, SubmissionRead};
+        const auto sample = scene_bridge::SampleSubmission(reader, element);
+        if (!sample.valid) return;
+        Begin(s);
+        if (!s.enabled) return;
+        const auto ticket = s.submission_next_ticket++;
+        auto out = Json();
+        out << "{\"event\":\"scene_bridge_submission_begin\",\"frame\":" << s.frame
+            << ",\"ticket\":" << ticket << ",\"thread_id\":" << thread.id
+            << ",\"stage\":" << stage << ",\"section\":" << section
+            << ",\"self\":" << sample.self << ",\"pass\":" << sample.pass
+            << ",\"element\":" << sample.element << ",\"vtable\":" << sample.vtable
+            << ",\"type\":" << sample.type << ",\"matrix_bits\":";
+        BridgeBits(out, sample.matrix, 16, true);
+        out << ",\"owner\":" << sample.owner << ",\"owner_index\":" << sample.owner_index
+            << ",\"owner_fname\":" << sample.owner_fname << ",\"backlink\":" << sample.backlink
+            << ",\"mesh_node\":" << sample.mesh_node << ",\"asset_proxy\":" << sample.asset_proxy
+            << ",\"asset_resource\":" << sample.asset_resource << ",\"asset_name\":";
+        BridgeText(out, sample.asset_name, sizeof(sample.asset_name), sample.asset_available);
+        out << ",\"bsp_source\":" << sample.bsp_source
+            << ",\"bsp_blocks\":" << sample.bsp_blocks << ",\"bsp_index\":" << sample.bsp_index << "}\n";
+        if (!Write(s, out.str())) return;
+        scope.ticket = ticket; scope.frame = s.frame; scope.thread = thread.id; scope.sample = sample;
+        ++s.submission_started; ++s.submission_pending;
+    } catch (...) { Fail(); }
+}
+
+void CaptureSubmissionLeave() noexcept {
+    if (!submission_stack.depth) { CaptureBridgeMarkReentered(); return; }
+    const auto depth = --submission_stack.depth;
+    if (depth >= kSubmissionDepth) return;
+    auto scope = submission_stack.scopes[depth];
+    submission_stack.scopes[depth] = {};
+    if (!scope.ticket) return;
+    if (bridge_query_depth) { bridge_reentered_query = true; return; }
+    try {
+        auto& s = State();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (!s.enabled || s.complete || scope.frame != s.frame || !s.submission_pending) return;
+        const scene_bridge::ProbeReader reader{nullptr, SubmissionRead};
+        const auto after = scene_bridge::SampleSubmission(reader, scope.sample.element);
+        const auto thread = CurrentBridgeThread();
+        const bool stable = thread.id == scope.thread && thread.birth &&
+                            scene_bridge::SameSubmission(scope.sample, after);
+        auto out = Json();
+        out << "{\"event\":\"scene_bridge_submission_end\",\"frame\":" << s.frame
+            << ",\"ticket\":" << scope.ticket << ",\"thread_id\":" << thread.id
+            << ",\"stable\":" << (stable ? "true" : "false") << "}\n";
+        if (!Write(s, out.str())) return;
+        --s.submission_pending; ++s.submission_completed;
+    } catch (...) { Fail(); }
+}
+
 bool CaptureBridgeShouldDisable() noexcept {
     try {
         auto& s = State();
@@ -1882,6 +1998,7 @@ void CaptureDeviceReleased(IDirect3DDevice8* device) {
         s.bridge_reset_seen = false;
         s.bridge_pending.clear();
         s.bridge_started = s.bridge_completed = s.bridge_dropped = 0;
+        s.submission_started = s.submission_completed = s.submission_pending = s.submission_dropped = 0;
         s.bridge_probe_overlap = s.bridge_present_overlap = s.bridge_operation_overlap = false;
         s.bridge_draw_thread = s.bridge_probe_thread = 0;
         s.bridge_draw_birth = s.bridge_probe_birth = 0;
@@ -2098,8 +2215,13 @@ void CapturePresentEnd(IDirect3DDevice8* device, uint64_t ticket, HRESULT result
                        << ",\"reset_seen\":" << (s.bridge_reset_seen ? "true" : "false")
                        << ",\"reset_pending\":" << (s.bridge_reset_ticket ? "true" : "false")
                        << ",\"started\":" << s.bridge_started << ",\"completed\":" << s.bridge_completed
-                       << ",\"pending\":" << s.bridge_pending.size() << ",\"dropped\":" << s.bridge_dropped
-                       << "}\n";
+                       << ",\"pending\":" << s.bridge_pending.size() << ",\"dropped\":" << s.bridge_dropped;
+                if (s.submission_requested)
+                    bridge << ",\"submission_started\":" << s.submission_started
+                           << ",\"submission_completed\":" << s.submission_completed
+                           << ",\"submission_pending\":" << s.submission_pending
+                           << ",\"submission_dropped\":" << s.submission_dropped;
+                bridge << "}\n";
                 if (!Write(s, bridge.str())) return;
             }
             auto out = Json();
@@ -2131,6 +2253,7 @@ void CapturePresentEnd(IDirect3DDevice8* device, uint64_t ticket, HRESULT result
             s.frame_image_attempted = false;
             s.bridge_pending.clear();
             s.bridge_started = s.bridge_completed = s.bridge_dropped = 0;
+            s.submission_started = s.submission_completed = s.submission_pending = s.submission_dropped = 0;
             s.bridge_probe_overlap = s.bridge_present_overlap = s.bridge_operation_overlap = false;
             s.bridge_reset_seen = s.bridge_reset_ticket != 0;
             s.bridge_draw_thread = s.bridge_probe_thread = 0;

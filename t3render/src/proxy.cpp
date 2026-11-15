@@ -1361,6 +1361,16 @@ extern "C" IDirect3D8* WINAPI Proxy_Direct3DCreate8(UINT sdk_version) {
                                                                   t3render::CaptureBridgeEnd,
                                                                   t3render::CaptureBridgeMarkReentered, &status);
                         t3render::CaptureBridgeInstallResult(status);
+                        wchar_t submission_option[2]{};
+                        if (GetEnvironmentVariableW(L"T3RENDER_SCENE_BRIDGE_SUBMISSION", submission_option, 2) == 1 &&
+                            submission_option[0] == L'1') {
+                            auto submission_status = t3render::scene_bridge::ProbeStatus::InvalidArguments;
+                            if (status == t3render::scene_bridge::ProbeStatus::Installed)
+                                (void)t3render::scene_bridge::InstallSubmissionProbe(t3render::CaptureSubmissionEnter,
+                                                                                    t3render::CaptureSubmissionLeave,
+                                                                                    &submission_status);
+                            t3render::CaptureSubmissionInstallResult(submission_status);
+                        }
                     });
                 });
             }

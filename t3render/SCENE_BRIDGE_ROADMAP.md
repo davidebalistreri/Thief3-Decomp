@@ -11,7 +11,10 @@ con bedroom riconoscibile, geometria e camera della stessa trace. Le differenze
 restano esplicite: materiali e illuminazione diagnostici, pass mancanti e
 nessuna parità completa. La [ricerca bridge](T3SCENEBRIDGE_RESEARCH.md)
 documenta anche una raccolta pre-draw osservata a runtime e i limiti della
-correlazione con il letto.
+correlazione con il letto. Nel frame 1001 sono ora verificati direttamente gli
+scope di submission del letto e di un blocco BSP; i byte geometrici della
+stessa selezione sono confrontati nel frame separato 2722. Provenienza e
+limiti sono nel [checkpoint](T3SCENEBRIDGE_RESEARCH.md#submission-runtime-frame-1001).
 
 ## Obiettivo e confine tra i due percorsi
 
@@ -130,6 +133,9 @@ dell'engine o ogni conversione sia già noto.
 2. **Scoperta bridge**: seguire staticamente le piste di geometria, istanze,
    camera e luci; osservare in modo read-only il punto candidato in TDS e
    dimostrare identità, ordine, ciclo di vita e coerenza tra frame e save.
+   Il checkpoint iniziale mesh statica + un BSP è superato nel frame 1001;
+   sospendere l'espansione della ricerca sul renderer legacy. Lifecycle generale,
+   variazioni di save e luci restano requisiti per le successive estensioni.
    Niente soppressione del renderer originale in questa fase.
 3. **Scene IR API-neutral**: schema/versione, convenzioni, provenienza e test
    di conversione; import offline T3SDK come fixture, con dati del gioco solo

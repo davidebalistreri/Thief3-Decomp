@@ -57,6 +57,10 @@ che la lista comprenda tutta la scena. Altri elementi sono trattati in rami
 diversi. L'array `this+0x74` / `this+0x7c` è percorso prima; dopo una chiamata
 virtuale a `0x10926a57`, ciascun elemento espone una seconda raccolta
 `+0x120` / `+0x128`, con stride 8. La sua semantica resta da dimostrare.
+**Correzione:** nel caso delle vtable del letto e dei blocchi BSP la chiamata
+`+4` a `0x10926e35` non è una submission di draw: le rispettive funzioni
+aggiornano dati tramite `0x109522d0`. Il contatore da solo non identifica il
+callsite del draw; vedere [il probe di submission](#submission-per-sezione).
 La funzione modifica anche le selezioni/flag durante il proprio lavoro, quindi
 la lista all'ingresso non equivale automaticamente agli oggetti effettivamente
 emessi. Evidenze REA:
@@ -69,6 +73,53 @@ che preceda *tutti* i draw del frame; può essere invocato per più pass. Il
 producer `0x109231a0` usa anche una strada alternativa oltre ai sei piani.
 Servono prove runtime prima di chiamare queste strutture inventario completo
 degli oggetti visibili o usarle come contratto del renderer.
+
+## Submission per sezione
+
+Analisi statica della stessa build SHA-256, senza inferire da essa esecuzione
+runtime. Il costruttore `0x1092f830` imposta la vtable renderer `0x10e49c6c`;
+il chiamante dopo `0x10926800` usa lo slot `+8` a `0x1092720b`. Nella vtable
+verificata questo slot punta a `0x10930300`, che seleziona percorsi tra cui
+`0x1092ff60` e `0x10930110`: questi percorrono nuovamente la lista `+0x50` /
+`+0x58` e passano l'elemento a `0x1092fae0`. Lì, a `0x1092fc73`, lo slot
+virtuale `+0x24` riceve il render stage e la sezione correnti.
+
+La vtable mesh `0x10e4e8c0` porta a `0x10dca4e0`, che inoltra alla mesh node
+`element+0x108`; la vtable node `0x10e49d14` porta a `0x10954b20`, che può
+chiamare `DrawIndexedPrimitive`. La vtable BSP `0x10e4a668` porta invece a
+`0x109428a0`, che può effettuare la stessa chiamata D3D8. Tutti i rami sono
+condizionali. Evidenze REA: `ev_4204f6b68d70d0fc7ee0fe8ae5b46ac804e379360ae20cf7572c179c900e357f`,
+`ev_a4546d4e6f1031c9c091de72097fb98eadde0a0ccd808e0e5c0095bc1f9db67e`,
+`ev_93a062bd494e0370a1fec60bdfa981471bb7d9c5ab1a47b521b8f7fc12e3ecbb`,
+`ev_dee8e10e46a951df86619711c7be68bb21b87427935d2831be703711d036ffbc`,
+`ev_39b2097eeb060a40c12ae0c52780f6828d505625b86777df3ba06f5990826e95`,
+`ev_c07598fd43121d47acfc21e31dfe6f8005ed87d610abe9ccaa18950c9de472f2`,
+`ev_fe74e39514e74362649a97bcda7f94148f7ba7b6c481fb043e4a03109eef5a49`,
+`ev_903474078d6aca1b88d6865413bf0aac568d5475bdf728694119e05110f42332`,
+`ev_e64ad7a00e931709e0c86e5ddd2af85588ad05112a27b9bcbae7ef62e8ca9863`,
+`ev_1fdc19959fa883401e1a721d4a704ea460745de0826750f25e50204a8a63b6c1`,
+`ev_25aa4ca8fd4545bdf863c5eace6ef06c9d3185c24bc325577028c0c8abc5ac1d`,
+`ev_ac455f5776ce76dbeaf8422d2b474ee8675c3b84ecec469b97fd87c839b4f7ad`,
+`ev_d15df3fb6227d00f473125971de4828d26baf35bc4fed61cdbf4615c26932998`,
+`ev_ddcda8e9f288ee8058901f95edd364c2e78f20c9cf8a63ae3fa70d5c8f88b5f0`,
+`ev_c1f6a79ecf1c21d4891628c9118753d159ad090e80d4c631432c1dd1beefefb4`.
+Hopper non fornisce confini completi delle procedure; le vtable e le
+istruzioni sono corroborate dai byte del PE e dal sorgente matched di
+`Class_109522D0::Advance`.
+
+Il nuovo probe sperimentale, esplicitamente opt-in, verifica il PE e i cinque
+byte `8b ce ff 52 24` al callsite `0x1092fc71`. Un thunk conserva registri,
+flag, stato x87/SIMD e `LastError`, apre uno scope thread-local, esegue la
+chiamata virtuale originale una volta e chiude lo scope al ritorno. Il return
+address visto dal callee è nel thunk: la trasparenza generale non è provata.
+Campiona in modo bounded identità dell'elemento, transform, backlink actor,
+mesh node e proprietà/risorsa del letto; per BSP verifica l'appartenenza a
+VBSP. Le letture prima e dopo non escludono ABA o modifiche non osservate.
+La trace associa i draw allo scope, con un ticket per chiamata, e registra
+eventuali scope mancanti; il confronto richiede scope bilanciati, lo stesso
+thread e intervallo Present, la stessa identità semantica e camera coerente.
+Gli indirizzi restano diagnostici locali. I test sintetici non provano il
+comportamento nel gioco.
 
 ## Camera e frame
 
@@ -491,3 +542,49 @@ render diagnostico. Letto e pareti sono riconoscibili, ma la scena è parziale,
 con colori piatti, culling/depth approssimati e senza illuminazione o texture.
 Non si afferma parità geometrica completa o validazione definitiva del bridge:
 il legame diretto fra risorsa runtime, payload e draw resta da dimostrare.
+
+## Submission runtime: frame 1001
+
+La successiva cattura `scene-bridge-submission-20261115-001` ha SHA-256
+`633047c6d44977f396b5cc270830dd48b18a551f175c43cae664e130e5f94759`.
+Il proxy usato aveva SHA-256
+`bd9f7d7b496b70db7843be2927d3bb4ccdcd4bcacdbf99d43be78fe8ec472f7f`;
+dopo la cattura la pubblicazione delle callback è stata resa atomica e
+riverificata nella fixture x86, senza ripetere il run TDS.
+Lo screenshot `bedroom-frame-1001.png`, ricavato dal backbuffer immediatamente
+prima del Present del frame 1001, mostra la bedroom e il letto. Il probe e
+338 scope di submission sono installati e completati, senza scope pendenti o
+scartati; il frame è sincronizzato fra due Present osservati sul thread 2548,
+senza Reset nel frame, overlap o rientri rilevati.
+
+Nel pass 0, stage 1, i draw indicizzati 8 e 9 avvengono negli scope delle
+sezioni 1 e 2 dell'elemento con backlink a `StaticMeshActor__1520`; nello
+scope si confermano nodo `+0x108`, proprietà `StaticMesh`, resource object e
+nome `innbed1a1`, oltre alla matrice dell'elemento. La traslazione runtime è
+`[3398, 1513.9998779, 272]`. Gli intervalli dei draw corrispondono alle
+sezioni e al confronto offline: 257 vertici, 708 indici, 3 sezioni, bounds e
+materiali coincidono. La camera del probe ha view/projection identiche ai
+draw; la posizione derivata è circa `[3571.8540, 1577.0316, 353.4705]`.
+Il viewport della camera conserva depth `0..1`, quello dei draw `0..0.5`.
+
+Nello stesso pass e stage, i draw 5 e 6 sono nello scope delle sezioni 0 e 1
+del blocco VBSP runtime 7, univocamente associato per metadati al blocco
+offline GMP 5. Conteggi 60 vertici/114 indici, bounds e materiali coincidono.
+Questo valida **i due percorsi di submission osservati** per il letto e un
+BSP; non attesta visibilità completa, skin, sezione nascosta `BF`, luci,
+contenuto GPU o parità generale del renderer.
+
+L'identità durevole emessa dal verificatore usa tipo `static_mesh`, nome
+`INNbed1A1` e fingerprint della mappa/bundle della fixture, dopo corrispondenza
+univoca del nome risorsa e del nome mappa runtime. Le impronte sono **offline**:
+non sono state lette dal resource manager runtime. I puntatori sono usati
+solo per correlare i campioni nella trace locale, non come ID serializzati.
+
+In questa cattura VB/IB per i quattro draw sono `unknown_resource` dopo un
+precedente Reset: gli argomenti dei draw coincidono con le sezioni, ma non
+sono stati confrontati i byte nello stesso frame. Il confronto automatico
+aggiuntivo verifica posizioni, UV e indici delle stesse sezioni nel frame
+**separato 2722**, usando le sue shadow e la stessa fixture. Il frame 2722 non
+contiene gli scope e non dimostra la proprietà diretta dei suoi draw. Nessuna
+shadow equivale a un readback GPU. La procedura e il report locale sono in
+[README_bridge_runtime_checkpoint.md](tools/README_bridge_runtime_checkpoint.md).

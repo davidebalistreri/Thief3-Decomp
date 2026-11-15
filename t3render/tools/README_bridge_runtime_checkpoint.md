@@ -1,5 +1,41 @@
 # Runtime bridge checkpoint: frame 2722
 
+## Scoped submission checkpoint: frame 1001
+
+The later frame 1001 directly brackets the per-section virtual draw call at
+`0x1092fc73`. In pass 0/stage 1, the scoped bed draws are 8/9 and the scoped
+VBSP runtime block 7 draws are 5/6; the latter uniquely matches offline GMP
+block 5. The synchronized frame has 338 completed scopes and no dropped or
+pending scopes. The bed's runtime actor, resource object and mesh node are
+rechecked at entry and return. Draw arguments, metadata, transforms, materials
+and camera are compared with the offline fixture and the probe observation.
+
+The frame-1001 buffer shadows for these draws are unavailable after an earlier
+Reset, so draw ownership and argument matching do not establish GPU bytes. The
+optional reference below independently verifies positions, UV and indices in
+the separate frame 2722; its shadow evidence does not acquire frame-1001
+provenance or direct ownership. The emitted resource key uses the runtime name
+and the **offline** map/bundle fingerprints, after matching the runtime map
+name and a unique offline resource. No process address is a persistent ID.
+
+```sh
+python3 -B t3render/tools/verify_bridge_submission.py \
+  build/t3render-captures/scene-bridge-submission-20261115-001/bedroom.jsonl \
+  --scene build/t3render-offline/SouthQuarter1_int1.scene.json \
+  --frame 1001 --pass 0 \
+  --reference-trace build/t3render-captures/scene-bridge-runtime-20261115-001/bedroom.jsonl \
+  --reference-frame 2722 --reference-draw 8 --reference-bsp 5
+```
+
+The command returns success only when both bed sections and two sections of
+one BSP have matched scopes in the same stage. The reference comparison is
+separately marked `same_frame=false`; all captures remain local under `build/`.
+For a fresh capture, `run_tds_bedroom_batch.py --scene-bridge
+--submission-scope` opts into the additional, build-verified callsite hook.
+The per-call ticket is a transient scope generation, not a resource ID.
+
+## Original asset-backed checkpoint
+
 The read-only probe observes one `0x10926800` list entry linked to
 `StaticMeshActor__1520`, its local mesh property, mesh node, transform and
 material sections, plus bounded VBSP array members. Camera and objects are

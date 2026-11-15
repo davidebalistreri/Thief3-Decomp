@@ -152,9 +152,104 @@ def one(records, event, op_id=None):
     return values[0] if len(values) == 1 else None
 
 
+def submission_for_draw(records, draw_id, expected_pass):
+    """Match a balanced same-thread section scope to a unique semantic entry.
+
+    The caller must first validate the complete trace with trace_summary.
+    This never infers ownership from temporal adjacency alone.
+    """
+    unknown = {"status": "unknown"}
+    header = one(records, "header")
+    capability = header.get("scene_bridge") if isinstance(header, dict) else None
+    if not isinstance(capability, dict) or capability.get("submission_scope") != "section_call_v1" or \
+            capability.get("submission_install_status") != "installed":
+        return unknown
+    draw = one(records, "draw", draw_id)
+    outcome = one(records, "draw_result", draw_id)
+    frame = one(records, "scene_bridge_frame")
+    end = one(records, "frame_end")
+    if not snapshot_window_synchronized(frame, end, outcome) or not isinstance(draw, dict):
+        return unknown
+    if (not uint(frame.get("submission_started"), 64, True) or
+            frame.get("submission_started") != frame.get("submission_completed") or
+            frame.get("submission_pending") != 0 or frame.get("submission_dropped") != 0):
+        return unknown
+    ticket = draw.get("submission_ticket")
+    if not uint(ticket, 64, True):
+        return unknown
+    begins = [r for r in records if r.get("event") == "scene_bridge_submission_begin" and r.get("ticket") == ticket]
+    ends = [r for r in records if r.get("event") == "scene_bridge_submission_end" and r.get("ticket") == ticket]
+    if len(begins) != 1 or len(ends) != 1:
+        return unknown
+    begin, finish = begins[0], ends[0]
+    if (not records.index(begin) < records.index(draw) < records.index(outcome) < records.index(finish) or
+            any(item.get("frame") != draw.get("frame") for item in (frame, end, begin, finish, outcome)) or
+            begin.get("thread_id") != draw.get("thread_id") or finish.get("thread_id") != draw.get("thread_id") or
+            draw.get("thread_id") != frame.get("present_thread") or finish.get("stable") is not True or
+            begin.get("pass") != expected_pass or not uint(begin.get("stage")) or not uint(begin.get("section"))):
+        return unknown
+    matches = []
+    for observation in (r for r in records if r.get("event") == "scene_bridge_observation"):
+        if (observation.get("frame") != draw.get("frame") or records.index(observation) >= records.index(begin) or
+                observation.get("thread_id") != draw.get("thread_id") or observation.get("self") != begin.get("self") or
+                observation.get("caller") != EXPECTED_CALLER or observation.get("known_caller") is not True or
+                observation.get("pass") != expected_pass or observation.get("pass_stable") is not True):
+            continue
+        camera = observation.get("current_camera")
+        transforms = draw.get("transforms")
+        if (not isinstance(camera, dict) or camera.get("stable") is not True or not isinstance(transforms, dict) or
+                compare_matrix(camera.get("derived_matrix_bits"), transforms.get("view")) != "equal_bits" or
+                compare_matrix(camera.get("projection_bits"), transforms.get("projection")) != "equal_bits"):
+            continue
+        world = transforms.get("world")
+        if not isinstance(world, list) or not world or compare_matrix(begin.get("matrix_bits"), world[0]) != "equal_bits":
+            continue
+        if begin.get("type") == 4 and begin.get("vtable") == EXPECTED_ELEMENT_VTABLE:
+            target = observation.get("target") or {}
+            entry = target.get("entry") or {}
+            node = target.get("mesh_node") or {}
+            asset = target.get("asset") or {}
+            owner_class = target.get("owner_class") or {}
+            complete = (target.get("object_scan_complete") is True and target.get("list_scan_complete") is True and
+                        target.get("object_scan_truncated") is False and target.get("list_scan_truncated") is False and
+                        target.get("actors_named_target") == target.get("list_occurrences") == 1)
+            if (complete and owner_link(entry, observation.get("object_table_complete")) and
+                    owner_class.get("member") is True and owner_class.get("stable") is True and
+                    owner_class.get("address") == entry.get("owner_class") and
+                    fullname(owner_class.get("name"), owner_class.get("fname")) == "StaticMeshActor" and
+                    node.get("stable") is True and trace_summary._bridge_mesh_node(node) and
+                    trace_summary._bridge_asset(asset) and asset.get("status") == "candidate" and
+                    trace_summary._bridge_asset_audit(asset.get("audit"), asset.get("name")) and
+                    node.get("name", "").casefold() == asset.get("name", "").casefold() == TARGET_ASSET.casefold() and
+                    begin.get("element") == entry.get("address") and begin.get("owner") == entry.get("owner_candidate") and
+                    begin.get("owner_index") == entry.get("owner_object_index") and begin.get("owner_fname") == entry.get("owner_fname") and
+                    begin.get("backlink") == entry.get("owner_backlink") and begin.get("mesh_node") == node.get("address") and
+                    begin.get("asset_proxy") == asset["audit"].get("proxy") and
+                    begin.get("asset_resource") == asset["audit"].get("resource") and
+                    isinstance(begin.get("asset_name"), str) and begin["asset_name"].casefold() == asset["name"].casefold() and
+                    begin.get("matrix_bits") == entry.get("object_matrix_bits") and
+                    isinstance(node.get("sections"), list) and begin["section"] < len(node["sections"])):
+                matches.append({"status": "matched", "kind": "static_mesh", "actor": TARGET_ACTOR,
+                                "resource_name": asset["name"], "section": begin["section"], "stage": begin["stage"],
+                                "observation_ticket": observation["ticket"]})
+        elif begin.get("type") == 5 and begin.get("vtable") == 0x10e4a668:
+            bsp = observation.get("bsp") or {}
+            if bsp.get("source_stable") is not True or not trace_summary._bridge_bsp(bsp, observation.get("entries")):
+                continue
+            for block in bsp.get("candidates", []):
+                if (block.get("stable") is True and block.get("address") == begin.get("element") and
+                        block.get("source_index") == begin.get("bsp_index") and bsp.get("source") == begin.get("bsp_source") and
+                        bsp.get("blocks") == begin.get("bsp_blocks") and block.get("transform_bits") == begin.get("matrix_bits") and
+                        isinstance(block.get("sections"), list) and begin["section"] < len(block["sections"])):
+                    matches.append({"status": "matched", "kind": "bsp", "runtime_index": block["source_index"],
+                                    "section": begin["section"], "stage": begin["stage"],
+                                    "observation_ticket": observation["ticket"]})
+    return matches[0] if len(matches) == 1 else unknown
+
+
 def analyze(records, frame, draw_id, expected_pass):
     """Return only proven comparisons and explicit unknowns for one draw."""
-    records = [record for record in records if record.get("frame") == frame]
+    records = [record for record in records if record.get("frame") == frame or record.get("event") == "header"]
     draw = one(records, "draw", draw_id)
     end = one(records, "frame_end")
     outcome = one(records, "draw_result", draw_id)
@@ -184,6 +279,9 @@ def analyze(records, frame, draw_id, expected_pass):
             draw.get("thread_id") != bridge.get("draw_thread"):
         return result
     result["present_interval"] = "synchronized"
+    result["submission"] = submission_for_draw(records, draw_id, expected_pass)
+    if result["submission"].get("kind") == "static_mesh":
+        result["actor_submitted_draw"] = "scoped_virtual_call"
     if snapshot_window_synchronized(bridge, end, outcome):
         result["complete_observation_window"] = "synchronized"
     if not observation or observation.get("thread_id") != bridge.get("probe_thread"):
@@ -285,13 +383,17 @@ def read_selected(path, frame, draw_id):
         for raw in stream:
             digest.update(raw)
             item = json.loads(raw, object_pairs_hook=trace_summary._object, parse_constant=trace_summary._constant)
+            if item.get("event") == "header" and item.get("scene_bridge", {}).get("submission_scope"):
+                records.append(item)
+                continue
             if item.get("frame") != frame:
                 continue
             event = item.get("event")
             if event == "draw" and item.get("op_id") == draw_id:
                 # Never retain or forward geometry payloads or resource identities.
-                records.append({key: item.get(key) for key in ("event", "frame", "op_id", "thread_id", "transforms", "viewport")})
-            elif event in ("scene_bridge_observation", "scene_bridge_frame", "frame_end") or \
+                records.append({key: item.get(key) for key in ("event", "frame", "op_id", "thread_id", "transforms", "viewport", "submission_ticket")})
+            elif event in ("scene_bridge_observation", "scene_bridge_frame", "frame_end",
+                           "scene_bridge_submission_begin", "scene_bridge_submission_end") or \
                     event == "draw_result" and item.get("op_id") == draw_id:
                 records.append(item)
         finished = os.fstat(stream.fileno())

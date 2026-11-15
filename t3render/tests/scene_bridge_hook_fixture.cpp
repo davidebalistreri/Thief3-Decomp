@@ -9,12 +9,43 @@
 using namespace t3render::scene_bridge;
 
 extern "C" unsigned FixtureTarget();
+extern "C" unsigned FixtureSubmission(void*);
+extern "C" unsigned char FixtureSubmissionSite;
 
 namespace {
 unsigned started = 0, ended = 0;
 unsigned reentries = 0;
 bool test_reentry = false, entered_recursively = false;
 ProbeSnapshot last;
+char events[16]{};
+unsigned event_count = 0, submission_depth = 0;
+bool nested_submission = false, nested_done = false, submission_args_ok = true;
+void* submission_object = nullptr;
+
+void SubmissionEnter(std::uint32_t element, std::uint32_t stage, std::uint32_t section) noexcept {
+    submission_args_ok = submission_args_ok && element == reinterpret_cast<std::uint32_t>(submission_object) &&
+                         stage == 2 && section == 5;
+    if (event_count < sizeof(events)) events[event_count++] = 'E';
+    ++submission_depth;
+    __asm__ volatile("fninit\n\tpxor %%xmm0, %%xmm0\n\tpxor %%xmm7, %%xmm7" ::: "xmm0", "xmm7");
+    SetLastError(123);
+}
+void SubmissionLeave() noexcept {
+    submission_args_ok = submission_args_ok && submission_depth != 0;
+    if (event_count < sizeof(events)) events[event_count++] = 'L';
+    if (submission_depth) --submission_depth;
+    __asm__ volatile("fninit\n\tpxor %%xmm0, %%xmm0\n\tpxor %%xmm7, %%xmm7" ::: "xmm0", "xmm7");
+    SetLastError(456);
+}
+unsigned __attribute__((thiscall, noinline)) FakeDraw(void* object, unsigned stage, unsigned section) {
+    submission_args_ok = submission_args_ok && object == submission_object && stage == 2 && section == 5 && submission_depth;
+    if (event_count < sizeof(events)) events[event_count++] = 'D';
+    if (nested_submission && !nested_done) {
+        nested_done = true;
+        submission_args_ok = submission_args_ok && FixtureSubmission(object) == 123;
+    }
+    return 123;
+}
 
 void Reentry() noexcept { ++reentries; }
 
@@ -40,6 +71,18 @@ extern "C" __attribute__((naked, noinline)) unsigned FixtureTarget() {
     __asm__ volatile("movl $0x12345678, %%eax\n\tret" ::: "eax");
 }
 
+// The five bytes at FixtureSubmissionSite reproduce only the callsite shape,
+// not game code. The virtual callee consumes two thiscall stack arguments.
+extern "C" __attribute__((naked, noinline)) unsigned FixtureSubmission(void*) {
+    __asm__ volatile(
+        "pushl %%ebx\n\tpushl %%esi\n\tpushl %%edi\n\t"
+        "movl 16(%%esp), %%esi\n\tmovl $2, %%edi\n\tmovl $5, %%ebx\n\t"
+        "movl (%%esi), %%edx\n\tpushl %%ebx\n\tpushl %%edi\n\t"
+        ".globl _FixtureSubmissionSite\n_FixtureSubmissionSite:\n\t"
+        ".byte 0x8b, 0xce\n\tcall *0x24(%%edx)\n\t"
+        "popl %%edi\n\tpopl %%esi\n\tpopl %%ebx\n\tret" ::: "memory");
+}
+
 static bool CheckGpr() {
     unsigned ok = 0;
     __asm__ volatile(
@@ -61,6 +104,44 @@ static bool CheckGpr() {
 
 int main(int argc, char** argv) {
     ProbeStatus status{};
+    if (argc == 2 && std::strcmp(argv[1], "--submission") == 0) {
+        void* table[10]{};
+        table[9] = reinterpret_cast<void*>(&FakeDraw);
+        struct Object { void** table; } object{table};
+        submission_object = &object;
+        if (!InstallFixtureSubmissionProbe(&FixtureSubmissionSite, SubmissionEnter, SubmissionLeave, &status)) {
+            std::printf("submission_install_failed=%u\n", static_cast<unsigned>(status)); return 1;
+        }
+        nested_submission = true;
+        alignas(16) unsigned char before[512]{}, after[512]{};
+        alignas(16) const std::uint32_t pattern0[4] = {1, 2, 3, 4}, pattern7[4] = {5, 6, 7, 8};
+        unsigned result = 0;
+        SetLastError(0x539);
+        __asm__ volatile(
+            "fninit\n\tfld1\n\tmovdqu %[p0], %%xmm0\n\tmovdqu %[p7], %%xmm7\n\t"
+            "fxsave %[before]\n\tpushl %[object]\n\tcall _FixtureSubmission\n\taddl $4, %%esp\n\t"
+            "movl %%eax, %[result]\n\tfxsave %[after]"
+            : [before] "=m"(before), [after] "=m"(after), [result] "=m"(result)
+            : [object] "r"(&object), [p0] "m"(pattern0), [p7] "m"(pattern7)
+            : "eax", "ecx", "edx", "xmm0", "xmm7", "memory", "cc");
+        const bool fp_ok = std::memcmp(before, after, 8) == 0 && std::memcmp(before + 24, after + 24, 4) == 0 &&
+            std::memcmp(before + 32, after + 32, 10) == 0 && std::memcmp(before + 160, after + 160, 16) == 0 &&
+            std::memcmp(before + 272, after + 272, 16) == 0;
+        const bool valid = result == 123 && submission_args_ok && submission_depth == 0 &&
+                           event_count == 6 && std::memcmp(events, "EDEDLL", 6) == 0 && GetLastError() == 0x539 && fp_ok;
+        if (!DisableSubmissionProbe(&status)) return 1;
+        const unsigned prior = event_count;
+        const bool disabled = FixtureSubmission(&object) == 123 && event_count == prior + 1 && events[prior] == 'D';
+        std::printf("submission_nested=%s fp=%s disable=%s\n", valid ? "PASS" : "FAIL", fp_ok ? "PASS" : "FAIL", disabled ? "PASS" : "FAIL");
+        return valid && disabled ? 0 : 1;
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--submission-bad-site") == 0) {
+        const bool installed = InstallFixtureSubmissionProbe(reinterpret_cast<void*>(&FixtureTarget), SubmissionEnter,
+                                                             SubmissionLeave, &status);
+        const bool valid = !installed && status == ProbeStatus::PrologueMismatch && FixtureTarget() == 0x12345678;
+        std::printf("submission_signature_rejected=%s\n", valid ? "PASS" : "FAIL");
+        return valid ? 0 : 1;
+    }
     if (argc == 2 && (std::strcmp(argv[1], "--read-perf") == 0 || std::strcmp(argv[1], "--read-perf-max") == 0)) {
         LARGE_INTEGER start{}, finish{}, frequency{};
         std::uint32_t source = 123, destination = 0;

@@ -167,6 +167,11 @@ using BeginProbe = std::uint64_t (*)(std::uint32_t thread_id) noexcept;
 using EndProbe = void (*)(std::uint64_t ticket, const ProbeSnapshot&) noexcept;
 // Called on a nested hook entry. Must be lock-free and must not call game code.
 using MarkProbeReentry = void (*)() noexcept;
+// Callbacks bracket the virtual draw call at the verified section callsite.
+// Values are transient process-local diagnostics, never SceneIR identifiers.
+using EnterSubmission = void (*)(std::uint32_t element, std::uint32_t stage,
+                                 std::uint32_t section) noexcept;
+using LeaveSubmission = void (*)() noexcept;
 
 enum class ProbeStatus {
     Installed, Disabled, InvalidArguments, AlreadyAttempted, UnsupportedProcessor,
@@ -182,9 +187,13 @@ bool InstallProbe(BeginProbe begin, EndProbe end, MarkProbeReentry reentry, Prob
 // exit, because a thread may already be in flight when the hook is disabled.
 bool DisableProbe(ProbeStatus* status) noexcept;
 
+bool InstallSubmissionProbe(EnterSubmission enter, LeaveSubmission leave, ProbeStatus* status) noexcept;
+bool DisableSubmissionProbe(ProbeStatus* status) noexcept;
+
 #if defined(T3RENDER_SCENE_BRIDGE_TEST_FIXTURE)
 // Available only in a separate fixture executable, never in the game proxy.
 bool InstallFixtureProbe(void* target, BeginProbe begin, EndProbe end, MarkProbeReentry reentry, ProbeStatus* status) noexcept;
+bool InstallFixtureSubmissionProbe(void* target, EnterSubmission enter, LeaveSubmission leave, ProbeStatus* status) noexcept;
 #endif
 
 }  // namespace t3render::scene_bridge

@@ -284,6 +284,7 @@ def summarize(path):
     frame_images = False
     bridge_capability = None
     bridge_tickets = set()
+    submission_tickets = set()
     clear_rect_limit = None
     requested_frames = None
     lines = 0
@@ -350,6 +351,12 @@ def summarize(path):
                             bridge_capability.get("mesh_sections") not in (None, "actor_materials_v1") or
                             bridge_capability.get("bsp_candidates") not in (None, "vbsp_array_v1")):
                             raise TraceError(f"line {lines}: invalid scene bridge capability")
+                        scope = bridge_capability.get("submission_scope")
+                        scope_status = bridge_capability.get("submission_install_status")
+                        if ((scope is None) != (scope_status is None) or
+                                scope not in (None, "section_call_v1") or
+                                (scope is not None and scope_status not in statuses)):
+                            raise TraceError(f"line {lines}: invalid submission capability")
                     header_seen = True
                 elif event == "header":
                     raise TraceError(f"line {lines}: duplicate header")
@@ -380,7 +387,49 @@ def summarize(path):
                     current = {"frame": frame, "draws": 0, "calls": Counter(), "pending": {},
                                "last_op": 0, "overlap": False, "image_seen": False,
                                "bridge_finished": False, "bridge_frame": None, "bridge_count": 0,
-                               "bridge_threads": set(), "bridge_draw_threads": set(), "bridge_order_valid": True}
+                               "bridge_threads": set(), "bridge_draw_threads": set(), "bridge_order_valid": True,
+                               "submission_stacks": {}, "submission_started": 0, "submission_completed": 0}
+                elif event in ("scene_bridge_submission_begin", "scene_bridge_submission_end"):
+                    if (bridge_capability is None or bridge_capability.get("submission_scope") != "section_call_v1" or
+                            bridge_capability.get("submission_install_status") != "installed" or current is None or
+                            item.get("frame") != current["frame"] or current["image_seen"]):
+                        raise TraceError(f"line {lines}: submission outside an installed capture frame")
+                    ticket, thread = item.get("ticket"), item.get("thread_id")
+                    if not _uint(ticket, 64) or not ticket or not _uint(thread) or not thread:
+                        raise TraceError(f"line {lines}: invalid submission ticket or thread")
+                    stacks = current["submission_stacks"]
+                    stack = stacks.setdefault(thread, [])
+                    if event.endswith("_begin"):
+                        fields = ("stage", "section", "self", "pass", "element", "vtable", "type", "owner",
+                                  "owner_index", "owner_fname", "backlink", "mesh_node", "asset_proxy", "asset_resource",
+                                  "bsp_source", "bsp_blocks", "bsp_index")
+                        bits = item.get("matrix_bits")
+                        name = item.get("asset_name")
+                        if (ticket in submission_tickets or any(not _uint(item.get(k)) for k in fields) or
+                                not item["self"] or not item["element"] or not isinstance(bits, list) or len(bits) != 16 or
+                                any(not _uint(v) or (v & 0x7f800000) == 0x7f800000 for v in bits) or
+                                (item["vtable"], item["type"]) not in ((0x10e4e8c0, 4), (0x10e4a668, 5)) or
+                                len(stack) >= 16 or current["submission_started"] >= 4096):
+                            raise TraceError(f"line {lines}: invalid submission sample")
+                        if (name is None and (item["asset_proxy"] or item["asset_resource"]) or
+                                name is not None and (not isinstance(name, str) or not 0 < len(name) < 128 or
+                                    not all(32 <= ord(c) < 127 for c in name) or not item["asset_proxy"] or
+                                    not item["asset_resource"])):
+                            raise TraceError(f"line {lines}: invalid submission asset")
+                        if item["type"] == 4 and (not item["owner"] or not item["mesh_node"] or
+                                                  item["backlink"] != item["element"]):
+                            raise TraceError(f"line {lines}: invalid mesh submission backlink")
+                        if item["type"] == 5 and (not item["bsp_source"] or not item["bsp_blocks"] or
+                                                  item["element"] != item["bsp_blocks"] + item["bsp_index"] * 0x1ac):
+                            raise TraceError(f"line {lines}: invalid BSP submission membership")
+                        submission_tickets.add(ticket)
+                        stack.append(ticket)
+                        current["submission_started"] += 1
+                    else:
+                        if not stack or stack[-1] != ticket or type(item.get("stable")) is not bool:
+                            raise TraceError(f"line {lines}: submission end is unpaired or out of order")
+                        stack.pop()
+                        current["submission_completed"] += 1
                 elif event == "scene_bridge_observation":
                     if (bridge_capability is None or bridge_capability["install_status"] != "installed" or
                             current is None or item.get("frame") != current["frame"] or current["bridge_finished"]):
@@ -435,6 +484,15 @@ def summarize(path):
                              "probe_overlap", "present_overlap", "operation_overlap", "reset_seen", "reset_pending")
                     threads = ("previous_present_thread", "present_thread", "draw_thread", "probe_thread")
                     counts = ("started", "completed", "pending", "dropped")
+                    if bridge_capability.get("submission_scope") == "section_call_v1":
+                        subcounts = ("submission_started", "submission_completed", "submission_pending", "submission_dropped")
+                        actual_pending = sum(len(stack) for stack in current["submission_stacks"].values())
+                        if (any(not _uint(item.get(k), 64) for k in subcounts) or
+                                item["submission_started"] != current["submission_started"] or
+                                item["submission_completed"] != current["submission_completed"] or
+                                item["submission_pending"] != actual_pending or
+                                item["submission_started"] != item["submission_completed"] + actual_pending):
+                            raise TraceError(f"line {lines}: inconsistent submission frame counts")
                     reentry_capable = bridge_capability.get("reentry_detection") == "saturating_counter_v1"
                     if ((reentry_capable and type(item.get("probe_reentered")) is not bool) or
                             (not reentry_capable and "probe_reentered" in item) or
@@ -564,6 +622,11 @@ def summarize(path):
                             if not _uint(thread):
                                 raise TraceError(f"line {lines}: scene capture draw requires a thread ID")
                             current["bridge_draw_threads"].add(thread)
+                            submission = item.get("submission_ticket")
+                            if submission is not None and (not _uint(submission, 64) or not submission or
+                                    not current["submission_stacks"].get(thread) or
+                                    current["submission_stacks"][thread][-1] != submission):
+                                raise TraceError(f"line {lines}: draw is outside its submission scope")
                         current["calls"][call] += 1
                         calls[call] += 1
                     elif event in ("draw_result", "clear_result"):
@@ -612,6 +675,9 @@ def summarize(path):
                         del current["bridge_threads"]
                         del current["bridge_draw_threads"]
                         del current["bridge_order_valid"]
+                        del current["submission_stacks"]
+                        del current["submission_started"]
+                        del current["submission_completed"]
                         frames.append(current)
                         current = None
                 events[event] += 1

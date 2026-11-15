@@ -21,11 +21,13 @@ namespace {
 
 constexpr std::uintptr_t kImageBase = 0x10900000;
 constexpr std::uintptr_t kTarget = 0x10926800;
+constexpr std::uintptr_t kSubmissionSite = 0x1092fc71;
 constexpr DWORD kTimestamp = 0x40c8a4da;
 constexpr DWORD kImageSize = 0x718000;
 constexpr char kExecutableSha256[] = "09e0be902062c53cbb1736cffa1bd3ec883bd5e864f8e7f3f99bc0d06f6ad0f8";
 constexpr char kPrologueSha256[] = "a4d662a480fee65cbb66de2d2cfa3aa83371a21e8c88e5ae7b78a9aca6e9ca07";
 constexpr std::size_t kThunkSize = 128;
+constexpr std::size_t kSubmissionThunkSize = 256;
 
 struct ProbeState {
     std::mutex mutex;
@@ -43,6 +45,23 @@ struct ProbeState {
 // Neither the state nor executable thunk is ever freed during the process.
 ProbeState* State() noexcept {
     static ProbeState* state = new (std::nothrow) ProbeState;
+    return state;
+}
+
+struct SubmissionState {
+    std::mutex mutex;
+    bool attempted = false;
+    bool active = false;
+    void* target = nullptr;
+    void* trampoline = nullptr;
+    void* thunk = nullptr;
+    std::atomic<EnterSubmission> enter{nullptr};
+    std::atomic<LeaveSubmission> leave{nullptr};
+};
+
+// Like the entry thunk, an in-flight submission may outlive hook removal.
+SubmissionState* Submission() noexcept {
+    static SubmissionState* state = new (std::nothrow) SubmissionState;
     return state;
 }
 
@@ -173,6 +192,115 @@ void Put32(BYTE*& output, std::uint32_t value) noexcept {
     output += sizeof(value);
 }
 
+void __cdecl SubmissionEnter(const std::uint32_t* registers) noexcept {
+    const DWORD error = GetLastError();
+    auto* state = Submission();
+    // pushad layout: EDI, ESI, EBP, saved ESP, EBX, EDX, ECX, EAX.
+    const auto enter = state ? state->enter.load(std::memory_order_acquire) : nullptr;
+    if (enter && registers) enter(registers[1], registers[0], registers[4]);
+    SetLastError(error);
+}
+
+void __cdecl SubmissionLeave(const std::uint32_t*) noexcept {
+    const DWORD error = GetLastError();
+    auto* state = Submission();
+    const auto leave = state ? state->leave.load(std::memory_order_acquire) : nullptr;
+    if (leave) leave();
+    SetLastError(error);
+}
+
+// Save the complete legacy machine state around each diagnostic callback.
+// The called function receives the saved register array, just as Dispatch does.
+void EmitSubmissionCallback(BYTE*& p, void (*callback)(const std::uint32_t*) noexcept) noexcept {
+    *p++ = 0x9c; *p++ = 0x60; *p++ = 0xfc;
+    *p++ = 0x89; *p++ = 0xe3;
+    *p++ = 0x81; *p++ = 0xec; Put32(p, 0x220);
+    *p++ = 0x83; *p++ = 0xe4; *p++ = 0xf0;
+    *p++ = 0x0f; *p++ = 0xae; *p++ = 0x04; *p++ = 0x24;
+    *p++ = 0x89; *p++ = 0xe6;
+    *p++ = 0xdb; *p++ = 0xe3;
+    *p++ = 0x83; *p++ = 0xec; *p++ = 0x04;
+    *p++ = 0xc7; *p++ = 0x04; *p++ = 0x24; Put32(p, 0x1f80);
+    *p++ = 0x0f; *p++ = 0xae; *p++ = 0x14; *p++ = 0x24;
+    *p++ = 0x83; *p++ = 0xc4; *p++ = 0x04;
+    *p++ = 0x83; *p++ = 0xec; *p++ = 0x0c; *p++ = 0x53;
+    *p++ = 0xe8;
+    Put32(p, static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(callback) -
+                                       (reinterpret_cast<std::uintptr_t>(p) + 4)));
+    *p++ = 0x89; *p++ = 0xf4;
+    *p++ = 0x0f; *p++ = 0xae; *p++ = 0x0c; *p++ = 0x24;
+    *p++ = 0x89; *p++ = 0xdc; *p++ = 0x61; *p++ = 0x9d;
+}
+
+bool VerifySubmissionSite(void* target, ProbeStatus* status) noexcept {
+    const BYTE expected[] = {0x8b, 0xce, 0xff, 0x52, 0x24}; // mov ecx,esi; call [edx+0x24]
+    BYTE bytes[sizeof(expected)]{};
+    SIZE_T read = 0;
+    MEMORY_BASIC_INFORMATION memory{};
+    if (!VirtualQuery(target, &memory, sizeof(memory)) || memory.State != MEM_COMMIT ||
+        (memory.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
+        !(memory.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) ||
+        !ReadProcessMemory(GetCurrentProcess(), target, bytes, sizeof(bytes), &read) || read != sizeof(bytes) ||
+        std::memcmp(bytes, expected, sizeof(bytes)) != 0)
+        return SetStatus(status, ProbeStatus::PrologueMismatch);
+    return true;
+}
+
+bool MakeSubmissionThunk(SubmissionState& state) noexcept {
+    auto* memory = static_cast<BYTE*>(VirtualAlloc(nullptr, kSubmissionThunkSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    if (!memory) return false;
+    BYTE* p = memory;
+    EmitSubmissionCallback(p, SubmissionEnter);
+    // Execute the displaced virtual call exactly once, including the original
+    // arguments already on the game stack. The thunk supplies its return PC.
+    *p++ = 0x8b; *p++ = 0xce; *p++ = 0xff; *p++ = 0x52; *p++ = 0x24;
+    EmitSubmissionCallback(p, SubmissionLeave);
+    *p++ = 0xe9;
+    Put32(p, static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(state.target) + 5 -
+                                       (reinterpret_cast<std::uintptr_t>(p) + 4)));
+    if (static_cast<std::size_t>(p - memory) > kSubmissionThunkSize) { VirtualFree(memory, 0, MEM_RELEASE); return false; }
+    DWORD protection = 0;
+    if (!VirtualProtect(memory, kSubmissionThunkSize, PAGE_EXECUTE_READ, &protection) ||
+        !FlushInstructionCache(GetCurrentProcess(), memory, static_cast<SIZE_T>(p - memory))) {
+        VirtualFree(memory, 0, MEM_RELEASE); return false;
+    }
+    state.thunk = memory;
+    return true;
+}
+
+bool InstallSubmissionAt(SubmissionState& state, void* target, EnterSubmission enter,
+                         LeaveSubmission leave, ProbeStatus* status) noexcept {
+    if (!IsProcessorFeaturePresent(PF_XMMI_INSTRUCTIONS_AVAILABLE))
+        return SetStatus(status, ProbeStatus::UnsupportedProcessor);
+    HMODULE pinned = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                            reinterpret_cast<LPCWSTR>(&SubmissionEnter), &pinned))
+        return SetStatus(status, ProbeStatus::ModulePinFailed);
+    if (!VerifySubmissionSite(target, status)) return false;
+    state.target = target;
+    if (!MakeSubmissionThunk(state)) return SetStatus(status, ProbeStatus::HookEngineFailed);
+    const auto initialized = MH_Initialize();
+    if (initialized != MH_OK && initialized != MH_ERROR_ALREADY_INITIALIZED) {
+        VirtualFree(state.thunk, 0, MEM_RELEASE); state.thunk = nullptr;
+        return SetStatus(status, ProbeStatus::HookEngineFailed);
+    }
+    if (MH_CreateHook(target, state.thunk, &state.trampoline) != MH_OK) {
+        VirtualFree(state.thunk, 0, MEM_RELEASE); state.thunk = nullptr;
+        return SetStatus(status, ProbeStatus::HookCreateFailed);
+    }
+    if (!VerifySubmissionSite(target, status)) {
+        MH_RemoveHook(target); VirtualFree(state.thunk, 0, MEM_RELEASE); state.thunk = nullptr; return false;
+    }
+    state.enter.store(enter, std::memory_order_release);
+    state.leave.store(leave, std::memory_order_release);
+    if (MH_EnableHook(target) != MH_OK) {
+        MH_RemoveHook(target); VirtualFree(state.thunk, 0, MEM_RELEASE); state.thunk = nullptr;
+        return SetStatus(status, ProbeStatus::HookEnableFailed);
+    }
+    state.active = true;
+    return SetStatus(status, ProbeStatus::Installed, true);
+}
+
 // The generated x86 wrapper saves flags/GPRs and the complete legacy
 // FXSAVE state (x87, MMX, XMM and MXCSR) in a 16-byte-aligned stack buffer.
 // It clears DF and initializes FP state for the C++ callback, then restores
@@ -272,6 +400,31 @@ bool DisableProbe(ProbeStatus* status) noexcept {
     return SetStatus(status, ProbeStatus::Disabled, true);
 }
 
+bool InstallSubmissionProbe(EnterSubmission enter, LeaveSubmission leave, ProbeStatus* status) noexcept {
+    if (!enter || !leave) return SetStatus(status, ProbeStatus::InvalidArguments);
+    auto* state = Submission();
+    if (!state) return SetStatus(status, ProbeStatus::HookEngineFailed);
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (state->attempted) return SetStatus(status, ProbeStatus::AlreadyAttempted);
+    state->attempted = true;
+    // The entry prologue is already detoured by the separately verified probe.
+    auto* entry = State();
+    if (!entry || !entry->active.load(std::memory_order_acquire))
+        return SetStatus(status, ProbeStatus::InvalidArguments);
+    if (!VerifyExecutable(status) || !VerifyImage(status)) return false;
+    return InstallSubmissionAt(*state, reinterpret_cast<void*>(kSubmissionSite), enter, leave, status);
+}
+
+bool DisableSubmissionProbe(ProbeStatus* status) noexcept {
+    auto* state = Submission();
+    if (!state) return SetStatus(status, ProbeStatus::HookEngineFailed);
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (!state->active) return SetStatus(status, ProbeStatus::Disabled, true);
+    if (MH_DisableHook(state->target) != MH_OK) return SetStatus(status, ProbeStatus::HookDisableFailed);
+    state->active = false;
+    return SetStatus(status, ProbeStatus::Disabled, true);
+}
+
 #if defined(T3RENDER_SCENE_BRIDGE_TEST_FIXTURE)
 // Compiled only into an isolated synthetic fixture, never the game proxy.
 bool InstallFixtureProbe(void* target, BeginProbe begin, EndProbe end, MarkProbeReentry reentry, ProbeStatus* status) noexcept {
@@ -282,6 +435,16 @@ bool InstallFixtureProbe(void* target, BeginProbe begin, EndProbe end, MarkProbe
     if (state->attempted) return SetStatus(status, ProbeStatus::AlreadyAttempted);
     state->attempted = true;
     return InstallAt(*state, target, begin, end, reentry, status, false);
+}
+
+bool InstallFixtureSubmissionProbe(void* target, EnterSubmission enter, LeaveSubmission leave, ProbeStatus* status) noexcept {
+    if (!target || !enter || !leave) return SetStatus(status, ProbeStatus::InvalidArguments);
+    auto* state = Submission();
+    if (!state) return SetStatus(status, ProbeStatus::HookEngineFailed);
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (state->attempted) return SetStatus(status, ProbeStatus::AlreadyAttempted);
+    state->attempted = true;
+    return InstallSubmissionAt(*state, target, enter, leave, status);
 }
 #endif
 

@@ -126,6 +126,9 @@ std::uint64_t CaptureBridgeBegin(std::uint32_t thread_id) noexcept;
 void CaptureBridgeEnd(std::uint64_t ticket, const scene_bridge::ProbeSnapshot&) noexcept;
 void CaptureBridgeMarkReentered() noexcept;
 void CaptureBridgeInstallResult(scene_bridge::ProbeStatus) noexcept;
+void CaptureSubmissionInstallResult(scene_bridge::ProbeStatus) noexcept;
+void CaptureSubmissionEnter(std::uint32_t element, std::uint32_t stage, std::uint32_t section) noexcept;
+void CaptureSubmissionLeave() noexcept;
 bool CaptureBridgeShouldDisable() noexcept;
 // A Present window must begin before readback/native Present and end only
 // after native Present returns. A zero ticket means synchronization is unknown.

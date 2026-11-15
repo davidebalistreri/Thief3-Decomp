@@ -1,4 +1,5 @@
 #include "../src/scene_bridge_snapshot.hpp"
+#include "../src/scene_bridge_submission.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -201,7 +202,22 @@ int main() {
     assert(bsp.stable && bsp.source_index == 1 && bsp.list_index == 1 &&
            bsp.vertex_count == 60 && bsp.index_count == 114 && bsp.sections_available &&
            bsp.sections_copied == 2 && std::strcmp(bsp.sections[0].material_name, "wall") == 0);
+    complete.put<std::uint32_t>(0x10f2c734, 0x1000);
+    auto mesh_submission = SampleSubmission(reader, 0x3000);
+    assert(mesh_submission.valid && mesh_submission.owner == 0x4000 && mesh_submission.mesh_node == 0xf000 &&
+           mesh_submission.asset_available && mesh_submission.asset_proxy == 0xc000 &&
+           mesh_submission.asset_resource == 0xd000 && std::strcmp(mesh_submission.asset_name, mesh_name) == 0);
+    auto bsp_submission = SampleSubmission(reader, bsp_block);
+    assert(bsp_submission.valid && bsp_submission.bsp_index == 1 && bsp_submission.bsp_source == 0x16000);
+    assert(SameSubmission(mesh_submission, SampleSubmission(reader, 0x3000)));
+    complete.put<std::uint32_t>(0x40b4, 0);
+    assert(!SampleSubmission(reader, 0x3000).valid);
+    complete.put<std::uint32_t>(0x40b4, 0x3000);
+    complete.put<std::uint32_t>(0xd008, 0);
+    assert(!SameSubmission(mesh_submission, SampleSubmission(reader, 0x3000)));
+    complete.put<std::uint32_t>(0xd008, 0xe004);
     complete.put<std::uint32_t>(0x17000, 1);
+    assert(!SampleSubmission(reader, bsp_block).valid);
     sample = SampleProbe(reader, 42, 0x1000, 0);
     assert(!sample.bsp.source_stable && sample.bsp.candidates_copied == 0);
     complete.put<std::uint32_t>(0x17000, 2);

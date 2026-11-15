@@ -23,6 +23,7 @@ import scene_pbr_flames as flames
 import scene_pbr_bed as bed
 import scene_pbr_candlestick as candlestick
 import scene_pbr_arch as arch
+import scene_pbr_details as details
 from ibt import IBT
 from scene_ir import SceneSnapshot, transform_point
 from t3common import game_dir, resolve_map
@@ -132,7 +133,8 @@ def shadow_owners(scene, lights, actors):
 
 def create_packet(scene, light_scene, calibration, resolver, remaster, render_pass=None, stage=None,
                   shadows=None, actors=None, offline=None, offline_raw=None, caster_resolve=None,
-                  flame_glb=None, flame_radiance=8, bed_glb=None, candlestick_glb=None, arch_glb=None):
+                  flame_glb=None, flame_radiance=8, bed_glb=None, candlestick_glb=None, arch_glb=None,
+                  details_glb=None):
     render_pass, stage = legacy.select_scope(scene, render_pass, stage)
     legacy.select_scope(light_scene)
     if (light_scene.source.kind != "runtime" or scene.source.frame_id != light_scene.source.frame_id or
@@ -147,6 +149,8 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
         raise ValueError("generated candlestick requires bedroom remaster materials")
     if arch_glb is not None and remaster is None:
         raise ValueError("generated arch requires bedroom remaster materials")
+    if details_glb is not None and remaster is None:
+        raise ValueError("generated bedroom details require bedroom remaster materials")
     if candlestick_glb is not None and flame_glb is not None and candlestick_glb != flame_glb:
         raise ValueError("candlestick and flame geometry must use the same GLB")
     scale = scene.conventions.meters_per_unit
@@ -190,6 +194,8 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
     replaced_candles = {item["target_id"] for item in candle_report["instances"]} if candle_report else set()
     arch_parts, arch_report = (arch.select(scene, arch_glb, render_pass, stage)
                                if arch_glb is not None else ([], None))
+    detail_parts, detail_report = (details.select(scene, remaster.anchor_id, details_glb, render_pass, stage)
+                                   if details_glb is not None else ([], None))
     seen = set()
     triangles = 0
     for submission in scene.submissions:
@@ -393,6 +399,35 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
             if shadow is not None:
                 record["shadow_caster_lights"] = [lights[n]["id"] for n in range(len(lights)) if mask & (1 << n)]
             records.append(record)
+    if detail_report is not None:
+        mask = (1 << len(lights)) - 1 if shadow is not None else 0
+        for part in detail_parts:
+            if part["material"] == "DecorWood":
+                albedo, normal, roughness = (remaster.resolve("beam_wood_v2", channel)
+                                               for channel in ("albedo", "normal", "roughness"))
+            elif part["material"] == "DecorPages":
+                albedo = _constant("decor_pages", (173, 148, 107, 255))
+                normal, roughness = flat_normal, _constant("decor_pages_roughness", (242, 242, 242, 255))
+            else:
+                albedo = _constant("decor_leather", (46, 23, 13, 255))
+                normal, roughness = flat_normal, _constant("decor_leather_roughness", (230, 230, 230, 255))
+            ao = default_ao
+            if any(mip[3::4].count(255) != len(mip)//4 for mip in albedo["mips"]):
+                raise ValueError("generated bedroom details albedo must be opaque")
+            tex = [texture_index(value) for value in (albedo, normal, roughness, ao)]
+            triangles += len(part["vertices"])//3
+            if triangles > MAX_TRIANGLES or len(draws) >= MAX_DRAWS:
+                raise ValueError("PBR geometry exceeds bounds")
+            draws.append((tex, part["vertices"], mask, (0, 0, 0)))
+            record = {"target_kind": "visual_addition", "target_id": "generated:bedroom_details",
+                      "anchor_id": detail_report["anchor_id"], "section": "generated:"+part["material"],
+                      "material": part["material"], "replacement": "bedroom_details", "source": detail_report["source"],
+                      "triangles": len(part["vertices"])//3, "albedo": albedo["name"], "normal": normal["name"],
+                      "roughness": roughness["name"], "ao": ao["name"],
+                      "flat_fallback_triangles": part["fallback_triangles"]}
+            if shadow is not None:
+                record["shadow_caster_lights"] = [light["id"] for light in lights]
+            records.append(record)
     if not draws:
         raise ValueError("PBR preview has no opaque submitted geometry")
     flame_report = None
@@ -483,6 +518,8 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
         stats["generated_candlesticks"] = candle_report
     if arch_report is not None:
         stats["generated_arch"] = arch_report
+    if detail_report is not None:
+        stats["generated_bedroom_details"] = detail_report
     return bytes(body), stats
 
 
@@ -505,6 +542,7 @@ def main(argv=None):
     parser.add_argument("--bed-high", type=Path, help="generated Godot high-poly bed GLB for the semantic bed anchor")
     parser.add_argument("--candlestick-high", type=Path, help="generated Godot high-poly candlestick GLB")
     parser.add_argument("--arch-high", type=Path, help="generated Godot rosette and jamb GLB")
+    parser.add_argument("--bedroom-details", type=Path, help="generated Godot bed-relative visual details")
     parser.add_argument("--flame-radiance", type=float, help="artistic linear flame radiance (default: 8)")
     parser.add_argument("--shadow-map-size", type=int)
     parser.add_argument("--shadow-near-m", type=float)
@@ -522,6 +560,8 @@ def main(argv=None):
             raise ValueError("--candlestick-high requires --bedroom-remaster-materials")
         if args.arch_high is not None and args.bedroom_remaster_materials is None:
             raise ValueError("--arch-high requires --bedroom-remaster-materials")
+        if args.bedroom_details is not None and args.bedroom_remaster_materials is None:
+            raise ValueError("--bedroom-details requires --bedroom-remaster-materials")
         if not args.shadows and (args.offline_shadow_casters or args.candle_flames is not None or any(x is not None for x in (args.shadow_map_size,
                 args.shadow_near_m, args.shadow_far_m, args.shadow_bias_m, args.shadow_softness))):
             raise ValueError("shadow parameters require --shadows")
@@ -571,7 +611,9 @@ def main(argv=None):
                                         candlestick_glb=preview.read_limited(args.candlestick_high, flames.MAX_GLB_BYTES)
                                         if args.candlestick_high is not None else None,
                                         arch_glb=preview.read_limited(args.arch_high, flames.MAX_GLB_BYTES)
-                                        if args.arch_high is not None else None)
+                                        if args.arch_high is not None else None,
+                                        details_glb=preview.read_limited(args.bedroom_details, flames.MAX_GLB_BYTES)
+                                        if args.bedroom_details is not None else None)
         finally:
             for bundle in bundles:
                 bundle.close()
@@ -602,6 +644,8 @@ def main(argv=None):
             manifest["limitations"].append("Generated candlesticks replace scoped candidate actors; metal uses a dielectric approximation, wax is opaque, and UV-inferred tangents are approximate.")
         if args.arch_high is not None:
             manifest["limitations"].append("Generated rosette and jambs modify a scoped candidate arch; material mapping and UV-inferred tangents are approximations.")
+        if args.bedroom_details is not None:
+            manifest["limitations"].append("Bedroom details are offline artistic additions anchored to the submitted bed, not runtime observations; their shadows and materials are preview approximations.")
         legacy.write_pair(args.output, body, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))
     except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, struct.error) as exc:

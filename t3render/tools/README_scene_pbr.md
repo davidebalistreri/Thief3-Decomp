@@ -186,6 +186,27 @@ absolute RGB difference 0.108 on a 0–255 scale. The camera shows mainly the
 arch edge, so this image does not establish a detailed visual comparison of
 the rosette.
 
+## Bed-relative bedroom details
+
+`--bedroom-details <bedroom_details.glb>` adds the locally generated Godot
+baseboards, trim and book using the submitted bed's transform and a bounded
+bed-relative region. This is an offline artistic addition: it is not a
+visibility or ownership observation from TDS, and does not modify SceneIR,
+gameplay or collision. Its draw records and manifest state this provenance.
+The option requires bedroom remaster materials and is off by default.
+
+Wood uses `beam_wood_v2` albedo, normal and roughness with constant AO;
+pages and leather use constant colors and roughness. The rectangular wood
+texture is resampled to the packet's square dimensions while retaining its
+normalized UV mapping. Height maps and Godot's material parameters are not
+fully reproduced. If shadow maps are enabled, these artistic additions cast
+shadows for the selected lights; there is no observed runtime cast flag.
+
+Frame 1001 has 6,956 detail triangles, none requiring tangent fallback. With
+all other options unchanged, the D3D12 preview changes 36,489 pixels with
+mean absolute RGB difference 0.166 on a 0–255 scale. These figures do not
+establish runtime parity.
+
 ## Volumetric preview
 
 `--volumetric` integrates a homogeneous participating medium from the camera
@@ -347,6 +368,8 @@ to replace the scoped bedroom candlestick metal and wax; optionally use the
 same GLB with `--candle-flames` for emissive flame geometry.
 Add `--arch-high build/assets/godot/remaster/garrett_home/highpoly/generated/rosette_high.glb`
 for the bedroom arch's generated rosette and jambs.
+Add `--bedroom-details build/assets/godot/remaster/garrett_home/highpoly/generated/bedroom_details.glb`
+for optional bed-relative artistic trim and decoration.
 
 Run `t3render_scene_pbr_d3d12 <packet> --output <new.ppm> [--indirect] [--gtao] [--volumetric] [--reflections] [--filmic]` in a D3D12
 environment. The packet, manifest and PPM use exclusive creation. See the

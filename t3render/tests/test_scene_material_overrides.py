@@ -161,6 +161,21 @@ class BedroomSelectionTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 textures.resolve("../wood_floor_v2", "albedo")
 
+    @unittest.skipUnless(shutil.which("magick"), "ImageMagick 7 required")
+    def test_rectangular_beam_texture_keeps_normalized_uv_layout(self):
+        with tempfile.TemporaryDirectory(prefix="t3render-beam-material-") as directory:
+            path = Path(directory)/"beam_wood_v2"/"beam_wood_v2_albedo.png"
+            path.parent.mkdir()
+            subprocess.run(["magick", "-size", "512x256", "xc:black", "-fill", "white", "-draw",
+                            "rectangle 256,0 511,255", str(path)], check=True, timeout=30)
+            result = overrides.GodotTextures(directory, texture_size=512).resolve("beam_wood_v2", "albedo")
+            pixels = result["mips"][0]
+            self.assertEqual(pixels[(128*512+128)*4:(128*512+128)*4+4], bytes((0, 0, 0, 255)))
+            self.assertEqual(pixels[(128*512+384)*4:(128*512+384)*4+4], bytes((255, 255, 255, 255)))
+            subprocess.run(["magick", "-size", "256x512", "xc:black", str(path)], check=True, timeout=30)
+            with self.assertRaisesRegex(ValueError, "dimensions"):
+                overrides.GodotTextures(directory).resolve("beam_wood_v2", "albedo")
+
 
 class PacketOverrideTests(unittest.TestCase):
     @classmethod

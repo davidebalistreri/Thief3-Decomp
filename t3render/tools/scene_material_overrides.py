@@ -17,7 +17,7 @@ MATERIALS = {"stmwall512d_d": "stone_wall_v2", "hsefloorb_d": "wood_floor_v2"}
 AREAS = {"stone_wall_v2": ((-.25, -.10, -2.10), (4.85, 4.10, 3.35)),
          "wood_floor_v2": ((-6.0, -.08, -1.6), (5.0, .08, 3.2))}
 SOURCE_SIZES = {"stone_wall_v2": 2048, "wood_floor_v2": 1024, "bed_wool_v2": 512, "pillow_linen": 512,
-                "candlestick_metal_v2": 1024, "arch_stone_v2": 1024}
+                "candlestick_metal_v2": 1024, "arch_stone_v2": 1024, "beam_wood_v2": (512, 256)}
 MAX_PNG_BYTES = 16 * 1024 * 1024
 TEXTURE_SIZE = 1024
 
@@ -121,7 +121,8 @@ class GodotTextures:
             info = subprocess.run(["magick", "identify", "-format", "%m %w %h\\n", "png:-"], input=raw,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=30).stdout
             expected = SOURCE_SIZES[name]
-            if info != f"PNG {expected} {expected}\n".encode():
+            width, height = (expected, expected) if isinstance(expected, int) else expected
+            if info != f"PNG {width} {height}\n".encode():
                 raise ValueError(f"unexpected override PNG dimensions or frames: {path}")
             linear = kind == "albedo" and self.linear_albedo_mips
             args = ["magick", "png:-", "-alpha", "on"]

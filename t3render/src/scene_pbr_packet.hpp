@@ -5,6 +5,7 @@
 
 namespace t3render::pbr {
 constexpr std::uint32_t kMaxLights = 16;
+constexpr std::uint64_t kMaxShadowDrawCalls = 65536, kMaxShadowTriangles = 6000000;
 using scene::Mip;
 using scene::Texture;
 using scene::Vertex;
@@ -15,11 +16,14 @@ struct Light {
 };
 struct Draw {
     std::uint32_t textures[4]{}, first_vertex = 0, vertex_count = 0;
+    std::uint32_t shadow_mask = 0;
 };
 struct Frame {
     std::uint32_t width = 0, height = 0;
     float min_depth = 0, max_depth = 1, view[16]{}, projection[16]{};
     float camera[3]{}, meters_per_unit = 0, ambient[3]{}, exposure = 0;
+    std::uint32_t shadow_size = 0;
+    float shadow_near_m = 0, shadow_far_m = 0, shadow_bias_m = 0, shadow_softness = 0;
     std::vector<Light> lights;
     std::vector<Texture> textures;
     std::vector<Vertex> vertices;
@@ -31,7 +35,8 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
     scene::Reader reader(bytes, size);
     Frame frame;
     char magic[8];
-    if (!reader.bytes(magic, sizeof(magic)) || std::memcmp(magic, "T3PBR01\0", 8) ||
+    if (!reader.bytes(magic, sizeof(magic)) || std::memcmp(magic, "T3PBR0", 6) ||
+        (magic[6] != '1' && magic[6] != '2') || magic[7] != '\0' ||
         !reader.u32(frame.width) || !reader.u32(frame.height) || !frame.width || !frame.height ||
         frame.width > 2048 || frame.height > 2048 || !reader.f32(frame.min_depth) || !reader.f32(frame.max_depth) ||
         frame.min_depth < 0 || frame.max_depth > 1 || frame.min_depth > frame.max_depth) return false;
@@ -45,6 +50,14 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
     if (!reader.u32(texture_count) || !reader.u32(draw_count) || !reader.u32(light_count) ||
         !texture_count || texture_count > scene::kMaxTextures || !draw_count || draw_count > scene::kMaxDraws ||
         !light_count || light_count > kMaxLights) return false;
+    if (magic[6] == '2') {
+        if (!reader.u32(frame.shadow_size) || frame.shadow_size < 64 || frame.shadow_size > 512 ||
+            (frame.shadow_size & (frame.shadow_size - 1)) ||
+            !reader.f32(frame.shadow_near_m, 1) || frame.shadow_near_m < .01f ||
+            !reader.f32(frame.shadow_far_m, 100) || frame.shadow_far_m <= frame.shadow_near_m ||
+            !reader.f32(frame.shadow_bias_m, .25f) || frame.shadow_bias_m < 0 ||
+            !reader.f32(frame.shadow_softness, 2) || frame.shadow_softness < 0) return false;
+    }
     frame.lights.reserve(light_count);
     for (std::uint32_t i = 0; i < light_count; ++i) {
         Light light;
@@ -74,12 +87,21 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
         frame.textures.push_back(std::move(texture));
     }
     frame.draws.reserve(draw_count);
+    std::uint64_t shadow_draw_calls = 0, shadow_triangles = 0;
     for (std::uint32_t i = 0; i < draw_count; ++i) {
         Draw draw;
         for (auto& index : draw.textures) if (!reader.u32(index) || index >= texture_count) return false;
         if (!reader.u32(draw.vertex_count) || !draw.vertex_count || draw.vertex_count % 3 ||
             draw.vertex_count > scene::kMaxTriangles * 3 - frame.vertices.size() ||
+            (frame.shadow_size && (!reader.u32(draw.shadow_mask) || draw.shadow_mask >= (1u << light_count))) ||
             std::size_t(draw.vertex_count) * 48 > reader.remaining()) return false;
+        if (frame.shadow_size) {
+            for (std::uint32_t light = 0; light < light_count; ++light) if (draw.shadow_mask & (1u << light)) {
+                shadow_draw_calls += 6;
+                shadow_triangles += std::uint64_t(draw.vertex_count / 3) * 6;
+            }
+            if (shadow_draw_calls > kMaxShadowDrawCalls || shadow_triangles > kMaxShadowTriangles) return false;
+        }
         draw.first_vertex = static_cast<std::uint32_t>(frame.vertices.size());
         for (std::uint32_t j = 0; j < draw.vertex_count; ++j) {
             Vertex vertex{};

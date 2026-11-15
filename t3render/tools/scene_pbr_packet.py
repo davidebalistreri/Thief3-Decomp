@@ -13,6 +13,7 @@ import struct
 import sys
 
 import compare_bridge_fixture as comparison
+import scene_direct_candidates as direct
 import scene_ir_to_d3d12_packet as preview
 import scene_ir_to_textured_packet as legacy
 import scene_legacy_states as states
@@ -22,11 +23,14 @@ from scene_ir import SceneSnapshot, transform_point
 from t3common import game_dir, resolve_map
 
 MAGIC = b"T3PBR01\0"
+SHADOW_MAGIC = b"T3PBR02\0"
 MAX_LIGHTS = 16
 MAX_TRIANGLES = 100000
 MAX_DRAWS = 8192
 MAX_TEXTURES = 64
 MAX_BYTES = 64 * 1024 * 1024
+MAX_SHADOW_DRAWS = 65536
+MAX_SHADOW_TRIANGLES = 6000000
 
 
 def _number(value, low, high, name):
@@ -74,7 +78,48 @@ def _constant(name, rgba):
             "mips": [bytes(rgba)]}
 
 
-def create_packet(scene, light_scene, calibration, resolver, remaster, render_pass=None, stage=None):
+def shadow_parameters(value):
+    if not isinstance(value, dict) or set(value) != {"size", "near_m", "far_m", "bias_m", "softness"}:
+        raise ValueError("invalid shadow map parameters")
+    size = value["size"]
+    if type(size) is not int or size < 64 or size > 512 or size & (size-1):
+        raise ValueError("shadow map size must be a power of two from 64 to 512")
+    def f32(value, low, high, name):
+        result = struct.unpack("<f", struct.pack("<f", _number(value, low, high, name)))[0]
+        bounds = [struct.unpack("<f", struct.pack("<f", bound))[0] for bound in (low, high)]
+        return _number(result, *bounds, name)
+    result = {"size": size, "near_m": f32(value["near_m"], .01, 1, "shadow near"),
+              "far_m": f32(value["far_m"], .01, 100, "shadow far"),
+              "bias_m": f32(value["bias_m"], 0, .25, "shadow bias"),
+              "softness": f32(value["softness"], 0, 2, "shadow softness")}
+    if result["far_m"] <= result["near_m"]:
+        raise ValueError("shadow far must be greater than near")
+    return result
+
+
+def shadow_owners(scene, lights, actors):
+    """Validate semantic light ownership using the fingerprinted actor export."""
+    if not isinstance(actors, dict):
+        raise ValueError("shadow maps require the fingerprinted offline actors")
+    prefix = f"candidate:light:{scene.source.map}:{scene.source.fingerprints.get('map')}:"
+    owners = []
+    for light in lights:
+        identity = light["id"]
+        if not identity.startswith(prefix) or ":" in identity[len(prefix):]:
+            raise ValueError("shadow light requires a qualified candidate identity")
+        name = identity[len(prefix):]
+        actor = actors.get(name)
+        if not isinstance(actor, dict):
+            raise ValueError("shadow light lacks an offline actor")
+        parent = actor.get("attached_to")
+        if parent is not None and (not isinstance(parent, str) or parent not in actors):
+            raise ValueError("shadow light has an unresolved offline parent")
+        owners.append({name, parent})
+    return owners
+
+
+def create_packet(scene, light_scene, calibration, resolver, remaster, render_pass=None, stage=None,
+                  shadows=None, actors=None):
     render_pass, stage = legacy.select_scope(scene, render_pass, stage)
     legacy.select_scope(light_scene)
     if (light_scene.source.kind != "runtime" or scene.source.frame_id != light_scene.source.frame_id or
@@ -90,6 +135,8 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
     if camera is None or any(abs(x) > 1000000 for x in camera):
         raise ValueError("PBR preview requires an invertible camera view")
     ambient, exposure, lights = load_calibration(calibration, light_scene)
+    shadow = shadow_parameters(shadows) if shadows is not None else None
+    owners = shadow_owners(scene, lights, actors) if shadow is not None else None
     resources = {m.id: m for m in scene.static_mesh_resources}
     instances = {m.id: m for m in scene.mesh_instances}
     blocks = {b.id: b for b in scene.bsp_blocks}
@@ -119,7 +166,8 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
         seen.add(identity)
         if submission.target_kind == "mesh_instance":
             instance = instances[submission.target_id]
-            geometry, matrix = resources[instance.resource_id].geometry, instance.transform
+            resource = resources[instance.resource_id]
+            geometry, matrix = resource.geometry, instance.transform
             section = geometry.sections[submission.section]
             material_id = (instance.material_ids[submission.section] if instance.material_ids else section.material_id)
         else:
@@ -133,6 +181,18 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
             raise ValueError("PBR preview requires affine instance transforms")
         a, b, c, d, e, f, g, h, i = (matrix[n] for n in (0, 1, 2, 4, 5, 6, 8, 9, 10))
         mirrored = a*(e*i-f*h) - b*(d*i-f*g) + c*(d*h-e*g) < 0
+        shadow_mask = 0
+        if shadow is not None:
+            if submission.target_kind == "bsp_block":
+                shadow_mask = (1 << len(lights)) - 1
+            else:
+                actor_name = instance.id.rsplit(":", 1)[-1]
+                actor = actors.get(actor_name)
+                if (not isinstance(actor, dict) or type(actor.get("casts_shadows")) is not bool or
+                        not isinstance(actor.get("mesh"), str) or actor["mesh"].lower() != resource.name.lower()):
+                    raise ValueError("shadow caster lacks matching offline mesh and cast flag")
+                if actor["casts_shadows"]:
+                    shadow_mask = sum(1 << n for n, ignored in enumerate(owners) if actor_name not in ignored)
         diffuse = resolver.resolve(material)
         if any(mip[3::4].count(255) != len(mip)//4 for mip in diffuse["mips"]):
             skipped.append({"target_kind": identity[0], "target_id": identity[1], "section": identity[2],
@@ -171,18 +231,28 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
             triangles += len(part)//3
             if triangles > MAX_TRIANGLES or len(draws) >= MAX_DRAWS:
                 raise ValueError("PBR geometry exceeds bounds")
-            draws.append((tex, part))
+            draws.append((tex, part, shadow_mask))
             records.append({"target_kind": identity[0], "target_id": identity[1], "section": identity[2],
                             "material": material, "triangle_range": [first//3, end//3], "reversed_winding": mirrored,
                             "replacement": replacement, "albedo": albedo["name"], "normal": normal["name"],
                             "roughness": roughness["name"], "ao": ao["name"],
                             "flat_fallback_triangles": sum(part[n][11] == 0 for n in range(0, len(part), 3))})
+            if shadow is not None:
+                records[-1]["shadow_caster_lights"] = [lights[n]["id"] for n in range(len(lights)) if shadow_mask & (1 << n)]
     if not draws:
         raise ValueError("PBR preview has no opaque submitted geometry")
+    if shadow is not None:
+        calls = sum(mask.bit_count()*6 for _, _, mask in draws)
+        work = sum(mask.bit_count()*6*(len(vertices)//3) for _, vertices, mask in draws)
+        if calls > MAX_SHADOW_DRAWS or work > MAX_SHADOW_TRIANGLES:
+            raise ValueError("shadow maps exceed renderer work bounds")
     viewport = scene.camera.viewport
-    body = bytearray(struct.pack("<8sIIff32f4f4fIII", MAGIC, viewport.width, viewport.height,
+    body = bytearray(struct.pack("<8sIIff32f4f4fIII", SHADOW_MAGIC if shadow else MAGIC, viewport.width, viewport.height,
                                  viewport.min_depth, viewport.max_depth, *scene.camera.view, *scene.camera.projection,
                                  *camera, scale, *ambient, exposure, len(textures), len(draws), len(lights)))
+    if shadow is not None:
+        body.extend(struct.pack("<I4f", shadow["size"], shadow["near_m"], shadow["far_m"],
+                                shadow["bias_m"], shadow["softness"]))
     for light in lights:
         body.extend(struct.pack("<8f", *light["position"], light["radius_m"], *light["color_linear"],
                                 light["intensity_candela"]))
@@ -190,8 +260,10 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
         body.extend(struct.pack("<III", tex["width"], tex["height"], len(tex["mips"])))
         for mip in tex["mips"]:
             body.extend(mip)
-    for tex, vertices in draws:
+    for tex, vertices, shadow_mask in draws:
         body.extend(struct.pack("<5I", *tex, len(vertices)))
+        if shadow is not None:
+            body.extend(struct.pack("<I", shadow_mask))
         for vertex in vertices:
             body.extend(struct.pack("<12f", *vertex))
     if len(body) > MAX_BYTES:
@@ -202,6 +274,9 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
                           | {"mips": len(tex["mips"])}
                           | ({"source_sha256": tex["source_sha256"]} if "source_sha256" in tex else {})
                           for tex in textures]}
+    if shadow is not None:
+        stats["shadow_maps"] = {**shadow, "casters": "scoped_opaque_geometry_with_offline_cast_flags",
+                                "draw_calls": calls, "triangle_submissions": work}
     return bytes(body), stats
 
 
@@ -217,9 +292,18 @@ def main(argv=None):
     parser.add_argument("--pass", dest="render_pass", type=int)
     parser.add_argument("--stage", type=int)
     parser.add_argument("--bedroom-remaster-materials", type=Path)
+    parser.add_argument("--shadows", action="store_true", help="render point-light shadow maps from selected opaque geometry")
+    parser.add_argument("--shadow-map-size", type=int)
+    parser.add_argument("--shadow-near-m", type=float)
+    parser.add_argument("--shadow-far-m", type=float)
+    parser.add_argument("--shadow-bias-m", type=float)
+    parser.add_argument("--shadow-softness", type=float)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
+        if not args.shadows and any(x is not None for x in (args.shadow_map_size, args.shadow_near_m,
+                                                             args.shadow_far_m, args.shadow_bias_m, args.shadow_softness)):
+            raise ValueError("shadow parameters require --shadows")
         scene_raw = preview.read_limited(args.scene, preview.MAX_INPUT)
         light_raw = preview.read_limited(args.light_scene, preview.MAX_INPUT)
         offline_raw = preview.read_limited(args.offline_scene, preview.MAX_INPUT)
@@ -245,12 +329,20 @@ def main(argv=None):
             remaster = (overrides.BedroomOverrides(scene, args.bedroom_remaster_materials,
                                                    texture_size=512, linear_albedo_mips=True)
                         if args.bedroom_remaster_materials is not None else None)
+            shadow = ({"size": 512 if args.shadow_map_size is None else args.shadow_map_size,
+                       "near_m": .05 if args.shadow_near_m is None else args.shadow_near_m,
+                       "far_m": 15 if args.shadow_far_m is None else args.shadow_far_m,
+                       "bias_m": .015 if args.shadow_bias_m is None else args.shadow_bias_m,
+                       "softness": .5 if args.shadow_softness is None else args.shadow_softness}
+                      if args.shadows else None)
+            actors = direct.offline_actors(scene, offline, offline_raw, args.offline_actors) if shadow is not None else None
             body, stats = create_packet(scene, light_scene, calibration, legacy.TextureResolver(bundles), remaster,
-                                        args.render_pass, args.stage)
+                                        args.render_pass, args.stage, shadows=shadow, actors=actors)
         finally:
             for bundle in bundles:
                 bundle.close()
-        manifest = {"schema": "t3.scene.pbr-packet", "version": 1, "source_frame": scene.source.frame_id,
+        manifest = {"schema": "t3.scene.pbr-packet", "version": 2 if shadow is not None else 1,
+                    "source_frame": scene.source.frame_id,
                     "scene_sha256": hashlib.sha256(scene_raw).hexdigest(),
                     "light_scene_sha256": hashlib.sha256(light_raw).hexdigest(),
                     "calibration_sha256": hashlib.sha256(calibration).hexdigest(),
@@ -262,6 +354,8 @@ def main(argv=None):
                                     "Sections with nonopaque offline diffuse alpha are omitted. Other unreplaced materials use vertex normals and roughness 0.8.",
                                     "Override AO, roughness and normals are generated offline; tangent space and the SDK unit scale are assumptions."],
                     **stats}
+        if shadow is not None:
+            manifest["limitations"].append("Shadow maps use only selected opaque runtime-scope geometry and offline cast flags; off-screen casters and runtime flags are unknown.")
         legacy.write_pair(args.output, body, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))
     except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, struct.error) as exc:

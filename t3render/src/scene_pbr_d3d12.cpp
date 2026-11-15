@@ -1,6 +1,7 @@
 // Independent SceneIR material/light preview; no D3D8 render-state replay.
 #include "scene_d3d12_common.hpp"
 #include "scene_pbr_packet.hpp"
+#include <string>
 
 namespace {
 using namespace t3render::pbr;
@@ -24,8 +25,9 @@ struct Constants {
     float view[16], projection[16];
     float size_scale_count[4], camera_exposure[4], ambient[4];
     float light_position_radius[kMaxLights][4], light_color_intensity[kMaxLights][4];
+    float shadow_settings[4];
 };
-static_assert(sizeof(Constants) == 688, "unexpected PBR constant-buffer layout");
+static_assert(sizeof(Constants) == 704, "unexpected PBR constant-buffer layout");
 
 int Render(const Frame& frame, const wchar_t* output) {
     ComPtr<ID3D12Device> device;
@@ -42,6 +44,7 @@ cbuffer Scene : register(b0) {
     row_major float4x4 view; row_major float4x4 projection;
     float4 size_scale_count; float4 camera_exposure; float4 ambient;
     float4 light_position_radius[16]; float4 light_color_intensity[16];
+    float4 shadow_settings;
 };
 struct O { float4 uv:TEXCOORD0; float3 world:TEXCOORD1; float3 normal:TEXCOORD2;
            float4 tangent:TEXCOORD3; float4 position:SV_Position; };
@@ -53,11 +56,47 @@ O main(float3 p:POSITION, float2 uv:TEXCOORD0, float3 n:NORMAL, float4 t:TANGENT
     static const char ps_source[] = R"(
 Texture2D albedo_tex:register(t0); Texture2D normal_tex:register(t1);
 Texture2D roughness_tex:register(t2); Texture2D ao_tex:register(t3); SamplerState samp:register(s0);
+#if T3_SHADOWS
+TextureCubeArray shadow_maps:register(t5); SamplerState shadow_sampler:register(s1);
+#endif
 cbuffer Scene : register(b0) {
     row_major float4x4 view; row_major float4x4 projection;
     float4 size_scale_count; float4 camera_exposure; float4 ambient;
     float4 light_position_radius[16]; float4 light_color_intensity[16];
+    float4 shadow_settings;
 };
+#if T3_SHADOWS
+float visibility(float3 world, float3 geometric_normal, float3 to_light, uint light_index) {
+    float3 ray=world-light_position_radius[light_index].xyz;
+    float ray_length=length(ray), distance=ray_length*size_scale_count.z;
+    if(distance>=shadow_settings.x || ray_length<0.000001) return 1;
+    float3 direction=ray/ray_length;
+    float3 axis=abs(direction.z)<0.95?float3(0,0,1):float3(0,1,0);
+    float3 tangent=normalize(cross(axis,direction)); float3 bitangent=cross(direction,tangent);
+    float radius=min(0.15,light_position_radius[light_index].w/max(distance,0.01)*shadow_settings.z);
+    if(radius>0) radius=max(radius,1/shadow_settings.w);
+    float slope=1+2*(1-saturate(dot(geometric_normal,to_light)));
+    float plane_numerator=dot(geometric_normal,direction);
+    float plane_cos=abs(plane_numerator);
+    // Point sampling returns a texel-center depth rather than the exact ray.
+    // Bound its radial error using the receiver slope and cubemap resolution.
+    float texel_slope=min(4,sqrt(saturate(1-plane_cos*plane_cos))/max(plane_cos,0.1));
+    float texel_bias=distance*(2/shadow_settings.w)*texel_slope;
+    float visible=0;
+    [unroll] for(int y=-2;y<=2;++y) [unroll] for(int x=-2;x<=2;++x) {
+        float3 sample_dir=normalize(direction+(tangent*x+bitangent*y)*(radius*0.5));
+        // Compare against the receiver's tangent plane along each sample ray;
+        // a constant radial distance creates false self-shadow on sloped planes.
+        float plane_denominator=dot(geometric_normal,sample_dir);
+        float plane_scale=(abs(plane_denominator)>0.05 && plane_numerator*plane_denominator>0)
+                          ? clamp(plane_numerator/plane_denominator,0.5,2) : 1;
+        float receiver=(distance*plane_scale-shadow_settings.y*slope-texel_bias)/shadow_settings.x;
+        float depth=shadow_maps.SampleLevel(shadow_sampler,float4(sample_dir,(float)light_index),0).r;
+        visible+=receiver<=depth?1:0;
+    }
+    return visible/25;
+}
+#endif
 float4 main(float4 uv:TEXCOORD0, float3 world:TEXCOORD1, float3 normal:TEXCOORD2,
             float4 tangent:TEXCOORD3):SV_Target {
     const float pi=3.14159265359;
@@ -65,6 +104,7 @@ float4 main(float4 uv:TEXCOORD0, float3 world:TEXCOORD1, float3 normal:TEXCOORD2
     float roughness=clamp(roughness_tex.Sample(samp,uv.xy).r,0.04,1);
     float ao=saturate(ao_tex.Sample(samp,uv.xy).r);
     float3 n=normal*rsqrt(max(dot(normal,normal),0.00000001));
+    float3 geometric_normal=n;
     if (abs(tangent.w)>0.5) {
         float3 t=tangent.xyz-n*dot(n,tangent.xyz); float t2=dot(t,t);
         float3 mapped=normal_tex.Sample(samp,uv.xy).rgb*2-1; float m2=dot(mapped,mapped);
@@ -94,11 +134,34 @@ float4 main(float4 uv:TEXCOORD0, float3 world:TEXCOORD1, float3 normal:TEXCOORD2
             float3 diffuse=(1-fresnel)*albedo/pi;
             float radius=light_position_radius[i].w;
             float3 radiance=light_color_intensity[i].rgb*light_color_intensity[i].w/max(d2,radius*radius);
-            result+=(diffuse+specular)*radiance*nl;
+            float light_visibility=1;
+#if T3_SHADOWS
+            light_visibility=visibility(world,geometric_normal,l,i);
+#endif
+            result+=(diffuse+specular)*radiance*nl*light_visibility;
         }
     }
     // Avoid half-float overflow producing inf/NaN in the display pass.
     return float4(min(max(result,0),65504),1);
+})";
+    static const char shadow_vs_source[] = R"(
+cbuffer ShadowPass:register(b1) {
+    float4 light_scale; float4 face_right; float4 face_up; float4 face_forward; float4 clip_range;
+};
+struct O {float3 world:TEXCOORD0; float4 position:SV_Position;};
+O main(float3 position:POSITION) {
+    O o; float3 p=(position-light_scale.xyz)*light_scale.w;
+    float z=dot(p,face_forward.xyz);
+    o.position=float4(dot(p,face_right.xyz),dot(p,face_up.xyz),
+                      (z*clip_range.y-clip_range.x*clip_range.y)/(clip_range.y-clip_range.x),z);
+    o.world=position; return o;
+})";
+    static const char shadow_ps_source[] = R"(
+cbuffer ShadowPass:register(b1) {
+    float4 light_scale; float4 face_right; float4 face_up; float4 face_forward; float4 clip_range;
+};
+float main(float3 world:TEXCOORD0):SV_Target {
+    return saturate(length((world-light_scale.xyz)*light_scale.w)/clip_range.y);
 })";
     static const char tone_vs_source[] = R"(
 float4 main(uint id:SV_VertexID):SV_Position {
@@ -110,6 +173,7 @@ cbuffer Scene : register(b0) {
     row_major float4x4 view; row_major float4x4 projection;
     float4 size_scale_count; float4 camera_exposure; float4 ambient;
     float4 light_position_radius[16]; float4 light_color_intensity[16];
+    float4 shadow_settings;
 };
 float4 main(float4 position:SV_Position):SV_Target {
     float3 c=max(hdr.Load(int3(position.xy,0)).rgb*camera_exposure.w,0);
@@ -117,8 +181,11 @@ float4 main(float4 position:SV_Position):SV_Target {
     c=lerp(c*12.92,1.055*pow(c,1/2.4)-0.055,step(0.0031308,c));
     return float4(saturate(c),1);
 })";
-    ComPtr<ID3DBlob> vs, ps, tone_vs, tone_ps;
-    if (!Compile(compile, vs_source, "vs_5_0", vs) || !Compile(compile, ps_source, "ps_5_0", ps) ||
+    ComPtr<ID3DBlob> vs, ps, tone_vs, tone_ps, shadow_vs, shadow_ps;
+    const std::string pixel_source = std::string(frame.shadow_size ? "#define T3_SHADOWS 1\n" : "#define T3_SHADOWS 0\n") + ps_source;
+    if (!Compile(compile, vs_source, "vs_5_0", vs) || !Compile(compile, pixel_source.c_str(), "ps_5_0", ps) ||
+        (frame.shadow_size && (!Compile(compile, shadow_vs_source, "vs_5_0", shadow_vs) ||
+                               !Compile(compile, shadow_ps_source, "ps_5_0", shadow_ps))) ||
         !Compile(compile, tone_vs_source, "vs_5_0", tone_vs) || !Compile(compile, tone_ps_source, "ps_5_0", tone_ps)) return 1;
 
     D3D12_COMMAND_QUEUE_DESC queue_desc{}; queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -128,24 +195,33 @@ float4 main(float4 position:SV_Position):SV_Target {
         !Check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.put())), "CreateFence")) return 1;
     Handle event{CreateEventW(nullptr, FALSE, FALSE, nullptr)};
     if (!event.p) return 1;
-    D3D12_DESCRIPTOR_RANGE ranges[5]{};
-    D3D12_ROOT_PARAMETER params[6]{};
+    D3D12_DESCRIPTOR_RANGE ranges[6]{};
+    D3D12_ROOT_PARAMETER params[8]{};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; params[0].Descriptor.ShaderRegister = 0;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    for (UINT i = 0; i < 5; ++i) {
+    for (UINT i = 0; i < 6; ++i) {
         ranges[i].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; ranges[i].NumDescriptors = 1;
         ranges[i].BaseShaderRegister = i;
         params[i+1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         params[i+1].DescriptorTable.NumDescriptorRanges = 1; params[i+1].DescriptorTable.pDescriptorRanges = &ranges[i];
         params[i+1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     }
-    D3D12_STATIC_SAMPLER_DESC sampler{};
+    params[7].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[7].Constants.ShaderRegister = 1; params[7].Constants.Num32BitValues = 20;
+    params[7].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    D3D12_STATIC_SAMPLER_DESC samplers[2]{};
+    auto& sampler = samplers[0];
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     sampler.MaxAnisotropy = 1; sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
     sampler.MaxLOD = D3D12_FLOAT32_MAX; sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    D3D12_ROOT_SIGNATURE_DESC root_desc{}; root_desc.NumParameters = 6; root_desc.pParameters = params;
-    root_desc.NumStaticSamplers = 1; root_desc.pStaticSamplers = &sampler;
+    auto& shadow_sampler = samplers[1]; shadow_sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    shadow_sampler.AddressU = shadow_sampler.AddressV = shadow_sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    shadow_sampler.MaxAnisotropy = 1; shadow_sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    shadow_sampler.MaxLOD = D3D12_FLOAT32_MAX; shadow_sampler.ShaderRegister = 1;
+    shadow_sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_ROOT_SIGNATURE_DESC root_desc{}; root_desc.NumParameters = 8; root_desc.pParameters = params;
+    root_desc.NumStaticSamplers = 2; root_desc.pStaticSamplers = samplers;
     root_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
     ComPtr<ID3DBlob> root_blob, root_errors; ComPtr<ID3D12RootSignature> root;
     if (!Check(D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, root_blob.put(), root_errors.put()), "SerializeRoot") ||
@@ -174,8 +250,16 @@ float4 main(float4 position:SV_Position):SV_Target {
     desc.DepthStencilState.BackFace = desc.DepthStencilState.FrontFace;
     desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     desc.NumRenderTargets = 1; desc.RTVFormats[0] = kHdr; desc.DSVFormat = DXGI_FORMAT_D32_FLOAT; desc.SampleDesc.Count = 1;
-    ComPtr<ID3D12PipelineState> pipeline, tone_pipeline;
+    ComPtr<ID3D12PipelineState> pipeline, tone_pipeline, shadow_pipeline;
     if (!Check(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(pipeline.put())), "CreatePbrPipeline")) return 1;
+    if (frame.shadow_size) {
+        auto shadow_desc = desc;
+        shadow_desc.VS = {shadow_vs->GetBufferPointer(), shadow_vs->GetBufferSize()};
+        shadow_desc.PS = {shadow_ps->GetBufferPointer(), shadow_ps->GetBufferSize()};
+        shadow_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        shadow_desc.RTVFormats[0] = DXGI_FORMAT_R32_FLOAT;
+        if (!Check(device->CreateGraphicsPipelineState(&shadow_desc, IID_PPV_ARGS(shadow_pipeline.put())), "CreateShadowPipeline")) return 1;
+    }
     desc.VS = {tone_vs->GetBufferPointer(), tone_vs->GetBufferSize()}; desc.PS = {tone_ps->GetBufferPointer(), tone_ps->GetBufferSize()};
     desc.InputLayout = {nullptr, 0}; desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     desc.DepthStencilState.DepthEnable = FALSE; desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
@@ -185,7 +269,8 @@ float4 main(float4 position:SV_Position):SV_Target {
     if (!Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.p, pipeline.p,
                                          IID_PPV_ARGS(list.put())), "CreateList")) return 1;
     D3D12_DESCRIPTOR_HEAP_DESC heap_desc{}; heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heap_desc.NumDescriptors = static_cast<UINT>(frame.textures.size()*2+1); heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    heap_desc.NumDescriptors = static_cast<UINT>(frame.textures.size()*2+1+(frame.shadow_size ? 1 : 0));
+    heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ComPtr<ID3D12DescriptorHeap> srv_heap;
     if (!Check(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(srv_heap.put())), "CreateSrvHeap")) return 1;
     auto cpu_srv = srv_heap->GetCPUDescriptorHandleForHeapStart();
@@ -218,17 +303,47 @@ float4 main(float4 position:SV_Position):SV_Target {
              &depth_clear, IID_PPV_ARGS(depth.put())), "CreateDepth")) return 1;
     D3D12_SHADER_RESOURCE_VIEW_DESC hdr_srv{}; hdr_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     hdr_srv.Format = kHdr; hdr_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; hdr_srv.Texture2D.MipLevels = 1;
-    device->CreateShaderResourceView(hdr.p, &hdr_srv, cpu_srv);
-    heap_desc = {}; heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; heap_desc.NumDescriptors = 2;
+    device->CreateShaderResourceView(hdr.p, &hdr_srv, cpu_srv); cpu_srv.ptr += srv_step;
+    const UINT shadow_faces = frame.shadow_size ? static_cast<UINT>(frame.lights.size()*6) : 0;
+    ComPtr<ID3D12Resource> shadow_map, shadow_depth;
+    if (frame.shadow_size) {
+        auto shadow_desc = Image(frame.shadow_size, frame.shadow_size, 1, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+        shadow_desc.DepthOrArraySize = static_cast<UINT16>(shadow_faces);
+        const auto shadow_depth_desc = Image(frame.shadow_size, frame.shadow_size, 1, DXGI_FORMAT_D32_FLOAT,
+                                             D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+        D3D12_CLEAR_VALUE shadow_clear{}; shadow_clear.Format = DXGI_FORMAT_R32_FLOAT; shadow_clear.Color[0] = 1;
+        if (!Check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &shadow_desc,
+                  D3D12_RESOURCE_STATE_RENDER_TARGET, &shadow_clear, IID_PPV_ARGS(shadow_map.put())), "CreateShadowMap") ||
+            !Check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &shadow_depth_desc,
+                  D3D12_RESOURCE_STATE_DEPTH_WRITE, &depth_clear, IID_PPV_ARGS(shadow_depth.put())), "CreateShadowDepth")) return 1;
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{}; srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Format = DXGI_FORMAT_R32_FLOAT; srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+        srv.TextureCubeArray.MipLevels = 1; srv.TextureCubeArray.NumCubes = static_cast<UINT>(frame.lights.size());
+        device->CreateShaderResourceView(shadow_map.p, &srv, cpu_srv);
+    }
+    heap_desc = {}; heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; heap_desc.NumDescriptors = 2+shadow_faces;
     ComPtr<ID3D12DescriptorHeap> rtv_heap, dsv_heap;
     if (!Check(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(rtv_heap.put())), "CreateRtvHeap")) return 1;
-    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; heap_desc.NumDescriptors = 1;
+    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; heap_desc.NumDescriptors = frame.shadow_size ? 2 : 1;
     if (!Check(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(dsv_heap.put())), "CreateDsvHeap")) return 1;
     auto hdr_rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    auto output_rtv = hdr_rtv; output_rtv.ptr += device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    const UINT rtv_step = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    auto output_rtv = hdr_rtv; output_rtv.ptr += rtv_step;
     auto dsv = dsv_heap->GetCPUDescriptorHandleForHeapStart();
     device->CreateRenderTargetView(hdr.p, nullptr, hdr_rtv); device->CreateRenderTargetView(target.p, nullptr, output_rtv);
     device->CreateDepthStencilView(depth.p, nullptr, dsv);
+    D3D12_CPU_DESCRIPTOR_HANDLE shadow_dsv{};
+    if (frame.shadow_size) {
+        shadow_dsv = dsv; shadow_dsv.ptr += device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+        device->CreateDepthStencilView(shadow_depth.p, nullptr, shadow_dsv);
+        auto face_handle = output_rtv; face_handle.ptr += rtv_step;
+        for (UINT i = 0; i < shadow_faces; ++i) {
+            D3D12_RENDER_TARGET_VIEW_DESC view{}; view.Format = DXGI_FORMAT_R32_FLOAT;
+            view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+            view.Texture2DArray.FirstArraySlice = i; view.Texture2DArray.ArraySize = 1;
+            device->CreateRenderTargetView(shadow_map.p, &view, face_handle); face_handle.ptr += rtv_step;
+        }
+    }
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{}; UINT rows = 0; UINT64 row_size = 0, total = 0;
     device->GetCopyableFootprints(&output_desc, 0, 1, 0, &fp, &rows, &row_size, &total);
     if (rows != frame.height || row_size != UINT64(frame.width)*4 || fp.Footprint.RowPitch < row_size ||
@@ -263,20 +378,57 @@ float4 main(float4 position:SV_Position):SV_Target {
         cb.light_position_radius[i][3] = frame.lights[i].radius_m;
         cb.light_color_intensity[i][3] = frame.lights[i].intensity;
     }
+    if (frame.shadow_size) {
+        cb.shadow_settings[0] = frame.shadow_far_m; cb.shadow_settings[1] = frame.shadow_bias_m;
+        cb.shadow_settings[2] = frame.shadow_softness; cb.shadow_settings[3] = static_cast<float>(frame.shadow_size);
+    }
     mapped = nullptr;
     if (!Check(constants->Map(0, &no_read, &mapped), "MapConstants") || !mapped) return 1;
     std::memcpy(mapped, &cb, sizeof(cb)); const D3D12_RANGE cb_written{0, sizeof(cb)}; constants->Unmap(0, &cb_written);
     list->SetGraphicsRootSignature(root.p);
     ID3D12DescriptorHeap* heaps[] = {srv_heap.p}; list->SetDescriptorHeaps(1, heaps);
     list->SetGraphicsRootConstantBufferView(0, constants->GetGPUVirtualAddress());
+    const D3D12_VERTEX_BUFFER_VIEW vb{vertices->GetGPUVirtualAddress(), static_cast<UINT>(vertex_bytes), sizeof(Vertex)};
+    list->IASetVertexBuffers(0, 1, &vb); list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    const auto gpu_base = srv_heap->GetGPUDescriptorHandleForHeapStart();
+    if (frame.shadow_size) {
+        // Direct3D cubemap order and per-face right/up axes, in world coordinates.
+        static const float axes[6][3][3] = {
+            {{0,0,-1}, {0,1,0}, {1,0,0}}, {{0,0,1}, {0,1,0}, {-1,0,0}},
+            {{1,0,0}, {0,0,-1}, {0,1,0}}, {{1,0,0}, {0,0,1}, {0,-1,0}},
+            {{1,0,0}, {0,1,0}, {0,0,1}}, {{-1,0,0}, {0,1,0}, {0,0,-1}}};
+        const D3D12_VIEWPORT shadow_viewport{0, 0, static_cast<float>(frame.shadow_size),
+                                              static_cast<float>(frame.shadow_size), 0, 1};
+        const D3D12_RECT shadow_scissor{0, 0, static_cast<LONG>(frame.shadow_size), static_cast<LONG>(frame.shadow_size)};
+        const float shadow_clear[4] = {1, 0, 0, 0};
+        list->SetPipelineState(shadow_pipeline.p);
+        list->RSSetViewports(1, &shadow_viewport); list->RSSetScissorRects(1, &shadow_scissor);
+        for (std::size_t light = 0; light < frame.lights.size(); ++light) for (UINT face = 0; face < 6; ++face) {
+            auto rtv = output_rtv; rtv.ptr += UINT64(1+light*6+face)*rtv_step;
+            list->OMSetRenderTargets(1, &rtv, FALSE, &shadow_dsv);
+            list->ClearRenderTargetView(rtv, shadow_clear, 0, nullptr);
+            list->ClearDepthStencilView(shadow_dsv, D3D12_CLEAR_FLAG_DEPTH, 1, 0, 0, nullptr);
+            float shadow_constants[20]{};
+            for (UINT k = 0; k < 3; ++k) {
+                shadow_constants[k] = frame.lights[light].position[k];
+                for (UINT axis = 0; axis < 3; ++axis) shadow_constants[4+axis*4+k] = axes[face][axis][k];
+            }
+            shadow_constants[3] = frame.meters_per_unit;
+            shadow_constants[16] = frame.shadow_near_m; shadow_constants[17] = frame.shadow_far_m;
+            list->SetGraphicsRoot32BitConstants(7, 20, shadow_constants, 0);
+            for (const auto& draw : frame.draws)
+                if (draw.shadow_mask & (1u << light)) list->DrawInstanced(draw.vertex_count, 1, draw.first_vertex, 0);
+        }
+        Transition(list.p, shadow_map.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        auto shadow_handle = gpu_base; shadow_handle.ptr += UINT64(frame.textures.size()*2+1)*srv_step;
+        list->SetGraphicsRootDescriptorTable(6, shadow_handle);
+        list->SetPipelineState(pipeline.p);
+    }
     const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(frame.width), static_cast<float>(frame.height), frame.min_depth, frame.max_depth};
     const D3D12_RECT scissor{0, 0, static_cast<LONG>(frame.width), static_cast<LONG>(frame.height)};
     list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &scissor);
     list->OMSetRenderTargets(1, &hdr_rtv, FALSE, &dsv); list->ClearRenderTargetView(hdr_rtv, clear.Color, 0, nullptr);
     list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1, 0, 0, nullptr);
-    const D3D12_VERTEX_BUFFER_VIEW vb{vertices->GetGPUVirtualAddress(), static_cast<UINT>(vertex_bytes), sizeof(Vertex)};
-    list->IASetVertexBuffers(0, 1, &vb); list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    const auto gpu_base = srv_heap->GetGPUDescriptorHandleForHeapStart();
     for (const auto& draw : frame.draws) {
         for (UINT i = 0; i < 4; ++i) {
             auto handle = gpu_base; handle.ptr += (UINT64(draw.textures[i])*2+(i == 0 ? 1 : 0))*srv_step;

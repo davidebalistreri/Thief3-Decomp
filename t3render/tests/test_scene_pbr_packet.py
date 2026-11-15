@@ -7,12 +7,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "tools"))
 import scene_pbr_packet as pbr
 import scene_pbr_fixture as gpu_fixture
+import scene_pbr_shadow_fixture as shadow_fixture
 from scene_ir import VisualLight
 from test_scene_material_overrides import FakeRemaster, scene_fixture
 from test_scene_textured_packet import Resolver
@@ -122,6 +124,83 @@ class PbrPacketTests(unittest.TestCase):
         expected = [(2*transform[12]-v[0], v[1], v[2]) for v in (before[0], before[2], before[1])]
         self.assertEqual(after, expected)
 
+    def test_shadow_packet_uses_semantic_caster_flags_and_light_ownership(self):
+        scene, lights, config = inputs()
+        prefix = f"candidate:light:{scene.source.map}:{scene.source.fingerprints['map']}:"
+        first = replace(lights.lights[0], id=prefix+"StaticMeshActor__1520")
+        second = replace(first, id=prefix+"lamp", position=(3, 2, 1))
+        lights = replace(lights, lights=(first, second))
+        config["lights"] = [dict(config["lights"][0], id=light.id) for light in (first, second)]
+        actors = {"StaticMeshActor__1520": {"mesh": "INNbed1A1", "casts_shadows": True, "attached_to": None},
+                  "lamp": {"attached_to": None}}
+        shadows = {"size": 128, "near_m": .05, "far_m": 15, "bias_m": .015, "softness": .5}
+        raw, info = pbr.create_packet(scene, lights, json.dumps(config), Resolver(), FakeRemaster(scene),
+                                       shadows=shadows, actors=actors)
+        self.assertEqual(raw[:8], pbr.SHADOW_MAGIC)
+        self.assertEqual(self.parse(raw).returncode, 0)
+        self.assertEqual(info["draws"][0]["shadow_caster_lights"], [first.id, second.id])
+        self.assertEqual(info["draws"][-1]["shadow_caster_lights"], [second.id])
+        actors["StaticMeshActor__1520"]["casts_shadows"] = False
+        _, info = pbr.create_packet(scene, lights, json.dumps(config), Resolver(), FakeRemaster(scene),
+                                    shadows=shadows, actors=actors)
+        self.assertEqual(info["draws"][-1]["shadow_caster_lights"], [])
+        actors["StaticMeshActor__1520"]["casts_shadows"] = True
+        actors["lamp"]["attached_to"] = "StaticMeshActor__1520"
+        _, info = pbr.create_packet(scene, lights, json.dumps(config), Resolver(), FakeRemaster(scene),
+                                    shadows=shadows, actors=actors)
+        self.assertEqual(info["draws"][-1]["shadow_caster_lights"], [])
+        actors["lamp"]["attached_to"] = "missing"
+        with self.assertRaisesRegex(ValueError, "unresolved offline parent"):
+            pbr.create_packet(scene, lights, json.dumps(config), Resolver(), None, shadows=shadows, actors=actors)
+        actors["lamp"]["attached_to"] = None
+        actors["StaticMeshActor__1520"]["mesh"] = "other"
+        with self.assertRaisesRegex(ValueError, "offline mesh and cast flag"):
+            pbr.create_packet(scene, lights, json.dumps(config), Resolver(), None, shadows=shadows, actors=actors)
+
+    def test_shadow_parameters_and_parser_reject_invalid_bounds_and_masks(self):
+        valid = {"size": 128, "near_m": .05, "far_m": 15, "bias_m": .015, "softness": .5}
+        self.assertAlmostEqual(pbr.shadow_parameters(dict(valid, near_m=.01))["near_m"], .01)
+        for key, value in (("size", 32), ("size", 129), ("size", True), ("near_m", 0),
+                           ("far_m", .02), ("bias_m", -.01), ("softness", 3)):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                pbr.shadow_parameters(dict(valid, **{key: value}))
+        scene, lights, config = inputs()
+        prefix = f"candidate:light:{scene.source.map}:{scene.source.fingerprints['map']}:"
+        light = replace(lights.lights[0], id=prefix+"lamp")
+        lights = replace(lights, lights=(light,))
+        config["lights"][0]["id"] = light.id
+        actors = {"lamp": {"attached_to": None},
+                  "StaticMeshActor__1520": {"mesh": "INNbed1A1", "casts_shadows": True}}
+        raw, _ = pbr.create_packet(scene, lights, json.dumps(config), Resolver(), None, shadows=valid, actors=actors)
+        self.assertEqual(self.parse(raw).returncode, 0)
+        for offset, value in ((196, struct.pack("<I", 1024)), (200, struct.pack("<f", 0)),
+                              (204, struct.pack("<f", 0)), (208, struct.pack("<f", .5)),
+                              (212, struct.pack("<f", 3))):
+            with self.subTest(offset=offset):
+                self.assertEqual(self.parse(raw[:offset]+value+raw[offset+4:]).returncode, 2)
+        texture_count, _, light_count = struct.unpack_from("<III", raw, 184)
+        offset = 216+light_count*32
+        for _ in range(texture_count):
+            width, height, levels = struct.unpack_from("<III", raw, offset)
+            offset += 12
+            for _ in range(levels):
+                offset += width*height*4
+                width, height = max(1,width//2), max(1,height//2)
+        self.assertEqual(self.parse(raw[:offset+20]+struct.pack("<I", 2)+raw[offset+24:]).returncode, 2)
+        with mock.patch.object(pbr, "MAX_SHADOW_DRAWS", 1):
+            with self.assertRaisesRegex(ValueError, "work bounds"):
+                pbr.create_packet(scene, lights, json.dumps(config), Resolver(), None, shadows=valid, actors=actors)
+        # Many individually valid draws must not multiply into unbounded GPU work.
+        fixture = shadow_fixture.fixture(4)
+        header = bytearray(fixture[:196])
+        struct.pack_into("<II", header, 188, 1000, 16)
+        first_light = fixture[216:248]
+        textures = fixture[248:312]
+        draw = bytearray(fixture[312:312+24+6*48])
+        struct.pack_into("<I", draw, 20, (1 << 16)-1)
+        oversized = bytes(header)+fixture[196:216]+first_light*16+textures+bytes(draw)*1000
+        self.assertEqual(self.parse(oversized).returncode, 2)
+
     def test_calibration_rejects_ambiguous_or_unbounded_inputs(self):
         _, lights, config = inputs()
         bad_configs = []
@@ -207,6 +286,51 @@ class PbrPacketTests(unittest.TestCase):
         image[center:center+3] = bytes([116]*3)
         with self.assertRaisesRegex(ValueError, "linear light"):
             gpu_fixture.verify_srgb_filter(image)
+
+    def test_shadow_gpu_fixture_checks_faces_softness_layers_and_orientation(self):
+        for face in range(7):
+            for shadow in (False, True):
+                for asymmetric in (False, True):
+                    with self.subTest(face=face, shadow=shadow, asymmetric=asymmetric):
+                        self.assertEqual(self.parse(shadow_fixture.fixture(face, shadow, asymmetric=asymmetric)).returncode, 0)
+        self.assertEqual(self.parse(shadow_fixture.fixture(4, True, two_lights=True)).returncode, 0)
+        self.assertEqual(self.parse(shadow_fixture.fixture(4, True, hard=True)).returncode, 0)
+        self.assertEqual(self.parse(shadow_fixture.fixture(4, True, short_range=True)).returncode, 0)
+        self.assertEqual(self.parse(shadow_fixture.fixture(4, True, behind=True)).returncode, 0)
+        header = b"P6\n64 64\n255\n"
+        base = bytearray(header+bytes([120, 120, 120])*64*64)
+        shadow = bytearray(base)
+        def set_pixel(image, x, y, rgb):
+            offset = len(header)+(y*64+x)*3
+            image[offset:offset+3] = bytes(rgb)
+        set_pixel(shadow, 32, 32, (24, 24, 24))
+        set_pixel(shadow, 20, 32, (80, 80, 80))
+        self.assertGreater(shadow_fixture.verify(base, shadow)["intermediate_samples"], 0)
+        hard = bytearray(base)
+        set_pixel(hard, 32, 32, (24, 24, 24))
+        self.assertEqual(shadow_fixture.verify_hard(base, hard, shadow)["hard_intermediate"], 0)
+        with self.assertRaisesRegex(ValueError, "distinct penumbrae"):
+            shadow_fixture.verify_hard(base, shadow, shadow)
+        self.assertEqual(shadow_fixture.verify_short_range(base, base)["max_channel_difference"], 0)
+        with self.assertRaisesRegex(ValueError, "beyond shadow range"):
+            shadow_fixture.verify_short_range(base, shadow)
+        with self.assertRaisesRegex(ValueError, "remained lit"):
+            shadow_fixture.verify(base, base)
+        asymmetric = bytearray(base)
+        set_pixel(asymmetric, 47, 23, (24, 24, 24))
+        shadow_fixture.verify_asymmetric(base, asymmetric)
+        with self.assertRaisesRegex(ValueError, "not shadowed"):
+            shadow_fixture.verify_asymmetric(base, base)
+        for y in range(64):
+            for x in range(64):
+                set_pixel(base, x, y, (120, 24, 120))
+        two = bytearray(base)
+        set_pixel(two, 32, 32, (24, 24, 120))
+        set_pixel(two, 20, 32, (80, 24, 120))
+        shadow_fixture.verify(base, two, two_lights=True)
+        set_pixel(two, 32, 32, (24, 24, 24))
+        with self.assertRaisesRegex(ValueError, "light-specific"):
+            shadow_fixture.verify(base, two, two_lights=True)
 
 
 if __name__ == "__main__":

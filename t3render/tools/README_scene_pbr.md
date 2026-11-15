@@ -32,11 +32,46 @@ Reinhard and sRGB display pass. The PPM is an SDR preview of the HDR buffer.
 
 This is a first PBR preview, not a physically calibrated lighting solution:
 source strengths, color and exposure are artistic; the SDK metre scale and
-tangent basis are assumptions. Metallic materials, shadows, GI, emissive
+tangent basis are assumptions. Metallic materials, GI, emissive
 lighting, volumetrics, reflections and temporal effects are absent. The
 render is a partial runtime-selected scene, and offline asset bindings for
 some actors remain candidates. Height maps are not used. The legacy renderer
 and its benchmark remain independent.
+
+## Point-light shadow maps
+
+`--shadows` opts into a separate shadow-map path in packet version 2. Each
+selected point light renders six radial-distance faces into an R32F cubemap
+array with a shared depth buffer. The PBR pass compares 25 point samples per
+light. Its sampling cone uses the calibrated source radius and an adjustable
+softness multiplier; this is an area-light approximation, not exact physical
+penumbra reconstruction. A receiver-plane approximation from interpolated
+vertex normals and slope- and texel-scaled bias reduce self-shadowing, but
+cannot eliminate all acne or light leaks.
+
+Caster geometry comes from the selected, opaque same-frame sections only.
+For mesh instances, the fingerprinted offline actor export supplies the cast
+flag and mesh identity; a light's owner and attached parent are excluded for
+that light. All selected opaque casters are rendered two-sided. Cast flags and
+ownership are **offline candidates**, not observed runtime shadow state.
+Off-screen objects and sections omitted from the capture, non-opaque
+textures, and dynamic shadow-state changes can therefore produce missing or
+incorrect shadows. The previous unshadowed version-1 packet remains supported.
+
+Defaults are 512² per face, near 0.05 m, far 15 m, bias 0.015 m and softness
+0.5. `--shadow-map-size`, `--shadow-near-m`, `--shadow-far-m`,
+`--shadow-bias-m` and `--shadow-softness` change them; softness 0 gives a hard
+comparison. Near clipping may omit nearby blockers; receivers past the far
+distance are unshadowed. Sizes are powers
+of two from 64 to 512, with at most 65,536 shadow draw calls and six million
+triangle submissions. Six faces and 25 samples per light make this an offline
+preview, not a real-time performance claim.
+
+On the local frame-1001 five-light preview, 58 selected draws (3,445
+triangles) cast for each light. Shadow maps change 651,125 pixels compared
+with the same unshadowed PBR image, with mean absolute RGB difference 7.012
+on a 0–255 scale. This measures a visual change, not parity with TDS. The
+version-1 PBR image remains byte-identical when shadows are not enabled.
 
 For the local frame 1001, five preview omni lights, 26 textures, 59 draws and
 3,553 triangles render the bedroom; one candle-wax section is excluded for
@@ -85,6 +120,9 @@ python3 -B t3render/tools/scene_pbr_packet.py \
   --output build/t3render-offline/bedroom-runtime-1001-pbr.scene.bin
 ```
 
+To build the shadowed alternative, append `--shadows` and choose a different
+output path; all other arguments and the calibration stay the same.
+
 Run `t3render_scene_pbr_d3d12 <packet> --output <new.ppm>` in a D3D12
 environment. The packet, manifest and PPM use exclusive creation. See the
 [Highball setup](README_synthetic_replay.md#repeat-on-highball); TDS does not
@@ -105,3 +143,15 @@ sRGB filtering, roughness, AO, normal direction, inverse
 square distance in metres, HDR values above one and finite output at extreme
 energy. The extracted shared D3D12 helpers were also checked by rendering the
 existing legacy shadow packet again and comparing its PPM byte for byte.
+
+For shadow-map verification, `scene_pbr_shadow_fixture.py create <new.bin>`
+creates a synthetic receiver and occluder; use `--baseline` for the unshadowed
+input. Render both with the PBR executable, then run
+`scene_pbr_shadow_fixture.py verify <shadow.ppm> --reference <base.ppm>`.
+Repeat with `--face 0` through `--face 6` (6 is a cubemap seam),
+`--asymmetric`, and `--two-lights`. `--hard` uses `--soft-reference <soft.ppm>`
+at verification; `--short-range` checks the far-distance fallback and
+`--behind` checks that a blocker behind the receiver does not shadow it. On the
+local Highball/D3D12 path, these fixtures passed for the six faces, seam,
+asymmetric occluders, independent light layers, soft versus hard penumbrae,
+range fallback and an off-axis receiver self-shadow case.

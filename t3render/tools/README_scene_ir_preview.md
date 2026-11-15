@@ -1,5 +1,9 @@
 # SceneIR DX12 preview
 
+The separate [textured SceneIR D3D12 consumer](README_scene_ir_textures.md)
+now renders the selected frame-1001 submissions with original diffuse textures.
+The flat-color diagnostic path below remains useful for geometry inspection.
+
 This diagnostic path takes geometry and transforms **only from SceneIR**. It
 temporarily uses the existing `t3render_d3d12_replay_up` executable as a DX12
 packet consumer; it does not extend the D3D8 replay. The offline example below

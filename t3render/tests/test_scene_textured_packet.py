@@ -15,6 +15,7 @@ sys.path.insert(0, str(HERE.parent / "tools"))
 import build_scoped_scene_snapshot as builder
 import scene_ir_to_textured_packet as packet
 import scene_texture_fixture as gpu_fixture
+import scene_ambient_fixture as ambient_fixture
 from t3texture import Mip, Texture
 from test_scoped_scene_snapshot import fixture
 
@@ -147,6 +148,34 @@ class TexturedScenePacketTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 packet.create_packet(base, Resolver(), draw_states={},
                                      additional_scenes=[packet.SceneSnapshot.from_dict(data)])
+
+    def test_ambient_candidates_roundtrip_and_invalid_values_are_rejected(self):
+        scene = scoped_scene()
+        states = {s.draw_id: dict(packet.legacy_states.DEFAULT) for s in scene.submissions}
+        raw, info = packet.create_packet(scene, Resolver(), draw_states=states,
+                                         ambient_candidates={2: [.125, .25, .375, 1]})
+        self.assertEqual(raw[:8], b"T3SCN04\0")
+        self.assertEqual(struct.unpack_from("<I4f", raw, 244), (1, .125, .25, .375, 1))
+        self.assertEqual(info["draws"][0]["ambient_candidate"], [.125, .25, .375, 1])
+        self.assertEqual(self.parse(raw).returncode, 0)
+        for bad in (raw[:244] + struct.pack("<I", 2) + raw[248:],
+                    raw[:248] + struct.pack("<I", 0x7fc00000) + raw[252:], raw[:-1]):
+            self.assertEqual(self.parse(bad).returncode, 2)
+        for candidate in ({}, {2: None}, {2: [-1, 0, 0, 1]}, {999: [0, 0, 0, 1]}):
+            with self.subTest(candidate=candidate), self.assertRaises(ValueError):
+                packet.create_packet(scene, Resolver(), draw_states=states, ambient_candidates=candidate)
+
+    def test_ambient_gpu_fixture_detects_wrong_modulation(self):
+        self.assertEqual(self.parse(ambient_fixture.fixture()).returncode, 0)
+        header = b"P6\n64 64\n255\n"
+        image = bytearray(header + bytes(64 * 64 * 3))
+        for (x, y), color in ambient_fixture.EXPECTED.items():
+            offset = len(header) + (y * 64 + x) * 3
+            image[offset:offset + 3] = bytes(color)
+        self.assertEqual(ambient_fixture.verify(image), 2)
+        image[len(header) + (32 * 64 + 16) * 3] = 0
+        with self.assertRaisesRegex(ValueError, "wrong pixel"):
+            ambient_fixture.verify(image)
 
     def test_exclusive_write_does_not_overwrite_or_leave_first_file(self):
         with tempfile.TemporaryDirectory(prefix="t3render-textured-output-") as directory:

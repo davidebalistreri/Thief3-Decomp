@@ -187,11 +187,12 @@ int Render(const Frame& frame, const wchar_t* output) {
         "o.p.x+=o.p.w/size.x;o.p.y-=o.p.w/size.y;o.uv=float4(uv,0,0);return o;}";
     static const char ps_source[] =
         "Texture2D diffuse:register(t0);SamplerState samp:register(s0);"
-        "cbuffer Alpha:register(b1){uint mode;float reference;float lod_bias;}"
+        "cbuffer Alpha:register(b1){uint mode;float reference;float lod_bias;uint ambient;float4 ambient_color;}"
         "float4 main(float4 uv:TEXCOORD0):SV_Target{float4 c=diffuse.SampleBias(samp,uv.xy,lod_bias);"
         "bool keep=(mode==0)||(mode==2&&c.a<reference)||(mode==3&&c.a==reference)||"
         "(mode==4&&c.a<=reference)||(mode==5&&c.a>reference)||(mode==6&&c.a!=reference)||"
-        "(mode==7&&c.a>=reference)||(mode==8);if(!keep)discard;return c;}";
+        "(mode==7&&c.a>=reference)||(mode==8);if(!keep)discard;"
+        "if(ambient!=0)c.rgb=ambient_color.rgb;return c;}";
     ComPtr<ID3DBlob> vs, ps;
     if (!Compile(compile, vs_source, "vs_5_0", vs) || !Compile(compile, ps_source, "ps_5_0", ps)) return 1;
 
@@ -211,7 +212,7 @@ int Render(const Frame& frame, const wchar_t* output) {
     params[1].DescriptorTable.NumDescriptorRanges = 1; params[1].DescriptorTable.pDescriptorRanges = &range;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[2].Constants.ShaderRegister = 1; params[2].Constants.Num32BitValues = 4;
+    params[2].Constants.ShaderRegister = 1; params[2].Constants.Num32BitValues = 8;
     params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_STATIC_SAMPLER_DESC sampler{}; sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
@@ -355,11 +356,13 @@ int Render(const Frame& frame, const wchar_t* output) {
     for (std::size_t i = 0; i < frame.draws.size(); ++i) {
         const auto& draw = frame.draws[i];
         auto handle = gpu_base; handle.ptr += UINT64(draw.texture) * srv_step;
-        struct AlphaConstants { std::uint32_t mode; float reference, bias, padding; } alpha{
-            draw.state.alpha_compare, draw.state.alpha_ref / 255.0f, draw.state.mip_lod_bias, 0};
+        struct AlphaConstants { std::uint32_t mode; float reference, bias; std::uint32_t ambient; float color[4]; } alpha{
+            draw.state.alpha_compare, draw.state.alpha_ref / 255.0f, draw.state.mip_lod_bias, draw.ambient_candidate,
+            {draw.ambient_color[0], draw.ambient_color[1], draw.ambient_color[2], draw.ambient_color[3]}};
+        static_assert(sizeof(AlphaConstants) == 8 * sizeof(std::uint32_t), "unexpected pixel constants layout");
         list->SetPipelineState(pipelines[draw_pipelines[i]]->object.p);
         list->SetGraphicsRootDescriptorTable(1, handle);
-        list->SetGraphicsRoot32BitConstants(2, 4, &alpha, 0);
+        list->SetGraphicsRoot32BitConstants(2, 8, &alpha, 0);
         list->DrawInstanced(draw.vertex_count, 1, draw.first_vertex, 0);
     }
     Transition(list.p, target.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);

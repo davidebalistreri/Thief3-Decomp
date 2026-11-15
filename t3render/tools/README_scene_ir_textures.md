@@ -16,8 +16,8 @@ submissions in their SceneIR order, with per-draw alpha test, blend, depth,
 color-write mask and culling. Without an explicit trace these states default
 to opaque, back-face culling and D32 LESS. Texture and geometry are asset-backed
 matches, not GPU readbacks or proof of the original shader bindings. The pixel
-shader uses sampled texture alpha as an approximation; fog, lighting, missing
-objects and HUD are absent. This is not D3D8 parity.
+shader uses sampled texture alpha as an approximation; by default fog,
+lighting, missing objects and HUD are absent. This is not D3D8 parity.
 
 The frame-1001 capture produces 18 submissions, 450 triangles and four diffuse
 textures (wall, floor, bed wood and fabric). The tested local Highball/D3D12
@@ -32,6 +32,59 @@ Its local stage-1 preview has 51 submissions, 2,997 triangles and 11 textures;
 it includes a candle holder and a crate near the bed. The renderer preserves
 the candidate limitations and actor IDs in its packet manifest. The objects
 and textures are not runtime mesh-payload or material-binding proof.
+
+## Ambient candidate
+
+With `--ambient-candidate-stage 1`, the exporter requires a state trace and a
+matching offline fixture. It revalidates the scoped snapshot, checks the
+frame-wide constant and pre-Reset program budgets, then requires each selected
+draw to have sampled finite register 18 and an exact, unique match to the
+fingerprinted kernel's `Ambient11_Light_Vertex`. It uses the sampled RGB as a
+constant ambient output. A following stage-4 snapshot can modulate that output
+with its offline diffuse texture and the captured blend/depth state.
+
+The pixel shader binding is not captured, and the vertex program identity is a
+**pre-Reset hypothesis**, not proof of the active GPU program. The mode is an
+explicit approximation, not a replay of either shader. Texture alpha still
+comes from the offline asset; unselected draws, direct lights, stencil and
+other effects remain missing. No candidate is added to the SceneIR light list.
+The packet manifest records the sampled per-draw colors and these limitations.
+
+For the local fingerprinted kernel, D3DDisassemble of the ambient vertex asset
+(`sha256:10fb13338c9197ebaa83a0bef3e6bc575d11534645beb60d8ef0d8672934a75f`)
+shows register 18 sent to vertex color, with a constant-one secondary coordinate
+when register 0.z is one. The separately named ambient pixel asset multiplies
+those inputs for RGB and samples texture alpha. Its presence in the bundle
+does not establish its runtime binding. Original shader bytes remain local.
+
+In frame 1001 the expanded stage-1 snapshot has 51 matching ambient candidates;
+their register-18 RGB is approximately `(0.01464, 0.02133, 0.03137)`. Combining
+it with the separately revalidated stage 4 produced 102 draws on Highball/DX12.
+The room is very dark until direct light contributions are reconstructed. A
+synthetic GPU fixture checks ambient output and diffuse modulation, while the
+existing texture, depth/blend and sampler fixtures still pass.
+
+```sh
+python3 -B t3render/tools/build_scoped_scene_snapshot.py \
+  build/t3render-captures/scene-bridge-submission-20261115-001/bedroom.jsonl \
+  --scene build/t3render-offline/SouthQuarter1_int1.scene.json \
+  --frame 1001 --pass 0 --stage 4 --anchor-draw 302 \
+  --include-asset-candidates \
+  --output build/t3render-offline/bedroom-runtime-1001-candidates-stage4.scene.json
+
+python3 -B t3render/tools/scene_ir_to_textured_packet.py \
+  build/t3render-offline/bedroom-runtime-1001-candidates.scene.json \
+  --additional-scene build/t3render-offline/bedroom-runtime-1001-candidates-stage4.scene.json \
+  --game-dir "$T3_GAME_DIR" --pass 0 --stage 1 \
+  --state-trace build/t3render-captures/scene-bridge-submission-20261115-001/bedroom.jsonl \
+  --offline-scene build/t3render-offline/SouthQuarter1_int1.scene.json \
+  --ambient-candidate-stage 1 \
+  --output build/t3render-offline/bedroom-runtime-1001-ambient.scene.bin
+```
+
+The stage-1 snapshot is generated as described in the runtime checkpoint. All
+capture-derived outputs remain local. The optional mode writes packet version
+4; versions 1–3 remain readable and the default exporter still writes v3.
 
 The optional `--state-trace <trace> --offline-scene <fixture>` revalidates the
 trace fingerprint and rebuilds the bounded bed-and-BSP scoped snapshot before
@@ -147,6 +200,6 @@ alpha test, source-alpha/additive/multiply blending, color masking, depth
 comparison and writes, disabled depth, and front/back/disabled culling. Its 11
 GPU pixel checks passed locally on Highball. `scene_sampler_fixture.py create
 <new.bin>` and `verify <image.ppm>` check biases -1, 0 and +1 on distinct mips;
-all three pixels passed on the same GPU environment. Existing version-1 and
-version-2 packets remain readable; the exporter writes version 3 with a
-per-draw bias and API-neutral state.
+all three pixels passed on the same GPU environment. `scene_ambient_fixture.py`
+checks constant ambient and subsequent diffuse modulation, plus the ordinary
+texture path. Existing versions 1–3 remain readable.

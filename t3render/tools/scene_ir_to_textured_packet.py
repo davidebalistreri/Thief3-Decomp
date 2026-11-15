@@ -24,8 +24,10 @@ from t3common import game_dir, resolve_map  # noqa: E402
 from t3texture import TYPE_MATERIAL, TYPE_TEXTURE, decode_rgba, mip_size, parse_material, parse_texture  # noqa: E402
 import scene_ir_to_d3d12_packet as preview  # noqa: E402
 import scene_legacy_states as legacy_states  # noqa: E402
+import scene_ambient_candidates as ambient  # noqa: E402
 
 MAGIC = b"T3SCN03\0"
+AMBIENT_MAGIC = b"T3SCN04\0"
 MAX_BYTES = 64 * 1024 * 1024
 MAX_TEXTURES = 64
 MAX_DRAWS = 8192
@@ -135,7 +137,7 @@ def select_scope(scene, render_pass=None, stage=None):
 
 
 def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=None, sampler_candidates=None,
-                  additional_scenes=()):
+                  additional_scenes=(), ambient_candidates=None):
     render_pass, stage = select_scope(scene, render_pass, stage)
     selections = [(scene, render_pass, stage)]
     if additional_scenes and draw_states is None:
@@ -169,6 +171,10 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
         raise ValueError("draw count exceeds renderer bounds")
     if len({s.draw_id for s, _ in submissions}) != len(submissions):
         raise ValueError("composed scenes contain duplicate draw IDs")
+    if ambient_candidates is not None:
+        if draw_states is None or not isinstance(ambient_candidates, dict) or not ambient_candidates or not (
+                set(ambient_candidates) <= {s.draw_id for s, _ in submissions}):
+            raise ValueError("ambient candidates require revalidated submitted draws")
     if additional_scenes:
         # Trace operation IDs increase within a frame; restore their original
         # order when combining individually verified stage snapshots.
@@ -215,28 +221,40 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             raise ValueError("sampler candidate missing for submitted draw")
         sampler = (match_sampler(sampler_candidates[submission.draw_id], tex) if sampler_candidates is not None else
                    {"status": "preview_default", "stage": None, "mip_lod_bias": 0.0})
-        draws.append((texture_indices[tex_key], vertices, state, sampler))
+        color = ambient_candidates.get(submission.draw_id) if ambient_candidates is not None else None
+        if ambient_candidates is not None and submission.draw_id in ambient_candidates and (
+                not isinstance(color, (tuple, list)) or len(color) != 4 or any(
+                isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or not 0 <= x <= 1
+                for x in color)):
+            raise ValueError("invalid ambient candidate color")
+        draws.append((texture_indices[tex_key], vertices, state, sampler, color))
         source_draws.append({"draw": submission.draw_id, "target_kind": submission.target_kind,
                              "target_id": submission.target_id, "section": submission.section,
                              "render_pass": submission.render_pass, "stage": submission.stage,
                              "material": material_name, "texture": tex["name"], "triangles": len(vertices) // 3,
                              "state": state, "sampler": sampler})
+        if color is not None:
+            source_draws[-1]["ambient_candidate"] = list(color)
     camera = scene.camera
     viewport = camera.viewport
     size = (struct.calcsize("<8sIIff32fII") + sum(12 + sum(len(mip) for mip in tex["mips"]) for tex in textures) +
-            sum(56 + len(vertices) * 20 for _, vertices, _, _ in draws))
+            sum(56 + (20 if ambient_candidates is not None else 0) + len(vertices) * 20
+                for _, vertices, _, _, _ in draws))
     if size > MAX_BYTES:
         raise ValueError("packet exceeds renderer bounds")
-    body = bytearray(struct.pack("<8sIIff32fII", MAGIC, viewport.width, viewport.height,
+    body = bytearray(struct.pack("<8sIIff32fII", AMBIENT_MAGIC if ambient_candidates is not None else MAGIC,
+                                 viewport.width, viewport.height,
                                  viewport.min_depth, viewport.max_depth, *camera.view, *camera.projection,
                                  len(textures), len(draws)))
     for tex in textures:
         body.extend(struct.pack("<III", tex["width"], tex["height"], len(tex["mips"])))
         for mip in tex["mips"]:
             body.extend(mip)
-    for texture_index, vertices, state, sampler in draws:
+    for texture_index, vertices, state, sampler, color in draws:
         body.extend(struct.pack("<13If", texture_index, len(vertices), *(state[key] for key in legacy_states.FIELDS),
                                 sampler["mip_lod_bias"]))
+        if ambient_candidates is not None:
+            body.extend(struct.pack("<I4f", int(color is not None), *(color if color is not None else (0, 0, 0, 0))))
         for vertex in vertices:
             body.extend(struct.pack("<5f", *vertex))
     if len(body) != size:
@@ -282,6 +300,8 @@ def main(argv=None):
     parser.add_argument("--offline-scene", type=Path, help="original fixture used to revalidate scoped state")
     parser.add_argument("--sampler-candidate-stage", type=int,
                         help="hypothesize a metadata-compatible texture stage; requires --state-trace")
+    parser.add_argument("--ambient-candidate-stage", type=int,
+                        help="use a pre-Reset ambient shader hypothesis for this submission stage")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
@@ -295,6 +315,8 @@ def main(argv=None):
             raise ValueError("composed previews require a state trace and offline scene")
         if args.sampler_candidate_stage is not None and (args.state_trace is None or not 0 <= args.sampler_candidate_stage < 8):
             raise ValueError("sampler candidate requires a state trace and stage 0..7")
+        if args.ambient_candidate_stage is not None and (args.state_trace is None or args.ambient_candidate_stage < 0):
+            raise ValueError("ambient candidate requires a state trace and a nonnegative stage")
         states = None
         samplers = {} if args.sampler_candidate_stage is not None else None
         if args.state_trace is not None:
@@ -320,16 +342,26 @@ def main(argv=None):
         for role, path in paths:
             if scene.source.fingerprints.get(role) != digest_file(path):
                 raise ValueError(f"{role} bundle fingerprint does not match SceneIR")
+        ambient_values = None
+        if args.ambient_candidate_stage is not None:
+            matching = [(current, select_scope(current, args.render_pass, args.stage) if current is scene else select_scope(current))
+                        for current in (scene, *extra_scenes)]
+            matching = [(current, scope) for current, scope in matching if scope[1] == args.ambient_candidate_stage]
+            if len(matching) != 1:
+                raise ValueError("ambient candidate stage must identify exactly one scene")
+            current, scope = matching[0]
+            ambient_values = ambient.from_trace(current, args.state_trace, kernel_path, *scope)
         bundles = []
         try:
             for _, path in paths:
                 bundles.append(IBT(path))
             body, stats = create_packet(scene, TextureResolver(bundles), args.render_pass, args.stage, states, samplers,
-                                        additional_scenes=extra_scenes)
+                                        additional_scenes=extra_scenes, ambient_candidates=ambient_values)
         finally:
             for bundle in bundles:
                 bundle.close()
-        manifest = {"schema": "t3.scene.textured-packet", "version": 3, "source_frame": scene.source.frame_id,
+        manifest = {"schema": "t3.scene.textured-packet", "version": 4 if ambient_values is not None else 3,
+                    "source_frame": scene.source.frame_id,
                     "scene_sha256": hashlib.sha256(raw).hexdigest(), "packet_sha256": hashlib.sha256(body).hexdigest(),
                     "state_source": "revalidated_same_frame_trace" if states is not None else "opaque_preview_defaults",
                     "source_fingerprints": scene.source.fingerprints, "source_limitations": list(scene.source.limitations),
@@ -342,6 +374,8 @@ def main(argv=None):
             manifest["additional_scene_sha256"] = [hashlib.sha256(data).hexdigest() for data in extra_raw]
             manifest["additional_source_limitations"] = [list(other.source.limitations) for other in extra_scenes]
             manifest["limitations"].append("Partial selected draws share a depth buffer; omitted draws and stencil operations are not reconstructed.")
+        if ambient_values is not None:
+            manifest["limitations"].append("Ambient RGB uses sampled vertex constants with a pre-Reset shader hypothesis; the active GPU and pixel shaders are unproven.")
         write_pair(args.output, body, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))
     except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, struct.error) as exc:

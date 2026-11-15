@@ -35,7 +35,12 @@ struct DrawStyle {
                blend_dst == rhs.blend_dst && blend_op == rhs.blend_op && color_mask == rhs.color_mask;
     }
 };
-struct Draw { std::uint32_t texture, first_vertex, vertex_count; DrawStyle state; };
+struct Draw {
+    std::uint32_t texture, first_vertex, vertex_count;
+    DrawStyle state;
+    std::uint32_t ambient_candidate = 0;
+    float ambient_color[4]{};
+};
 struct Frame {
     std::uint32_t width = 0, height = 0;
     float min_depth = 0, max_depth = 1;
@@ -81,10 +86,11 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
     const char v1[8] = {'T', '3', 'S', 'C', 'N', '0', '1', '\0'};
     const char v2[8] = {'T', '3', 'S', 'C', 'N', '0', '2', '\0'};
     const char v3[8] = {'T', '3', 'S', 'C', 'N', '0', '3', '\0'};
+    const char v4[8] = {'T', '3', 'S', 'C', 'N', '0', '4', '\0'};
     Frame frame;
     if (!reader.bytes(magic, sizeof(magic)) ||
         (std::memcmp(magic, v1, sizeof(magic)) && std::memcmp(magic, v2, sizeof(magic)) &&
-         std::memcmp(magic, v3, sizeof(magic))) ||
+         std::memcmp(magic, v3, sizeof(magic)) && std::memcmp(magic, v4, sizeof(magic))) ||
         !reader.u32(frame.width) || !reader.u32(frame.height) || !frame.width || !frame.height ||
         frame.width > 2048 || frame.height > 2048 || !reader.f32(frame.min_depth) ||
         !reader.f32(frame.max_depth) || frame.min_depth < 0 || frame.max_depth > 1 ||
@@ -128,8 +134,13 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
                 !s.depth_compare || s.depth_compare > 8 || s.cull > 2 || s.blend_enable > 1 ||
                 s.blend_src > 9 || s.blend_dst > 9 || s.blend_op > 4 || s.alpha_compare > 8 ||
                 s.alpha_ref > 255 || s.color_mask > 15) return false;
-            if (!std::memcmp(magic, v3, sizeof(magic)) &&
+            if ((!std::memcmp(magic, v3, sizeof(magic)) || !std::memcmp(magic, v4, sizeof(magic))) &&
                 (!reader.f32(s.mip_lod_bias, 16.0f) || s.mip_lod_bias >= 16.0f)) return false;
+            if (!std::memcmp(magic, v4, sizeof(magic))) {
+                if (!reader.u32(draw.ambient_candidate) || draw.ambient_candidate > 1) return false;
+                for (float& value : draw.ambient_color)
+                    if (!reader.f32(value, 1.0f) || value < 0) return false;
+            }
         }
         if (std::size_t(count) * 20 > reader.remaining()) return false;
         for (std::uint32_t n = 0; n < count; ++n) {

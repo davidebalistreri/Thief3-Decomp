@@ -119,7 +119,7 @@ def match_sampler(candidate, texture):
     return {"status": "metadata_match_not_identity", "stage": candidate["stage"], "mip_lod_bias": bias}
 
 
-def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=None, sampler_candidates=None):
+def select_scope(scene, render_pass=None, stage=None):
     if scene.version != 1 or scene.source.kind != "runtime" or scene.source.camera_synchronized is not True:
         raise ValueError("textured preview requires a synchronized scoped runtime SceneIR v1")
     preview.validate_camera(scene.camera)
@@ -131,17 +131,52 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
               (render_pass is None or s.render_pass == render_pass) and (stage is None or s.stage == stage)}
     if len(scopes) != 1:
         raise ValueError("select an unambiguous submission pass and stage")
-    render_pass, stage = next(iter(scopes))
-    submissions = [s for s in scene.submissions if (s.render_pass, s.stage) == (render_pass, stage)]
+    return next(iter(scopes))
+
+
+def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=None, sampler_candidates=None,
+                  additional_scenes=()):
+    render_pass, stage = select_scope(scene, render_pass, stage)
+    selections = [(scene, render_pass, stage)]
+    if additional_scenes and draw_states is None:
+        raise ValueError("composed previews require revalidated per-draw states")
+    seen_scopes = {(render_pass, stage)}
+    identities = {}
+    for index, current in enumerate((scene, *additional_scenes)):
+        scope = (render_pass, stage) if index == 0 else select_scope(current)
+        if index:
+            if (current.source.map != scene.source.map or current.source.frame_id != scene.source.frame_id or
+                    current.source.fingerprints != scene.source.fingerprints or current.camera != scene.camera or
+                    current.conventions != scene.conventions):
+                raise ValueError("composed scenes must share frame, fingerprints, camera and conventions")
+            if scope[0] != render_pass or scope in seen_scopes:
+                raise ValueError("composed scenes must have distinct stages in the same pass")
+            seen_scopes.add(scope)
+            selections.append((current, *scope))
+        for collection in ("static_mesh_resources", "mesh_instances", "bsp_blocks", "materials"):
+            for item in getattr(current, collection):
+                key = (collection, item.id)
+                if key in identities and identities[key] != item:
+                    raise ValueError("composed scenes disagree on a shared resource or instance")
+                identities[key] = item
+    submissions = []
+    for current, selected_pass, selected_stage in selections:
+        lookup = ({x.id: x for x in current.static_mesh_resources}, {x.id: x for x in current.mesh_instances},
+                  {x.id: x for x in current.bsp_blocks}, {x.id: x.name for x in current.materials})
+        submissions.extend((s, lookup) for s in current.submissions
+                           if (s.render_pass, s.stage) == (selected_pass, selected_stage))
     if not 1 <= len(submissions) <= MAX_DRAWS:
         raise ValueError("draw count exceeds renderer bounds")
-    meshes = {x.id: x for x in scene.static_mesh_resources}
-    instances = {x.id: x for x in scene.mesh_instances}
-    blocks = {x.id: x for x in scene.bsp_blocks}
-    materials = {x.id: x.name for x in scene.materials}
+    if len({s.draw_id for s, _ in submissions}) != len(submissions):
+        raise ValueError("composed scenes contain duplicate draw IDs")
+    if additional_scenes:
+        # Trace operation IDs increase within a frame; restore their original
+        # order when combining individually verified stage snapshots.
+        submissions.sort(key=lambda pair: pair[0].draw_id)
     textures, texture_indices, draws, source_draws = [], {}, [], []
     triangle_count = 0
-    for submission in submissions:
+    for submission, lookup in submissions:
+        meshes, instances, blocks, materials = lookup
         if submission.target_kind == "mesh_instance":
             instance = instances[submission.target_id]
             geometry, matrix = meshes[instance.resource_id].geometry, instance.transform
@@ -183,6 +218,7 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
         draws.append((texture_indices[tex_key], vertices, state, sampler))
         source_draws.append({"draw": submission.draw_id, "target_kind": submission.target_kind,
                              "target_id": submission.target_id, "section": submission.section,
+                             "render_pass": submission.render_pass, "stage": submission.stage,
                              "material": material_name, "texture": tex["name"], "triangles": len(vertices) // 3,
                              "state": state, "sampler": sampler})
     camera = scene.camera
@@ -208,6 +244,8 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
     stats = {"render_pass": render_pass, "stage": stage, "triangles": triangle_count, "draws": source_draws,
              "textures": [{key: tex[key] for key in ("name", "bundle", "format", "width", "height")}
                           | {"mips": len(tex["mips"])} for tex in textures]}
+    if additional_scenes:
+        stats["composed_scopes"] = [{"render_pass": p, "stage": s} for _, p, s in selections]
     return bytes(body), stats
 
 
@@ -238,6 +276,8 @@ def main(argv=None):
     parser.add_argument("--game-dir")
     parser.add_argument("--pass", dest="render_pass", type=int)
     parser.add_argument("--stage", type=int)
+    parser.add_argument("--additional-scene", type=Path, action="append", default=[],
+                        help="compose another same-frame scoped stage; requires trace revalidation")
     parser.add_argument("--state-trace", type=Path, help="optional synchronized legacy state observation")
     parser.add_argument("--offline-scene", type=Path, help="original fixture used to revalidate scoped state")
     parser.add_argument("--sampler-candidate-stage", type=int,
@@ -247,23 +287,30 @@ def main(argv=None):
     try:
         raw = preview.read_limited(args.scene, preview.MAX_INPUT)
         scene = SceneSnapshot.from_json(raw)
+        extra_raw = [preview.read_limited(path, preview.MAX_INPUT) for path in args.additional_scene]
+        extra_scenes = [SceneSnapshot.from_json(data) for data in extra_raw]
         if (args.state_trace is None) != (args.offline_scene is None):
             raise ValueError("state trace and offline scene must be supplied together")
+        if extra_scenes and args.state_trace is None:
+            raise ValueError("composed previews require a state trace and offline scene")
         if args.sampler_candidate_stage is not None and (args.state_trace is None or not 0 <= args.sampler_candidate_stage < 8):
             raise ValueError("sampler candidate requires a state trace and stage 0..7")
         states = None
         samplers = {} if args.sampler_candidate_stage is not None else None
         if args.state_trace is not None:
-            scopes = {(s.render_pass, s.stage) for s in scene.submissions if
-                      (args.render_pass is None or s.render_pass == args.render_pass) and
-                      (args.stage is None or s.stage == args.stage)}
-            if len(scopes) != 1:
-                raise ValueError("select an unambiguous submission pass and stage")
-            selected_pass, selected_stage = next(iter(scopes))
+            selected_pass, selected_stage = select_scope(scene, args.render_pass, args.stage)
             offline_bytes = preview.read_limited(args.offline_scene, preview.MAX_INPUT)
-            states = legacy_states.from_trace(scene, SceneSnapshot.from_json(offline_bytes), offline_bytes,
-                                               args.state_trace, selected_pass, selected_stage,
-                                               sampler_stage=args.sampler_candidate_stage, samplers=samplers)
+            offline = SceneSnapshot.from_json(offline_bytes)
+            states = {}
+            for current, scope in [(scene, (selected_pass, selected_stage))] + [
+                    (other, select_scope(other)) for other in extra_scenes]:
+                current_states = legacy_states.from_trace(current, offline, offline_bytes, args.state_trace, *scope,
+                                                          sampler_stage=args.sampler_candidate_stage, samplers=samplers)
+                if states.keys() & current_states.keys():
+                    raise ValueError("composed scenes contain duplicate draw IDs")
+                states.update(current_states)
+            if extra_scenes:
+                legacy_states.validate_composition_interval(scene, args.state_trace, states)
         game = game_dir(args.game_dir)
         local_path = resolve_map(game, scene.source.map, ".ibt")
         kernel_path = local_path.parent / "Kernel_GFXALL.ibt"
@@ -277,7 +324,8 @@ def main(argv=None):
         try:
             for _, path in paths:
                 bundles.append(IBT(path))
-            body, stats = create_packet(scene, TextureResolver(bundles), args.render_pass, args.stage, states, samplers)
+            body, stats = create_packet(scene, TextureResolver(bundles), args.render_pass, args.stage, states, samplers,
+                                        additional_scenes=extra_scenes)
         finally:
             for bundle in bundles:
                 bundle.close()
@@ -289,7 +337,10 @@ def main(argv=None):
                                     "UV0 is used without a flip; clip depth 0..1 and half-pixel correction are assumptions.",
                                     "Sampler candidates match metadata only, not texture identity or shader UV routing.",
                                     "Linear wrap sampler with mips; shader output and culling convention remain approximations.",
-                                    "No fog, runtime lights, legacy shaders, missing objects or HUD."], **stats}
+                                    "No stencil, fog, runtime lights, legacy shaders, missing objects or HUD."], **stats}
+        if extra_scenes:
+            manifest["additional_scene_sha256"] = [hashlib.sha256(data).hexdigest() for data in extra_raw]
+            manifest["limitations"].append("Partial selected draws share a depth buffer; omitted draws and stencil operations are not reconstructed.")
         write_pair(args.output, body, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))
     except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, struct.error) as exc:

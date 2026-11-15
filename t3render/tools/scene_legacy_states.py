@@ -119,3 +119,17 @@ def from_trace(scene, offline, offline_bytes, trace, render_pass, stage, *, samp
                     raise ValueError("invalid sampler stage")
                 samplers[submission.draw_id] = sampler_candidate(draw, sampler_stage)
     return result
+
+
+def validate_composition_interval(scene, trace, states):
+    """Reject target/depth clears between selected draws; stencil remains unsupported."""
+    if not states:
+        raise ValueError("composition requires selected draws")
+    records = runtime.read_frame(trace, scene.source.frame_id, scene.source.fingerprints.get("trace"))
+    first, last = min(states), max(states)
+    for record in records:
+        if record.get("event") != "clear" or not first < record.get("op_id", -1) < last:
+            continue
+        flags = record.get("flags")
+        if type(flags) is not int or flags & ~7 or flags & 3:
+            raise ValueError("composition cannot skip a target or depth clear")

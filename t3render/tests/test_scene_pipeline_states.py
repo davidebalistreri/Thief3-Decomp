@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -83,6 +84,19 @@ class LegacyStateTests(unittest.TestCase):
         invalid = {s.draw_id: dict(states.DEFAULT, alpha_compare=99) for s in scene.submissions}
         with self.assertRaisesRegex(ValueError, "invalid draw state"):
             packet.create_packet(scene, packet_tests.Resolver(), draw_states=invalid)
+
+    def test_composition_refuses_intervening_target_or_depth_clears(self):
+        scene = packet_tests.scoped_scene()
+        draws = {2: {}, 8: {}}
+        with mock.patch.object(states.runtime, "read_frame") as reader:
+            for flags in (1, 2, 3, 8):
+                reader.return_value = [{"event": "clear", "op_id": 5, "flags": flags}]
+                with self.subTest(flags=flags), self.assertRaisesRegex(ValueError, "clear"):
+                    states.validate_composition_interval(scene, "trace", draws)
+            reader.return_value = [{"event": "clear", "op_id": 1, "flags": 3},
+                                   {"event": "clear", "op_id": 5, "flags": 4},
+                                   {"event": "clear", "op_id": 9, "flags": 3}]
+            states.validate_composition_interval(scene, "trace", draws)
 
     def test_fixture_verifier_rejects_wrong_blend_and_depth_pixels(self):
         image = bytearray(b"P6\n64 64\n255\n" + bytes(64 * 64 * 3))

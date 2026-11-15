@@ -37,10 +37,26 @@ draws use additive blending, stage 4 uses two-times modulation, and stage 6 uses
 source-alpha blending; these observations do not reconstruct the missing legacy
 pixel shaders or light contributions. A stage-3 snapshot and packet were also
 revalidated locally: 59 scoped submissions and 1,684 asset-backed triangles.
-It is evidence only: this standalone renderer clears depth, so stage 3's equal
-depth test cannot reproduce that stage without the preceding depth history;
-the submissions have not been composed as lighting. No runtime addresses or
-D3D state enums are added to SceneIR.
+It is evidence only: this standalone renderer clears depth, so stage 3's
+`LESS_EQUAL` depth test cannot reproduce occlusion without the preceding depth history;
+the submissions do not yet reproduce lighting. The selected stage-3 draws
+also have stencil testing enabled, which this renderer does not implement. No
+runtime addresses or D3D state enums are added to SceneIR.
+
+For diagnostics, `--additional-scene` composes separately revalidated stages
+from the same frame, pass, camera and asset fingerprints into one packet, in
+captured operation order with a shared depth buffer. It rejects conflicting
+resources, repeated draws and intervening color/depth clears. It requires
+`--state-trace` and `--offline-scene`; each snapshot is revalidated before
+its states are paired. Omitted draws and stencil operations are not recreated,
+so the depth and visibility history remains partial. In particular, stage 3
+still uses an unlit diffuse shader, not the captured lighting shader.
+
+With the existing frame-1001 stage-1 and stage-3 snapshots, composition
+produced 77 draws and 2,134 triangles on the standalone Highball/D3D12 path.
+The additional diffuse passes overexpose the image; this demonstrates packet
+composition and shared depth, not legacy lighting or visual parity. The
+rendered packet, manifest and image stay local under `build/`.
 
 The optional `--sampler-candidate-stage 2` requires the trace and offline
 fixture above. It accepts only linear wrap filtering, zero max mip and no
@@ -80,6 +96,13 @@ To use the revalidated states instead of preview defaults, append:
 ```
 
 Append `--sampler-candidate-stage 2` to apply the separate sampler hypothesis.
+
+To compose a second stage for the depth diagnostic, add the state options above
+and append:
+
+```sh
+--additional-scene build/t3render-offline/bedroom-runtime-1001-stage3.scene.json
+```
 
 ```powershell
 .\build\t3render-mingw\t3render_scene_d3d12.exe `

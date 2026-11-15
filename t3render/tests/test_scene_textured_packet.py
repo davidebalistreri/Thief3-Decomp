@@ -104,6 +104,50 @@ class TexturedScenePacketTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "SceneIR v1"):
             packet.create_packet(packet.SceneSnapshot.from_dict(data), Resolver())
 
+    def test_composed_stages_share_a_packet_and_keep_trace_order(self):
+        base = scoped_scene()
+        data = base.to_dict()
+        for item, draw in zip(data["submissions"], (1, 7, 9, 11)):
+            item.update(stage=3, draw_id=draw)
+        light_stage = packet.SceneSnapshot.from_dict(data)
+        states = {s.draw_id: dict(packet.legacy_states.DEFAULT) for s in (*base.submissions, *light_stage.submissions)}
+        for item in light_stage.submissions:
+            states[item.draw_id].update(depth_compare=3, depth_write=0, blend_enable=1, blend_src=1, blend_dst=1)
+        raw, stats = packet.create_packet(base, Resolver(), draw_states=states, additional_scenes=[light_stage])
+        self.assertEqual([d["draw"] for d in stats["draws"]], [1, 2, 3, 4, 5, 7, 9, 11])
+        self.assertEqual([d["stage"] for d in stats["draws"]], [3, 1, 1, 1, 1, 3, 3, 3])
+        self.assertEqual(stats["draws"][0]["state"]["depth_compare"], 3)
+        self.assertEqual(self.parse(raw).stdout, b"640 480 1 8 24 255 0 0\n")
+        with self.assertRaisesRegex(ValueError, "per-draw states"):
+            packet.create_packet(base, Resolver(), additional_scenes=[light_stage])
+        with self.assertRaisesRegex(ValueError, "duplicate draw"):
+            packet.create_packet(base, Resolver(), draw_states=states,
+                                 additional_scenes=[packet.SceneSnapshot.from_dict(dict(data, submissions=[
+                                     dict(data["submissions"][0], draw_id=2)]))])
+
+    def test_composition_rejects_mismatched_camera_frame_or_shared_geometry(self):
+        base = scoped_scene()
+        for change in ("camera", "frame", "geometry", "pass", "stage"):
+            data = base.to_dict()
+            for item in data["submissions"]:
+                item.update(stage=3, draw_id=item["draw_id"] + 100)
+            if change == "camera":
+                data["camera"]["view"][12] += 1
+            elif change == "frame":
+                data["source"]["frame_id"] += 1
+                data["camera"]["source"]["frame_id"] += 1
+            elif change == "geometry":
+                data["static_mesh_resources"][0]["geometry"]["positions"][0][0] += 1
+            elif change == "pass":
+                for item in data["submissions"]:
+                    item["render_pass"] += 1
+            else:
+                for item in data["submissions"]:
+                    item["stage"] = 1
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                packet.create_packet(base, Resolver(), draw_states={},
+                                     additional_scenes=[packet.SceneSnapshot.from_dict(data)])
+
     def test_exclusive_write_does_not_overwrite_or_leave_first_file(self):
         with tempfile.TemporaryDirectory(prefix="t3render-textured-output-") as directory:
             output = Path(directory) / "scene.bin"

@@ -29,8 +29,8 @@ struct Constants {
 };
 static_assert(sizeof(Constants) == 704, "unexpected PBR constant-buffer layout");
 
-int Render(const Frame& frame, const wchar_t* output, bool indirect, bool gtao, bool volumetric) {
-    const bool use_gbuffer = indirect || gtao || volumetric;
+int Render(const Frame& frame, const wchar_t* output, bool indirect, bool gtao, bool volumetric, bool reflections) {
+    const bool use_gbuffer = indirect || gtao || volumetric || reflections;
     ComPtr<ID3D12Device> device;
     if (!SelectDevice(device)) return 1;
     Module module{LoadLibraryExW(L"d3dcompiler_47.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
@@ -169,7 +169,7 @@ float4 main(float4 uv:TEXCOORD0, float3 world:TEXCOORD1, float3 normal:TEXCOORD2
     // Camera-relative metres keep half-float precision independent of map origin.
     float3 relative=(world-camera_exposure.xyz)*size_scale_count.z;
     o.position=all(abs(relative)<=60000)?float4(relative,1):float4(0,0,0,0);
-    o.normal=float4(geometric_normal,1);
+    o.normal=float4(geometric_normal,roughness);
     o.diffuse=float4(min(max(direct_diffuse,0),65504),1);
     o.albedo=float4(albedo,ao); return o;
 #else
@@ -316,6 +316,54 @@ float ambient_visibility(int2 pixel) {
     return full>0.00001?saturate(visible/full):1;
 }
 #endif
+#if T3_REFLECTIONS
+float3 screen_reflection(int2 pixel) {
+    int2 size=int2(size_scale_count.xy);
+    float4 p=positions.Load(int3(pixel,0));
+    float4 nr=normals.Load(int3(pixel,0));
+    float p2=dot(p.xyz,p.xyz);
+    if(p.w<0.5||p2<0.000001||nr.w>=0.95) return 0;
+    float3 v=-p.xyz*rsqrt(p2);
+    float nv=saturate(dot(nr.xyz,v));
+    if(nv<=0.0001) return 0;
+    float3 ray=normalize(reflect(-v,nr.xyz));
+    float3 origin=p.xyz+nr.xyz*0.03;
+    [loop] for(int step=1;step<=48;++step) {
+        float distance=0.1+(step-1)*0.15;
+        float3 sample_position=origin+ray*distance;
+        float3 world=camera_exposure.xyz+sample_position/size_scale_count.z;
+        float4 clip=mul(mul(float4(world,1),view),projection);
+        if(clip.w<=0.00001) break;
+        clip.x+=clip.w/size_scale_count.x; clip.y-=clip.w/size_scale_count.y;
+        float3 ndc=clip.xyz/clip.w;
+        if(any(abs(ndc.xy)>1)||ndc.z<0||ndc.z>1) break;
+        int2 qpixel=int2((ndc.x*0.5+0.5)*size.x,(0.5-ndc.y*0.5)*size.y);
+        if(any(qpixel<0)||any(qpixel>=size)) break;
+        float4 hit=positions.Load(int3(qpixel,0));
+        if(hit.w<0.5||dot(hit.xyz-p.xyz,hit.xyz-p.xyz)<0.01) continue;
+        float ray_depth=mul(float4(sample_position,0),view).z;
+        float hit_depth=mul(float4(hit.xyz,0),view).z;
+        float thickness=0.08+distance*0.025;
+        if(ray_depth<hit_depth||ray_depth-hit_depth>thickness) continue;
+        // Small roughness-dependent filter; reject samples from different depths.
+        int radius=(int)round(nr.w*4);
+        float3 reflected=0; float weight=0;
+        [unroll] for(int y=-1;y<=1;++y) [unroll] for(int x=-1;x<=1;++x) {
+            int2 q=qpixel+int2(x,y)*radius;
+            if(any(q<0)||any(q>=size)) continue;
+            float4 neighbor=positions.Load(int3(q,0));
+            if(neighbor.w<0.5||abs(mul(float4(neighbor.xyz-hit.xyz,0),view).z)>thickness) continue;
+            reflected+=hdr.Load(int3(q,0)).rgb; weight+=1;
+        }
+        if(weight==0) return 0;
+        float fresnel=0.04+0.96*pow(1-nv,5);
+        float roughness_fade=(1-nr.w)*(1-nr.w);
+        float edge=saturate((1-max(abs(ndc.x),abs(ndc.y)))*8);
+        return reflected/weight*fresnel*roughness_fade*edge*saturate((7.3-distance)/1.5);
+    }
+    return 0;
+}
+#endif
 #if T3_VOLUMETRIC
 float3 volume_lighting(float3 ray, float distance) {
     const float extinction=0.06, scattering=0.045, anisotropy=0.2;
@@ -363,6 +411,9 @@ float4 main(float4 position:SV_Position):SV_Target {
 #endif
     c+=bounce;
 #endif
+#if T3_REFLECTIONS
+    c+=screen_reflection(int2(position.xy));
+#endif
 #if T3_VOLUMETRIC
     float4 endpoint=positions.Load(int3(position.xy,0));
     if(endpoint.w>0.5) {
@@ -380,6 +431,7 @@ float4 main(float4 position:SV_Position):SV_Target {
                                 (indirect ? "#define T3_INDIRECT 1\n" : "#define T3_INDIRECT 0\n") +
                                 (gtao ? "#define T3_GTAO 1\n" : "#define T3_GTAO 0\n") +
                                 (volumetric ? "#define T3_VOLUMETRIC 1\n" : "#define T3_VOLUMETRIC 0\n") +
+                                (reflections ? "#define T3_REFLECTIONS 1\n" : "#define T3_REFLECTIONS 0\n") +
                                 (frame.has_emission ? "#define T3_EMISSION 1\n" : "#define T3_EMISSION 0\n");
     const std::string shadow_option = frame.shadow_size ? "#define T3_SHADOWS 1\n" : "#define T3_SHADOWS 0\n";
     const std::string pixel_source = shadow_option + options + ps_source;
@@ -723,18 +775,19 @@ float4 main(float4 position:SV_Position):SV_Target {
 
 int wmain(int argc, wchar_t** argv) {
     const auto usage = []() {
-        std::fwprintf(stderr, L"usage: t3render_scene_pbr_d3d12 <pbr.bin> --output <new-image.ppm> [--indirect] [--gtao] [--volumetric]\n");
+        std::fwprintf(stderr, L"usage: t3render_scene_pbr_d3d12 <pbr.bin> --output <new-image.ppm> [--indirect] [--gtao] [--volumetric] [--reflections]\n");
         return 2;
     };
-    if (argc < 4 || argc > 7 || std::wcscmp(argv[2], L"--output") || !argv[3][0]) return usage();
-    bool indirect = false, gtao = false, volumetric = false;
+    if (argc < 4 || argc > 8 || std::wcscmp(argv[2], L"--output") || !argv[3][0]) return usage();
+    bool indirect = false, gtao = false, volumetric = false, reflections = false;
     for (int i = 4; i < argc; ++i) {
         if (!std::wcscmp(argv[i], L"--indirect") && !indirect) indirect = true;
         else if (!std::wcscmp(argv[i], L"--gtao") && !gtao) gtao = true;
         else if (!std::wcscmp(argv[i], L"--volumetric") && !volumetric) volumetric = true;
+        else if (!std::wcscmp(argv[i], L"--reflections") && !reflections) reflections = true;
         else return usage();
     }
     Frame frame;
     if (!ReadPacket(argv[1], frame)) return 2;
-    return Render(frame, argv[3], indirect, gtao, volumetric);
+    return Render(frame, argv[3], indirect, gtao, volumetric, reflections);
 }

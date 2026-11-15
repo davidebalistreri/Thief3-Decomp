@@ -32,8 +32,8 @@ Reinhard and sRGB display pass. The PPM is an SDR preview of the HDR buffer.
 
 This is a first PBR preview, not a physically calibrated lighting solution:
 source strengths, color and exposure are artistic; the SDK metre scale and
-tangent basis are assumptions. Metallic materials, reflections and temporal
-effects are absent. The
+tangent basis are assumptions. Metallic materials and temporal effects are
+absent. The
 render is a partial runtime-selected scene, and offline asset bindings for
 some actors remain candidates. Height maps are not used. The legacy renderer
 and its benchmark remain independent.
@@ -127,6 +127,26 @@ On the frame-1001 PBR/indirect/GTAO/flame preview it changes 786,225 pixels,
 with mean absolute RGB difference 11.976 on a 0–255 scale. The same frame
 without the option remains byte-identical to the previous version. This is an
 art-directed preview of a partial runtime scene, not parity with TDS.
+
+## Screen-space reflections
+
+`--reflections` traces a reflected view ray against the visible position
+buffer, then samples the directly rendered HDR image. A dielectric Fresnel
+term and roughness-dependent fade and nine-tap filter approximate rough
+reflections. The result is added before volumetric attenuation and tonemapping.
+
+This is a first screen-space preview, not ray tracing or a full PBR reflection
+model. It uses geometric rather than normal-mapped normals, a depth-thickness heuristic,
+up to 48 steps and a roughly 7 m ray. Off-screen and occluded surfaces,
+indirect light, fog in reflected radiance, history, metallic response and a
+fallback environment are unavailable. Roughness filtering is a small screen
+kernel, not a physically correct microfacet convolution. Missing hits,
+leaks, edge fade, banding and flicker are possible. It is off by default.
+
+On the frame-1001 preview with the other optional effects enabled, reflections
+change 68,050 pixels, with mean absolute RGB difference 0.0442 on a 0–255
+scale. Without the flag the same frame remains byte-identical to the previous
+version. This measurement is not evidence of parity with TDS.
 
 ## Point-light shadow maps
 
@@ -241,7 +261,7 @@ Add `--candle-flames build/assets/godot/remaster/garrett_home/highpoly/generated
 to include the generated flame geometry. This requires the existing Godot
 replacement asset and shadows; its packet and manifest remain under `build/`.
 
-Run `t3render_scene_pbr_d3d12 <packet> --output <new.ppm> [--indirect] [--gtao] [--volumetric]` in a D3D12
+Run `t3render_scene_pbr_d3d12 <packet> --output <new.ppm> [--indirect] [--gtao] [--volumetric] [--reflections]` in a D3D12
 environment. The packet, manifest and PPM use exclusive creation. See the
 [Highball setup](README_synthetic_replay.md#repeat-on-highball); TDS does not
 need to be running.
@@ -304,3 +324,9 @@ Render the first two with and without `--volumetric`, and render `shadow` with
 it; `verify` compares all five. The local GPU test verified extinction,
 scattering and an occluder affecting only the shadow map. A version-1 packet
 without shadow maps was also rendered with the option enabled.
+
+`scene_pbr_reflection_fixture.py` provides `smooth`, `medium`, `rough` and
+`away` packets. Render each with and without `--reflections` and use `verify`
+with the corresponding base image. Local GPU checks observed a colored
+reflection, reduced response at intermediate roughness, and no response for
+a fully rough or oppositely oriented receiver.

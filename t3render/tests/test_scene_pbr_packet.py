@@ -18,6 +18,7 @@ import scene_pbr_shadow_fixture as shadow_fixture
 import scene_pbr_indirect_fixture as indirect_fixture
 import scene_pbr_gtao_fixture as gtao_fixture
 import scene_pbr_volumetric_fixture as volumetric_fixture
+import scene_pbr_reflection_fixture as reflection_fixture
 from scene_ir import VisualLight
 from test_scene_material_overrides import FakeRemaster, scene_fixture
 from test_scene_textured_packet import Resolver
@@ -383,6 +384,26 @@ class PbrPacketTests(unittest.TestCase):
             volumetric_fixture.verify(base, extinction, base, extinction, extinction)
         with self.assertRaisesRegex(ValueError, "did not occlude"):
             volumetric_fixture.verify(base, extinction, base, scatter, scatter)
+
+    def test_reflection_gpu_fixture_checks_direction_and_roughness(self):
+        for kind in reflection_fixture.KINDS:
+            self.assertEqual(self.parse(reflection_fixture.fixture(kind)).returncode, 0)
+        header = b"P6\n64 64\n255\n"
+        base = bytearray(header+bytes(64*64*3))
+        smooth, medium = bytearray(base), bytearray(base)
+        pixel = len(header)+(32*64+24)*3
+        smooth[pixel:pixel+3] = bytes((38, 0, 0))
+        medium[pixel:pixel+3] = bytes((18, 0, 0))
+        reflection_fixture.verify(base, smooth, "smooth")
+        reflection_fixture.verify(base, medium, "medium")
+        reflection_fixture.verify(base, base, "rough")
+        reflection_fixture.verify(base, base, "away")
+        with self.assertRaisesRegex(ValueError, "colored reflection"):
+            reflection_fixture.verify(base, base, "smooth")
+        with self.assertRaisesRegex(ValueError, "roughness"):
+            reflection_fixture.verify(base, smooth, "medium")
+        with self.assertRaisesRegex(ValueError, "unexpected reflection"):
+            reflection_fixture.verify(base, smooth, "away")
 
 
 if __name__ == "__main__":

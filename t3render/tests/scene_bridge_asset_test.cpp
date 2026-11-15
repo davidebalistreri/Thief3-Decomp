@@ -63,6 +63,27 @@ int main() {
         assert(a.status == AssetStatus::Candidate && a.stable && a.name_available);
         assert(a.descriptor_match && a.local_property_found && a.proxy_live_member &&
                a.proxy_vtable_match && a.resource_vtable_match && std::strcmp(a.name, "INNbed1A") == 0);
+        assert(a.audit.available && a.audit.descriptor == 0x6200 && a.audit.descriptor_count == 1 &&
+               a.audit.descriptor_size == 4 && a.audit.descriptor_flags == 0);
+        assert(a.audit.property_hash == 0x2000 && a.audit.bucket_head == 3 && a.audit.slot_index == 3 &&
+               a.audit.slot_id_flags == (indirect ? 0x2b : 0x802b) &&
+               a.audit.slot_value == (indirect ? 0x7000u : 0x3000u));
+        assert(a.audit.chain_count == 1 && a.audit.chain[0].index == 3 &&
+               a.audit.chain[0].next == 0 && a.audit.chain[0].value == a.audit.slot_value);
+        assert(a.audit.proxy == 0x3000 && a.audit.object_index == 2 && a.audit.objects_count == 3 &&
+               a.audit.proxy_index == 2 && a.audit.resource == 0x4000 &&
+               a.audit.name_address == 0x5004 && a.audit.name_length == 8);
+    }
+    {
+        auto m = fixture();
+        m.put<std::uint16_t>(0x2006, 2);
+        const std::uint32_t slot = 0x10f7b5c8 + 2 * 8;
+        m.put<std::uint16_t>(slot, 3); m.put<std::uint16_t>(slot + 2, 0x8023);
+        m.put<std::uint32_t>(slot + 4, 7);
+        const auto a = sample(m);
+        assert(a.status == AssetStatus::Candidate && a.audit.chain_count == 2 &&
+               a.audit.bucket_head == 2 && a.audit.chain[0].index == 2 && a.audit.chain[0].next == 3 &&
+               a.audit.chain[1].index == 3 && a.audit.chain[1].next == 0);
     }
     {
         auto m = fixture(); m.put<std::uint32_t>(0x623c, 0x400000);
@@ -104,7 +125,7 @@ int main() {
     {
         auto m = fixture(); m.change_name = true;
         const auto a = sample(m);
-        assert(a.status == AssetStatus::Unknown && !a.stable && !a.name_available);
+        assert(a.status == AssetStatus::Unknown && !a.stable && !a.name_available && !a.audit.available);
     }
     {
         auto m = fixture(); m.put<std::uint8_t>(0x5004 + 8, '!');

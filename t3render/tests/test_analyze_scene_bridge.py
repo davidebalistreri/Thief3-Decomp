@@ -19,6 +19,18 @@ def bits(values):
     return [struct.unpack("<I", struct.pack("<f", x))[0] for x in values]
 
 
+def asset_audit():
+    return {"descriptor_table": 0x6000, "descriptor_array": 0x6100, "descriptor": 0x6200,
+            "descriptor_vtable": 0x10e72e48, "descriptor_copy": 0x10aeecc0,
+            "descriptor_count": 1, "descriptor_size": 4, "descriptor_flags": 0,
+            "owner_flags": 0, "property_hash": 0x2000, "bucket_head": 3,
+            "slot_index": 3, "slot_next": 0, "slot_id_flags": 0x802b, "slot_value": 0x3000,
+            "chain": [{"index": 3, "next": 0, "id_flags": 0x802b, "value": 0x3000}],
+            "objects_data": 0x8000, "objects_count": 3, "objects_capacity": 3, "object_index": 2,
+            "proxy": 0x3000, "proxy_vtable": 0x10e4dfa8, "proxy_index": 2, "resource": 0x4000,
+            "resource_vtable": 0x10ec0e20, "name_address": 0x5004, "name_length": 9}
+
+
 def fixture():
     matrix = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 4, 5, 6, 1]
     camera = {"address": 100, "stable": True, "source_matrix_bits": bits(matrix),
@@ -42,7 +54,8 @@ def fixture():
               "requested_frames": 1, "operation_results": 1, "clear_rect_limit": 256,
               "scene_bridge": {"requested": True, "install_status": "installed", "probe_limit": 128,
                                "entries_per_probe": 128, "target_object_limit": 65536,
-                               "target_list_limit": 8192, "synchronization": "present_interval_and_thread_only"}}
+                               "target_list_limit": 8192, "synchronization": "present_interval_and_thread_only",
+                               "reentry_detection": "saturating_counter_v1"}}
     observation = {"event": "scene_bridge_observation", "frame": 3, "ticket": 1, "thread_id": 9,
                    "next_d3d_operation": 2, "self": 42, "caller": module.EXPECTED_CALLER, "known_caller": True,
                    "pass": 4, "pass_stable": True, "configured_camera": camera, "current_camera": camera,
@@ -55,7 +68,7 @@ def fixture():
     frame = {"event": "scene_bridge_frame", "frame": 3, "status": "synchronized",
              "previous_present_observed": True, "previous_present_thread": 9, "present_thread": 9,
              "draw_thread": 9, "probe_thread": 9, "same_thread": True, "present_tracked": True,
-             "epoch_unknown": False, "probe_overlap": False, "present_overlap": False,
+             "epoch_unknown": False, "probe_overlap": False, "probe_reentered": False, "present_overlap": False,
              "operation_overlap": False, "reset_seen": False, "reset_pending": False,
              "started": 1, "completed": 1, "pending": 0, "dropped": 0}
     end = {"event": "frame_end", "frame": 3, "present_hr": 0, "had_reset": False, "concurrent_operations": False}
@@ -67,6 +80,7 @@ class SceneBridgeAnalysisTests(unittest.TestCase):
     def test_complete_candidate_is_not_promoted_to_draw_proof(self):
         out = module.analyze(fixture(), 3, 2, 4)
         self.assertEqual(out["present_interval"], "synchronized")
+        self.assertEqual(out["complete_observation_window"], "synchronized")
         self.assertEqual(out["static_caller"], "matches_verified_callsite")
         self.assertEqual(out["actor_membership_and_backlink"], "matched")
         self.assertEqual(out["actor_uniqueness"], "one_in_complete_observed_scans")
@@ -90,6 +104,20 @@ class SceneBridgeAnalysisTests(unittest.TestCase):
                 self.assertEqual(result["actor_membership_and_backlink"], "unknown")
                 self.assertEqual(result["runtime_asset"]["status"], "unknown")
 
+    def test_historical_trace_cannot_claim_complete_probe_window(self):
+        records = copy.deepcopy(fixture())
+        del records[0]["scene_bridge"]["reentry_detection"]
+        del records[5]["probe_reentered"]
+        result = module.analyze(records, 3, 2, 4)
+        self.assertEqual(result["present_interval"], "synchronized")
+        self.assertEqual(result["complete_observation_window"], "unknown")
+        self.assertEqual(result["actor_membership_and_backlink"], "matched")
+        with tempfile.TemporaryDirectory(prefix="t3render-bridge-old-") as directory:
+            path = Path(directory) / "old.jsonl"
+            path.write_text("".join(json.dumps(r) + "\n" for r in records))
+            selected, _ = module.read_selected(path, 3, 2)
+            self.assertEqual(module.analyze(selected, 3, 2, 4)["complete_observation_window"], "unknown")
+
     def test_ambiguous_scans_and_weak_asset_remain_unknown(self):
         for key, value in (("actors_named_target", 2), ("list_occurrences", 2),
                            ("list_scan_truncated", True), ("object_scan_complete", False)):
@@ -104,6 +132,58 @@ class SceneBridgeAnalysisTests(unittest.TestCase):
         self.assertEqual(module.analyze(records, 3, 2, 4)["runtime_asset"]["status"], "unknown")
         records[2]["target"]["entry"]["owner_backlink"] = 0
         self.assertEqual(module.analyze(records, 3, 2, 4)["actor_membership_and_backlink"], "unknown")
+
+    def test_new_property_audit_is_consistent_without_promoting_candidate(self):
+        records = copy.deepcopy(fixture())
+        records[0]["scene_bridge"]["asset_audit"] = "local_property_v1"
+        records[2]["target"]["asset"]["audit"] = asset_audit()
+        result = module.analyze(records, 3, 2, 4)
+        self.assertEqual(result["asset_property_audit"], "consistent")
+        self.assertEqual(result["runtime_asset"]["status"], "candidate")
+        for change in ("slot_value", "proxy_index", "broken_chain", "missing_audit"):
+            with self.subTest(change=change):
+                bad = copy.deepcopy(records)
+                asset = bad[2]["target"]["asset"]
+                if change == "slot_value": asset["audit"]["slot_value"] = 0x9999
+                elif change == "proxy_index": asset["audit"]["proxy_index"] = 1
+                elif change == "broken_chain": asset["audit"]["chain"][0]["next"] = 3
+                else: asset["audit"] = None
+                self.assertEqual(module.analyze(bad, 3, 2, 4)["asset_property_audit"], "unknown")
+                with tempfile.TemporaryDirectory(prefix="t3render-bridge-audit-") as directory:
+                    path = Path(directory) / "trace.jsonl"
+                    path.write_text("".join(json.dumps(r) + "\n" for r in bad))
+                    with self.assertRaises(ValueError):
+                        module.read_selected(path, 3, 2)
+
+    def test_guarded_mesh_node_reports_counts_and_bounds_without_addresses(self):
+        records = copy.deepcopy(fixture())
+        records[0]["scene_bridge"]["mesh_node"] = "actor_node_v1"
+        records[0]["scene_bridge"]["mesh_sections"] = "actor_materials_v1"
+        records[2]["target"]["mesh_node"] = {
+            "pool_scan_complete": True, "pool_scan_truncated": False, "nodes_scanned": 2,
+            "occurrences": 1, "address": 0x9000, "vtable": 0x10e49d14, "name_address": 0x9100,
+            "name": "innbed1a1", "counts": {"vertices": 257, "triangles": 236, "indices": 708, "sections": 3},
+            "bounds_bits": bits([-1, -2, -3, 1, 2, 3]), "stable": True,
+            "section_array": 0x9200, "instance_materials": 0x9300, "sections_truncated": False,
+            "sections": [{"name": "Default", "material_name": name, "triangles": count // 3,
+                          "first_vertex": 0, "vertex_count": 257, "first_index": first,
+                          "index_count": count, "unknown": 0}
+                         for name, first, count in (("BF", 0, 24), ("GENgoodnessA_D", 24, 480),
+                                                    ("GENiFABRICwoolA2_D", 504, 204))]}
+        node = module.analyze(records, 3, 2, 4)["runtime_mesh_node"]
+        self.assertEqual(node["status"], "candidate")
+        self.assertEqual(node["counts"]["vertices"], 257)
+        self.assertEqual(node["bounds_t3_units"], [-1, -2, -3, 1, 2, 3])
+        self.assertTrue(node["name_matches_asset"])
+        self.assertEqual(node["sections"][1]["material_name"], "GENgoodnessA_D")
+        self.assertNotIn(str(0x9000), json.dumps(node))
+        records[2]["target"]["mesh_node"]["vtable"] = 0
+        self.assertEqual(module.analyze(records, 3, 2, 4)["runtime_mesh_node"]["status"], "unknown")
+        with tempfile.TemporaryDirectory(prefix="t3render-bridge-node-") as directory:
+            path = Path(directory) / "trace.jsonl"
+            path.write_text("".join(json.dumps(r) + "\n" for r in records))
+            with self.assertRaises(ValueError):
+                module.read_selected(path, 3, 2)
 
     def test_compare_is_bit_exact_and_rejects_nonfinite(self):
         records = copy.deepcopy(fixture())

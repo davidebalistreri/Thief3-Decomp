@@ -188,6 +188,26 @@ class SceneIRPreviewTests(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertEqual(sidecar.read_text(), "existing")
 
+    def test_runtime_preview_reports_producer_claim_and_source_limitations(self):
+        data = example()
+        data["source"].update(kind="runtime", frame_id=7, camera_synchronized=True,
+                              fingerprints={"trace": "a" * 64}, limitations=["asset-backed geometry"])
+        data["camera"] = camera_data()["camera"]
+        data["camera"]["source"] = {"kind": "runtime", "frame_id": 7, "fingerprint": "a" * 64}
+        with tempfile.TemporaryDirectory(prefix="t3render-scene-runtime-preview-") as directory:
+            root = Path(directory)
+            scene_path, output = root / "scene.json", root / "packet.txt"
+            scene_path.write_text(json.dumps(data), encoding="utf-8")
+            cmd = [sys.executable, str(HERE.parent / "tools" / "scene_ir_to_d3d12_packet.py"),
+                   str(scene_path), "--instance", "actor:bed", "--bsp", "0", "--output", str(output)]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads(Path(str(output) + ".manifest.json").read_text())
+            self.assertEqual(manifest["kind"], "runtime_scene_ir_preview_producer_assertion")
+            self.assertTrue(manifest["camera_synchronized_to_scene"])
+            self.assertEqual(manifest["scene_frame_id"], 7)
+            self.assertEqual(manifest["scene_limitations"], ["asset-backed geometry"])
+
 
 if __name__ == "__main__":
     unittest.main()

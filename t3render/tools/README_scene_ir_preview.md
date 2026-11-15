@@ -1,12 +1,15 @@
-# Offline SceneIR DX12 preview
+# SceneIR DX12 preview
 
 This diagnostic path takes geometry and transforms **only from SceneIR**. It
 temporarily uses the existing `t3render_d3d12_replay_up` executable as a DX12
-packet consumer; it does not extend the D3D8 replay. The trace supplies only
-an independently sampled camera. The offline map export remains
+packet consumer; it does not extend the D3D8 replay. The offline example below
+uses an independently sampled camera. The offline map export remains
 `source.kind=offline`, with `frame_id=null` and `camera_synchronized=false`.
 The attached camera records its runtime frame and trace fingerprint separately.
 This combination is **not a synchronized runtime scene**.
+For the asset-backed runtime-selected frame 2722, see the
+[runtime checkpoint](README_bridge_runtime_checkpoint.md); provenance remains
+the producer's assertion and the consumer carries its limitations forward.
 
 The local `scene-ir-preview-2661.png` uses the 2661 draw-8 camera, the offline
 `StaticMeshActor__1520 / INNbed1A1`, and BSP `source_index` 5, 7 and 19:

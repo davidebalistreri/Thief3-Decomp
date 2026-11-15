@@ -389,6 +389,62 @@ int main(int argc, char** argv) {
         snapshot.entries[0].address = {0x5678, true};
         snapshot.entries[0].owner_name_available = true;
         std::strcpy(snapshot.entries[0].owner_name, "synthetic\"actor");
+        if (scenario == "bridge_asset_audit") {
+            auto& asset = snapshot.target.asset;
+            asset.status = t3render::scene_bridge::AssetStatus::Candidate;
+            asset.descriptor_match = asset.local_property_found = asset.proxy_live_member = true;
+            asset.proxy_vtable_match = asset.resource_vtable_match = asset.stable = true;
+            asset.name_available = true;
+            std::strcpy(asset.name, "INNbed1A1");
+            auto& a = asset.audit;
+            a.available = true;
+            a.descriptor_table = 0x6000; a.descriptor_array = 0x6100; a.descriptor = 0x6200;
+            a.descriptor_vtable = 0x10e72e48; a.descriptor_copy = 0x10aeecc0;
+            a.descriptor_count = 1; a.descriptor_size = 4; a.property_hash = 0x2000;
+            a.bucket_head = 3; a.slot_index = 3; a.slot_id_flags = 0x802b; a.slot_value = 0x3000;
+            a.chain_count = 1; a.chain[0] = {3, 0, 0x802b, 0x3000};
+            a.objects_data = 0x8000; a.objects_count = 3; a.objects_capacity = 3; a.object_index = 2;
+            a.proxy = 0x3000; a.proxy_vtable = 0x10e4dfa8; a.proxy_index = 2;
+            a.resource = 0x4000; a.resource_vtable = 0x10ec0e20;
+            a.name_address = 0x5004; a.name_length = 9;
+            auto& node = snapshot.target.mesh_node;
+            node.pool_scan_complete = true; node.nodes_scanned = 1; node.occurrences = 1;
+            node.address = {0x9000, true}; node.vtable = {0x10e49d14, true}; node.name_address = {0x9100, true};
+            node.name_available = node.counts_available = node.bounds_available = node.stable = true;
+            std::strcpy(node.name, "INNbed1A1");
+            node.vertex_count = 257; node.triangle_count = 236; node.index_count = 708; node.section_count = 3;
+            const float bounds[6] = {-1, -2, -3, 1, 2, 3};
+            std::memcpy(node.bounds_bits, bounds, sizeof(bounds));
+            node.section_array = {0x9200, true}; node.instance_materials = {0x9300, true};
+            node.sections_available = true; node.sections_copied = 3;
+            const char* names[] = {"BF", "GENgoodnessA_D", "GENiFABRICwoolA2_D"};
+            const unsigned first[] = {0, 24, 504}, count[] = {24, 480, 204};
+            for (unsigned i = 0; i < 3; ++i) {
+                auto& section = node.sections[i];
+                section.name_available = section.material_name_available = true;
+                std::strcpy(section.name, "Default"); std::strcpy(section.material_name, names[i]);
+                section.vertex_count = 257; section.first_index = first[i]; section.index_count = count[i];
+                section.triangles = count[i] / 3;
+            }
+            snapshot.count = {2, true}; snapshot.entries_attempted = 2;
+            snapshot.entries[1].list_index = 1;
+            snapshot.entries[1].address = {0x171b0, true};
+            snapshot.entries[1].vtable = {0x10e4a668, true}; snapshot.entries[1].type = {5, true};
+            auto& bsp = snapshot.bsp;
+            bsp.renderer = {0x15000, true}; bsp.source = {0x16000, true}; bsp.blocks = {0x17004, true};
+            bsp.block_count = 2; bsp.type5_seen = bsp.member_count = bsp.candidates_copied = 1; bsp.source_stable = true;
+            auto& block = bsp.candidates[0];
+            block.list_index = block.source_index = 1; block.address = {0x171b0, true};
+            block.metadata_available = block.stable = true;
+            block.vertex_count = 3; block.triangle_count = 1; block.index_count = 3; block.section_count = 1;
+            std::memcpy(block.bounds_bits, bounds, sizeof(bounds));
+            const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+            std::memcpy(block.transform_bits, identity, sizeof(identity));
+            block.section_array = {0x18004, true}; block.sections_available = true; block.sections_copied = 1;
+            block.sections[0].material_name_available = true;
+            std::strcpy(block.sections[0].material_name, "wall");
+            block.sections[0].triangles = 1; block.sections[0].vertex_count = block.sections[0].index_count = 3;
+        }
         if (install_failure) {
             if (t3render::CaptureBridgeBegin(fake_thread_id)) return 8;
             SimulatedDraw(scene_device, draw);

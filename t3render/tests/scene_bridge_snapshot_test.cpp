@@ -105,6 +105,14 @@ int main() {
     complete.region(0x7000, 128); complete.region(0x9000, 32);
     complete.region(0xc000, 128); complete.region(0xd000, 32); complete.region(0xe000, 32);
     complete.region(0x6000, 16); complete.region(0x6100, 0x100); complete.region(0x6200, 0x40);
+    complete.region(0x3100, 16); complete.region(0xf000, 0xc0); complete.region(0xf100, 32);
+    complete.region(0x10f31bb8, 12);
+    complete.region(0x11000, 40); complete.region(0x12000, 3 * 36);
+    complete.region(0x13000, 32); complete.region(0x14000, 32);
+    complete.region(0x14100, 32); complete.region(0x14200, 32);
+    complete.region(0x10f2c740, 4); complete.region(0x15000, 32); complete.region(0x16000, 0x58);
+    complete.region(0x17000, 4 + 2 * 0x1ac); complete.region(0x18000, 4 + 2 * 36);
+    complete.region(0x19000, 32); complete.region(0x19100, 32);
     complete.region(0x10f3eda4, 4); complete.region(0x10e72e48 + 0xb4, 4);
     complete.region(0x10f7b5c8 + 3 * 8, 8);
     complete.put<std::uint32_t>(0x10f3e4a4, 4); complete.put<std::uint32_t>(0x10f3e4a8, 4);
@@ -124,12 +132,104 @@ int main() {
     complete.put<std::uint32_t>(0xe000, sizeof(mesh_name) - 1);
     for (std::size_t i = 0; i < sizeof(mesh_name); ++i)
         complete.put<std::uint8_t>(0xe004 + static_cast<std::uint32_t>(i), mesh_name[i]);
+    complete.put<std::uint32_t>(0x3108, 0xf000);
+    complete.put<std::uint32_t>(0x10f31bb8, 0xf000); complete.put<std::uint32_t>(0x10f31bbc, 0xf000);
+    complete.put<std::uint32_t>(0x10f31bc0, 1); complete.put<std::uint32_t>(0xf000, 0x10e49d14);
+    complete.put<std::uint32_t>(0xf004, 257); complete.put<std::uint32_t>(0xf008, 236);
+    complete.put<std::uint32_t>(0xf00c, 708); complete.put<std::uint32_t>(0xf010, 3);
+    for (std::uint32_t i = 0; i < 6; ++i) complete.put<float>(0xf074 + i * 4, static_cast<float>(i));
+    complete.put<std::uint32_t>(0xf0b0, 0xf100);
+    complete.put<std::uint32_t>(0x3104, 0x11004); complete.put<std::uint32_t>(0x11000, 3);
+    complete.put<std::uint32_t>(0xf030, 0x12000);
+    const auto put_string = [&](std::uint32_t address, const char* text) {
+        const auto length = static_cast<std::uint32_t>(std::strlen(text));
+        complete.put<std::uint32_t>(address - 4, length);
+        for (std::uint32_t i = 0; i <= length; ++i) complete.put<std::uint8_t>(address + i, text[i]);
+    };
+    put_string(0x13004, "Default"); put_string(0x14004, "BF");
+    put_string(0x14104, "GENgoodnessA_D"); put_string(0x14204, "GENiFABRICwoolA2_D");
+    const std::uint32_t starts[] = {0, 24, 504}, sizes[] = {24, 480, 204};
+    const std::uint32_t names[] = {0x14004, 0x14104, 0x14204};
+    for (std::uint32_t i = 0; i < 3; ++i) {
+        const auto section = 0x12000u + i * 36;
+        complete.put<std::uint32_t>(section, 0x13004);
+        complete.put<std::uint32_t>(section + 12, sizes[i] / 3);
+        complete.put<std::uint32_t>(section + 20, 257);
+        complete.put<std::uint32_t>(section + 24, starts[i]);
+        complete.put<std::uint32_t>(section + 28, sizes[i]);
+        complete.put<std::uint32_t>(0x11004 + i * 12, names[i]);
+    }
+    constexpr std::uint32_t bsp_block = 0x17004 + 0x1ac;
+    complete.put<std::uint32_t>(0x1050, 2); complete.put<std::uint32_t>(0x2004, bsp_block);
+    complete.put<std::uint32_t>(0x10f2c740, 0x15000); complete.put<std::uint32_t>(0x1500c, 0x16000);
+    complete.put<std::uint32_t>(0x16000, 0x50534256); complete.put<std::uint32_t>(0x1600c, 2);
+    complete.put<std::uint32_t>(0x16054, 0x17004); complete.put<std::uint32_t>(0x17000, 2);
+    complete.put<std::uint32_t>(bsp_block, 0x10e4a668); complete.put<std::uint32_t>(bsp_block + 0x44, 5);
+    complete.put<std::uint32_t>(bsp_block + 0xe4, 60); complete.put<std::uint32_t>(bsp_block + 0xe8, 38);
+    complete.put<std::uint32_t>(bsp_block + 0xec, 114); complete.put<std::uint32_t>(bsp_block + 0xf0, 2);
+    for (std::uint32_t i = 0; i < 16; ++i) complete.put<float>(bsp_block + 4 + i * 4, i % 5 == 0 ? 1.f : 0.f);
+    for (std::uint32_t i = 0; i < 6; ++i) complete.put<float>(bsp_block + 0x17c + i * 4, static_cast<float>(i));
+    complete.put<std::uint32_t>(bsp_block + 0x130, 0x18004); complete.put<std::uint32_t>(0x18000, 2);
+    put_string(0x19004, "wall"); put_string(0x19104, "floor");
+    for (std::uint32_t i = 0; i < 2; ++i) {
+        const auto section = 0x18004u + i * 36;
+        complete.put<std::uint32_t>(section, i ? 0x19104 : 0x19004);
+        complete.put<std::uint32_t>(section + 12, 19); complete.put<std::uint32_t>(section + 20, 60);
+        complete.put<std::uint32_t>(section + 24, i * 57); complete.put<std::uint32_t>(section + 28, 57);
+    }
+    for (std::size_t i = 0; i < sizeof(mesh_name); ++i)
+        complete.put<std::uint8_t>(0xf100 + static_cast<std::uint32_t>(i), mesh_name[i]);
     reader.context = &complete;
     sample = SampleProbe(reader, 42, 0x1000, 0);
     assert(sample.target.object_scan_complete && sample.target.list_scan_complete && sample.target.entry_available);
     assert(sample.target.owner_class.stable && sample.target.owner_class.name_available);
     assert(sample.target.asset.status == AssetStatus::Candidate && sample.target.asset.stable);
     assert(std::strcmp(sample.target.asset.name, mesh_name) == 0);
+    assert(sample.target.mesh_node.pool_scan_complete && sample.target.mesh_node.nodes_scanned == 1 &&
+           sample.target.mesh_node.occurrences == 1 && sample.target.mesh_node.stable);
+    assert(sample.target.mesh_node.vertex_count == 257 && sample.target.mesh_node.index_count == 708 &&
+           sample.target.mesh_node.triangle_count == 236 && sample.target.mesh_node.section_count == 3 &&
+           std::strcmp(sample.target.mesh_node.name, mesh_name) == 0);
+    assert(sample.target.mesh_node.sections_available && sample.target.mesh_node.sections_copied == 3 &&
+           std::strcmp(sample.target.mesh_node.sections[1].name, "Default") == 0 &&
+           std::strcmp(sample.target.mesh_node.sections[1].material_name, "GENgoodnessA_D") == 0 &&
+           sample.target.mesh_node.sections[1].first_index == 24 &&
+           sample.target.mesh_node.sections[1].index_count == 480);
+    assert(sample.bsp.source_stable && sample.bsp.block_count == 2 && sample.bsp.type5_seen == 1 &&
+           sample.bsp.member_count == 1 && sample.bsp.candidates_copied == 1);
+    const auto& bsp = sample.bsp.candidates[0];
+    assert(bsp.stable && bsp.source_index == 1 && bsp.list_index == 1 &&
+           bsp.vertex_count == 60 && bsp.index_count == 114 && bsp.sections_available &&
+           bsp.sections_copied == 2 && std::strcmp(bsp.sections[0].material_name, "wall") == 0);
+    complete.put<std::uint32_t>(0x17000, 1);
+    sample = SampleProbe(reader, 42, 0x1000, 0);
+    assert(!sample.bsp.source_stable && sample.bsp.candidates_copied == 0);
+    complete.put<std::uint32_t>(0x17000, 2);
+    complete.put<std::uint32_t>(0x11000, 2);
+    sample = SampleProbe(reader, 42, 0x1000, 0);
+    assert(sample.target.mesh_node.stable && !sample.target.mesh_node.sections_available);
+    complete.put<std::uint32_t>(0x11000, 3);
+    complete.put<std::uint32_t>(0x12000 + 24, 700);
+    sample = SampleProbe(reader, 42, 0x1000, 0);
+    assert(sample.target.mesh_node.stable && !sample.target.mesh_node.sections_available);
+    complete.put<std::uint32_t>(0x12000 + 24, 0);
+    complete.put<std::uint32_t>(0xf000, 0);
+    sample = SampleProbe(reader, 42, 0x1000, 0);
+    assert(sample.target.mesh_node.pool_scan_complete && !sample.target.mesh_node.stable);
+    complete.put<std::uint32_t>(0xf000, 0x10e49d14);
+    complete.put<std::uint32_t>(0x10f31bc0, 8193);
+    sample = SampleProbe(reader, 42, 0x1000, 0);
+    assert(sample.target.mesh_node.pool_scan_truncated && !sample.target.mesh_node.stable);
+    complete.put<std::uint32_t>(0x10f31bc0, 1);
+    complete.put<std::uint32_t>(0xf010, 17);
+    sample = SampleProbe(reader, 42, 0x1000, 0);
+    assert(sample.target.mesh_node.stable && sample.target.mesh_node.sections_truncated &&
+           !sample.target.mesh_node.sections_available);
+    complete.put<std::uint32_t>(0xf010, 3);
+    complete.put<float>(0xf074, 5.0f);
+    sample = SampleProbe(reader, 42, 0x1000, 0);
+    assert(!sample.target.mesh_node.stable);
+    complete.put<float>(0xf074, 0.0f);
     complete.put<std::uint32_t>(0x623c, 0x400000);
     sample = SampleProbe(reader, 42, 0x1000, 0);
     assert(sample.target.asset.status == AssetStatus::DescriptorUnsupported && !sample.target.asset.name_available);

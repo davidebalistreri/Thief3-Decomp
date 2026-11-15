@@ -329,6 +329,67 @@ void BridgeAsset(std::ostream& out, const scene_bridge::AssetCandidate& asset) {
         << (asset.resource_vtable_match ? "true" : "false") << ",\"stable\":"
         << (asset.stable ? "true" : "false") << ",\"name\":";
     BridgeText(out, asset.name, sizeof(asset.name), asset.name_available);
+    out << ",\"audit\":";
+    if (!asset.audit.available) out << "null";
+    else {
+        const auto& a = asset.audit;
+        out << "{\"descriptor_table\":" << a.descriptor_table << ",\"descriptor_array\":" << a.descriptor_array
+            << ",\"descriptor\":" << a.descriptor << ",\"descriptor_vtable\":" << a.descriptor_vtable
+            << ",\"descriptor_copy\":" << a.descriptor_copy << ",\"descriptor_count\":" << a.descriptor_count
+            << ",\"descriptor_size\":" << a.descriptor_size << ",\"descriptor_flags\":" << a.descriptor_flags
+            << ",\"owner_flags\":" << a.owner_flags << ",\"property_hash\":" << a.property_hash
+            << ",\"bucket_head\":" << a.bucket_head << ",\"slot_index\":" << a.slot_index
+            << ",\"slot_next\":" << a.slot_next << ",\"slot_id_flags\":" << a.slot_id_flags
+            << ",\"slot_value\":" << a.slot_value << ",\"chain\":[";
+        for (std::size_t i = 0; i < a.chain_count; ++i) {
+            if (i) out << ',';
+            const auto& slot = a.chain[i];
+            out << "{\"index\":" << slot.index << ",\"next\":" << slot.next
+                << ",\"id_flags\":" << slot.id_flags << ",\"value\":" << slot.value << '}';
+        }
+        out << "],\"objects_data\":" << a.objects_data
+            << ",\"objects_count\":" << a.objects_count << ",\"objects_capacity\":" << a.objects_capacity
+            << ",\"object_index\":" << a.object_index << ",\"proxy\":" << a.proxy
+            << ",\"proxy_vtable\":" << a.proxy_vtable << ",\"proxy_index\":" << a.proxy_index
+            << ",\"resource\":" << a.resource
+            << ",\"resource_vtable\":" << a.resource_vtable << ",\"name_address\":" << a.name_address
+            << ",\"name_length\":" << a.name_length << '}';
+    }
+    out << '}';
+}
+
+void BridgeMeshNode(std::ostream& out, const scene_bridge::ProbeMeshNode& node) {
+    out << "{\"pool_scan_complete\":" << (node.pool_scan_complete ? "true" : "false")
+        << ",\"pool_scan_truncated\":" << (node.pool_scan_truncated ? "true" : "false")
+        << ",\"nodes_scanned\":" << node.nodes_scanned << ",\"occurrences\":" << node.occurrences
+        << ",\"address\":"; BridgeValue(out, node.address);
+    out << ",\"vtable\":"; BridgeValue(out, node.vtable);
+    out << ",\"name_address\":"; BridgeValue(out, node.name_address);
+    out << ",\"name\":"; BridgeText(out, node.name, sizeof(node.name), node.name_available);
+    out << ",\"counts\":";
+    if (!node.counts_available) out << "null";
+    else out << "{\"vertices\":" << node.vertex_count << ",\"triangles\":" << node.triangle_count
+             << ",\"indices\":" << node.index_count << ",\"sections\":" << node.section_count << '}';
+    out << ",\"bounds_bits\":"; BridgeBits(out, node.bounds_bits, 6, node.bounds_available);
+    out << ",\"stable\":" << (node.stable ? "true" : "false") << ",\"section_array\":";
+    BridgeValue(out, node.section_array);
+    out << ",\"instance_materials\":"; BridgeValue(out, node.instance_materials);
+    out << ",\"sections_truncated\":" << (node.sections_truncated ? "true" : "false") << ",\"sections\":";
+    if (!node.sections_available) out << "null";
+    else {
+        out << '[';
+        for (std::uint32_t i = 0; i < node.sections_copied; ++i) {
+            if (i) out << ',';
+            const auto& section = node.sections[i];
+            out << "{\"name\":"; BridgeText(out, section.name, sizeof(section.name), section.name_available);
+            out << ",\"material_name\":";
+            BridgeText(out, section.material_name, sizeof(section.material_name), section.material_name_available);
+            out << ",\"triangles\":" << section.triangles << ",\"first_vertex\":" << section.first_vertex
+                << ",\"vertex_count\":" << section.vertex_count << ",\"first_index\":" << section.first_index
+                << ",\"index_count\":" << section.index_count << ",\"unknown\":" << section.unknown << '}';
+        }
+        out << ']';
+    }
     out << '}';
 }
 
@@ -348,7 +409,48 @@ void BridgeTarget(std::ostream& out, const scene_bridge::ProbeTarget& target) {
         if (i) out << ',';
         BridgeNamedObject(out, target.outer[i]);
     }
-    out << "],\"asset\":"; BridgeAsset(out, target.asset); out << '}';
+    out << "],\"asset\":"; BridgeAsset(out, target.asset);
+    out << ",\"mesh_node\":"; BridgeMeshNode(out, target.mesh_node); out << '}';
+}
+
+void BridgeBsp(std::ostream& out, const scene_bridge::ProbeBsp& bsp) {
+    out << "{\"renderer\":"; BridgeValue(out, bsp.renderer);
+    out << ",\"source\":"; BridgeValue(out, bsp.source);
+    out << ",\"blocks\":"; BridgeValue(out, bsp.blocks);
+    out << ",\"block_count\":" << bsp.block_count << ",\"type5_seen\":" << bsp.type5_seen
+        << ",\"member_count\":" << bsp.member_count << ",\"source_stable\":" << (bsp.source_stable ? "true" : "false")
+        << ",\"candidates_truncated\":" << (bsp.candidates_truncated ? "true" : "false") << ",\"candidates\":[";
+    for (std::uint32_t i = 0; i < bsp.candidates_copied; ++i) {
+        if (i) out << ',';
+        const auto& block = bsp.candidates[i];
+        out << "{\"list_index\":" << block.list_index << ",\"source_index\":" << block.source_index << ",\"address\":";
+        BridgeValue(out, block.address);
+        out << ",\"counts\":";
+        if (!block.metadata_available) out << "null";
+        else out << "{\"vertices\":" << block.vertex_count << ",\"triangles\":" << block.triangle_count
+                 << ",\"indices\":" << block.index_count << ",\"sections\":" << block.section_count << '}';
+        out << ",\"bounds_bits\":"; BridgeBits(out, block.bounds_bits, 6, block.metadata_available);
+        out << ",\"transform_bits\":"; BridgeBits(out, block.transform_bits, 16, block.metadata_available);
+        out << ",\"stable\":" << (block.stable ? "true" : "false") << ",\"section_array\":";
+        BridgeValue(out, block.section_array);
+        out << ",\"sections_truncated\":" << (block.sections_truncated ? "true" : "false") << ",\"sections\":";
+        if (!block.sections_available) out << "null";
+        else {
+            out << '[';
+            for (std::uint32_t j = 0; j < block.sections_copied; ++j) {
+                if (j) out << ',';
+                const auto& section = block.sections[j];
+                out << "{\"material_name\":";
+                BridgeText(out, section.material_name, sizeof(section.material_name), section.material_name_available);
+                out << ",\"triangles\":" << section.triangles << ",\"first_vertex\":" << section.first_vertex
+                    << ",\"vertex_count\":" << section.vertex_count << ",\"first_index\":" << section.first_index
+                    << ",\"index_count\":" << section.index_count << ",\"unknown\":" << section.unknown << '}';
+            }
+            out << ']';
+        }
+        out << '}';
+    }
+    out << "]}";
 }
 
 template<typename T> struct ComRef {
@@ -447,6 +549,10 @@ bool Open(CaptureState& s) {
                                 << ",\"target_object_limit\":" << scene_bridge::kMaxTargetObjects
                                 << ",\"target_list_limit\":" << scene_bridge::kMaxTargetListEntries
                                 << ",\"reentry_detection\":\"saturating_counter_v1\""
+                                << ",\"asset_audit\":\"local_property_v1\""
+                                << ",\"mesh_node\":\"actor_node_v1\""
+                                << ",\"mesh_sections\":\"actor_materials_v1\""
+                                << ",\"bsp_candidates\":\"vbsp_array_v1\""
                                 << ",\"synchronization\":\"present_interval_and_thread_only\"}";
     if (s.experimental_facade) {
         out << ",\"experimental_facade\":{\"enabled\":true,\"identity_verified\":false,\"concurrency_verified\":false";
@@ -1612,8 +1718,19 @@ void CaptureBridgeEnd(std::uint64_t ticket, const scene_bridge::ProbeSnapshot& s
         }
         if (s.bridge_present_ticket) s.bridge_present_overlap = true;
         if (!s.pending_operations.empty()) s.bridge_operation_overlap = true;
-        if (snapshot.entries_attempted > scene_bridge::kMaxProbeEntries || snapshot.target.outer_count > 4) {
+        if (snapshot.entries_attempted > scene_bridge::kMaxProbeEntries || snapshot.target.outer_count > 4 ||
+            snapshot.bsp.candidates_copied > scene_bridge::kMaxProbeBspBlocks ||
+            (snapshot.target.asset.audit.available &&
+             snapshot.target.asset.audit.chain_count > scene_bridge::kMaxAssetAuditSlots) ||
+            (snapshot.target.mesh_node.sections_available &&
+             snapshot.target.mesh_node.sections_copied > scene_bridge::kMaxMeshNodeSections)) {
             ++s.bridge_dropped; return;
+        }
+        for (std::size_t i = 0; i < snapshot.bsp.candidates_copied; ++i) {
+            const auto& block = snapshot.bsp.candidates[i];
+            if (block.sections_available && block.sections_copied > scene_bridge::kMaxProbeBspSections) {
+                ++s.bridge_dropped; return;
+            }
         }
         auto out = Json();
         out << "{\"event\":\"scene_bridge_observation\",\"frame\":" << observation.frame
@@ -1636,7 +1753,8 @@ void CaptureBridgeEnd(std::uint64_t ticket, const scene_bridge::ProbeSnapshot& s
             if (i) out << ',';
             BridgeEntry(out, snapshot.entries[i]);
         }
-        out << "],\"target\":"; BridgeTarget(out, snapshot.target); out << "}\n";
+        out << "],\"target\":"; BridgeTarget(out, snapshot.target);
+        out << ",\"bsp\":"; BridgeBsp(out, snapshot.bsp); out << "}\n";
         if (Write(s, out.str())) ++s.bridge_completed;
     } catch (...) { Fail(); }
 }

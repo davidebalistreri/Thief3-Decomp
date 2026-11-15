@@ -3,7 +3,8 @@
 La sezione iniziale descrive la ricerca statica del 14 novembre 2026, non uno
 snapshot runtime né una Scene IR. La successiva
 [osservazione runtime](#probe-runtime-bedroom-frame-2661) documenta il probe
-e i suoi limiti. Il target è il
+e i suoi limiti; il [frame 2722](#probe-runtime-e-snapshot-bedroom-frame-2722)
+contiene la prima selezione runtime con geometria asset-backed. Il target è il
 `T3Main.exe` Steam x86 descritto in [target.md](../docs/target.md), SHA-256
 `09e0be902062c53cbb1736cffa1bd3ec883bd5e864f8e7f3f99bc0d06f6ad0f8`.
 I risultati REA sotto usano Hopper; sono statici e non attestano l'esecuzione.
@@ -384,3 +385,109 @@ python3 -B t3render/tools/correlate_trace_actor.py \
   SouthQuarter1_int1 --game-dir "$T3RENDER_GAME_DIR" \
   --actor StaticMeshActor__1520 --frame 2661
 ```
+
+## Nodo mesh e prossima osservazione
+
+Nel binario verificato, il percorso di `0x1097a990` passa il nodo ottenuto
+tramite `0x10932e00` a `0x10dcaf90`; quest'ultima lo conserva a
+`elemento+0x108`. Il nodo appartiene al pool `0x10f31bb8`, con nome a `+0xb0`
+e vtable costruita a `0x10e49d14`. L'analisi statica di `0x10944f00` e
+`0x10944a80` collega i campi del nodo `+0x04/+0x08/+0x0c/+0x10` ai conteggi
+vertici/triangoli/indici/sezioni del render blob, e `+0x74..+0x88` ai bounds.
+Le relative evidenze sono `ev_bc56dba55e2ccd81479f5f7a36bae6870d07ce58f58ad459048657dc143f754b`,
+`ev_474aa90122148530942929d5d517ea2a5a7aad28a1a1f123d8a56bf0ff460175`,
+`ev_4fde95416af3a2feef605f2aaaf90b8d477c8d03ad3786fa2836f38a0abd870a`,
+`ev_426f8a79dc5e9c8a0fe652780b254a7227cb44cc6a5df394d298e809bbf6285b`.
+
+Il nodo riferisce le sezioni a `+0x30` con stride `0x24`; `0x10dcaf90`
+inizializza un array di materiali per istanza a `elemento+0x104` e
+`0x10dcae20` ne aggiorna i nomi. La lettura proposta controlla appartenenza
+al pool, limiti, backlink, vtable, stringhe, intervalli e riletture. La copia
+è limitata a 16 sezioni; dati mancanti o troncati rimangono sconosciuti.
+L'evidenza statica delle assegnazioni materiali è
+`ev_7dc9fdf1925b16214d47ac728b8d009feb5188a56983afc2d1bc586d8b30b00a`.
+Queste erano le garanzie disponibili prima della cattura successiva: la
+verifica sul salvataggio è descritta nella sezione del frame 2722.
+
+Per il BSP, `0x10a23930` passa `*0x10f2c740+0x0c` a `0x10947fc0`, che
+verifica la firma `VBSP`; `0x10947670` costruisce un array di oggetti
+`Class_10E4A668` con stride `0x1ac`, salvandolo a `VBSP+0x54`. La lista del
+vecchio frame 2661 contiene nove voci di tipo 5 e vtable `0x10e4a668`, ma
+quella cattura non ha controllato che appartenessero a tale array. Il nuovo
+probe verifica questa appartenenza direttamente, campiona conteggi, matrice,
+bounds e sezioni dei membri osservati, e limita la copia a 16 blocchi e 16
+sezioni per blocco. Gli indici runtime restano candidati rispetto all'ordine
+euristico del parser offline, non identità dimostrate. Evidenze:
+`ev_08d510ab1dcbdab31547d4f0c050bebe2b69c6350daa55ad17671da762f7123b`,
+`ev_30ca74e6783cac94c59286a61615a234b60b9dd8f2ce2deeb73e01577bb1778b`,
+`ev_782dfbb3c9e62cea95c4155c7f94e0e056282f10973f2c2070ce3bb4b72239bb`.
+
+Il probe registra anche la catena bounded della proprietà locale, compresi
+descrittore, slot e collegamenti, nella trace diagnostica; gli indirizzi
+transitori non sono identificativi Scene IR. Il controllo della finestra per
+uno snapshot richiede esplicitamente il rilevamento di ricorsione: nel frame
+storico 2661 tale controllo è `unknown`. Il nuovo
+[confronto con la fixture](tools/README_bridge_runtime_checkpoint.md)
+riporta separatamente questa limitazione, uguaglianza numerica/bit della
+trasformazione e i dati mesh o BSP mancanti. Non produce uno snapshot runtime
+né considera validato il bridge sulla sola base di nomi o conteggi.
+
+## Probe runtime e snapshot bedroom: frame 2722
+
+La cattura `scene-bridge-runtime-20261115-001` ha SHA-256
+`d926202c7dbdcd8c8717a6e901d8a321d255fe97b2d9715ef291493b95734f37`;
+lo screenshot `bedroom.jsonl.frame-2722.png` è stato acquisito prima dello
+stesso `Present`. L'osservazione di `0x10926800` è nel pass 0, tra due
+`Present` osservate sul thread 1348, senza Reset, overlap o ricorsione
+rilevati. La view derivata e la projection coincidono bit per bit con il draw
+8. Il viewport della camera ha depth `0..1`, quello del draw `0..0.5`.
+L'inverso della view dà una posizione circa `[3571.6482,1576.4877,353.8444]`.
+
+Una sola voce della lista è collegata tramite membership e backlink a
+`StaticMeshActor__1520`; l'audit della proprietà `StaticMesh` è coerente e il
+nodo collegato porta il nome `innbed1a1`. La matrice runtime ha traslazione
+`[3398,1513.9998779,272]` e coincide numericamente con la fixture, a parte
+il segno di alcuni zeri. Conteggi 257 vertici/708 indici/3 sezioni, bounds e
+materiali `BF`, `GENgoodnessA_D`, `GENiFABRICwoolA2_D` coincidono. Non è
+stato osservato un ID risorsa runtime qualificato né il nome della skin.
+Per le due sezioni visibili del letto, i draw 8/9 successivi all'osservazione
+hanno posizioni, UV e indici identici all'asset nelle shadow dei lock; ciò
+non dimostra che i draw siano nel pass del probe, che l'attore osservato li abbia emessi, né
+che il contenuto inviato alla GPU coincida con la shadow.
+
+Nove voci della lista appartengono all'array runtime `VBSP`; il confronto
+incrocia **tutti** i candidati stabili con tutti i 45 blocchi offline, senza
+assumere identici gli indici. I tre confronti seguenti sono univoci per
+conteggi, bounds, sezioni, materiali, intervalli di indici e contenimento degli
+indici negli intervalli di vertici osservati. SceneIR non conserva gli
+intervalli originali di vertici: il contenimento non è un confronto esatto
+di quegli intervalli. Le sezioni hanno anche VB/IB delle shadow identici al
+GMP nello stesso frame e thread, con la stessa ultima osservazione del probe:
+
+| Indice VBSP runtime | Indice scanner offline | Draw delle due sezioni |
+|---|---|---|
+| 7 | 5 | 5, 6 |
+| 9 | 7 | 62, 63 |
+| 21 | 19 | 45, 46 |
+
+Questo è un matching per metadati più confronto di contenuto indipendente,
+non una prova del collegamento diretto tra i payload e le voci VBSP. I limiti
+di scansione, i campi mancanti e le corrispondenze multiple impediscono una
+selezione univoca nel produttore.
+
+Il produttore [runtime snapshot](tools/build_bridge_runtime_snapshot.py)
+usa la selezione, camera e transform osservate dal probe; usa invece geometria
+e ID della fixture offline, solo dopo i confronti sopra. Emette
+`source.kind=runtime`, frame e fingerprint della trace, e un manifest con la
+provenienza per componente, i draw e la mappa degli indici. La sezione `BF`
+non è stata confrontata ed è esclusa dalla preview; anche skin, ID qualificato
+runtime, luci e visibilità completa rimangono sconosciuti. La procedura è in
+[README_bridge_runtime_checkpoint.md](tools/README_bridge_runtime_checkpoint.md).
+
+Il consumer DX12 ha renderizzato 340 triangoli dello snapshot in
+`build/t3render-offline/bedroom-runtime-2722.png`; il confronto locale
+`bedroom-runtime-comparison-2722.png` accosta il D3D8 sincronizzato e il
+render diagnostico. Letto e pareti sono riconoscibili, ma la scena è parziale,
+con colori piatti, culling/depth approssimati e senza illuminazione o texture.
+Non si afferma parità geometrica completa o validazione definitiva del bridge:
+il legame diretto fra risorsa runtime, payload e draw resta da dimostrare.

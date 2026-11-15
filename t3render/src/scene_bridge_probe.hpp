@@ -12,6 +12,10 @@ namespace t3render::scene_bridge {
 constexpr std::size_t kMaxProbeEntries = 128;
 constexpr std::size_t kMaxTargetObjects = 65536;
 constexpr std::size_t kMaxTargetListEntries = 8192;
+constexpr std::size_t kMaxMeshNodeListEntries = 8192;
+constexpr std::size_t kMaxMeshNodeSections = 16;
+constexpr std::size_t kMaxProbeBspBlocks = 16;
+constexpr std::size_t kMaxProbeBspSections = 16;
 
 struct ProbeValue {
     std::uint32_t value = 0;
@@ -67,6 +71,57 @@ struct ProbeNamedObject {
     char name[64]{};
 };
 
+// Runtime mesh metadata, sampled through the target Flesh element. This is
+// diagnostic only: no COM objects, geometry payloads or durable IDs.
+struct ProbeMeshSection {
+    bool name_available = false, material_name_available = false;
+    char name[128]{}, material_name[128]{};
+    std::uint32_t triangles = 0, first_vertex = 0, vertex_count = 0;
+    std::uint32_t first_index = 0, index_count = 0, unknown = 0;
+};
+
+struct ProbeMeshNode {
+    bool pool_scan_complete = false;
+    bool pool_scan_truncated = false;
+    std::uint32_t nodes_scanned = 0, occurrences = 0;
+    ProbeValue address, vtable, name_address;
+    bool name_available = false;
+    char name[128]{};
+    bool counts_available = false, bounds_available = false, stable = false;
+    std::uint32_t vertex_count = 0, triangle_count = 0, index_count = 0, section_count = 0;
+    std::uint32_t bounds_bits[6]{};
+    ProbeValue section_array, instance_materials;
+    bool sections_available = false, sections_truncated = false;
+    std::uint32_t sections_copied = 0;
+    ProbeMeshSection sections[kMaxMeshNodeSections]{};
+};
+
+struct ProbeBspSection {
+    bool material_name_available = false;
+    char material_name[128]{};
+    std::uint32_t triangles = 0, first_vertex = 0, vertex_count = 0;
+    std::uint32_t first_index = 0, index_count = 0, unknown = 0;
+};
+
+struct ProbeBspBlock {
+    std::uint32_t list_index = 0, source_index = 0;
+    ProbeValue address;
+    bool metadata_available = false, stable = false;
+    std::uint32_t vertex_count = 0, triangle_count = 0, index_count = 0, section_count = 0;
+    std::uint32_t bounds_bits[6]{}, transform_bits[16]{};
+    ProbeValue section_array;
+    bool sections_available = false, sections_truncated = false;
+    std::uint32_t sections_copied = 0;
+    ProbeBspSection sections[kMaxProbeBspSections]{};
+};
+
+struct ProbeBsp {
+    ProbeValue renderer, source, blocks;
+    std::uint32_t block_count = 0, type5_seen = 0, member_count = 0, candidates_copied = 0;
+    bool source_stable = false, candidates_truncated = false;
+    ProbeBspBlock candidates[kMaxProbeBspBlocks]{};
+};
+
 struct ProbeTarget {
     bool object_scan_complete = false;
     bool list_scan_complete = false;
@@ -83,6 +138,7 @@ struct ProbeTarget {
     std::uint32_t outer_count = 0;
     bool outer_truncated = false;
     AssetCandidate asset; // target only; candidate until runtime evidence is corroborated
+    ProbeMeshNode mesh_node;
 };
 
 struct ProbeSnapshot {
@@ -102,6 +158,7 @@ struct ProbeSnapshot {
     bool entries_truncated = false;
     ProbeEntry entries[kMaxProbeEntries]{};
     ProbeTarget target;  // targeted search of StaticMeshActor__1520, independently bounded
+    ProbeBsp bsp;        // candidates proven members of the current VBSP array
 };
 
 // Begin marks the entire sampling interval. Zero declines the observation;

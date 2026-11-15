@@ -122,6 +122,16 @@ def synchronized(frame_result, frame_end, draw_result):
             hresult_succeeded(draw_result.get("hr")) is True)
 
 
+def snapshot_window_synchronized(frame_result, frame_end, draw_result):
+    """Require an explicitly observed absence of reentry for a new snapshot.
+
+    Historical traces can still establish an observed Present interval, but
+    their missing reentry marker cannot establish a complete probe window.
+    """
+    return (synchronized(frame_result, frame_end, draw_result) and
+            frame_result.get("probe_reentered") is False)
+
+
 def pick_observation(records, draw_id):
     """Last observed probe before a draw; this is not a call-stack proof."""
     last = None
@@ -152,16 +162,21 @@ def analyze(records, frame, draw_id, expected_pass):
     observation = pick_observation(records, draw_id) if draw else None
     result = {
         "frame": frame, "draw": draw_id, "actor": TARGET_ACTOR, "requested_pass": expected_pass,
-        "present_interval": "unknown", "observation_window": "unknown", "static_caller": "unknown",
+        "present_interval": "unknown", "complete_observation_window": "unknown",
+        "observation_window": "unknown", "static_caller": "unknown",
         "pass": "unknown", "actor_membership_and_backlink": "unknown", "actor_uniqueness": "unknown",
         "actor_transform": {"location_t3_units": None, "rotation_pitch_yaw_roll_units": None,
                             "element_matrix_16": None},
         "runtime_asset": {"status": "unknown", "matches_expected_name": "unknown"},
+        "asset_property_audit": "unknown",
+        "runtime_mesh_node": {"status": "unknown"},
+        "runtime_bsp": {"status": "unknown", "candidates": []},
         "comparisons": {"camera_source_vs_draw_view": "unknown", "camera_derived_vs_draw_view": "unknown",
                         "camera_projection_vs_draw_projection": "unknown", "camera_viewport_vs_draw_viewport": "unknown",
                         "object_matrix_vs_draw_world": "unknown"},
         "actor_submitted_draw": "unknown",
         "limitations": ["The Present interval and temporal order do not identify which object submitted the draw.",
+                        "A capture without explicit reentry detection cannot prove a complete observation window.",
                         "The source matrix's meaning is unverified; camera+0xe4 is used as a D3D view in one matched path.",
                         "Repeated reads do not exclude concurrent mutation or address reuse.",
                         "The asset candidate resolves only a local property; inherited defaults are not examined."]}
@@ -169,6 +184,8 @@ def analyze(records, frame, draw_id, expected_pass):
             draw.get("thread_id") != bridge.get("draw_thread"):
         return result
     result["present_interval"] = "synchronized"
+    if snapshot_window_synchronized(bridge, end, outcome):
+        result["complete_observation_window"] = "synchronized"
     if not observation or observation.get("thread_id") != bridge.get("probe_thread"):
         return result
     result["observation_window"] = "candidate"
@@ -178,6 +195,25 @@ def analyze(records, frame, draw_id, expected_pass):
     if not uint(expected_pass) or observation.get("pass") != expected_pass or observation.get("pass_stable") is not True:
         return result
     result["pass"] = "matches"
+    bsp = observation.get("bsp")
+    if isinstance(bsp, dict) and bsp.get("source_stable") is True and \
+            trace_summary._bridge_bsp(bsp, observation.get("entries")):
+        candidates = []
+        for block in bsp["candidates"]:
+            if block["stable"]:
+                candidates.append({"list_index": block["list_index"], "source_index": block["source_index"],
+                                   "counts": block["counts"], "bounds_t3_units": decode_floats(block["bounds_bits"], 6),
+                                   "transform": decode_floats(block["transform_bits"], 16),
+                                   "sections": block["sections"]})
+        entries = observation["entries"]
+        list_complete = (observation.get("entries_truncated") is False and
+                         observation.get("entries_attempted") == observation.get("count") == len(entries) and
+                         all(uint(item.get("address"), nonzero=True) and uint(item.get("type")) and
+                             uint(item.get("vtable"), nonzero=True) for item in entries))
+        result["runtime_bsp"] = {"status": "vbsp_array_members", "candidates": candidates,
+                                 "candidates_truncated": bsp["candidates_truncated"],
+                                 "candidates_complete": (list_complete and not bsp["candidates_truncated"] and
+                                                         all(block["stable"] for block in bsp["candidates"]))}
     camera = observation.get("current_camera")
     transforms = draw.get("transforms") if isinstance(draw, dict) else None
     if isinstance(camera, dict) and camera.get("stable") is True and isinstance(transforms, dict):
@@ -223,6 +259,18 @@ def analyze(records, frame, draw_id, expected_pass):
             0 < len(asset["name"]) < 128 and all(32 <= ord(c) < 127 for c in asset["name"])):
         result["runtime_asset"] = {"status": "candidate", "name": asset["name"],
                                    "matches_expected_name": asset["name"].casefold() == TARGET_ASSET.casefold()}
+        if trace_summary._bridge_asset_audit(asset.get("audit"), asset["name"]):
+            result["asset_property_audit"] = "consistent"
+    node = target.get("mesh_node")
+    if isinstance(node, dict) and node.get("stable") is True and trace_summary._bridge_mesh_node(node):
+        node_name = node["name"]
+        asset_name = result["runtime_asset"].get("name")
+        result["runtime_mesh_node"] = {
+            "status": "candidate", "name": node_name, "counts": node["counts"],
+            "bounds_t3_units": decode_floats(node["bounds_bits"], 6),
+            "sections": node.get("sections"),
+            "name_matches_asset": node_name.lower() == asset_name.lower() if asset_name else "unknown",
+        }
     return result
 
 

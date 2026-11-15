@@ -51,6 +51,276 @@ inline bool ReadProbeBytesOffset(const ProbeReader& reader, std::uint32_t base, 
     return ProbeOffset(base, offset, address) && ReadProbe(reader, address, destination, size);
 }
 
+inline bool ReadMeshNodeName(const ProbeReader& reader, std::uint32_t address, char (&name)[128]) noexcept {
+    for (std::uint32_t i = 0; i < sizeof(name); ++i) {
+        std::uint32_t at = 0;
+        unsigned char c = 0;
+        if (!ProbeOffset(address, i, at) || !ReadProbe(reader, at, &c, 1)) return false;
+        if (!c) { name[i] = '\0'; return i != 0; }
+        if (c < 32 || c >= 127 || i + 1 == sizeof(name)) return false;
+        name[i] = static_cast<char>(c);
+    }
+    return false;
+}
+
+// cString stores a byte length immediately before its character buffer.
+// Null/empty strings are represented as unavailable, not as material names.
+inline bool ReadMeshSectionName(const ProbeReader& reader, std::uint32_t address,
+                                char (&name)[128], bool& available) noexcept {
+    available = false;
+    if (!address) return true;
+    if (address < 4) return false;
+    const auto size = ReadProbeU32(reader, address - 4);
+    if (!size.available || size.value >= sizeof(name)) return false;
+    char first[128]{}, after[128]{};
+    if (!ReadProbe(reader, address, first, size.value + 1) || first[size.value] != '\0') return false;
+    for (std::uint32_t i = 0; i < size.value; ++i)
+        if (static_cast<unsigned char>(first[i]) < 32 || static_cast<unsigned char>(first[i]) >= 127) return false;
+    const auto size_after = ReadProbeU32(reader, address - 4);
+    if (!size_after.available || size_after.value != size.value ||
+        !ReadProbe(reader, address, after, size.value + 1) || std::memcmp(first, after, size.value + 1) != 0) return false;
+    if (size.value) { std::memcpy(name, first, size.value + 1); available = true; }
+    return true;
+}
+
+inline void ReadMeshNodeSections(const ProbeReader& reader, std::uint32_t element, ProbeMeshNode& node) noexcept {
+    if (!node.stable) return;
+    if (node.section_count > kMaxMeshNodeSections) { node.sections_truncated = true; return; }
+    if (!node.section_count) { node.sections_available = true; return; }
+    node.section_array = ReadProbeOffset(reader, node.address.value, 0x30);
+    node.instance_materials = ReadProbeOffset(reader, element, 0x104);
+    if (!node.section_array.available || !node.section_array.value || !node.instance_materials.available ||
+        node.instance_materials.value < 4) return;
+    const auto material_count = ReadProbeU32(reader, node.instance_materials.value - 4);
+    if (!material_count.available || material_count.value != node.section_count) return;
+    std::uint32_t sections[kMaxMeshNodeSections][9]{}, materials[kMaxMeshNodeSections][3]{};
+    std::uint32_t sections_after[kMaxMeshNodeSections][9]{}, materials_after[kMaxMeshNodeSections][3]{};
+    const auto section_bytes = node.section_count * sizeof(sections[0]);
+    const auto material_bytes = node.section_count * sizeof(materials[0]);
+    if (!ReadProbe(reader, node.section_array.value, sections, section_bytes) ||
+        !ReadProbe(reader, node.instance_materials.value, materials, material_bytes)) return;
+    for (std::uint32_t i = 0; i < node.section_count; ++i) {
+        auto& out = node.sections[i];
+        out.triangles = sections[i][3]; out.first_vertex = sections[i][4]; out.vertex_count = sections[i][5];
+        out.first_index = sections[i][6]; out.index_count = sections[i][7]; out.unknown = sections[i][8];
+        if (std::uint64_t{out.first_vertex} + out.vertex_count > node.vertex_count ||
+            std::uint64_t{out.first_index} + out.index_count > node.index_count ||
+            !ReadMeshSectionName(reader, sections[i][0], out.name, out.name_available) ||
+            !ReadMeshSectionName(reader, materials[i][0], out.material_name, out.material_name_available)) return;
+    }
+    const auto node_after = ReadProbeOffset(reader, element, 0x108);
+    const auto sections_pointer_after = ReadProbeOffset(reader, node.address.value, 0x30);
+    const auto materials_pointer_after = ReadProbeOffset(reader, element, 0x104);
+    const auto material_count_after = ReadProbeU32(reader, node.instance_materials.value - 4);
+    if (!node_after.available || node_after.value != node.address.value ||
+        !sections_pointer_after.available || sections_pointer_after.value != node.section_array.value ||
+        !materials_pointer_after.available || materials_pointer_after.value != node.instance_materials.value ||
+        !material_count_after.available || material_count_after.value != material_count.value ||
+        !ReadProbe(reader, node.section_array.value, sections_after, section_bytes) ||
+        !ReadProbe(reader, node.instance_materials.value, materials_after, material_bytes) ||
+        std::memcmp(sections, sections_after, section_bytes) != 0 ||
+        std::memcmp(materials, materials_after, material_bytes) != 0) return;
+    node.sections_copied = node.section_count;
+    node.sections_available = true;
+}
+
+inline void ReadProbeMeshNode(const ProbeReader& reader, std::uint32_t element, ProbeMeshNode& node) noexcept {
+    // Static analysis: 0x10dcaf90 stores the named mesh node at element+0x108;
+    // the live list and links are verified before any node metadata is used.
+    constexpr std::uint32_t kNodePool = 0x10f31bb8;
+    struct Pool { std::uint32_t head, tail, count; } pool{}, after{};
+    struct Links { std::uint32_t previous, next; } links{}, target_links{}, links_after{};
+    node.address = ReadProbeOffset(reader, element, 0x108);
+    if (!node.address.available || !node.address.value || !ReadProbe(reader, kNodePool, &pool, sizeof(pool))) return;
+    if (pool.count > kMaxMeshNodeListEntries) { node.pool_scan_truncated = true; return; }
+    if (!pool.count || !pool.head || !pool.tail) return;
+    std::uint32_t current = pool.head, previous = 0;
+    for (std::uint32_t i = 0; i < pool.count; ++i) {
+        if (!current || !ReadProbeBytesOffset(reader, current, 0xa8, &links, sizeof(links)) ||
+            links.previous != previous) return;
+        if (current == node.address.value) { ++node.occurrences; target_links = links; }
+        ++node.nodes_scanned;
+        previous = current;
+        current = links.next;
+    }
+    if (current || previous != pool.tail || !ReadProbe(reader, kNodePool, &after, sizeof(after)) ||
+        std::memcmp(&pool, &after, sizeof(pool)) != 0) return;
+    node.pool_scan_complete = true;
+    if (node.occurrences != 1) return;
+    node.vtable = ReadProbeU32(reader, node.address.value);
+    node.name_address = ReadProbeOffset(reader, node.address.value, 0xb0);
+    if (!node.vtable.available || node.vtable.value != 0x10e49d14 ||
+        !node.name_address.available || !node.name_address.value) return;
+    std::uint32_t counts[4]{};
+    node.counts_available = ReadProbeBytesOffset(reader, node.address.value, 0x04, counts, sizeof(counts));
+    node.bounds_available = ReadProbeBytesOffset(reader, node.address.value, 0x74, node.bounds_bits, sizeof(node.bounds_bits));
+    node.name_available = ReadMeshNodeName(reader, node.name_address.value, node.name);
+    if (!node.counts_available || !node.bounds_available || !node.name_available) return;
+    node.vertex_count = counts[0]; node.triangle_count = counts[1];
+    node.index_count = counts[2]; node.section_count = counts[3];
+    if (node.vertex_count > 65536 || node.triangle_count > 65536 ||
+        node.index_count > 65536 || node.section_count > 65536) return;
+    float bounds[6]{};
+    for (std::size_t i = 0; i < 6; ++i) {
+        if ((node.bounds_bits[i] & 0x7f800000u) == 0x7f800000u) return;
+        std::memcpy(&bounds[i], &node.bounds_bits[i], sizeof(float));
+    }
+    for (std::size_t i = 0; i < 3; ++i) if (bounds[i] > bounds[i + 3]) return;
+    std::uint32_t counts_after[4]{}, bounds_after[6]{};
+    char name_after[128]{};
+    const auto element_after = ReadProbeOffset(reader, element, 0x108);
+    const auto vtable_after = ReadProbeU32(reader, node.address.value);
+    const auto name_address_after = ReadProbeOffset(reader, node.address.value, 0xb0);
+    node.stable = element_after.available && element_after.value == node.address.value &&
+        vtable_after.available && vtable_after.value == node.vtable.value &&
+        name_address_after.available && name_address_after.value == node.name_address.value &&
+        ReadProbeBytesOffset(reader, node.address.value, 0x04, counts_after, sizeof(counts_after)) &&
+        ReadProbeBytesOffset(reader, node.address.value, 0x74, bounds_after, sizeof(bounds_after)) &&
+        ReadMeshNodeName(reader, node.name_address.value, name_after) &&
+        std::memcmp(counts, counts_after, sizeof(counts)) == 0 &&
+        std::memcmp(node.bounds_bits, bounds_after, sizeof(bounds_after)) == 0 &&
+        std::strcmp(node.name, name_after) == 0 &&
+        ReadProbeBytesOffset(reader, node.address.value, 0xa8, &links_after, sizeof(links_after)) &&
+        std::memcmp(&target_links, &links_after, sizeof(target_links)) == 0 &&
+        ReadProbe(reader, kNodePool, &after, sizeof(after)) && std::memcmp(&pool, &after, sizeof(pool)) == 0;
+    if (!node.stable) return;
+    ReadMeshNodeSections(reader, element, node);
+    // Bracket section reads with the same node, pool and metadata checks.
+    const auto final_element = ReadProbeOffset(reader, element, 0x108);
+    const auto final_vtable = ReadProbeU32(reader, node.address.value);
+    const auto final_name_address = ReadProbeOffset(reader, node.address.value, 0xb0);
+    node.stable = final_element.available && final_element.value == node.address.value &&
+        final_vtable.available && final_vtable.value == node.vtable.value &&
+        final_name_address.available && final_name_address.value == node.name_address.value &&
+        ReadMeshNodeName(reader, node.name_address.value, name_after) && std::strcmp(node.name, name_after) == 0 &&
+        ReadProbeBytesOffset(reader, node.address.value, 0x04, counts_after, sizeof(counts_after)) &&
+        ReadProbeBytesOffset(reader, node.address.value, 0x74, bounds_after, sizeof(bounds_after)) &&
+        std::memcmp(counts, counts_after, sizeof(counts)) == 0 &&
+        std::memcmp(node.bounds_bits, bounds_after, sizeof(bounds_after)) == 0 &&
+        ReadProbeBytesOffset(reader, node.address.value, 0xa8, &links_after, sizeof(links_after)) &&
+        std::memcmp(&target_links, &links_after, sizeof(target_links)) == 0 &&
+        ReadProbe(reader, kNodePool, &after, sizeof(after)) && std::memcmp(&pool, &after, sizeof(pool)) == 0;
+    if (!node.stable) node.sections_available = false;
+}
+
+inline void ReadProbeBspSections(const ProbeReader& reader, ProbeBspBlock& block) noexcept {
+    if (!block.stable) return;
+    if (block.section_count > kMaxProbeBspSections) { block.sections_truncated = true; return; }
+    if (!block.section_count) { block.sections_available = true; return; }
+    block.section_array = ReadProbeOffset(reader, block.address.value, 0x130);
+    if (!block.section_array.available || block.section_array.value < 4) return;
+    const auto count = ReadProbeU32(reader, block.section_array.value - 4);
+    if (!count.available || count.value != block.section_count) return;
+    std::uint32_t entries[kMaxProbeBspSections][9]{}, after[kMaxProbeBspSections][9]{};
+    const auto size = block.section_count * sizeof(entries[0]);
+    if (!ReadProbe(reader, block.section_array.value, entries, size)) return;
+    for (std::uint32_t i = 0; i < block.section_count; ++i) {
+        auto& out = block.sections[i];
+        out.triangles = entries[i][3]; out.first_vertex = entries[i][4]; out.vertex_count = entries[i][5];
+        out.first_index = entries[i][6]; out.index_count = entries[i][7]; out.unknown = entries[i][8];
+        if (std::uint64_t{out.first_vertex} + out.vertex_count > block.vertex_count ||
+            std::uint64_t{out.first_index} + out.index_count > block.index_count ||
+            !ReadMeshSectionName(reader, entries[i][0], out.material_name, out.material_name_available)) return;
+    }
+    const auto array_after = ReadProbeOffset(reader, block.address.value, 0x130);
+    const auto count_after = ReadProbeU32(reader, block.section_array.value - 4);
+    if (!array_after.available || array_after.value != block.section_array.value ||
+        !count_after.available || count_after.value != count.value ||
+        !ReadProbe(reader, block.section_array.value, after, size) || std::memcmp(entries, after, size) != 0) return;
+    block.sections_copied = block.section_count;
+    block.sections_available = true;
+}
+
+inline void ReadProbeBsp(const ProbeReader& reader, ProbeSnapshot& snapshot) noexcept {
+    // 0x10947fc0 writes the loaded VBSP pointer at renderer+0xc. 0x10947670
+    // builds its Class_10E4A668 array at VBSP+0x54, stride 0x1ac.
+    constexpr std::uint32_t kRenderer = 0x10f2c740, kMagic = 0x50534256, kStride = 0x1ac;
+    auto& bsp = snapshot.bsp;
+    bsp.renderer = ReadProbeU32(reader, kRenderer);
+    if (!bsp.renderer.available || !bsp.renderer.value) return;
+    bsp.source = ReadProbeOffset(reader, bsp.renderer.value, 0x0c);
+    if (!bsp.source.available || !bsp.source.value) return;
+    const auto magic = ReadProbeU32(reader, bsp.source.value);
+    const auto count = ReadProbeOffset(reader, bsp.source.value, 0x0c);
+    bsp.blocks = ReadProbeOffset(reader, bsp.source.value, 0x54);
+    if (!magic.available || magic.value != kMagic || !count.available || !count.value || count.value > 65536 ||
+        !bsp.blocks.available || bsp.blocks.value < 4 ||
+        std::uint64_t{bsp.blocks.value} + std::uint64_t{count.value} * kStride > (std::uint64_t{1} << 32)) return;
+    const auto allocated_count = ReadProbeU32(reader, bsp.blocks.value - 4);
+    if (!allocated_count.available || allocated_count.value != count.value) return;
+    bsp.block_count = count.value;
+    bsp.candidates_truncated = snapshot.entries_truncated;
+    for (std::uint32_t i = 0; i < snapshot.entries_attempted; ++i) {
+        const auto& entry = snapshot.entries[i];
+        if (!entry.address.available || !entry.address.value || !entry.type.available || entry.type.value != 5 ||
+            !entry.vtable.available || entry.vtable.value != 0x10e4a668) continue;
+        ++bsp.type5_seen;
+        if (entry.address.value < bsp.blocks.value) continue;
+        const auto distance = entry.address.value - bsp.blocks.value;
+        if (distance % kStride || distance / kStride >= bsp.block_count) continue;
+        ++bsp.member_count;
+        if (bsp.candidates_copied == kMaxProbeBspBlocks) { bsp.candidates_truncated = true; continue; }
+        auto& block = bsp.candidates[bsp.candidates_copied++];
+        block.list_index = entry.list_index; block.source_index = distance / kStride; block.address = entry.address;
+        std::uint32_t counts[4]{}, counts_after[4]{}, bounds_after[6]{}, transform_after[16]{};
+        block.metadata_available = ReadProbeBytesOffset(reader, block.address.value, 0xe4, counts, sizeof(counts)) &&
+            ReadProbeBytesOffset(reader, block.address.value, 0x17c, block.bounds_bits, sizeof(block.bounds_bits)) &&
+            ReadProbeBytesOffset(reader, block.address.value, 0x04, block.transform_bits, sizeof(block.transform_bits));
+        if (!block.metadata_available) continue;
+        block.vertex_count = counts[0]; block.triangle_count = counts[1];
+        block.index_count = counts[2]; block.section_count = counts[3];
+        if (block.vertex_count > 65536 || block.triangle_count > 65536 ||
+            block.index_count > 65536 || block.section_count > 65536) continue;
+        float bounds[6]{};
+        bool finite = true;
+        for (std::size_t j = 0; j < 6; ++j) {
+            if ((block.bounds_bits[j] & 0x7f800000u) == 0x7f800000u) finite = false;
+            std::memcpy(&bounds[j], &block.bounds_bits[j], sizeof(float));
+        }
+        for (auto bits : block.transform_bits) if ((bits & 0x7f800000u) == 0x7f800000u) finite = false;
+        if (!finite || bounds[0] > bounds[3] || bounds[1] > bounds[4] || bounds[2] > bounds[5]) continue;
+        const auto vtable_after = ReadProbeU32(reader, block.address.value);
+        const auto type_after = ReadProbeOffset(reader, block.address.value, 0x44);
+        const auto slot_after = ReadProbeOffset(reader, snapshot.array.value, block.list_index * 4);
+        block.stable = vtable_after.available && vtable_after.value == 0x10e4a668 &&
+            type_after.available && type_after.value == 5 && slot_after.available && slot_after.value == block.address.value &&
+            ReadProbeBytesOffset(reader, block.address.value, 0xe4, counts_after, sizeof(counts_after)) &&
+            ReadProbeBytesOffset(reader, block.address.value, 0x17c, bounds_after, sizeof(bounds_after)) &&
+            ReadProbeBytesOffset(reader, block.address.value, 0x04, transform_after, sizeof(transform_after)) &&
+            std::memcmp(counts, counts_after, sizeof(counts)) == 0 &&
+            std::memcmp(block.bounds_bits, bounds_after, sizeof(bounds_after)) == 0 &&
+            std::memcmp(block.transform_bits, transform_after, sizeof(transform_after)) == 0;
+        if (block.stable) ReadProbeBspSections(reader, block);
+        const auto final_slot = ReadProbeOffset(reader, snapshot.array.value, block.list_index * 4);
+        block.stable = block.stable && final_slot.available && final_slot.value == block.address.value &&
+            ReadProbeBytesOffset(reader, block.address.value, 0xe4, counts_after, sizeof(counts_after)) &&
+            ReadProbeBytesOffset(reader, block.address.value, 0x17c, bounds_after, sizeof(bounds_after)) &&
+            ReadProbeBytesOffset(reader, block.address.value, 0x04, transform_after, sizeof(transform_after)) &&
+            std::memcmp(counts, counts_after, sizeof(counts)) == 0 &&
+            std::memcmp(block.bounds_bits, bounds_after, sizeof(bounds_after)) == 0 &&
+            std::memcmp(block.transform_bits, transform_after, sizeof(transform_after)) == 0;
+        if (!block.stable) block.sections_available = false;
+    }
+    const auto renderer_after = ReadProbeU32(reader, kRenderer);
+    const auto source_after = ReadProbeOffset(reader, bsp.renderer.value, 0x0c);
+    const auto magic_after = ReadProbeU32(reader, bsp.source.value);
+    const auto count_after = ReadProbeOffset(reader, bsp.source.value, 0x0c);
+    const auto blocks_after = ReadProbeOffset(reader, bsp.source.value, 0x54);
+    const auto allocated_after = ReadProbeU32(reader, bsp.blocks.value - 4);
+    const auto list_count_after = ReadProbeOffset(reader, snapshot.self, 0x50);
+    const auto list_after = ReadProbeOffset(reader, snapshot.self, 0x58);
+    bsp.source_stable = renderer_after.available && renderer_after.value == bsp.renderer.value &&
+        source_after.available && source_after.value == bsp.source.value && magic_after.available && magic_after.value == kMagic &&
+        count_after.available && count_after.value == count.value && blocks_after.available && blocks_after.value == bsp.blocks.value &&
+        allocated_after.available && allocated_after.value == allocated_count.value &&
+        list_count_after.available && list_count_after.value == snapshot.count.value &&
+        list_after.available && list_after.value == snapshot.array.value;
+    if (!bsp.source_stable) for (std::size_t i = 0; i < bsp.candidates_copied; ++i) {
+        bsp.candidates[i].stable = false;
+        bsp.candidates[i].sections_available = false;
+    }
+}
+
 inline void ReadProbeCamera(const ProbeReader& reader, std::uint32_t global, ProbeCamera& camera) noexcept {
     camera.address = ReadProbeU32(reader, global);
     if (!camera.address.available || !camera.address.value) return;
@@ -384,6 +654,7 @@ inline void ReadTargetProbe(const ProbeReader& reader, ProbeSnapshot& snapshot) 
         std::strcmp(target.owner_class.name, "StaticMeshActor") == 0) {
         const AssetReader asset_reader{reader.context, reader.read};
         target.asset = InspectAssetCandidate(asset_reader, actor);
+        ReadProbeMeshNode(reader, flesh.value, target.mesh_node);
         // The asset reader copies a bounded candidate; bracket it with a fresh
         // list/owner validation so the property is not attached to a changed
         // element or actor. This cannot eliminate ABA or unobserved writes.
@@ -401,7 +672,10 @@ inline void ReadTargetProbe(const ProbeReader& reader, ProbeSnapshot& snapshot) 
             std::memcmp(reread.owner_location_bits, before.owner_location_bits, sizeof(before.owner_location_bits)) != 0 ||
             std::memcmp(reread.owner_rotation_bits, before.owner_rotation_bits, sizeof(before.owner_rotation_bits)) != 0 ||
             std::memcmp(reread.object_matrix_bits, before.object_matrix_bits, sizeof(before.object_matrix_bits)) != 0)
+        {
             target.asset = {};
+            target.mesh_node = {};
+        }
     }
 }
 
@@ -442,6 +716,7 @@ inline ProbeSnapshot SampleProbe(const ProbeReader& reader, std::uint32_t thread
     }
     ReadProbeOwners(reader, snapshot);
     ReadTargetProbe(reader, snapshot);
+    ReadProbeBsp(reader, snapshot);
     const ProbeValue final_pass = ReadProbeU32(reader, 0x10efef54);
     snapshot.pass_stable = snapshot.pass.available && final_pass.available && snapshot.pass.value == final_pass.value;
     RecheckProbeCamera(reader, 0x10f2c738, snapshot.configured_camera);

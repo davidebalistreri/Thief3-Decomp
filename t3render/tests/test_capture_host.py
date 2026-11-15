@@ -81,6 +81,30 @@ class CaptureHostTests(unittest.TestCase):
         self.assertEqual((frame["started"], frame["completed"], frame["pending"]), (1, 1, 0))
         self.assertEqual(trace_summary.summarize(self.path)["frame_count"], 1)
 
+    def test_bridge_asset_audit_records_and_validates_the_property_chain(self):
+        self.run_capture("bridge_asset_audit", frame="1", extra={"T3RENDER_SCENE_BRIDGE": "1"})
+        records = self.records()
+        self.assertEqual(records[0]["scene_bridge"]["asset_audit"], "local_property_v1")
+        self.assertEqual(records[0]["scene_bridge"]["mesh_node"], "actor_node_v1")
+        self.assertEqual(records[0]["scene_bridge"]["mesh_sections"], "actor_materials_v1")
+        self.assertEqual(records[0]["scene_bridge"]["bsp_candidates"], "vbsp_array_v1")
+        observation = next(r for r in records if r["event"] == "scene_bridge_observation")
+        target = observation["target"]
+        asset = target["asset"]
+        self.assertEqual(asset["audit"]["slot_value"], asset["audit"]["proxy"])
+        self.assertEqual(asset["audit"]["resource"], 0x4000)
+        self.assertTrue(target["mesh_node"]["stable"])
+        self.assertEqual(target["mesh_node"]["counts"]["vertices"], 257)
+        self.assertEqual(target["mesh_node"]["sections"][1]["material_name"], "GENgoodnessA_D")
+        self.assertTrue(observation["bsp"]["source_stable"])
+        self.assertEqual(observation["bsp"]["candidates"][0]["source_index"], 1)
+        self.assertEqual(observation["bsp"]["candidates"][0]["sections"][0]["material_name"], "wall")
+        self.assertEqual(trace_summary.summarize(self.path)["frame_count"], 1)
+        asset["audit"]["slot_value"] += 1
+        self.path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+        with self.assertRaises(trace_summary.TraceError):
+            trace_summary.summarize(self.path)
+
     def test_bridge_and_screenshot_share_one_frame_and_present(self):
         self.run_capture("bridge_image_good", frame="1", extra={"T3RENDER_SCENE_BRIDGE": "1",
                                                                  "T3RENDER_CAPTURE_SCREENSHOTS": "1"})

@@ -10,6 +10,7 @@ from collections import Counter
 import json
 import math
 from pathlib import Path
+import struct
 import sys
 
 
@@ -72,7 +73,174 @@ def _bridge_target(value):
     return (all(type(value.get(k)) is bool for k in flags) and all(_uint(value.get(k)) for k in counts) and
             isinstance(entries, list) and len(entries) == value["outer_count"] and len(entries) <= 4 and
             all(_bridge_named(e) for e in entries) and _bridge_named(value.get("owner_class")) and
-            (value.get("entry") is None or _bridge_entry(value["entry"])) and _bridge_asset(value.get("asset")))
+            (value.get("entry") is None or _bridge_entry(value["entry"])) and _bridge_asset(value.get("asset")) and
+            ("mesh_node" not in value or _bridge_mesh_node(value["mesh_node"])))
+
+
+def _bridge_mesh_node(value):
+    if not isinstance(value, dict):
+        return False
+    flags = ("pool_scan_complete", "pool_scan_truncated", "stable")
+    if (any(type(value.get(k)) is not bool for k in flags) or
+            any(not _uint(value.get(k)) for k in ("nodes_scanned", "occurrences")) or
+            value["nodes_scanned"] > 8192 or value["occurrences"] > value["nodes_scanned"] or
+            value["pool_scan_complete"] and value["pool_scan_truncated"] or
+            any(not _nullable_uint(value.get(k)) for k in ("address", "vtable", "name_address")) or
+            not _bridge_bits(value.get("bounds_bits"), 6)):
+        return False
+    name = value.get("name")
+    if name is not None and (not isinstance(name, str) or len(name) >= 128 or not all(32 <= ord(c) < 127 for c in name)):
+        return False
+    counts = value.get("counts")
+    if counts is not None and (not isinstance(counts, dict) or
+            set(counts) != {"vertices", "triangles", "indices", "sections"} or
+            any(not _uint(v) for v in counts.values())):
+        return False
+    if "sections" in value:
+        if (type(value.get("sections_truncated")) is not bool or
+                any(not _nullable_uint(value.get(k)) for k in ("section_array", "instance_materials"))):
+            return False
+        sections = value["sections"]
+        if sections is not None:
+            if (not isinstance(sections, list) or len(sections) > 16 or not value["stable"] or
+                    value["sections_truncated"] or counts is None or len(sections) != counts["sections"] or
+                    sections and (not value.get("section_array") or not value.get("instance_materials"))):
+                return False
+            keys = {"name", "material_name", "triangles", "first_vertex", "vertex_count", "first_index", "index_count", "unknown"}
+            for section in sections:
+                if not isinstance(section, dict) or set(section) != keys:
+                    return False
+                if any(not _uint(section[k]) for k in keys - {"name", "material_name"}):
+                    return False
+                for key in ("name", "material_name"):
+                    text = section[key]
+                    if text is not None and (not isinstance(text, str) or not text or len(text) >= 128 or
+                                             not all(32 <= ord(c) < 127 for c in text)):
+                        return False
+                if (section["first_vertex"] + section["vertex_count"] > counts["vertices"] or
+                        section["first_index"] + section["index_count"] > counts["indices"]):
+                    return False
+    if not value["stable"]:
+        return True
+    if (not value["pool_scan_complete"] or value["pool_scan_truncated"] or value["occurrences"] != 1 or
+            not value.get("address") or value.get("vtable") != 0x10e49d14 or
+            not value.get("name_address") or not name or counts is None or
+            any(v > 65536 for v in counts.values()) or value.get("bounds_bits") is None):
+        return False
+    bounds = [struct.unpack("<f", struct.pack("<I", v))[0] for v in value["bounds_bits"]]
+    return all(math.isfinite(v) for v in bounds) and all(bounds[i] <= bounds[i + 3] for i in range(3))
+
+
+def _bridge_bsp(value, entries):
+    if not isinstance(value, dict) or not isinstance(entries, list):
+        return False
+    if (any(not _nullable_uint(value.get(k)) for k in ("renderer", "source", "blocks")) or
+            any(not _uint(value.get(k)) for k in ("block_count", "type5_seen", "member_count")) or
+            any(type(value.get(k)) is not bool for k in ("source_stable", "candidates_truncated"))):
+        return False
+    candidates = value.get("candidates")
+    if (not isinstance(candidates, list) or len(candidates) > 16 or value["block_count"] > 65536 or
+            value["type5_seen"] > len(entries) or value["member_count"] > value["type5_seen"] or
+            len(candidates) > value["member_count"] or
+            value["member_count"] > len(candidates) and not value["candidates_truncated"]):
+        return False
+    if value["source_stable"] and (not value.get("renderer") or not value.get("source") or
+                                   not value.get("blocks") or not value["block_count"]):
+        return False
+    for block in candidates:
+        if (not isinstance(block, dict) or not _uint(block.get("list_index")) or
+                not _uint(block.get("source_index")) or not _nullable_uint(block.get("address")) or
+                not _nullable_uint(block.get("section_array")) or
+                type(block.get("stable")) is not bool or type(block.get("sections_truncated")) is not bool or
+                not _bridge_bits(block.get("bounds_bits"), 6) or not _bridge_bits(block.get("transform_bits"), 16)):
+            return False
+        counts = block.get("counts")
+        if counts is not None and (not isinstance(counts, dict) or
+                set(counts) != {"vertices", "triangles", "indices", "sections"} or
+                any(not _uint(v) for v in counts.values())):
+            return False
+        if block["list_index"] >= len(entries) or block["source_index"] >= value["block_count"]:
+            return False
+        entry = entries[block["list_index"]]
+        if (entry.get("list_index") != block["list_index"] or entry.get("address") != block["address"] or
+                entry.get("type") != 5 or entry.get("vtable") != 0x10e4a668 or not value.get("blocks") or
+                block["address"] != value["blocks"] + block["source_index"] * 0x1ac):
+            return False
+        sections = block.get("sections")
+        if sections is not None:
+            if (not isinstance(sections, list) or len(sections) > 16 or not block["stable"] or
+                    block["sections_truncated"] or counts is None or len(sections) != counts["sections"] or
+                    sections and not block.get("section_array")):
+                return False
+            keys = {"material_name", "triangles", "first_vertex", "vertex_count", "first_index", "index_count", "unknown"}
+            for section in sections:
+                if not isinstance(section, dict) or set(section) != keys or any(not _uint(section[k]) for k in keys - {"material_name"}):
+                    return False
+                name = section["material_name"]
+                if name is not None and (not isinstance(name, str) or not name or len(name) >= 128 or
+                                         not all(32 <= ord(c) < 127 for c in name)):
+                    return False
+                if (section["first_vertex"] + section["vertex_count"] > counts["vertices"] or
+                        section["first_index"] + section["index_count"] > counts["indices"]):
+                    return False
+        if block["stable"]:
+            if (not value["source_stable"] or counts is None or any(x > 65536 for x in counts.values()) or
+                    block["bounds_bits"] is None or block["transform_bits"] is None):
+                return False
+            bounds = [struct.unpack("<f", struct.pack("<I", x))[0] for x in block["bounds_bits"]]
+            transform = [struct.unpack("<f", struct.pack("<I", x))[0] for x in block["transform_bits"]]
+            if not all(math.isfinite(v) for v in bounds + transform) or any(bounds[i] > bounds[i + 3] for i in range(3)):
+                return False
+    return True
+
+
+def _bridge_asset_audit(audit, name):
+    keys = ("descriptor_table", "descriptor_array", "descriptor", "descriptor_vtable", "descriptor_copy",
+            "descriptor_count", "descriptor_size", "descriptor_flags", "owner_flags", "property_hash",
+            "bucket_head", "slot_index", "slot_next", "slot_id_flags", "slot_value", "objects_data",
+            "objects_count", "objects_capacity", "object_index", "proxy", "proxy_vtable", "proxy_index", "resource",
+            "resource_vtable", "name_address", "name_length")
+    if not isinstance(audit, dict) or set(audit) != set(keys) | {"chain"} or any(not _uint(audit[k]) for k in keys):
+        return False
+    chain = audit["chain"]
+    if not isinstance(chain, list) or not 0 < len(chain) <= 256:
+        return False
+    seen = set()
+    previous_id = -1
+    selected = None
+    for i, entry in enumerate(chain):
+        if (not isinstance(entry, dict) or set(entry) != {"index", "next", "id_flags", "value"} or
+                any(not _uint(entry[k]) for k in entry) or not 0 < entry["index"] < 61440 or
+                entry["index"] in seen or entry["next"] >= 61440 or entry["id_flags"] > 0xffff):
+            return False
+        if entry["index"] != (audit["bucket_head"] if not i else chain[i - 1]["next"]):
+            return False
+        property_id = entry["id_flags"] & 0x7fff
+        if property_id <= previous_id:
+            return False
+        previous_id = property_id
+        seen.add(entry["index"])
+        if property_id == 0x2b:
+            selected = entry
+    if (chain[-1]["next"] != 0 or selected is None or
+            selected != {"index": audit["slot_index"], "next": audit["slot_next"],
+                         "id_flags": audit["slot_id_flags"], "value": audit["slot_value"]}):
+        return False
+    nonzero = ("descriptor_table", "descriptor_array", "descriptor", "property_hash", "bucket_head",
+               "slot_index", "slot_value", "objects_data", "proxy", "resource", "name_address")
+    if any(not audit[k] for k in nonzero):
+        return False
+    return (audit["descriptor_vtable"] == 0x10e72e48 and audit["descriptor_copy"] == 0x10aeecc0 and
+            audit["descriptor_count"] == 1 and audit["descriptor_size"] == 4 and
+            not audit["descriptor_flags"] & 0x400000 and not audit["owner_flags"] & 0x80000000 and
+            0 < audit["bucket_head"] < 61440 and 0 < audit["slot_index"] < 61440 and
+            audit["slot_next"] < 61440 and audit["slot_id_flags"] in (0x2b, 0x802b) and
+            (audit["slot_id_flags"] != 0x802b or audit["slot_value"] == audit["proxy"]) and
+            audit["objects_count"] <= 65536 and audit["objects_count"] <= audit["objects_capacity"] <= 262144 and
+            audit["object_index"] < audit["objects_count"] and audit["proxy_index"] == audit["object_index"] and
+            audit["proxy_vtable"] == 0x10e4dfa8 and
+            audit["resource_vtable"] == 0x10ec0e20 and audit["name_address"] >= 4 and
+            isinstance(name, str) and audit["name_length"] == len(name) and 0 < len(name) < 128)
 
 
 def _bridge_asset(value):
@@ -84,6 +252,9 @@ def _bridge_asset(value):
         return False
     name = value.get("name")
     if name is not None and (not isinstance(name, str) or len(name) >= 128 or not all(32 <= ord(c) < 127 for c in name)):
+        return False
+    audit = value.get("audit")
+    if audit is not None and (value["status"] != "candidate" or not _bridge_asset_audit(audit, name)):
         return False
     return value["status"] != "candidate" or (all(value[k] for k in flags) and bool(name))
 
@@ -173,7 +344,11 @@ def summarize(path):
                             not 0 < bridge_capability["target_object_limit"] <= 65536 or
                             not _is_int(bridge_capability.get("target_list_limit")) or
                             not 0 < bridge_capability["target_list_limit"] <= 8192 or
-                            bridge_capability.get("reentry_detection") not in (None, "saturating_counter_v1")):
+                            bridge_capability.get("reentry_detection") not in (None, "saturating_counter_v1") or
+                            bridge_capability.get("asset_audit") not in (None, "local_property_v1") or
+                            bridge_capability.get("mesh_node") not in (None, "actor_node_v1") or
+                            bridge_capability.get("mesh_sections") not in (None, "actor_materials_v1") or
+                            bridge_capability.get("bsp_candidates") not in (None, "vbsp_array_v1")):
                             raise TraceError(f"line {lines}: invalid scene bridge capability")
                     header_seen = True
                 elif event == "header":
@@ -225,6 +400,18 @@ def summarize(path):
                             any(not _bridge_entry(e) for e in entries) or not _bridge_target(item.get("target"))):
                         raise TraceError(f"line {lines}: invalid bounded scene entries")
                     target = item["target"]
+                    if (bridge_capability.get("bsp_candidates") == "vbsp_array_v1" and
+                            ("bsp" not in item or not _bridge_bsp(item["bsp"], entries))):
+                        raise TraceError(f"line {lines}: invalid VBSP candidate observation")
+                    if bridge_capability.get("mesh_node") == "actor_node_v1" and "mesh_node" not in target:
+                        raise TraceError(f"line {lines}: missing mesh node observation")
+                    if (bridge_capability.get("mesh_sections") == "actor_materials_v1" and
+                            ("mesh_node" not in target or "sections" not in target["mesh_node"])):
+                        raise TraceError(f"line {lines}: missing mesh section observation")
+                    if bridge_capability.get("asset_audit") == "local_property_v1":
+                        asset = target["asset"]
+                        if "audit" not in asset or (asset["status"] == "candidate" and asset["audit"] is None):
+                            raise TraceError(f"line {lines}: missing asset property audit")
                     if (target["objects_scanned"] > bridge_capability["target_object_limit"] or
                             target["list_scanned"] > bridge_capability["target_list_limit"] or
                             target["actors_named_target"] > target["objects_scanned"] or

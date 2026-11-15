@@ -20,6 +20,26 @@ enum class AssetStatus {
     PropertyMalformed, ObjectNotUnique, ProxyMismatch, ResourceMismatch, Candidate
 };
 
+// Raw values from the validated property path, for diagnostic trace auditing
+// only. Transient addresses must never be used as SceneIR identifiers.
+constexpr std::size_t kMaxAssetAuditSlots = 256;
+struct AssetAuditSlot {
+    std::uint32_t index = 0, next = 0, id_flags = 0, value = 0;
+};
+struct AssetAudit {
+    bool available = false;
+    std::uint32_t descriptor_table = 0, descriptor_array = 0, descriptor = 0;
+    std::uint32_t descriptor_vtable = 0, descriptor_copy = 0;
+    std::uint32_t descriptor_count = 0, descriptor_size = 0, descriptor_flags = 0;
+    std::uint32_t owner_flags = 0, property_hash = 0, bucket_head = 0;
+    std::uint32_t slot_index = 0, slot_next = 0, slot_id_flags = 0, slot_value = 0;
+    std::uint32_t chain_count = 0;
+    AssetAuditSlot chain[kMaxAssetAuditSlots]{};
+    std::uint32_t objects_data = 0, objects_count = 0, objects_capacity = 0, object_index = 0;
+    std::uint32_t proxy = 0, proxy_vtable = 0, proxy_index = 0, resource = 0, resource_vtable = 0;
+    std::uint32_t name_address = 0, name_length = 0;
+};
+
 struct AssetCandidate {
     AssetStatus status = AssetStatus::Unknown;
     bool descriptor_match = false;
@@ -30,6 +50,7 @@ struct AssetCandidate {
     bool stable = false;
     bool name_available = false;
     char name[128]{};
+    AssetAudit audit;
 };
 
 namespace asset_detail {
@@ -37,7 +58,7 @@ constexpr std::uint32_t kPropertyId = 0x2b;
 constexpr std::uint32_t kPool = 0x10f7b5c8;
 constexpr std::uint32_t kPoolSlots = 61440;
 constexpr std::uint32_t kObjects = 0x10f3e4a0;
-constexpr std::size_t kMaxChain = 256;
+constexpr std::size_t kMaxChain = kMaxAssetAuditSlots;
 
 inline bool offset(std::uint32_t base, std::uint32_t add, std::uint32_t& out) noexcept {
     if (!base || base > std::numeric_limits<std::uint32_t>::max() - add) return false;
@@ -215,6 +236,41 @@ inline AssetCandidate InspectAssetCandidate(const AssetReader& r, std::uint32_t 
         result.status = AssetStatus::Unknown; return result;
     }
     std::memcpy(result.name, name, static_cast<std::size_t>(length) + 1);
+    auto& audit = result.audit;
+    audit.descriptor_table = descriptor_before.table;
+    audit.descriptor_array = descriptor_before.array;
+    audit.descriptor = descriptor_before.property;
+    audit.descriptor_vtable = descriptor_before.vtable;
+    audit.descriptor_copy = descriptor_before.copy;
+    audit.descriptor_count = descriptor_before.count;
+    audit.descriptor_size = descriptor_before.size;
+    audit.descriptor_flags = descriptor_before.flags;
+    audit.owner_flags = property.owner_flags;
+    audit.property_hash = property.hash;
+    audit.bucket_head = property.head;
+    audit.chain_count = static_cast<std::uint32_t>(property.count);
+    for (std::size_t i = 0; i < property.count; ++i) {
+        audit.chain[i] = {property.indices[i], property.slots[i].next,
+                          property.slots[i].id_flags, property.slots[i].value};
+        if ((property.slots[i].id_flags & 0x7fffu) == kPropertyId) {
+            audit.slot_index = property.indices[i];
+            audit.slot_next = property.slots[i].next;
+            audit.slot_id_flags = property.slots[i].id_flags;
+            audit.slot_value = property.slots[i].value;
+        }
+    }
+    audit.objects_data = objects.data;
+    audit.objects_count = objects.count;
+    audit.objects_capacity = objects.capacity;
+    audit.object_index = index;
+    audit.proxy = property.proxy;
+    audit.proxy_vtable = proxy_vtable;
+    audit.proxy_index = proxy_index;
+    audit.resource = resource;
+    audit.resource_vtable = resource_vtable;
+    audit.name_address = string;
+    audit.name_length = length;
+    audit.available = true;
     result.stable = true;
     result.name_available = true;
     result.status = AssetStatus::Candidate;

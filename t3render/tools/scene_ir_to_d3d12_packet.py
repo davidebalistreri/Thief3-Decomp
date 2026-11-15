@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Preview selected offline SceneIR geometry with the existing DX12 diagnostic.
+"""Preview selected SceneIR geometry with the existing DX12 diagnostic.
 
-The independent camera observation is a viewpoint only. Neither the scene nor
-its objects become a runtime frame by using a captured camera.
+An independent camera is a viewpoint only and never makes an offline scene a
+runtime frame. A runtime source is a producer assertion, not validation by this
+consumer; inspect its provenance and limitations separately.
 """
 import argparse
 import hashlib
@@ -79,8 +80,6 @@ def validate_camera(camera):
 
 
 def create_packet(scene, camera, instance_ids, bsp_indices, excluded_materials=()):
-    if scene.source.kind != "offline":
-        raise ValueError("this diagnostic consumer accepts offline SceneIR only")
     c = scene.conventions
     if (c.length_unit != "t3_unit" or c.axes != "t3_xyz" or c.up_axis != "z" or
             c.matrix_layout != "row_major" or c.matrix_vectors != "row" or
@@ -202,15 +201,19 @@ def main(argv=None):
                              "frame_id": camera.source.frame_id, "fingerprint": camera.source.fingerprint}
             camera_digest = None
         packet, stats = create_packet(scene, camera, args.instance, args.bsp, args.exclude_material)
-        manifest = {"kind": "offline_scene_ir_preview_not_runtime_frame", "map": scene.source.map,
+        runtime = scene.source.kind == "runtime"
+        manifest = {"kind": "runtime_scene_ir_preview_producer_assertion" if runtime else "offline_scene_ir_preview_not_runtime_frame",
+                    "map": scene.source.map, "scene_source": scene.source.kind,
+                    "scene_frame_id": scene.source.frame_id, "scene_limitations": list(scene.source.limitations),
                     "scene_sha256": hashlib.sha256(scene_bytes).hexdigest(),
                     "camera_observation_sha256": camera_digest,
-                    "camera_source": camera_source, "camera_synchronized_to_scene": False,
+                    "camera_source": camera_source,
+                    "camera_synchronized_to_scene": bool(runtime and args.camera is None and scene.source.camera_synchronized is True),
                     "clip_depth_assumption": "zero_to_one",
                     "packet_sha256": hashlib.sha256(packet.encode("ascii")).hexdigest(), **stats,
-                    "limitations": ["Offline geometry is not runtime visibility or a synchronized scene snapshot.",
-                        "Camera and viewport are separate observations; membership and camera timing are not matched.",
-                        "Clip depth 0..1 is assumed even when the offline scene convention is unknown.",
+                    "limitations": ["Scene provenance and synchronization are producer assertions, not verified by this consumer.",
+                        "A separate camera does not establish synchronization with scene objects.",
+                        "Clip depth 0..1 is assumed even when the scene convention is unknown.",
                         "Flat colors, approximate CCW culling and new D32 LESS depth are diagnostic only.",
                         "Textures, lighting, original depth history and unselected objects are absent."]}
         write_pair(args.output, packet, manifest)

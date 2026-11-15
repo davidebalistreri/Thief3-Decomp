@@ -33,6 +33,90 @@ it includes a candle holder and a crate near the bed. The renderer preserves
 the candidate limitations and actor IDs in its packet manifest. The objects
 and textures are not runtime mesh-payload or material-binding proof.
 
+## Opt-in bedroom material preview
+
+`--bedroom-remaster-materials <Godot materials directory>` selects the existing
+`stone_wall_v2` and `wood_floor_v2` assets on BSP triangles by material name,
+orientation and a bed-relative region. The required anchor is the unique
+`SouthQuarter1_int1 / StaticMeshActor__1520 / INNbed1A1` instance and its
+same-snapshot transform. The selector uses the SDK's 0.01905 metres per T3
+unit and the same bounds, Godot axis swap and clockwise facing as
+`wall_overrides.gd` and `floor_overrides.gd`. It keeps floor and ceiling apart
+even though they share `HSEfloorB_D`; it does not apply wall material to mesh
+instances. Region selection is based on triangle centroids, not room membership,
+and must be reviewed when geometry or anchor conventions change.
+
+The exporter preserves triangle order, positions, UVs, submission ownership
+and trace-derived states, splitting a draw into consecutive runs when needed.
+It replaces albedo on unlit/modulation runs and uses the OpenGL normal map with
+the UV-inferred tangent basis on enabled direct-light runs. Degenerate bases
+fall back to flat normals. Ambient, fog and skipped-light runs retain their
+original inputs. Both original and replacement albedo must be opaque. The
+replacement uses bias 0, rather than asserting that the original sampler's
+metadata describes the new image. The manifest records original and replacement
+samplers, source hashes, split triangle ranges and per-run fallback counts.
+SceneIR itself is unchanged, and its existing runtime/offline provenance limits
+still apply.
+
+ImageMagick 7 (`magick`) converts the locally generated Godot PNGs to 1024²
+RGBA8 with 11 triangle-filtered mips. The wall inputs must be 2048² and the
+floor inputs 1024²; unsupported sizes, missing maps or oversized packets fail.
+Use `build/assets/godot/remaster/regenerate.sh` if the local maps have not
+been generated. PNGs, packet and rendered image are game-derived and stay
+under `build/`. With no override option, the legacy preview is byte-identical
+for the tested frame-1001 packet.
+
+On the frame-1001 four-stage shadow preview below, the albedo replacement
+selects 45 wall and 22 floor triangles; the direct-light passes contain 180
+and 58 corresponding normal-map triangle submissions, with zero flat-basis
+fallbacks. The resulting Highball/DX12 packet contains 311 draws and 32,680
+triangles including candidate shadow volumes. Its local image differs from the
+prior preview at 304,113 pixels (mean absolute RGB difference 0.743/255).
+This is a visual comparison, not a parity measurement. Roughness, AO and
+height are not consumed, and the existing light model is not PBR or HDR.
+An independent local comparison against the Godot scripts matched all 67
+selected wall/floor triangle centroids by BSP block and material; the maximum
+centroid difference was 0.000084 m. This checks the current export, not future
+retessellation or a complete runtime visibility claim.
+
+To reproduce from the previously prepared frame-1001 snapshots and candidate
+files, add this option to the existing four-stage shadow-preview command:
+
+```sh
+--bedroom-remaster-materials build/assets/godot/remaster/garrett_home/materials
+```
+
+The complete local command is:
+
+```sh
+python3 -B t3render/tools/scene_ir_to_textured_packet.py \
+  build/t3render-offline/bedroom-runtime-1001-warm-stage1.scene.json \
+  --additional-scene build/t3render-offline/bedroom-runtime-1001-light-candidates-v1.scene.json \
+  --additional-scene build/t3render-offline/bedroom-runtime-1001-warm-stage4.scene.json \
+  --additional-scene build/t3render-offline/bedroom-runtime-1001-warm-stage6.scene.json \
+  --game-dir "$T3_GAME_DIR" --pass 0 --stage 1 \
+  --state-trace build/t3render-captures/scene-bridge-submission-20261115-001/bedroom.jsonl \
+  --offline-scene build/t3render-offline/SouthQuarter1_int1.lights.scene.json \
+  --offline-actors build/assets/godot/SouthQuarter1_int1/SouthQuarter1_int1.actors.json \
+  --ambient-candidate-stage 1 --direct-candidate-stage 3 --fog-candidate-stage 6 \
+  --spot-candidates --spot-projector-candidate genwindowint_p \
+  --normal-map-candidates --shader-normal-basis --sampler-scope 4:0 \
+  --direct-light-overrides build/t3render-offline/bedroom-runtime-1001-falloff-preview.overrides.json \
+  --shadow-candidates build/t3render-offline/bedroom-runtime-1001-shadow-candidates.json \
+  --shadow-light 'light:SouthQuarter1_int1:ed7d475b1efdc713d28b2a978e11fb0f662bdb17c5c2769d77c96e1f74b7ceba:D_384__5' \
+  --bedroom-remaster-materials build/assets/godot/remaster/garrett_home/materials \
+  --output build/t3render-offline/bedroom-runtime-1001-remaster-preview.scene.bin
+```
+
+Outputs are exclusive; choose a new name for each run. Render the packet with
+`t3render_scene_d3d12` as described below. The synthetic tests check the
+bed-relative selection, mixed floor/ceiling splits, transform invariance,
+unchanged geometry and draw order, alpha handling and normal-basis routing:
+
+```sh
+python3 -B -m unittest discover -s t3render/tests -p test_scene_material_overrides.py
+```
+
 ## SDK shadow-volume candidates
 
 `scene_shadow_candidates.py` prepares the original SDK shadow-volume meshes

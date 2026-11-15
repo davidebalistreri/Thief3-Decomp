@@ -32,6 +32,7 @@ import scene_shadow_render as shadow_render  # noqa: E402
 import scene_ambient_candidates as ambient  # noqa: E402
 import scene_direct_candidates as direct  # noqa: E402
 import scene_fog_candidates as fog  # noqa: E402
+import scene_material_overrides as material_overrides  # noqa: E402
 
 MAGIC = b"T3SCN03\0"
 AMBIENT_MAGIC = b"T3SCN04\0"
@@ -279,8 +280,10 @@ def select_scope(scene, render_pass=None, stage=None):
 
 def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=None, sampler_candidates=None,
                   additional_scenes=(), ambient_candidates=None, direct_candidates=None, fog_candidates=None,
-                  shadow_batches=None):
+                  shadow_batches=None, remaster=None):
     render_pass, stage = select_scope(scene, render_pass, stage)
+    if remaster is not None:
+        remaster.validate_scene(scene)
     selections = [(scene, render_pass, stage)]
     if additional_scenes and draw_states is None:
         raise ValueError("composed previews require revalidated per-draw states")
@@ -337,6 +340,8 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
         isinstance(value, dict) and value.get("projector_candidate") is not None for value in direct_candidates.values())
     normal_packet = direct_candidates is not None and any(
         isinstance(value, dict) and value.get("normal_sampler_candidate") is not None for value in direct_candidates.values())
+    if remaster is not None and direct_candidates is not None:
+        normal_packet = True
     shader_normal_packet = direct_candidates is not None and any(
         isinstance(value, dict) and value.get("shader_basis_candidate") is not None for value in direct_candidates.values())
     falloff_packet = direct_candidates is not None and any(
@@ -355,6 +360,14 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
         # order when combining individually verified stage snapshots.
         submissions.sort(key=lambda pair: pair[0].draw_id)
     textures, texture_indices, draws, source_draws = [], {}, [], []
+    opaque_textures = {}
+
+    def opaque(tex):
+        key = (tex["bundle"], tex["name"].lower())
+        if key not in opaque_textures:
+            opaque_textures[key] = all(mip[3::4].count(255) == len(mip)//4 for mip in tex["mips"])
+        return opaque_textures[key]
+
     triangle_count = 0
     for submission, lookup in submissions:
         meshes, instances, blocks, materials = lookup
@@ -560,22 +573,73 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             mode = 6 if fog_value is not None else 2 if is_lit else 3 if light is not None else 1 if color is not None else 0
         if normal_tex is not None:
             mode = ({2: 10, 4: 11, 5: 12} if shader_basis is not None else {2: 7, 4: 8, 5: 9})[mode]
-        draws.append((draw_texture_index, vertices, state, sampler, packet_color, mode, light_values, projector, projector_index, 0))
-        source_draws.append({"draw": submission.draw_id, "target_kind": submission.target_kind,
-                             "target_id": submission.target_id, "section": submission.section,
-                             "render_pass": submission.render_pass, "stage": submission.stage,
-                             "material": material_name, "texture": tex["name"], "triangles": len(vertices) // 3,
-                             "state": state, "sampler": sampler})
+        source = {"draw": submission.draw_id, "target_kind": submission.target_kind,
+                  "target_id": submission.target_id, "section": submission.section,
+                  "render_pass": submission.render_pass, "stage": submission.stage,
+                  "material": material_name, "texture": tex["name"], "triangles": len(vertices) // 3,
+                  "state": state, "sampler": sampler}
         if color is not None:
-            source_draws[-1]["ambient_candidate"] = list(color)
+            source["ambient_candidate"] = list(color)
         if light is not None:
-            source_draws[-1]["direct_candidate"] = light
+            source["direct_candidate"] = light
         if normal_tex is not None:
-            source_draws[-1]["normal_map_candidate"] = {"texture": normal_tex["name"], "bundle": normal_tex["bundle"],
-                                                        "flat_fallback_triangles": fallback_triangles,
-                                                        "basis": "sampled_shader_hypothesis" if shader_basis is not None else "inferred_uv"}
+            source["normal_map_candidate"] = {"texture": normal_tex["name"], "bundle": normal_tex["bundle"],
+                                              "flat_fallback_triangles": fallback_triangles,
+                                              "basis": "sampled_shader_hypothesis" if shader_basis is not None else "inferred_uv"}
         if fog_value is not None:
-            source_draws[-1]["fog_candidate"] = fog_value
+            source["fog_candidate"] = fog_value
+        # Ambient and fog consume their original inputs. For color modulation
+        # and enabled direct lights, split only at triangle boundaries while
+        # retaining the original order, state and submission provenance.
+        ranges = (remaster.partition(submission.target_kind, material_name, vertices)
+                  if remaster is not None and color is None and fog_value is None and
+                  (light is None or is_lit) else [(0, len(vertices), None)])
+        remaster_frames = None
+        for first, end, replacement in ranges:
+            part_vertices, part_texture, part_sampler, part_mode = vertices[first:end], draw_texture_index, sampler, mode
+            part_source = dict(source, triangles=(end-first)//3)
+            if len(ranges) > 1:
+                part_source["triangle_range"] = [first//3, end//3]
+            if normal_tex is not None and len(ranges) > 1:
+                part_source["normal_map_candidate"] = dict(source["normal_map_candidate"],
+                    flat_fallback_triangles=sum(vertices[i][11] == 0 for i in range(first, end, 3)))
+            if replacement is not None:
+                channel = "normal" if is_lit else "albedo"
+                if is_lit:
+                    if geometry.tangents is None or state["alpha_compare"] != 0:
+                        raise ValueError("remaster normal preview requires tangents and disabled alpha test")
+                    if remaster_frames is None:
+                        original_uv_vertices = [(*v[:3], *geometry.uv0[index], *v[5:8])
+                                                for v, index in zip(vertices, indices)]
+                        remaster_frames, _ = tangent_frames(original_uv_vertices, indices, geometry.tangents, matrix)
+                    part_vertices = remaster_frames[first:end]
+                    part_mode = {"point_approximation": 7, "spot_approximation": 9 if mode in (5, 9, 12) else 8}[light["mode"]]
+                replacement_tex = remaster.resolve(replacement, channel)
+                if channel == "albedo" and (not opaque(tex) or not opaque(replacement_tex)):
+                    raise ValueError("remaster albedo preview requires opaque source and replacement textures")
+                replacement_key = (replacement_tex["bundle"], replacement_tex["name"].lower())
+                if replacement_key not in texture_indices:
+                    if len(textures) == MAX_TEXTURES:
+                        raise ValueError("texture count exceeds renderer bounds")
+                    texture_indices[replacement_key] = len(textures)
+                    textures.append(replacement_tex)
+                part_texture = texture_indices[replacement_key]
+                part_sampler = {"status": "remaster_preview", "stage": None, "mip_lod_bias": 0.0}
+                part_source["original_sampler"], part_source["sampler"] = sampler, part_sampler
+                part_source["remaster_override"] = {"name": replacement, "channel": channel,
+                    "texture": replacement_tex["name"], "source_sha256": replacement_tex["source_sha256"],
+                    "first_triangle": first//3, "triangles": (end-first)//3}
+                if is_lit:
+                    if "normal_map_candidate" in part_source:
+                        part_source["original_normal_map_candidate"] = part_source.pop("normal_map_candidate")
+                    part_source["remaster_override"]["basis"] = "inferred_uv"
+                    part_source["remaster_override"]["flat_fallback_triangles"] = sum(
+                        part_vertices[i][11] == 0 for i in range(0, len(part_vertices), 3))
+            draws.append((part_texture, part_vertices, state, part_sampler, packet_color, part_mode,
+                          light_values, projector, projector_index, 0))
+            source_draws.append(part_source)
+        if len(draws) > MAX_DRAWS:
+            raise ValueError("remaster splits exceed renderer draw bounds")
     render_triangles = triangle_count
     if shadow_batches is not None:
         selected = set(shadow_batches)
@@ -659,7 +723,9 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
         raise ValueError("packet size mismatch")
     stats = {"render_pass": render_pass, "stage": stage, "triangles": triangle_count, "draws": source_draws,
              "textures": [{key: tex[key] for key in ("name", "bundle", "format", "width", "height")}
-                          | {"mips": len(tex["mips"])} for tex in textures]}
+                          | {"mips": len(tex["mips"])}
+                          | ({"source_sha256": tex["source_sha256"]} if "source_sha256" in tex else {})
+                          for tex in textures]}
     if shadow_batches is not None:
         stats.update(render_triangles=render_triangles, shadow_triangles=triangle_count-render_triangles)
     if additional_scenes:
@@ -725,6 +791,8 @@ def main(argv=None):
                         help="revalidated SDK shadow volumes for the primary scoped scene")
     parser.add_argument("--shadow-light", action="append", default=[],
                         help="offline semantic light ID to shadow; repeatable")
+    parser.add_argument("--bedroom-remaster-materials", type=Path,
+                        help="opt in to bed-relative wall/floor overrides from the Godot materials directory")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
@@ -863,9 +931,12 @@ def main(argv=None):
         try:
             for _, path in paths:
                 bundles.append(IBT(path))
+            remaster = (material_overrides.BedroomOverrides(scene, args.bedroom_remaster_materials)
+                        if args.bedroom_remaster_materials is not None else None)
             body, stats = create_packet(scene, TextureResolver(bundles), args.render_pass, args.stage, states, samplers,
                                         additional_scenes=extra_scenes, ambient_candidates=ambient_values,
-                                        direct_candidates=direct_values, fog_candidates=fog_values, shadow_batches=shadow_values)
+                                        direct_candidates=direct_values, fog_candidates=fog_values, shadow_batches=shadow_values,
+                                        remaster=remaster)
         finally:
             for bundle in bundles:
                 bundle.close()
@@ -881,6 +952,9 @@ def main(argv=None):
                                     ("Candidate stencil shadows are incomplete; runtime lights, legacy shaders, missing objects and HUD are unverified."
                                      if shadow_values is not None else
                                      "No stencil, verified runtime lights, legacy shaders, missing objects or HUD.")], **stats}
+        if remaster is not None:
+            manifest["bedroom_remaster_anchor"] = remaster.anchor_id
+            manifest["limitations"].append("Bedroom replacements are opt-in BSP material/orientation/bed-relative region choices. Albedo and OpenGL normal maps use UV0; roughness, AO and height are not rendered, and lighting is not PBR.")
         if shadow_values is not None:
             manifest["shadow_candidates_sha256"] = shadow_digest
             manifest["limitations"].append("Selected SDK volumes and offline cast flags approximate visible static casters; off-screen/runtime casters and actual stencil submissions are unobserved.")

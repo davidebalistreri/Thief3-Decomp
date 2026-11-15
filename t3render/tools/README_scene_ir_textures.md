@@ -95,20 +95,20 @@ and a matching kernel bundle. Each stage-3 draw must have a unique pre-Reset
 omni/spot program hypothesis, sampled constants and a unique offline light
 position within 0.01 T3 units. Ambiguous or missing inputs fail closed.
 
-Only omni candidates are shaded: register 20 supplies position; register 21.y
+By default only omni candidates are shaded: register 20 supplies position; register 21.y
 is used **as if** it were inverse radius. Color and the approximate `t3map`
 energy are offline values; Lambert shading, squared linear falloff and the
 optional `--direct-preview-gain` are renderer choices, not measured legacy
 behavior. Normals use the inverse-transpose instance transform. The gain is
-explicit and defaults to 1. All spot candidates contribute zero pending a
-validated cone/direction; no spot is silently treated as an omni light.
+explicit and defaults to 1. Spot candidates contribute zero unless explicitly
+enabled; no spot is silently treated as an omni light.
 
 This does not observe a runtime light object, pixel shader, color or energy.
 It does not implement stencil shadows, normal maps, emissions, missing scene
 objects or HUD. The preview does not write candidates into SceneIR's light
-list. The packet manifest labels every point or skipped spot and records the
-offline light ID, program hypothesis and parameters. The normal and lighting
-path writes packet version 5, while versions 1–4 remain readable.
+list. The packet manifest labels every point or spot and records the offline
+light ID, program hypothesis and parameters. The baseline point-light path
+writes packet version 5, while versions 1–4 remain readable.
 
 Using the local frame-1001 capture and the corrected offline fixture, the
 expanded stage-1/3/4 packet contains 222 draws: 51 ambient, 69 approximate
@@ -137,6 +137,36 @@ python3 -B t3render/tools/scene_ir_to_textured_packet.py \
   --output build/t3render-offline/bedroom-runtime-1001-direct.scene.bin
 ```
 
+With `--spot-candidates`, the exporter also checks each spot's sampled register
+19 against the offline actor rotation and checks the sampled projector rows
+22, 23 and 25 against its position and axis. It uses those rows with a soft
+circular mask and approximate axial falloff. The four spot axes in frame 1001
+match the corresponding offline rotations within 0.0001 per component. A
+separate D3DDisassemble of the local `SpotLightNormal11_Light_Vertex` asset
+(`sha256:d4f34f1aeda5f7747cfec11166536e73e183f7a882ad9de74478490a08dae95f`)
+shows those registers feeding the spot projection; this does not establish the
+post-Reset GPU program or the projected texture. The circular mask is a
+preview approximation, not the measured legacy cone.
+
+Optionally append `--spot-candidates --spot-projector-candidate genwindowint_p`
+to the command above and use a new output path. The sampler and the candidate
+texture's dimensions, format and mip count must match the observed stage-3
+metadata. The offline bundle has five matching entries, including two
+byte-identical `genwindowint_p` entries: the texture name is therefore a
+**hypothesis**, not proof of GPU identity. Same-named entries with different
+contents are rejected. The projected texture uses linear filtering, a black
+border and mip zero, as in the checked stage-3 sampler metadata. Colors,
+energy, normal mapping, shadows and the original pixel shader remain unproven.
+
+The local 222-draw preview then includes 51 approximate spot contributions.
+Compared with the frame-1001 screenshot, whole-image mean absolute RGB error
+was `(8.23, 6.82, 6.56)` for the circular mask and `(7.55, 6.45, 5.78)` for
+the named texture hypothesis, on a 0–255 scale. This comparison includes dark
+background, missing geometry and HUD and is not proof of visual parity or
+texture identity. The synthetic GPU fixtures exercise both projector paths;
+earlier packet fixtures also pass. Circular and textured modes write packet
+versions 6 and 7 respectively; versions 1–5 remain readable.
+
 The fixture, packets and rendered images contain game-derived data and stay
 local under `build/`.
 
@@ -164,8 +194,8 @@ resources, repeated draws and intervening color/depth clears. It requires
 `--state-trace` and `--offline-scene`; each snapshot is revalidated before
 its states are paired, and each source's limitations are retained in the
 manifest. Omitted draws and stencil operations are not recreated,
-so the depth and visibility history remains partial. In particular, stage 3
-still uses an unlit diffuse shader, not the captured lighting shader.
+so the depth and visibility history remains partial. Without either lighting
+preview option, stage 3 uses an unlit diffuse shader, not the legacy shader.
 
 With the existing frame-1001 stage-1 and stage-3 snapshots, composition
 produced 77 draws and 2,134 triangles on the standalone Highball/D3D12 path.

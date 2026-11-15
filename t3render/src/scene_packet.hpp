@@ -38,10 +38,12 @@ struct DrawStyle {
 struct Draw {
     std::uint32_t texture, first_vertex, vertex_count;
     DrawStyle state;
-    std::uint32_t ambient_candidate = 0;
+    std::uint32_t shading = 0;
     float ambient_color[4]{};
     float light_position[3]{}, light_inverse_radius = 0;
     float light_color[3]{}, light_energy = 0;
+    float spot_projector[3][4]{};
+    std::uint32_t projector_texture = 0;
 };
 struct Frame {
     std::uint32_t width = 0, height = 0;
@@ -90,11 +92,14 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
     const char v3[8] = {'T', '3', 'S', 'C', 'N', '0', '3', '\0'};
     const char v4[8] = {'T', '3', 'S', 'C', 'N', '0', '4', '\0'};
     const char v5[8] = {'T', '3', 'S', 'C', 'N', '0', '5', '\0'};
+    const char v6[8] = {'T', '3', 'S', 'C', 'N', '0', '6', '\0'};
+    const char v7[8] = {'T', '3', 'S', 'C', 'N', '0', '7', '\0'};
     Frame frame;
     if (!reader.bytes(magic, sizeof(magic)) ||
         (std::memcmp(magic, v1, sizeof(magic)) && std::memcmp(magic, v2, sizeof(magic)) &&
          std::memcmp(magic, v3, sizeof(magic)) && std::memcmp(magic, v4, sizeof(magic)) &&
-         std::memcmp(magic, v5, sizeof(magic))) ||
+         std::memcmp(magic, v5, sizeof(magic)) && std::memcmp(magic, v6, sizeof(magic)) &&
+         std::memcmp(magic, v7, sizeof(magic))) ||
         !reader.u32(frame.width) || !reader.u32(frame.height) || !frame.width || !frame.height ||
         frame.width > 2048 || frame.height > 2048 || !reader.f32(frame.min_depth) ||
         !reader.f32(frame.max_depth) || frame.min_depth < 0 || frame.max_depth > 1 ||
@@ -139,24 +144,37 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
                 s.blend_src > 9 || s.blend_dst > 9 || s.blend_op > 4 || s.alpha_compare > 8 ||
                 s.alpha_ref > 255 || s.color_mask > 15) return false;
             if ((!std::memcmp(magic, v3, sizeof(magic)) || !std::memcmp(magic, v4, sizeof(magic)) ||
-                 !std::memcmp(magic, v5, sizeof(magic))) &&
+                 !std::memcmp(magic, v5, sizeof(magic)) || !std::memcmp(magic, v6, sizeof(magic)) ||
+                 !std::memcmp(magic, v7, sizeof(magic))) &&
                 (!reader.f32(s.mip_lod_bias, 16.0f) || s.mip_lod_bias >= 16.0f)) return false;
-            if (!std::memcmp(magic, v4, sizeof(magic)) || !std::memcmp(magic, v5, sizeof(magic))) {
-                if (!reader.u32(draw.ambient_candidate) ||
-                    draw.ambient_candidate > (!std::memcmp(magic, v5, sizeof(magic)) ? 3u : 1u)) return false;
+            if (!std::memcmp(magic, v4, sizeof(magic)) || !std::memcmp(magic, v5, sizeof(magic)) ||
+                !std::memcmp(magic, v6, sizeof(magic)) || !std::memcmp(magic, v7, sizeof(magic))) {
+                const std::uint32_t max_shading = !std::memcmp(magic, v7, sizeof(magic)) ? 5u :
+                                                   !std::memcmp(magic, v6, sizeof(magic)) ? 4u :
+                                                   !std::memcmp(magic, v5, sizeof(magic)) ? 3u : 1u;
+                if (!reader.u32(draw.shading) || draw.shading > max_shading) return false;
                 for (float& value : draw.ambient_color)
                     if (!reader.f32(value, 1.0f) || value < 0) return false;
             }
-            if (!std::memcmp(magic, v5, sizeof(magic))) {
+            if (!std::memcmp(magic, v5, sizeof(magic)) || !std::memcmp(magic, v6, sizeof(magic)) ||
+                !std::memcmp(magic, v7, sizeof(magic))) {
                 for (float& value : draw.light_position) if (!reader.f32(value)) return false;
                 if (!reader.f32(draw.light_inverse_radius, 1.0f) || draw.light_inverse_radius < 0 ||
-                    (draw.ambient_candidate == 2 && draw.light_inverse_radius == 0)) return false;
+                    ((draw.shading == 2 || draw.shading == 4 || draw.shading == 5) && draw.light_inverse_radius == 0)) return false;
                 for (float& value : draw.light_color)
                     if (!reader.f32(value, 1.0f) || value < 0) return false;
                 if (!reader.f32(draw.light_energy, 4.0f) || draw.light_energy < 0) return false;
             }
+            if (!std::memcmp(magic, v6, sizeof(magic)) || !std::memcmp(magic, v7, sizeof(magic))) {
+                for (auto& row : draw.spot_projector) for (float& value : row) if (!reader.f32(value)) return false;
+                const auto& axis = draw.spot_projector[2];
+                if ((draw.shading == 4 || draw.shading == 5) && axis[0]*axis[0] + axis[1]*axis[1] + axis[2]*axis[2] < 1e-12f) return false;
+            }
+            if (!std::memcmp(magic, v7, sizeof(magic)) &&
+                (!reader.u32(draw.projector_texture) || draw.projector_texture >= texture_count)) return false;
         }
-        const bool direct = !std::memcmp(magic, v5, sizeof(magic));
+        const bool direct = !std::memcmp(magic, v5, sizeof(magic)) || !std::memcmp(magic, v6, sizeof(magic)) ||
+                            !std::memcmp(magic, v7, sizeof(magic));
         if (std::size_t(count) * (direct ? 32 : 20) > reader.remaining()) return false;
         for (std::uint32_t n = 0; n < count; ++n) {
             Vertex vertex{};
@@ -165,7 +183,8 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
             if (direct) {
                 if (!reader.f32(vertex.nx, 1.0f) || !reader.f32(vertex.ny, 1.0f) || !reader.f32(vertex.nz, 1.0f)) return false;
                 const float length_squared = vertex.nx*vertex.nx + vertex.ny*vertex.ny + vertex.nz*vertex.nz;
-                if (draw.ambient_candidate == 2 && (length_squared < .98f || length_squared > 1.02f)) return false;
+                if ((draw.shading == 2 || draw.shading == 4 || draw.shading == 5) &&
+                    (length_squared < .98f || length_squared > 1.02f)) return false;
             }
             frame.vertices.push_back(vertex);
         }

@@ -19,6 +19,20 @@ def sample():
             {"words": words}, struct.pack("<2I", *words))
 
 
+def spot_sample():
+    values = [0.] * (26 * 4)
+    values[19*4:20*4] = [-1, 0, 0, 0]
+    values[20*4:21*4] = [1, 2, 3, 1]
+    values[21*4:22*4] = [0, .01, .01, 1]
+    values[22*4:23*4] = [.5, .5, 0, -1.5]
+    values[23*4:24*4] = [.5, 0, .5, -2]
+    values[25*4:26*4] = [1, 0, 0, -1]
+    words = [0xfffe0100, 0x0000ffff]
+    return ({"status": "sampled", "count": 26,
+             "bits": list(struct.unpack("<104I", struct.pack("<104f", *values)))},
+            {"words": words}, struct.pack("<2I", *words))
+
+
 class DirectCandidateTests(unittest.TestCase):
     def test_omni_uses_sampled_position_and_explicit_offline_color(self):
         constants, program, binary = sample()
@@ -66,6 +80,43 @@ class DirectCandidateTests(unittest.TestCase):
                  self.assertRaisesRegex(ValueError, "fingerprint"):
                 direct.from_trace(scene, offline, offline_raw, "trace", "kernel", "actors", 0, 3, 1)
             reader.assert_not_called()
+
+    def test_spot_preview_requires_matching_axis_origin_and_projector(self):
+        constants, program, binary = spot_sample()
+        spot = SimpleNamespace(id="light:map:spot", kind="spot", position=(1, 2, 3), color=(.4, .5, .6))
+        actor = {"rotation": [0, 0, 0], "light": {"kind": "spot", "energy": .4}}
+        with mock.patch.object(direct.trace_to_ir, "observed_vertex_constants", return_value=constants), \
+             mock.patch.object(direct.trace_to_ir, "pre_reset_vertex_program", return_value=program):
+            args = ({}, {}, {}, {}, True, True, True, {binary: ["SpotLight11_Light_Vertex"]}, [spot], {"spot": actor}, 1)
+            result = direct.direct_light(*args, preview_spots=True)
+            self.assertEqual(result["mode"], "spot_approximation")
+            self.assertEqual(len(result["projector_rows"]), 3)
+            self.assertEqual(direct.direct_light(*args)["mode"], "skipped_spot")
+        for change in ("rotation", "origin", "center", "truncated"):
+            altered = dict(constants, bits=constants["bits"][:])
+            candidate_actor = dict(actor)
+            if change == "rotation": candidate_actor["rotation"] = [0, 8192, 0]
+            elif change == "origin": altered["bits"][25*4+3] = struct.unpack("<I", struct.pack("<f", 0))[0]
+            elif change == "center": altered["bits"][22*4+3] = struct.unpack("<I", struct.pack("<f", -30))[0]
+            else: altered["count"] = 25
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                direct.spot_projector(altered, candidate_actor, [1, 2, 3])
+
+    def test_projector_observation_keeps_metadata_and_rejects_sampler_mismatch(self):
+        stage = {"stage": 3, "states": {"11": 3, "13": 4, "14": 4, "15": 0, "16": 2, "17": 2, "18": 0, "20": 0, "24": 260},
+                 "texture": {"id": "0x1234", "type": 3, "width": 256, "height": 256, "levels": 9, "format": 861165636}}
+        result = direct.projector_texture_observation({"stages": [stage]}, "genwindowint_p")
+        self.assertEqual(result["name"], "genwindowint_p")
+        self.assertNotIn("id", result)
+        for change in ("address", "projection", "unavailable", "duplicate"):
+            item = {**stage, "states": dict(stage["states"])}
+            draw = {"stages": [item]}
+            if change == "address": item["states"]["13"] = 1
+            elif change == "projection": item["states"]["24"] = 0
+            elif change == "unavailable": item["texture_hr"] = -1
+            else: draw["stages"].append(item)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                direct.projector_texture_observation(draw, "candidate")
 
 
 if __name__ == "__main__":

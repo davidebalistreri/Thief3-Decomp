@@ -18,6 +18,8 @@ import scene_ir_to_textured_packet as packet
 import scene_texture_fixture as gpu_fixture
 import scene_ambient_fixture as ambient_fixture
 import scene_direct_fixture as direct_fixture
+import scene_spot_fixture as spot_fixture
+import scene_projector_fixture as projector_fixture
 from t3texture import Mip, Texture
 from test_scoped_scene_snapshot import fixture
 
@@ -235,6 +237,72 @@ class TexturedScenePacketTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "wrong pixel"):
             direct_fixture.verify(image)
 
+    def test_spot_packet_and_fixture_validate_projector_and_normals(self):
+        scene = scoped_scene()
+        states = {s.draw_id: dict(packet.legacy_states.DEFAULT) for s in scene.submissions}
+        states[2].update(depth_write=0, blend_enable=1, blend_src=1, blend_dst=1, color_mask=7)
+        light = {"mode": "spot_approximation", "position": [1, 2, 3], "inverse_radius_candidate": .1,
+                 "offline_color": [1, .8, .6], "offline_energy": .5, "gain": 1,
+                 "projector_rows": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0]]}
+        raw, _ = packet.create_packet(scene, Resolver(), draw_states=states, direct_candidates={2: light})
+        self.assertEqual(raw[:8], b"T3SCN06\0")
+        self.assertEqual(self.parse(raw).returncode, 0)
+        light["projector_rows"][2] = [0, 0, 0, 0]
+        with self.assertRaisesRegex(ValueError, "projector"):
+            packet.create_packet(scene, Resolver(), draw_states=states, direct_candidates={2: light})
+        raw = spot_fixture.fixture()
+        self.assertEqual(self.parse(raw).returncode, 0)
+        for bad in (raw[:580] + struct.pack("<I", 5) + raw[584:],
+                    raw[:612] + bytes(4) + raw[616:],
+                    raw[:664] + bytes(12) + raw[676:],
+                    raw[:700] + bytes(12) + raw[712:]):
+            self.assertEqual(self.parse(bad).returncode, 2)
+        header = b"P6\n64 64\n255\n"
+        image = bytearray(header + bytes(64 * 64 * 3))
+        for (x, y), color in spot_fixture.EXPECTED.items():
+            offset = len(header) + (y * 64 + x) * 3
+            image[offset:offset + 3] = bytes(color)
+        self.assertEqual(spot_fixture.verify(image), 2)
+        image[len(header) + (32 * 64 + 32) * 3] = 0
+        with self.assertRaisesRegex(ValueError, "wrong pixel"):
+            spot_fixture.verify(image)
+
+    def test_projector_packet_accepts_only_matching_texture_metadata(self):
+        class ProjectorResolver(Resolver):
+            def resolve_projector(self, name):
+                return {"name": name, "bundle": "fixture.ibt", "format": "A8R8G8B8", "width": 2, "height": 2,
+                        "mips": [bytes([255, 255, 255, 255] * 4)]}
+        scene = scoped_scene()
+        states = {s.draw_id: dict(packet.legacy_states.DEFAULT) for s in scene.submissions}
+        states[2].update(depth_write=0, blend_enable=1, blend_src=1, blend_dst=1, color_mask=7)
+        light = {"mode": "spot_approximation", "position": [1, 2, 3], "inverse_radius_candidate": .1,
+                 "offline_color": [1, .8, .6], "offline_energy": .5, "gain": 1,
+                 "projector_rows": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0]],
+                 "projector_candidate": {"name": "window", "width": 2, "height": 2, "levels": 1, "format": 21}}
+        raw, info = packet.create_packet(scene, ProjectorResolver(), draw_states=states, direct_candidates={2: light})
+        self.assertEqual(raw[:8], b"T3SCN07\0")
+        self.assertEqual(len(info["textures"]), 2)
+        self.assertEqual(self.parse(raw).returncode, 0)
+        light["projector_candidate"]["width"] = 4
+        with self.assertRaisesRegex(ValueError, "metadata"):
+            packet.create_packet(scene, ProjectorResolver(), draw_states=states, direct_candidates={2: light})
+        light["projector_candidate"]["width"] = True
+        with self.assertRaisesRegex(ValueError, "invalid projector"):
+            packet.create_packet(scene, ProjectorResolver(), draw_states=states, direct_candidates={2: light})
+        raw = projector_fixture.fixture()
+        self.assertEqual(self.parse(raw).returncode, 0)
+        # The second draw's projector index must be within the texture table.
+        self.assertEqual(self.parse(raw[:704] + struct.pack("<I", 2) + raw[708:]).returncode, 2)
+        header = b"P6\n64 64\n255\n"
+        image = bytearray(header + bytes(64 * 64 * 3))
+        for (x, y), color in projector_fixture.EXPECTED.items():
+            offset = len(header) + (y * 64 + x) * 3
+            image[offset:offset + 3] = bytes(color)
+        self.assertEqual(projector_fixture.verify(image), 3)
+        image[len(header) + (32 * 64 + 24) * 3] = 0
+        with self.assertRaisesRegex(ValueError, "wrong pixel"):
+            projector_fixture.verify(image)
+
     def test_exclusive_write_does_not_overwrite_or_leave_first_file(self):
         with tempfile.TemporaryDirectory(prefix="t3render-textured-output-") as directory:
             output = Path(directory) / "scene.bin"
@@ -288,6 +356,13 @@ class TexturedScenePacketTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "ambiguous"):
                 packet.TextureResolver([first, second]).resolve("stone")
             first.resources.pop()
+            duplicate_bundle = Bundle("local.ibt", [tex, tex])
+            duplicate_resolver = packet.TextureResolver([duplicate_bundle])
+            self.assertEqual(duplicate_resolver.resolve_projector("diffuse")["name"], "Diffuse")
+            altered = SimpleNamespace(name="Diffuse", type=packet.TYPE_TEXTURE, payload="different")
+            duplicate_bundle.resources.append(altered)
+            with self.assertRaisesRegex(ValueError, "ambiguous projector"):
+                packet.TextureResolver([duplicate_bundle]).resolve_projector("Diffuse")
             texture.mips[1].level = 2
             with self.assertRaisesRegex(ValueError, "mip chain"):
                 packet.TextureResolver([first, second]).resolve("stone")

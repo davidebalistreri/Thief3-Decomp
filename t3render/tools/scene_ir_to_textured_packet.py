@@ -30,6 +30,8 @@ import scene_direct_candidates as direct  # noqa: E402
 MAGIC = b"T3SCN03\0"
 AMBIENT_MAGIC = b"T3SCN04\0"
 DIRECT_MAGIC = b"T3SCN05\0"
+SPOT_MAGIC = b"T3SCN06\0"
+PROJECTOR_MAGIC = b"T3SCN07\0"
 MAX_BYTES = 64 * 1024 * 1024
 MAX_TEXTURES = 64
 MAX_DRAWS = 8192
@@ -93,11 +95,26 @@ class TextureResolver:
         if not texture_name:
             raise ValueError(f"material {name} has no diffuse texture")
         texture_bundle, texture_resource = self.find(texture_name, TYPE_TEXTURE)
+        value = self.decode_texture(texture_bundle, texture_resource, texture_name)
+        self.cache[key] = value
+        return value
+
+    def resolve_projector(self, name):
+        """Allow duplicate named entries only when all bytes and part boundaries agree."""
+        for bundle in self.bundles:
+            matches = [r for r in bundle.resources if r.type == TYPE_TEXTURE and r.name.lower() == name.lower()]
+            if matches:
+                parts = bundle.split(matches[0])
+                if any(bundle.split(resource) != parts for resource in matches[1:]):
+                    raise ValueError(f"ambiguous projector texture {name} in {bundle.path.name}")
+                return self.decode_texture(bundle, matches[0], name, parts)
+        raise ValueError(f"missing projector texture {name}")
+
+    def decode_texture(self, texture_bundle, texture_resource, texture_name, parts=None):
         texture_key = (str(texture_bundle.path), texture_resource.name.lower())
         if texture_key in self.textures:
-            self.cache[key] = self.textures[texture_key]
-            return self.cache[key]
-        texture = parse_texture(texture_resource, texture_bundle.split(texture_resource))
+            return self.textures[texture_key]
+        texture = parse_texture(texture_resource, texture_bundle.split(texture_resource) if parts is None else parts)
         if (not 1 <= texture.width <= 2048 or not 1 <= texture.height <= 2048 or
                 not 1 <= len(texture.mips) <= 12):
             raise ValueError(f"texture {texture_name} exceeds renderer bounds")
@@ -120,7 +137,6 @@ class TextureResolver:
                  "format": texture.format, "width": texture.width, "height": texture.height, "mips": mips}
         self.decoded_bytes += decoded_size
         self.textures[texture_key] = value
-        self.cache[key] = value
         return value
 
 
@@ -206,6 +222,13 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             raise ValueError("direct candidates require revalidated submitted draws")
         if ambient_candidates is not None and set(ambient_candidates) & set(direct_candidates):
             raise ValueError("a draw cannot have ambient and direct candidates")
+    spot_packet = direct_candidates is not None and any(
+        isinstance(value, dict) and value.get("mode") == "spot_approximation" for value in direct_candidates.values())
+    projector_packet = direct_candidates is not None and any(
+        isinstance(value, dict) and value.get("projector_candidate") is not None for value in direct_candidates.values())
+    if projector_packet and any(isinstance(value, dict) and value.get("projector_candidate") is not None and
+                                value.get("mode") != "spot_approximation" for value in direct_candidates.values()):
+        raise ValueError("projector texture candidates require spotlight draws")
     if additional_scenes:
         # Trace operation IDs increase within a frame; restore their original
         # order when combining individually verified stage snapshots.
@@ -230,12 +253,13 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             raise ValueError("only affine row-vector transforms are supported")
         light = direct_candidates.get(submission.draw_id) if direct_candidates is not None else None
         if direct_candidates is not None and submission.draw_id in direct_candidates:
-            if not isinstance(light, dict) or light.get("mode") not in ("point_approximation", "skipped_spot"):
+            if not isinstance(light, dict) or light.get("mode") not in (
+                    "point_approximation", "skipped_spot", "spot_approximation"):
                 raise ValueError("invalid direct candidate")
-        is_point = light is not None and light["mode"] == "point_approximation"
-        if is_point and geometry.normals is None:
-            raise ValueError("point-light candidate requires source normals")
-        normal_xform = normal_matrix(matrix) if is_point else None
+        is_lit = light is not None and light["mode"] in ("point_approximation", "spot_approximation")
+        if is_lit and geometry.normals is None:
+            raise ValueError("direct-light candidate requires source normals")
+        normal_xform = normal_matrix(matrix) if is_lit else None
         tex = resolver.resolve(material_name)
         tex_key = (tex["bundle"], tex["name"].lower())
         if tex_key not in texture_indices:
@@ -249,7 +273,7 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             uv = geometry.uv0[index]
             if (abs(position[3] - 1) > 1e-6 or any(not math.isfinite(v) or abs(v) > 1000000 for v in position[:3] + uv)):
                 raise ValueError("vertex exceeds renderer bounds")
-            normal = transform_normal(geometry.normals[index], normal_xform) if is_point else (0, 0, 0)
+            normal = transform_normal(geometry.normals[index], normal_xform) if is_lit else (0, 0, 0)
             vertices.append((*position[:3], *uv, *normal) if direct_candidates is not None else (*position[:3], *uv))
         triangle_count += len(vertices) // 3
         if not vertices or triangle_count > MAX_TRIANGLES:
@@ -271,7 +295,7 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
                 isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or not 0 <= x <= 1
                 for x in color)):
             raise ValueError("invalid ambient candidate color")
-        if is_point:
+        if is_lit:
             position, inverse, rgb = light.get("position"), light.get("inverse_radius_candidate"), light.get("offline_color")
             energy, gain = light.get("offline_energy"), light.get("gain")
             values = (position if isinstance(position, (tuple, list)) else [])
@@ -287,8 +311,38 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             light_values = (*position, inverse, *rgb, energy * gain)
         else:
             light_values = (0,) * 8
-        mode = 2 if is_point else 3 if light is not None else 1 if color is not None else 0
-        draws.append((texture_indices[tex_key], vertices, state, sampler, color, mode, light_values))
+        projector_index = 0
+        if light is not None and light["mode"] == "spot_approximation":
+            rows = light.get("projector_rows")
+            if (not isinstance(rows, (list, tuple)) or len(rows) != 3 or any(
+                    not isinstance(row, (list, tuple)) or len(row) != 4 or any(
+                        isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or abs(x) > 1000000
+                        for x in row) for row in rows) or sum(x*x for x in rows[2][:3]) < 1e-12):
+                raise ValueError("invalid spot candidate projector")
+            projector = tuple(x for row in rows for x in row)
+            mode = 4
+            candidate = light.get("projector_candidate")
+            if candidate is not None:
+                if (not isinstance(candidate, dict) or not isinstance(candidate.get("name"), str) or not candidate["name"] or
+                        any(type(candidate.get(key)) is not int or candidate[key] <= 0
+                            for key in ("width", "height", "levels", "format"))):
+                    raise ValueError("invalid projector texture candidate")
+                projector_texture = resolver.resolve_projector(candidate["name"])
+                if projector_texture["name"].lower() != candidate["name"].lower():
+                    raise ValueError("projector texture candidate name does not match asset")
+                match_sampler({**candidate, "status": "candidate", "stage": 3, "lod_bias": 0}, projector_texture)
+                projector_key = (projector_texture["bundle"], projector_texture["name"].lower())
+                if projector_key not in texture_indices:
+                    if len(textures) == MAX_TEXTURES:
+                        raise ValueError("texture count exceeds renderer bounds")
+                    texture_indices[projector_key] = len(textures)
+                    textures.append(projector_texture)
+                projector_index = texture_indices[projector_key]
+                mode = 5
+        else:
+            projector = (0,) * 12
+            mode = 2 if is_lit else 3 if light is not None else 1 if color is not None else 0
+        draws.append((texture_indices[tex_key], vertices, state, sampler, color, mode, light_values, projector, projector_index))
         source_draws.append({"draw": submission.draw_id, "target_kind": submission.target_kind,
                              "target_id": submission.target_id, "section": submission.section,
                              "render_pass": submission.render_pass, "stage": submission.stage,
@@ -303,10 +357,12 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
     size = (struct.calcsize("<8sIIff32fII") + sum(12 + sum(len(mip) for mip in tex["mips"]) for tex in textures) +
             sum(56 + (20 if ambient_candidates is not None or direct_candidates is not None else 0) +
                 (32 if direct_candidates is not None else 0) + len(vertices) * (32 if direct_candidates is not None else 20)
-                for _, vertices, _, _, _, _, _ in draws))
+                + (48 if spot_packet else 0) + (4 if projector_packet else 0)
+                for _, vertices, _, _, _, _, _, _, _ in draws))
     if size > MAX_BYTES:
         raise ValueError("packet exceeds renderer bounds")
-    magic = DIRECT_MAGIC if direct_candidates is not None else AMBIENT_MAGIC if ambient_candidates is not None else MAGIC
+    magic = (PROJECTOR_MAGIC if projector_packet else SPOT_MAGIC if spot_packet else
+             DIRECT_MAGIC if direct_candidates is not None else AMBIENT_MAGIC if ambient_candidates is not None else MAGIC)
     body = bytearray(struct.pack("<8sIIff32fII", magic,
                                  viewport.width, viewport.height,
                                  viewport.min_depth, viewport.max_depth, *camera.view, *camera.projection,
@@ -315,13 +371,17 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
         body.extend(struct.pack("<III", tex["width"], tex["height"], len(tex["mips"])))
         for mip in tex["mips"]:
             body.extend(mip)
-    for texture_index, vertices, state, sampler, color, mode, light_values in draws:
+    for texture_index, vertices, state, sampler, color, mode, light_values, projector, projector_index in draws:
         body.extend(struct.pack("<13If", texture_index, len(vertices), *(state[key] for key in legacy_states.FIELDS),
                                 sampler["mip_lod_bias"]))
         if ambient_candidates is not None or direct_candidates is not None:
             body.extend(struct.pack("<I4f", mode, *(color if color is not None else (0, 0, 0, 0))))
         if direct_candidates is not None:
             body.extend(struct.pack("<8f", *light_values))
+        if spot_packet:
+            body.extend(struct.pack("<12f", *projector))
+        if projector_packet:
+            body.extend(struct.pack("<I", projector_index))
         for vertex in vertices:
             body.extend(struct.pack("<8f" if direct_candidates is not None else "<5f", *vertex))
     if len(body) != size:
@@ -370,7 +430,10 @@ def main(argv=None):
     parser.add_argument("--ambient-candidate-stage", type=int,
                         help="use a pre-Reset ambient shader hypothesis for this submission stage")
     parser.add_argument("--direct-candidate-stage", type=int,
-                        help="approximate scoped omni-light candidates for this submission stage")
+                        help="approximate scoped direct-light candidates for this submission stage")
+    parser.add_argument("--spot-candidates", action="store_true",
+                        help="also preview validated spotlight projector candidates with an approximate circular mask")
+    parser.add_argument("--spot-projector-candidate", help="explicitly hypothesize a metadata-compatible offline projector texture")
     parser.add_argument("--offline-actors", type=Path, help="fingerprinted t3map actor export for candidate light colors")
     parser.add_argument("--direct-preview-gain", type=float, default=1.0,
                         help="uncalibrated visual gain for candidate direct lights (default: 1)")
@@ -392,6 +455,10 @@ def main(argv=None):
         if ((args.direct_candidate_stage is None) != (args.offline_actors is None) or
                 (args.direct_candidate_stage is not None and (args.state_trace is None or args.direct_candidate_stage < 0))):
             raise ValueError("direct candidates require a state trace, offline actors and a nonnegative stage")
+        if args.spot_candidates and args.direct_candidate_stage is None:
+            raise ValueError("spot candidates require a direct candidate stage")
+        if args.spot_projector_candidate is not None and not args.spot_candidates:
+            raise ValueError("projector texture candidate requires spotlight candidates")
         states = None
         samplers = {} if args.sampler_candidate_stage is not None else None
         if args.state_trace is not None:
@@ -435,7 +502,8 @@ def main(argv=None):
                 raise ValueError("direct candidate stage must identify exactly one scene")
             current, scope = matching[0]
             direct_values = direct.from_trace(current, offline, offline_bytes, args.state_trace, kernel_path, args.offline_actors,
-                                              *scope, args.direct_preview_gain)
+                                              *scope, args.direct_preview_gain, preview_spots=args.spot_candidates,
+                                              projector_candidate=args.spot_projector_candidate)
         bundles = []
         try:
             for _, path in paths:
@@ -446,7 +514,7 @@ def main(argv=None):
         finally:
             for bundle in bundles:
                 bundle.close()
-        manifest = {"schema": "t3.scene.textured-packet", "version": 5 if direct_values is not None else 4 if ambient_values is not None else 3,
+        manifest = {"schema": "t3.scene.textured-packet", "version": 7 if body[:8] == PROJECTOR_MAGIC else 6 if body[:8] == SPOT_MAGIC else 5 if direct_values is not None else 4 if ambient_values is not None else 3,
                     "source_frame": scene.source.frame_id,
                     "scene_sha256": hashlib.sha256(raw).hexdigest(), "packet_sha256": hashlib.sha256(body).hexdigest(),
                     "state_source": "revalidated_same_frame_trace" if states is not None else "opaque_preview_defaults",
@@ -464,7 +532,13 @@ def main(argv=None):
             manifest["limitations"].append("Ambient RGB uses sampled vertex constants with a pre-Reset shader hypothesis; the active GPU and pixel shaders are unproven.")
         if direct_values is not None:
             manifest["limitations"].append("Point-light Lambert shading and squared linear falloff are approximations; the coefficient's radius meaning is unproven.")
-            manifest["limitations"].append("Light colors and energies come from offline actor data; runtime light identity, colors, intensity, shadows and spotlights are unproven.")
+            manifest["limitations"].append("Light colors and energies come from offline actor data; runtime light identity, colors, intensity and shadows are unproven.")
+            if body[:8] == PROJECTOR_MAGIC:
+                manifest["limitations"].append("The projected texture is an offline metadata-compatible hypothesis, not an observed GPU texture identity.")
+            elif body[:8] == SPOT_MAGIC:
+                manifest["limitations"].append("Spotlight projection uses sampled matrix candidates with an approximate circular mask, not the original projected texture or a verified cone.")
+            else:
+                manifest["limitations"].append("Spotlight contributions are omitted.")
         write_pair(args.output, body, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))
     except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, struct.error) as exc:

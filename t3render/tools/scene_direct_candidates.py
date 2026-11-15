@@ -1,4 +1,4 @@
-"""Derive explicitly approximate point-light previews from scoped draw samples.
+"""Derive approximate point and spot previews from scoped draw samples.
 
 This is not a runtime light list. Shader identity is a pre-Reset hypothesis;
 colors and brightness come from the fingerprinted offline actor export.
@@ -13,9 +13,53 @@ import build_bridge_runtime_snapshot as runtime
 import correlate_runtime_light_candidates as candidates
 import scene_ir_to_d3d12_packet as preview
 import trace_to_ir
+from t3common import rotator_matrix
 
 
-def direct_light(draw, outcome, header, frame_begin, cb, pb, hb, shader_index, lights, actors, gain):
+def spot_projector(constants, actor, position):
+    """Check the sampled axis and projection against the offline actor rotation."""
+    if constants["count"] <= 25:
+        raise ValueError("spot candidate projector constants are unavailable")
+    direction = bridge.decode_floats(constants["bits"][19 * 4:20 * 4], 4)
+    rows = [bridge.decode_floats(constants["bits"][i * 4:(i + 1) * 4], 4) for i in (22, 23, 25)]
+    rotation = actor.get("rotation") if isinstance(actor, dict) else None
+    if (direction is None or any(row is None or any(abs(x) > 1000000 for x in row) for row in rows) or
+            direction[3] != 0 or abs(sum(x*x for x in direction[:3]) - 1) > .001 or
+            not isinstance(rotation, (list, tuple)) or len(rotation) != 3 or any(type(x) is not int for x in rotation)):
+        raise ValueError("spot candidate axis or projector is invalid")
+    forward = rotator_matrix(*rotation)[0]
+    if any(abs(forward[i] + direction[i]) > .0001 or abs(rows[2][i] - forward[i]) > .0001 for i in range(3)):
+        raise ValueError("spot candidate axis differs from the offline actor")
+    def project(row, point):
+        return sum(row[i] * point[i] for i in range(3)) + row[3]
+    if abs(project(rows[2], position)) > .01:
+        raise ValueError("spot candidate projector origin does not match its sampled position")
+    center = [position[i] + forward[i] * 100 for i in range(3)]
+    depth = project(rows[2], center)
+    if depth <= 0 or any(not .48 <= project(row, center) / depth <= .52 for row in rows[:2]):
+        raise ValueError("spot candidate projector does not center its axis")
+    return rows
+
+
+def projector_texture_observation(draw, name):
+    """Capture metadata, never the transient texture pointer or presumed identity."""
+    stages = draw.get("stages") if isinstance(draw, dict) else None
+    matches = [s for s in stages if isinstance(s, dict) and s.get("stage") == 3] if isinstance(stages, list) else []
+    if len(matches) != 1 or "texture_hr" in matches[0]:
+        raise ValueError("spot projector texture observation is unavailable")
+    item = matches[0]
+    states, texture = item.get("states"), item.get("texture")
+    expected = (("11", 3), ("13", 4), ("14", 4), ("15", 0), ("16", 2), ("17", 2), ("18", 0),
+                ("20", 0), ("24", 260))
+    if (not isinstance(states, dict) or any(type(states.get(k)) is not int or states[k] != v for k, v in expected) or
+            not isinstance(texture, dict) or texture.get("type") != 3 or any(
+                type(texture.get(key)) is not int or texture[key] <= 0 for key in ("width", "height", "levels", "format"))):
+        raise ValueError("unsupported spot projector sampler or texture metadata")
+    return {"name": name, **{key: texture[key] for key in ("width", "height", "levels", "format")}}
+
+
+def direct_light(draw, outcome, header, frame_begin, cb, pb, hb, shader_index, lights, actors, gain,
+                 *, preview_spots=False, projector_candidate=None):
     constants = trace_to_ir.observed_vertex_constants(draw, outcome, header, frame_begin, cb)
     program = trace_to_ir.pre_reset_vertex_program(draw, outcome, header, pb, hb)
     if not constants or constants.get("status") != "sampled" or constants["count"] <= 21 or not program:
@@ -36,24 +80,33 @@ def direct_light(draw, outcome, header, frame_begin, cb, pb, hb, shader_index, l
         raise ValueError("direct candidate light position or kind is ambiguous")
     light = matches[0]
     result = {"offline_light_id": light.id, "program_hypothesis": names[0], "kind": kind}
-    if kind == "spot":
+    if kind == "spot" and not preview_spots:
         return {**result, "mode": "skipped_spot"}
     actor_name = light.id.rsplit(":", 1)[-1]
     actor = actors.get(actor_name)
     source = actor.get("light") if isinstance(actor, dict) else None
-    energy = source.get("energy") if isinstance(source, dict) and source.get("kind") == "omni" else None
+    energy = source.get("energy") if isinstance(source, dict) and source.get("kind") == kind else None
     if (isinstance(energy, bool) or not isinstance(energy, (int, float)) or not math.isfinite(energy) or
             not 0 <= energy <= 1 or light.color is None or any(not 0 <= x <= 1 for x in light.color)):
         raise ValueError("offline light color or approximate energy is unavailable")
-    return {**result, "mode": "point_approximation", "position": position[:3],
-            "inverse_radius_candidate": coefficients[1], "offline_color": list(light.color),
-            "offline_energy": energy, "gain": gain}
+    result.update({"mode": "spot_approximation" if kind == "spot" else "point_approximation",
+                   "position": position[:3], "inverse_radius_candidate": coefficients[1],
+                   "offline_color": list(light.color), "offline_energy": energy, "gain": gain})
+    if kind == "spot":
+        result["projector_rows"] = spot_projector(constants, actor, position[:3])
+        if projector_candidate is not None:
+            result["projector_candidate"] = projector_texture_observation(draw, projector_candidate)
+    return result
 
 
-def from_trace(scene, offline, offline_bytes, trace, kernel, actors_path, render_pass, stage, gain):
+def from_trace(scene, offline, offline_bytes, trace, kernel, actors_path, render_pass, stage, gain,
+               *, preview_spots=False, projector_candidate=None):
     if (isinstance(gain, bool) or not isinstance(gain, (int, float)) or
             not math.isfinite(gain) or not 0 <= gain <= 4):
         raise ValueError("direct preview gain must be between 0 and 4")
+    if projector_candidate is not None and (not preview_spots or not isinstance(projector_candidate, str) or
+                                             not projector_candidate or len(projector_candidate) > 128):
+        raise ValueError("projector texture candidate requires an enabled spotlight preview")
     digest = scene.source.fingerprints.get("trace")
     if (scene.source.kind != "runtime" or scene.source.camera_synchronized is not True or not digest or
             offline.source.kind != "offline" or scene.source.map != offline.source.map or
@@ -90,5 +143,6 @@ def from_trace(scene, offline, offline_bytes, trace, kernel, actors_path, render
         draw = bridge.one(records, "draw", sub.draw_id)
         outcome = bridge.one(records, "draw_result", sub.draw_id)
         result[sub.draw_id] = direct_light(draw, outcome, header, frame_begin, cb, pb, hb, index,
-                                          offline.lights, actors, gain)
+                                          offline.lights, actors, gain, preview_spots=preview_spots,
+                                          projector_candidate=projector_candidate)
     return result

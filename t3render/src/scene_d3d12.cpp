@@ -187,18 +187,24 @@ int Render(const Frame& frame, const wchar_t* output) {
         "o.p.x+=o.p.w/size.x;o.p.y-=o.p.w/size.y;o.uv=float4(uv,0,0);o.world=p;o.normal=n;return o;}";
     static const char ps_source[] =
         "Texture2D diffuse:register(t0);SamplerState samp:register(s0);"
+        "Texture2D projector_texture:register(t1);SamplerState projector_sampler:register(s1);"
         "cbuffer Alpha:register(b1){uint mode;float reference;float lod_bias;uint shading;float4 ambient_color;"
-        "float4 light_position_inverse_radius;float4 light_color_energy;}"
+        "float4 light_position_inverse_radius;float4 light_color_energy;float4 projector_x;float4 projector_y;float4 projector_w;}"
         "float4 main(float4 uv:TEXCOORD0,float3 world:TEXCOORD1,float3 normal:TEXCOORD2):SV_Target{"
         "float4 c=diffuse.SampleBias(samp,uv.xy,lod_bias);"
         "bool keep=(mode==0)||(mode==2&&c.a<reference)||(mode==3&&c.a==reference)||"
         "(mode==4&&c.a<=reference)||(mode==5&&c.a>reference)||(mode==6&&c.a!=reference)||"
         "(mode==7&&c.a>=reference)||(mode==8);if(!keep)discard;"
         "if(shading==1)c.rgb=ambient_color.rgb;"
-        "if(shading==2){float3 to_light=light_position_inverse_radius.xyz-world;"
+        "if(shading==2||shading==4||shading==5){float3 to_light=light_position_inverse_radius.xyz-world;"
         "float distance=length(to_light);float falloff=saturate(1-distance*light_position_inverse_radius.w);"
+        "float3 cone=1;if(shading==4||shading==5){float4 spot_world=float4(world,1);float w=dot(spot_world,projector_w);"
+        "float2 uv_proj=float2(dot(spot_world,projector_x),dot(spot_world,projector_y))/max(w,0.000001);"
+        "if(shading==5)cone=(w>0)?projector_texture.SampleLevel(projector_sampler,uv_proj,0).rgb:0;"
+        "else cone=(w>0)?saturate(4*(1-length((uv_proj-0.5)*2))):0;"
+        "falloff=saturate(1-max(w,0)*light_position_inverse_radius.w);}"
         "float diffuse_term=saturate(dot(normalize(normal),to_light/max(distance,0.000001)));"
-        "c.rgb=light_color_energy.rgb*(light_color_energy.w*diffuse_term*falloff*falloff);}"
+        "c.rgb=light_color_energy.rgb*(light_color_energy.w*diffuse_term*falloff*falloff*cone);}"
         "if(shading==3)c.rgb=0;return c;}";
     ComPtr<ID3DBlob> vs, ps;
     if (!Compile(compile, vs_source, "vs_5_0", vs) || !Compile(compile, ps_source, "ps_5_0", ps)) return 1;
@@ -211,22 +217,34 @@ int Render(const Frame& frame, const wchar_t* output) {
     Handle event{CreateEventW(nullptr, FALSE, FALSE, nullptr)};
     if (!event.p) return 1;
     D3D12_DESCRIPTOR_RANGE range{}; range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; range.NumDescriptors = 1;
-    D3D12_ROOT_PARAMETER params[3]{};
+    D3D12_DESCRIPTOR_RANGE projector_range = range; projector_range.BaseShaderRegister = 1;
+    // 34 camera constants + 28 pixel constants + two descriptor tables use
+    // the D3D12 root signature's full 64-DWORD budget.
+    D3D12_ROOT_PARAMETER params[4]{};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[0].Constants.ShaderRegister = 0; params[0].Constants.Num32BitValues = 36;
+    params[0].Constants.ShaderRegister = 0; params[0].Constants.Num32BitValues = 34;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
     params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     params[1].DescriptorTable.NumDescriptorRanges = 1; params[1].DescriptorTable.pDescriptorRanges = &range;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[2].Constants.ShaderRegister = 1; params[2].Constants.Num32BitValues = 16;
+    params[2].Constants.ShaderRegister = 1; params[2].Constants.Num32BitValues = 28;
     params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    D3D12_STATIC_SAMPLER_DESC sampler{}; sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[3].DescriptorTable.NumDescriptorRanges = 1; params[3].DescriptorTable.pDescriptorRanges = &projector_range;
+    params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_STATIC_SAMPLER_DESC samplers[2]{};
+    auto& sampler = samplers[0]; sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     sampler.MaxAnisotropy = 1; sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
     sampler.MaxLOD = D3D12_FLOAT32_MAX; sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    D3D12_ROOT_SIGNATURE_DESC root_desc{}; root_desc.NumParameters = 3; root_desc.pParameters = params;
-    root_desc.NumStaticSamplers = 1; root_desc.pStaticSamplers = &sampler;
+    auto& projector_sampler = samplers[1]; projector_sampler.Filter = D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+    projector_sampler.AddressU = projector_sampler.AddressV = projector_sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    projector_sampler.MaxAnisotropy = 1; projector_sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    projector_sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+    projector_sampler.ShaderRegister = 1; projector_sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_ROOT_SIGNATURE_DESC root_desc{}; root_desc.NumParameters = 4; root_desc.pParameters = params;
+    root_desc.NumStaticSamplers = 2; root_desc.pStaticSamplers = samplers;
     root_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
     ComPtr<ID3DBlob> root_blob, root_errors; ComPtr<ID3D12RootSignature> root;
     if (!Check(D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, root_blob.put(), root_errors.put()), "SerializeRoot") ||
@@ -352,7 +370,7 @@ int Render(const Frame& frame, const wchar_t* output) {
     list->SetGraphicsRoot32BitConstants(0, 16, frame.view, 0);
     list->SetGraphicsRoot32BitConstants(0, 16, frame.projection, 16);
     const float size[] = {static_cast<float>(frame.width), static_cast<float>(frame.height), 0, 0};
-    list->SetGraphicsRoot32BitConstants(0, 4, size, 32);
+    list->SetGraphicsRoot32BitConstants(0, 2, size, 32);
     const D3D12_VIEWPORT viewport{0, 0, size[0], size[1], frame.min_depth, frame.max_depth};
     const D3D12_RECT scissor{0, 0, static_cast<LONG>(frame.width), static_cast<LONG>(frame.height)};
     list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &scissor);
@@ -365,16 +383,22 @@ int Render(const Frame& frame, const wchar_t* output) {
         const auto& draw = frame.draws[i];
         auto handle = gpu_base; handle.ptr += UINT64(draw.texture) * srv_step;
         struct AlphaConstants {
-            std::uint32_t mode; float reference, bias; std::uint32_t shading; float color[4], light_position[4], light_color[4];
+            std::uint32_t mode; float reference, bias; std::uint32_t shading;
+            float color[4], light_position[4], light_color[4], projector[3][4];
         } alpha{
-            draw.state.alpha_compare, draw.state.alpha_ref / 255.0f, draw.state.mip_lod_bias, draw.ambient_candidate,
+            draw.state.alpha_compare, draw.state.alpha_ref / 255.0f, draw.state.mip_lod_bias, draw.shading,
             {draw.ambient_color[0], draw.ambient_color[1], draw.ambient_color[2], draw.ambient_color[3]},
             {draw.light_position[0], draw.light_position[1], draw.light_position[2], draw.light_inverse_radius},
-            {draw.light_color[0], draw.light_color[1], draw.light_color[2], draw.light_energy}};
-        static_assert(sizeof(AlphaConstants) == 16 * sizeof(std::uint32_t), "unexpected pixel constants layout");
+            {draw.light_color[0], draw.light_color[1], draw.light_color[2], draw.light_energy},
+            {{draw.spot_projector[0][0], draw.spot_projector[0][1], draw.spot_projector[0][2], draw.spot_projector[0][3]},
+             {draw.spot_projector[1][0], draw.spot_projector[1][1], draw.spot_projector[1][2], draw.spot_projector[1][3]},
+             {draw.spot_projector[2][0], draw.spot_projector[2][1], draw.spot_projector[2][2], draw.spot_projector[2][3]}}};
+        static_assert(sizeof(AlphaConstants) == 28 * sizeof(std::uint32_t), "unexpected pixel constants layout");
         list->SetPipelineState(pipelines[draw_pipelines[i]]->object.p);
         list->SetGraphicsRootDescriptorTable(1, handle);
-        list->SetGraphicsRoot32BitConstants(2, 16, &alpha, 0);
+        auto projector = gpu_base; projector.ptr += UINT64(draw.projector_texture) * srv_step;
+        list->SetGraphicsRootDescriptorTable(3, projector);
+        list->SetGraphicsRoot32BitConstants(2, 28, &alpha, 0);
         list->DrawInstanced(draw.vertex_count, 1, draw.first_vertex, 0);
     }
     Transition(list.p, target.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);

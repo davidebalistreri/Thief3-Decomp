@@ -22,6 +22,7 @@ import scene_spot_fixture as spot_fixture
 import scene_projector_fixture as projector_fixture
 import scene_fog_fixture as fog_fixture
 import scene_normal_fixture as normal_fixture
+import scene_shader_normal_fixture as shader_normal_fixture
 from t3texture import Mip, Texture
 from test_scoped_scene_snapshot import fixture
 
@@ -216,6 +217,12 @@ class TexturedScenePacketTests(unittest.TestCase):
         frames, fallback = packet.tangent_frames(degenerate_uv, indices, tangents, packet.preview.IDENTITY)
         self.assertEqual(fallback, 1)
         self.assertEqual([v[8:] for v in frames], [(0, 0, 0, 0)] * 3)
+        frames, fallback = packet.shader_tangent_frames(mirrored_uv, indices, tangents, packet.preview.IDENTITY, 1)
+        self.assertEqual((fallback, frames[0][8:]), (0, (1, 0, 0, 1)))
+        frames, fallback = packet.shader_tangent_frames(degenerate_uv, indices, tangents, packet.preview.IDENTITY, -1)
+        self.assertEqual((fallback, frames[0][8:]), (0, (-1, 0, 0, 1)))
+        frames, fallback = packet.shader_tangent_frames(vertices, indices, [(0, 0, 1)] * 3, packet.preview.IDENTITY, 1)
+        self.assertEqual((fallback, frames[0][8:]), (1, (0, 0, 0, 0)))
 
     def test_normal_map_packet_uses_observed_metadata_and_flat_fallback(self):
         class NormalResolver(Resolver):
@@ -241,6 +248,21 @@ class TexturedScenePacketTests(unittest.TestCase):
                         dict(light, normal_sampler_candidate=dict(sampler, status="unbound"))):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 packet.create_packet(scene, NormalResolver(), draw_states=states, direct_candidates={2: invalid})
+        basis_light = dict(light, shader_basis_candidate={"tangent_scale": -1, "uv_offset": [.25, -.5]})
+        basis_raw, basis_info = packet.create_packet(scene, NormalResolver(), draw_states=states,
+                                                      direct_candidates={2: basis_light})
+        self.assertEqual(basis_raw[:8], b"T3SCN10\0")
+        self.assertEqual(self.parse(basis_raw).returncode, 0)
+        self.assertEqual(basis_info["draws"][0]["normal_map_candidate"]["basis"], "sampled_shader_hypothesis")
+        # First draw follows two 2x2 textures and its 160-byte header.
+        self.assertEqual(struct.unpack_from("<2f", basis_raw, 160+56+160+12), (.25, -.5))
+        self.assertEqual(struct.unpack_from("<4f", basis_raw, 160+56+160+32), (-1, 0, 0, 1))
+        for basis in ({"tangent_scale": 0, "uv_offset": [0, 0]},
+                      {"tangent_scale": True, "uv_offset": [0, 0]},
+                      {"tangent_scale": 1, "uv_offset": [float("nan"), 0]}):
+            with self.subTest(basis=basis), self.assertRaisesRegex(ValueError, "shader basis"):
+                packet.create_packet(scene, NormalResolver(), draw_states=states,
+                                     direct_candidates={2: dict(light, shader_basis_candidate=basis)})
         data = scene.to_dict()
         data["bsp_blocks"][0]["geometry"]["tangents"] = None
         with self.assertRaisesRegex(ValueError, "tangents"):
@@ -269,6 +291,24 @@ class TexturedScenePacketTests(unittest.TestCase):
         image[header + (32*64+5)*3] = 0
         with self.assertRaisesRegex(ValueError, "wrong pixel"):
             normal_fixture.verify(image)
+
+    def test_sampled_shader_normal_fixture_and_packet_validation(self):
+        raw = shader_normal_fixture.fixture()
+        self.assertEqual(self.parse(raw).returncode, 0)
+        self.assertEqual(self.parse(b"T3SCN09\0" + raw[8:]).returncode, 2)
+        third_draw = 160 + 4*16 + 2*(160 + 6*48)
+        for offset, value in ((third_draw+56, struct.pack("<I", 13)),
+                              (third_draw+160+44, struct.pack("<f", -1))):
+            self.assertEqual(self.parse(raw[:offset] + value + raw[offset+4:]).returncode, 2)
+        header = b"P6\n64 64\n255\n"
+        image = bytearray(header + bytes(64*64*3))
+        for (x, y), color in shader_normal_fixture.EXPECTED.items():
+            offset = len(header) + (y*64+x)*3
+            image[offset:offset+3] = bytes(color)
+        self.assertEqual(shader_normal_fixture.verify(image), 6)
+        image[len(header)+(32*64+15)*3] = 0
+        with self.assertRaisesRegex(ValueError, "wrong pixel"):
+            shader_normal_fixture.verify(image)
 
     def test_direct_packet_roundtrip_rejects_missing_normals_or_invalid_light(self):
         scene = scoped_scene()

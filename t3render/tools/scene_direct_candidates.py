@@ -70,8 +70,21 @@ def normal_sampler_observation(draw, light):
     return sampler
 
 
+def normal_shader_basis(constants):
+    """Read constants used by the matched pre-Reset normal-light vertex program."""
+    if constants.get("count", 0) <= 38:
+        raise ValueError("normal shader basis constants are incomplete")
+    def reg(index):
+        return bridge.decode_floats(constants["bits"][index*4:(index+1)*4], 4)
+    base, scale, offset = reg(0), reg(16), reg(38)
+    if (base != [0, .5, 1, 2] or scale is None or scale[3] not in (-1, 1) or
+            offset is None or any(abs(x) > 1000000 for x in offset[:2])):
+        raise ValueError("unsupported normal shader basis constants")
+    return {"tangent_scale": scale[3], "uv_offset": offset[:2]}
+
+
 def direct_light(draw, outcome, header, frame_begin, cb, pb, hb, shader_index, lights, actors, gain,
-                 *, preview_spots=False, projector_candidate=None):
+                 *, preview_spots=False, projector_candidate=None, preview_shader_basis=False):
     constants = trace_to_ir.observed_vertex_constants(draw, outcome, header, frame_begin, cb)
     program = trace_to_ir.pre_reset_vertex_program(draw, outcome, header, pb, hb)
     if not constants or constants.get("status") != "sampled" or constants["count"] <= 21 or not program:
@@ -104,6 +117,8 @@ def direct_light(draw, outcome, header, frame_begin, cb, pb, hb, shader_index, l
     result.update({"mode": "spot_approximation" if kind == "spot" else "point_approximation",
                    "position": position[:3], "inverse_radius_candidate": coefficients[1],
                    "offline_color": list(light.color), "offline_energy": energy, "gain": gain})
+    if preview_shader_basis and names[0].lower() in ("omnilightnormal11_light_vertex", "spotlightnormal11_light_vertex"):
+        result["shader_basis_candidate"] = normal_shader_basis(constants)
     if kind == "spot":
         result["projector_rows"] = spot_projector(constants, actor, position[:3])
         if projector_candidate is not None:
@@ -133,13 +148,15 @@ def offline_actors(scene, offline, offline_bytes, actors_path):
 
 
 def from_trace(scene, offline, offline_bytes, trace, kernel, actors_path, render_pass, stage, gain,
-               *, preview_spots=False, projector_candidate=None, preview_normal_maps=False):
+               *, preview_spots=False, projector_candidate=None, preview_normal_maps=False, preview_shader_basis=False):
     if (isinstance(gain, bool) or not isinstance(gain, (int, float)) or
             not math.isfinite(gain) or not 0 <= gain <= 4):
         raise ValueError("direct preview gain must be between 0 and 4")
     if projector_candidate is not None and (not preview_spots or not isinstance(projector_candidate, str) or
                                              not projector_candidate or len(projector_candidate) > 128):
         raise ValueError("projector texture candidate requires an enabled spotlight preview")
+    if preview_shader_basis and not preview_normal_maps:
+        raise ValueError("shader normal basis requires normal map candidates")
     actors = offline_actors(scene, offline, offline_bytes, actors_path)
     digest = scene.source.fingerprints.get("trace")
     bridge.trace_summary.summarize(trace)
@@ -163,7 +180,7 @@ def from_trace(scene, offline, offline_bytes, trace, kernel, actors_path, render
         outcome = bridge.one(records, "draw_result", sub.draw_id)
         light = direct_light(draw, outcome, header, frame_begin, cb, pb, hb, index,
                              offline.lights, actors, gain, preview_spots=preview_spots,
-                             projector_candidate=projector_candidate)
+                             projector_candidate=projector_candidate, preview_shader_basis=preview_shader_basis)
         if preview_normal_maps:
             normal_sampler = normal_sampler_observation(draw, light)
             if normal_sampler is not None:

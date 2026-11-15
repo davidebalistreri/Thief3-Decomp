@@ -243,6 +243,41 @@ With the separate uncalibrated gain-2 experiment, wall error changes from
 and bed regions worsen slightly. Neither result validates the light colors or
 the original tangent convention.
 
+### Sampled shader-basis alternative
+
+With `--normal-map-candidates --shader-normal-basis`, each normal-light draw
+must also provide sampled registers 0, 16 and 38. The exporter checks the
+known register-0 values, accepts only `c16.w` of ±1 and applies the sampled
+`c38.xy` UV offset. It approximates the pre-Reset candidate vertex program's
+`cross(normal, tangent)` bitangent and tangent scaling rather than deriving a
+sign from UVs. It also approximates the named candidate pixel program's
+unnormalized `sample * 2 - 1` normal and tangent-space dot product. Tangents
+are orthogonalized in this renderer and ambiguous tangents still fall back to
+flat normals; this is not execution of the original shaders.
+
+D3DDisassemble of the fingerprinted kernel's candidate normal-light assets
+shows the cross product, scaling and UV offset in the vertex programs
+(`OmniLightNormal11_Light_Vertex` SHA-256 `39703670fef598b4de980006b0976139dac7e9195c5d8a0f0786486bf8782bb6`,
+`SpotLightNormal11_Light_Vertex` SHA-256 `d4f34f1aeda5f7747cfec11166536e73e183f7a882ad9de74478490a08dae95f`).
+The separately named pixel assets use a saturated normal/light dot followed by
+texture lookups and an unobserved pixel constant. Their SHA-256 values are
+`89a355aa9643999219c29307efef86f38c1e1285fbe3ddd0c76725f9874d6a79` for omni
+and `dcbdc859728068e40a3b69e03a18df60fe9be3a27817425f5bf52679ff8fc2ae`
+for spot. Neither the active post-Reset programs nor runtime pixel constants
+and lookup texture identities were captured. A scan of the two fingerprinted
+bundles found no metadata match for the 256×256, 128×128 or 128×1 lookup
+observations; four kernel texture entries could not be parsed, and other
+sources were not searched. Existing approximate light falloff remains in use.
+
+In frame 1001, all 112 candidates have `c16.w = 1` and `c38.xy = (0, 0)`.
+This mode yields 50 flat-fallback triangles out of 8,437, versus 1,066 with
+the UV-derived basis. Against the synchronized screenshot, whole-image mean
+absolute RGB error changes from `(7.459, 5.953, 4.337)` to `(7.475, 5.966,
+4.338)`; the wall rectangle changes from `(11.408, 7.251, 1.418)` to
+`(11.530, 7.349, 1.408)`. These results do not establish parity or shader
+identity. Packet v10 carries this alternative; the synthetic GPU check covers
+unnormalized samples, tangent direction, spotlight projection and fallback.
+
 The optional `--state-trace <trace> --offline-scene <fixture>` revalidates the
 trace fingerprint and rebuilds the bounded bed-and-BSP scoped snapshot before
 mapping its draw states to the renderer's neutral vocabulary. This currently

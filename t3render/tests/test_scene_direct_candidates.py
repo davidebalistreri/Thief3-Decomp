@@ -34,6 +34,22 @@ def spot_sample():
 
 
 class DirectCandidateTests(unittest.TestCase):
+    def test_sampled_normal_shader_constants_are_bounded_and_complete(self):
+        values = [0.] * (39 * 4)
+        values[0:4] = [0, .5, 1, 2]
+        values[16*4:17*4] = [1, 1, 1, -1]
+        values[38*4:39*4] = [.25, -.5, 0, 0]
+        sample = {"count": 39, "bits": list(struct.unpack("<156I", struct.pack("<156f", *values)))}
+        self.assertEqual(direct.normal_shader_basis(sample), {"tangent_scale": -1, "uv_offset": [.25, -.5]})
+        for change in ("count", "base", "scale", "offset"):
+            altered = dict(sample, bits=list(sample["bits"]))
+            if change == "count": altered["count"] = 38
+            if change == "base": altered["bits"][1] = 0
+            if change == "scale": altered["bits"][16*4+3] = 0
+            if change == "offset": altered["bits"][38*4] = 0x7fc00000
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                direct.normal_shader_basis(altered)
+
     def test_normal_map_observation_requires_normal_program_and_bound_sampler(self):
         states = {"13": 1, "14": 1, "16": 2, "17": 2, "18": 2, "19": 3212836864, "20": 0, "24": 0}
         stage = {"stage": 0, "states": states, "texture": {"type": 3, "width": 512, "height": 512,

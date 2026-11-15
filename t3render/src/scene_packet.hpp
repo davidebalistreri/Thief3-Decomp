@@ -96,13 +96,14 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
     const char v7[8] = {'T', '3', 'S', 'C', 'N', '0', '7', '\0'};
     const char v8[8] = {'T', '3', 'S', 'C', 'N', '0', '8', '\0'};
     const char v9[8] = {'T', '3', 'S', 'C', 'N', '0', '9', '\0'};
+    const char v10[8] = {'T', '3', 'S', 'C', 'N', '1', '0', '\0'};
     Frame frame;
     if (!reader.bytes(magic, sizeof(magic)) ||
         (std::memcmp(magic, v1, sizeof(magic)) && std::memcmp(magic, v2, sizeof(magic)) &&
          std::memcmp(magic, v3, sizeof(magic)) && std::memcmp(magic, v4, sizeof(magic)) &&
          std::memcmp(magic, v5, sizeof(magic)) && std::memcmp(magic, v6, sizeof(magic)) &&
          std::memcmp(magic, v7, sizeof(magic)) && std::memcmp(magic, v8, sizeof(magic)) &&
-         std::memcmp(magic, v9, sizeof(magic))) ||
+         std::memcmp(magic, v9, sizeof(magic)) && std::memcmp(magic, v10, sizeof(magic))) ||
         !reader.u32(frame.width) || !reader.u32(frame.height) || !frame.width || !frame.height ||
         frame.width > 2048 || frame.height > 2048 || !reader.f32(frame.min_depth) ||
         !reader.f32(frame.max_depth) || frame.min_depth < 0 || frame.max_depth > 1 ||
@@ -149,12 +150,14 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
             if ((!std::memcmp(magic, v3, sizeof(magic)) || !std::memcmp(magic, v4, sizeof(magic)) ||
                  !std::memcmp(magic, v5, sizeof(magic)) || !std::memcmp(magic, v6, sizeof(magic)) ||
                  !std::memcmp(magic, v7, sizeof(magic)) || !std::memcmp(magic, v8, sizeof(magic)) ||
-                 !std::memcmp(magic, v9, sizeof(magic))) &&
+                 !std::memcmp(magic, v9, sizeof(magic)) || !std::memcmp(magic, v10, sizeof(magic))) &&
                 (!reader.f32(s.mip_lod_bias, 16.0f) || s.mip_lod_bias >= 16.0f)) return false;
             if (!std::memcmp(magic, v4, sizeof(magic)) || !std::memcmp(magic, v5, sizeof(magic)) ||
                 !std::memcmp(magic, v6, sizeof(magic)) || !std::memcmp(magic, v7, sizeof(magic)) ||
-                !std::memcmp(magic, v8, sizeof(magic)) || !std::memcmp(magic, v9, sizeof(magic))) {
-                const std::uint32_t max_shading = !std::memcmp(magic, v9, sizeof(magic)) ? 9u :
+                !std::memcmp(magic, v8, sizeof(magic)) || !std::memcmp(magic, v9, sizeof(magic)) ||
+                !std::memcmp(magic, v10, sizeof(magic))) {
+                const std::uint32_t max_shading = !std::memcmp(magic, v10, sizeof(magic)) ? 12u :
+                                                   !std::memcmp(magic, v9, sizeof(magic)) ? 9u :
                                                    !std::memcmp(magic, v8, sizeof(magic)) ? 6u :
                                                    !std::memcmp(magic, v7, sizeof(magic)) ? 5u :
                                                    !std::memcmp(magic, v6, sizeof(magic)) ? 4u :
@@ -165,7 +168,7 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
             }
             if (!std::memcmp(magic, v5, sizeof(magic)) || !std::memcmp(magic, v6, sizeof(magic)) ||
                 !std::memcmp(magic, v7, sizeof(magic)) || !std::memcmp(magic, v8, sizeof(magic)) ||
-                !std::memcmp(magic, v9, sizeof(magic))) {
+                !std::memcmp(magic, v9, sizeof(magic)) || !std::memcmp(magic, v10, sizeof(magic))) {
                 for (float& value : draw.light_position) if (!reader.f32(value)) return false;
                 if (!reader.f32(draw.light_inverse_radius, 1.0f) || draw.light_inverse_radius < 0 ||
                     ((draw.shading == 2 || draw.shading == 4 || draw.shading == 5 || draw.shading >= 7) &&
@@ -175,14 +178,16 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
                 if (!reader.f32(draw.light_energy, 4.0f) || draw.light_energy < 0) return false;
             }
             if (!std::memcmp(magic, v6, sizeof(magic)) || !std::memcmp(magic, v7, sizeof(magic)) ||
-                !std::memcmp(magic, v8, sizeof(magic)) || !std::memcmp(magic, v9, sizeof(magic))) {
+                !std::memcmp(magic, v8, sizeof(magic)) || !std::memcmp(magic, v9, sizeof(magic)) ||
+                !std::memcmp(magic, v10, sizeof(magic))) {
                 for (auto& row : draw.spot_projector) for (float& value : row) if (!reader.f32(value)) return false;
                 const auto& axis = draw.spot_projector[2];
-                if ((draw.shading == 4 || draw.shading == 5 || draw.shading == 8 || draw.shading == 9) &&
+                if ((draw.shading == 4 || draw.shading == 5 || draw.shading == 8 || draw.shading == 9 ||
+                     draw.shading == 11 || draw.shading == 12) &&
                     axis[0]*axis[0] + axis[1]*axis[1] + axis[2]*axis[2] < 1e-12f) return false;
             }
             if ((!std::memcmp(magic, v7, sizeof(magic)) || !std::memcmp(magic, v8, sizeof(magic)) ||
-                 !std::memcmp(magic, v9, sizeof(magic))) &&
+                 !std::memcmp(magic, v9, sizeof(magic)) || !std::memcmp(magic, v10, sizeof(magic))) &&
                 (!reader.u32(draw.projector_texture) || draw.projector_texture >= texture_count)) return false;
             if (draw.shading == 6 &&
                 (s.depth_enable != 1 || s.depth_write != 0 || s.blend_enable != 1 ||
@@ -195,8 +200,8 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
         }
         const bool direct = !std::memcmp(magic, v5, sizeof(magic)) || !std::memcmp(magic, v6, sizeof(magic)) ||
                             !std::memcmp(magic, v7, sizeof(magic)) || !std::memcmp(magic, v8, sizeof(magic)) ||
-                            !std::memcmp(magic, v9, sizeof(magic));
-        const bool tangent = !std::memcmp(magic, v9, sizeof(magic));
+                            !std::memcmp(magic, v9, sizeof(magic)) || !std::memcmp(magic, v10, sizeof(magic));
+        const bool tangent = !std::memcmp(magic, v9, sizeof(magic)) || !std::memcmp(magic, v10, sizeof(magic));
         if (std::size_t(count) * (tangent ? 48 : direct ? 32 : 20) > reader.remaining()) return false;
         for (std::uint32_t n = 0; n < count; ++n) {
             Vertex vertex{};
@@ -219,6 +224,7 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
                     if (vertex.tangent_sign == 0) {
                         if (length_squared != 0) return false;
                     } else if ((vertex.tangent_sign != 1 && vertex.tangent_sign != -1) ||
+                               (draw.shading >= 10 && vertex.tangent_sign != 1) ||
                                length_squared < .98f || length_squared > 1.02f || std::fabs(normal_dot) > .02f) return false;
                 } else if (vertex.tx != 0 || vertex.ty != 0 || vertex.tz != 0 || vertex.tangent_sign != 0) return false;
             }

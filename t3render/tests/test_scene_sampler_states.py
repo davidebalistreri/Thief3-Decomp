@@ -63,6 +63,7 @@ class SamplerObservationTests(unittest.TestCase):
             base = [str(scene_path), "--output", str(output)]
             trace = ["--state-trace", str(root / "trace.jsonl"), "--offline-scene", str(offline_path)]
             cases = [(["--sampler-scope", "1:2"], "require a state trace"),
+                     (["--shader-normal-basis"], "requires normal map candidates"),
                      (trace + ["--sampler-scope", "1:2", "--sampler-scope", "1:0"], "must be unique"),
                      (trace + ["--sampler-scope", "1:2", "--sampler-candidate-stage", "2"], "exclude the global"),
                      (trace + ["--sampler-scope", "9:0"], "must identify a selected scene"),

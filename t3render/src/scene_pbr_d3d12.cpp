@@ -1,0 +1,332 @@
+// Independent SceneIR material/light preview; no D3D8 render-state replay.
+#include "scene_d3d12_common.hpp"
+#include "scene_pbr_packet.hpp"
+
+namespace {
+using namespace t3render::pbr;
+using namespace t3render::dx12;
+constexpr DXGI_FORMAT kHdr = DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+bool ReadPacket(const wchar_t* path, Frame& frame) {
+    FILE* file = _wfopen(path, L"rb");
+    if (!file) { std::fprintf(stderr, "cannot open PBR packet\n"); return false; }
+    std::vector<std::uint8_t> bytes(t3render::scene::kMaxPacketBytes + 1);
+    const std::size_t size = std::fread(bytes.data(), 1, bytes.size(), file);
+    const bool error = std::ferror(file) != 0;
+    const bool close_error = std::fclose(file) != 0;
+    if (error || close_error || !ParsePacket(bytes.data(), size, frame)) {
+        std::fprintf(stderr, "invalid PBR packet\n"); return false;
+    }
+    return true;
+}
+
+struct Constants {
+    float view[16], projection[16];
+    float size_scale_count[4], camera_exposure[4], ambient[4];
+    float light_position_radius[kMaxLights][4], light_color_intensity[kMaxLights][4];
+};
+static_assert(sizeof(Constants) == 688, "unexpected PBR constant-buffer layout");
+
+int Render(const Frame& frame, const wchar_t* output) {
+    ComPtr<ID3D12Device> device;
+    if (!SelectDevice(device)) return 1;
+    Module module{LoadLibraryExW(L"d3dcompiler_47.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
+    if (!module.p) { std::fprintf(stderr, "d3dcompiler_47.dll unavailable\n"); return 1; }
+    FARPROC address = GetProcAddress(module.p, "D3DCompile");
+    CompileFn compile = nullptr;
+    static_assert(sizeof(compile) == sizeof(address), "unexpected function pointer size");
+    std::memcpy(&compile, &address, sizeof(compile));
+    if (!compile) return 1;
+    static const char vs_source[] = R"(
+cbuffer Scene : register(b0) {
+    row_major float4x4 view; row_major float4x4 projection;
+    float4 size_scale_count; float4 camera_exposure; float4 ambient;
+    float4 light_position_radius[16]; float4 light_color_intensity[16];
+};
+struct O { float4 uv:TEXCOORD0; float3 world:TEXCOORD1; float3 normal:TEXCOORD2;
+           float4 tangent:TEXCOORD3; float4 position:SV_Position; };
+O main(float3 p:POSITION, float2 uv:TEXCOORD0, float3 n:NORMAL, float4 t:TANGENT) {
+    O o; o.position=mul(mul(float4(p,1),view),projection);
+    o.position.x+=o.position.w/size_scale_count.x; o.position.y-=o.position.w/size_scale_count.y;
+    o.uv=float4(uv,0,0); o.world=p; o.normal=n; o.tangent=t; return o;
+})";
+    static const char ps_source[] = R"(
+Texture2D albedo_tex:register(t0); Texture2D normal_tex:register(t1);
+Texture2D roughness_tex:register(t2); Texture2D ao_tex:register(t3); SamplerState samp:register(s0);
+cbuffer Scene : register(b0) {
+    row_major float4x4 view; row_major float4x4 projection;
+    float4 size_scale_count; float4 camera_exposure; float4 ambient;
+    float4 light_position_radius[16]; float4 light_color_intensity[16];
+};
+float4 main(float4 uv:TEXCOORD0, float3 world:TEXCOORD1, float3 normal:TEXCOORD2,
+            float4 tangent:TEXCOORD3):SV_Target {
+    const float pi=3.14159265359;
+    float3 albedo=albedo_tex.Sample(samp,uv.xy).rgb; // sRGB SRV filters in linear light.
+    float roughness=clamp(roughness_tex.Sample(samp,uv.xy).r,0.04,1);
+    float ao=saturate(ao_tex.Sample(samp,uv.xy).r);
+    float3 n=normal*rsqrt(max(dot(normal,normal),0.00000001));
+    if (abs(tangent.w)>0.5) {
+        float3 t=tangent.xyz-n*dot(n,tangent.xyz); float t2=dot(t,t);
+        float3 mapped=normal_tex.Sample(samp,uv.xy).rgb*2-1; float m2=dot(mapped,mapped);
+        if(t2>0.00000001&&m2>0.00000001) {
+            t*=rsqrt(t2); mapped*=rsqrt(m2);
+            float3 mapped_world=t*mapped.x+cross(n,t)*tangent.w*mapped.y+n*mapped.z;
+            n=mapped_world*rsqrt(max(dot(mapped_world,mapped_world),0.00000001));
+        }
+    }
+    float3 view_delta=camera_exposure.xyz-world;
+    float3 v=view_delta*rsqrt(max(dot(view_delta,view_delta),0.00000001));
+    float nv=saturate(dot(n,v));
+    float3 result=albedo*ambient.rgb*ao;
+    float alpha=roughness*roughness; float a2=alpha*alpha; float k=(roughness+1)*(roughness+1)/8;
+    [loop] for(uint i=0;i<(uint)size_scale_count.w;i++) {
+        float3 to_light=(light_position_radius[i].xyz-world)*size_scale_count.z;
+        float d2=dot(to_light,to_light); float3 l=to_light*rsqrt(max(d2,0.00000001));
+        float nl=saturate(dot(n,l));
+        if(nl>0&&nv>0) {
+            float3 half_sum=v+l; float3 h=half_sum*rsqrt(max(dot(half_sum,half_sum),0.00000001));
+            float nh=saturate(dot(n,h)), vh=saturate(dot(v,h));
+            float denom=nh*nh*(a2-1)+1;
+            float distribution=a2/max(pi*denom*denom,0.00000001);
+            float geometry=(nv/(nv*(1-k)+k))*(nl/(nl*(1-k)+k));
+            float3 fresnel=0.04+(1-0.04)*pow(1-vh,5);
+            float3 specular=distribution*geometry*fresnel/max(4*nv*nl,0.00000001);
+            float3 diffuse=(1-fresnel)*albedo/pi;
+            float radius=light_position_radius[i].w;
+            float3 radiance=light_color_intensity[i].rgb*light_color_intensity[i].w/max(d2,radius*radius);
+            result+=(diffuse+specular)*radiance*nl;
+        }
+    }
+    // Avoid half-float overflow producing inf/NaN in the display pass.
+    return float4(min(max(result,0),65504),1);
+})";
+    static const char tone_vs_source[] = R"(
+float4 main(uint id:SV_VertexID):SV_Position {
+    float2 p=float2((id<<1)&2,id&2); return float4(p*float2(2,-2)+float2(-1,1),0,1);
+})";
+    static const char tone_ps_source[] = R"(
+Texture2D hdr:register(t4);
+cbuffer Scene : register(b0) {
+    row_major float4x4 view; row_major float4x4 projection;
+    float4 size_scale_count; float4 camera_exposure; float4 ambient;
+    float4 light_position_radius[16]; float4 light_color_intensity[16];
+};
+float4 main(float4 position:SV_Position):SV_Target {
+    float3 c=max(hdr.Load(int3(position.xy,0)).rgb*camera_exposure.w,0);
+    c=c/(1+c);
+    c=lerp(c*12.92,1.055*pow(c,1/2.4)-0.055,step(0.0031308,c));
+    return float4(saturate(c),1);
+})";
+    ComPtr<ID3DBlob> vs, ps, tone_vs, tone_ps;
+    if (!Compile(compile, vs_source, "vs_5_0", vs) || !Compile(compile, ps_source, "ps_5_0", ps) ||
+        !Compile(compile, tone_vs_source, "vs_5_0", tone_vs) || !Compile(compile, tone_ps_source, "ps_5_0", tone_ps)) return 1;
+
+    D3D12_COMMAND_QUEUE_DESC queue_desc{}; queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    ComPtr<ID3D12CommandQueue> queue; ComPtr<ID3D12CommandAllocator> allocator; ComPtr<ID3D12Fence> fence;
+    if (!Check(device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(queue.put())), "CreateQueue") ||
+        !Check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(allocator.put())), "CreateAllocator") ||
+        !Check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.put())), "CreateFence")) return 1;
+    Handle event{CreateEventW(nullptr, FALSE, FALSE, nullptr)};
+    if (!event.p) return 1;
+    D3D12_DESCRIPTOR_RANGE ranges[5]{};
+    D3D12_ROOT_PARAMETER params[6]{};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; params[0].Descriptor.ShaderRegister = 0;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    for (UINT i = 0; i < 5; ++i) {
+        ranges[i].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; ranges[i].NumDescriptors = 1;
+        ranges[i].BaseShaderRegister = i;
+        params[i+1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[i+1].DescriptorTable.NumDescriptorRanges = 1; params[i+1].DescriptorTable.pDescriptorRanges = &ranges[i];
+        params[i+1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    }
+    D3D12_STATIC_SAMPLER_DESC sampler{};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.MaxAnisotropy = 1; sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX; sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_ROOT_SIGNATURE_DESC root_desc{}; root_desc.NumParameters = 6; root_desc.pParameters = params;
+    root_desc.NumStaticSamplers = 1; root_desc.pStaticSamplers = &sampler;
+    root_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    ComPtr<ID3DBlob> root_blob, root_errors; ComPtr<ID3D12RootSignature> root;
+    if (!Check(D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, root_blob.put(), root_errors.put()), "SerializeRoot") ||
+        !Check(device->CreateRootSignature(0, root_blob->GetBufferPointer(), root_blob->GetBufferSize(), IID_PPV_ARGS(root.put())), "CreateRoot")) return 1;
+    D3D12_INPUT_ELEMENT_DESC input[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 20, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}};
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{}; desc.pRootSignature = root.p;
+    desc.VS = {vs->GetBufferPointer(), vs->GetBufferSize()}; desc.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+    desc.InputLayout = {input, 4}; desc.SampleMask = UINT_MAX;
+    for (auto& blend : desc.BlendState.RenderTarget) {
+        blend.SrcBlend = blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+        blend.DestBlend = blend.DestBlendAlpha = D3D12_BLEND_ZERO;
+        blend.BlendOp = blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        blend.LogicOp = D3D12_LOGIC_OP_NOOP; blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    }
+    desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID; desc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    desc.RasterizerState.DepthClipEnable = TRUE;
+    desc.DepthStencilState.DepthEnable = TRUE; desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    desc.DepthStencilState.StencilReadMask = D3D12_DEFAULT_STENCIL_READ_MASK;
+    desc.DepthStencilState.StencilWriteMask = D3D12_DEFAULT_STENCIL_WRITE_MASK;
+    desc.DepthStencilState.FrontFace = {D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS};
+    desc.DepthStencilState.BackFace = desc.DepthStencilState.FrontFace;
+    desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    desc.NumRenderTargets = 1; desc.RTVFormats[0] = kHdr; desc.DSVFormat = DXGI_FORMAT_D32_FLOAT; desc.SampleDesc.Count = 1;
+    ComPtr<ID3D12PipelineState> pipeline, tone_pipeline;
+    if (!Check(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(pipeline.put())), "CreatePbrPipeline")) return 1;
+    desc.VS = {tone_vs->GetBufferPointer(), tone_vs->GetBufferSize()}; desc.PS = {tone_ps->GetBufferPointer(), tone_ps->GetBufferSize()};
+    desc.InputLayout = {nullptr, 0}; desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    desc.DepthStencilState.DepthEnable = FALSE; desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    desc.RTVFormats[0] = kColor; desc.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    if (!Check(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(tone_pipeline.put())), "CreateTonePipeline")) return 1;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    if (!Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.p, pipeline.p,
+                                         IID_PPV_ARGS(list.put())), "CreateList")) return 1;
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{}; heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    heap_desc.NumDescriptors = static_cast<UINT>(frame.textures.size()*2+1); heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    ComPtr<ID3D12DescriptorHeap> srv_heap;
+    if (!Check(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(srv_heap.put())), "CreateSrvHeap")) return 1;
+    auto cpu_srv = srv_heap->GetCPUDescriptorHandleForHeapStart();
+    const UINT srv_step = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    std::vector<std::unique_ptr<GpuTexture>> textures;
+    for (const auto& texture : frame.textures) {
+        auto gpu = std::make_unique<GpuTexture>();
+        if (!UploadTexture(device.p, list.p, texture, *gpu, DXGI_FORMAT_R8G8B8A8_TYPELESS)) return 1;
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{}; srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Format = kColor; srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Texture2D.MipLevels = static_cast<UINT>(texture.mips.size());
+        device->CreateShaderResourceView(gpu->texture.p, &srv, cpu_srv); cpu_srv.ptr += srv_step;
+        srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        device->CreateShaderResourceView(gpu->texture.p, &srv, cpu_srv); cpu_srv.ptr += srv_step;
+        textures.push_back(std::move(gpu));
+    }
+    const auto default_heap = Heap(D3D12_HEAP_TYPE_DEFAULT), upload_heap = Heap(D3D12_HEAP_TYPE_UPLOAD), read_heap = Heap(D3D12_HEAP_TYPE_READBACK);
+    const auto hdr_desc = Image(frame.width, frame.height, 1, kHdr, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    const auto output_desc = Image(frame.width, frame.height, 1, kColor, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    const auto depth_desc = Image(frame.width, frame.height, 1, DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    D3D12_CLEAR_VALUE clear{}; clear.Format = kHdr;
+    D3D12_CLEAR_VALUE output_clear{}; output_clear.Format = kColor;
+    D3D12_CLEAR_VALUE depth_clear{}; depth_clear.Format = DXGI_FORMAT_D32_FLOAT; depth_clear.DepthStencil.Depth = 1;
+    ComPtr<ID3D12Resource> hdr, target, depth;
+    if (!Check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &hdr_desc, D3D12_RESOURCE_STATE_RENDER_TARGET,
+             &clear, IID_PPV_ARGS(hdr.put())), "CreateHdr") ||
+        !Check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &output_desc, D3D12_RESOURCE_STATE_RENDER_TARGET,
+             &output_clear, IID_PPV_ARGS(target.put())), "CreateOutput") ||
+        !Check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &depth_desc, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+             &depth_clear, IID_PPV_ARGS(depth.put())), "CreateDepth")) return 1;
+    D3D12_SHADER_RESOURCE_VIEW_DESC hdr_srv{}; hdr_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    hdr_srv.Format = kHdr; hdr_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; hdr_srv.Texture2D.MipLevels = 1;
+    device->CreateShaderResourceView(hdr.p, &hdr_srv, cpu_srv);
+    heap_desc = {}; heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; heap_desc.NumDescriptors = 2;
+    ComPtr<ID3D12DescriptorHeap> rtv_heap, dsv_heap;
+    if (!Check(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(rtv_heap.put())), "CreateRtvHeap")) return 1;
+    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; heap_desc.NumDescriptors = 1;
+    if (!Check(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(dsv_heap.put())), "CreateDsvHeap")) return 1;
+    auto hdr_rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
+    auto output_rtv = hdr_rtv; output_rtv.ptr += device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    auto dsv = dsv_heap->GetCPUDescriptorHandleForHeapStart();
+    device->CreateRenderTargetView(hdr.p, nullptr, hdr_rtv); device->CreateRenderTargetView(target.p, nullptr, output_rtv);
+    device->CreateDepthStencilView(depth.p, nullptr, dsv);
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{}; UINT rows = 0; UINT64 row_size = 0, total = 0;
+    device->GetCopyableFootprints(&output_desc, 0, 1, 0, &fp, &rows, &row_size, &total);
+    if (rows != frame.height || row_size != UINT64(frame.width)*4 || fp.Footprint.RowPitch < row_size ||
+        !total || total > SIZE_MAX || fp.Offset > total || row_size > total - fp.Offset ||
+        UINT64(frame.height-1) > (total-fp.Offset-row_size)/fp.Footprint.RowPitch) return 1;
+    const auto read_desc = Buffer(total);
+    ComPtr<ID3D12Resource> readback;
+    if (!Check(device->CreateCommittedResource(&read_heap, D3D12_HEAP_FLAG_NONE, &read_desc, D3D12_RESOURCE_STATE_COPY_DEST,
+             nullptr, IID_PPV_ARGS(readback.put())), "CreateReadback")) return 1;
+    const std::size_t vertex_bytes = frame.vertices.size()*sizeof(Vertex);
+    const auto vertex_desc = Buffer(vertex_bytes), constant_desc = Buffer((sizeof(Constants)+255)&~std::size_t(255));
+    ComPtr<ID3D12Resource> vertices, constants;
+    if (!Check(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &vertex_desc, D3D12_RESOURCE_STATE_GENERIC_READ,
+             nullptr, IID_PPV_ARGS(vertices.put())), "CreateVertices") ||
+        !Check(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &constant_desc, D3D12_RESOURCE_STATE_GENERIC_READ,
+             nullptr, IID_PPV_ARGS(constants.put())), "CreateConstants")) return 1;
+    void* mapped = nullptr; const D3D12_RANGE no_read{0, 0};
+    if (!Check(vertices->Map(0, &no_read, &mapped), "MapVertices") || !mapped) return 1;
+    std::memcpy(mapped, frame.vertices.data(), vertex_bytes);
+    const D3D12_RANGE vertex_written{0, vertex_bytes}; vertices->Unmap(0, &vertex_written);
+    Constants cb{};
+    std::memcpy(cb.view, frame.view, sizeof(cb.view)); std::memcpy(cb.projection, frame.projection, sizeof(cb.projection));
+    cb.size_scale_count[0] = static_cast<float>(frame.width); cb.size_scale_count[1] = static_cast<float>(frame.height);
+    cb.size_scale_count[2] = frame.meters_per_unit; cb.size_scale_count[3] = static_cast<float>(frame.lights.size());
+    for (unsigned i = 0; i < 3; ++i) { cb.camera_exposure[i] = frame.camera[i]; cb.ambient[i] = frame.ambient[i]; }
+    cb.camera_exposure[3] = frame.exposure;
+    for (std::size_t i = 0; i < frame.lights.size(); ++i) {
+        for (unsigned j = 0; j < 3; ++j) {
+            cb.light_position_radius[i][j] = frame.lights[i].position[j];
+            cb.light_color_intensity[i][j] = frame.lights[i].color[j];
+        }
+        cb.light_position_radius[i][3] = frame.lights[i].radius_m;
+        cb.light_color_intensity[i][3] = frame.lights[i].intensity;
+    }
+    mapped = nullptr;
+    if (!Check(constants->Map(0, &no_read, &mapped), "MapConstants") || !mapped) return 1;
+    std::memcpy(mapped, &cb, sizeof(cb)); const D3D12_RANGE cb_written{0, sizeof(cb)}; constants->Unmap(0, &cb_written);
+    list->SetGraphicsRootSignature(root.p);
+    ID3D12DescriptorHeap* heaps[] = {srv_heap.p}; list->SetDescriptorHeaps(1, heaps);
+    list->SetGraphicsRootConstantBufferView(0, constants->GetGPUVirtualAddress());
+    const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(frame.width), static_cast<float>(frame.height), frame.min_depth, frame.max_depth};
+    const D3D12_RECT scissor{0, 0, static_cast<LONG>(frame.width), static_cast<LONG>(frame.height)};
+    list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &scissor);
+    list->OMSetRenderTargets(1, &hdr_rtv, FALSE, &dsv); list->ClearRenderTargetView(hdr_rtv, clear.Color, 0, nullptr);
+    list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1, 0, 0, nullptr);
+    const D3D12_VERTEX_BUFFER_VIEW vb{vertices->GetGPUVirtualAddress(), static_cast<UINT>(vertex_bytes), sizeof(Vertex)};
+    list->IASetVertexBuffers(0, 1, &vb); list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    const auto gpu_base = srv_heap->GetGPUDescriptorHandleForHeapStart();
+    for (const auto& draw : frame.draws) {
+        for (UINT i = 0; i < 4; ++i) {
+            auto handle = gpu_base; handle.ptr += (UINT64(draw.textures[i])*2+(i == 0 ? 1 : 0))*srv_step;
+            list->SetGraphicsRootDescriptorTable(i+1, handle);
+        }
+        list->DrawInstanced(draw.vertex_count, 1, draw.first_vertex, 0);
+    }
+    Transition(list.p, hdr.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    list->OMSetRenderTargets(1, &output_rtv, FALSE, nullptr);
+    list->SetPipelineState(tone_pipeline.p);
+    auto hdr_handle = gpu_base; hdr_handle.ptr += UINT64(frame.textures.size()*2)*srv_step;
+    list->SetGraphicsRootDescriptorTable(5, hdr_handle);
+    list->DrawInstanced(3, 1, 0, 0);
+    Transition(list.p, target.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = readback.p; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint = fp;
+    D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = target.p; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    if (!Check(list->Close(), "CloseList")) return 1;
+    ID3D12CommandList* lists[] = {list.p}; queue->ExecuteCommandLists(1, lists);
+    if (FAILED(queue->Signal(fence.p, 1))) AbortInFlight("Queue signal failed");
+    UINT64 completed = fence->GetCompletedValue();
+    if (completed == UINT64_MAX) AbortInFlight("Device removed");
+    if (completed < 1 && (FAILED(fence->SetEventOnCompletion(1, event.p)) || WaitForSingleObject(event.p, 10000) != WAIT_OBJECT_0))
+        AbortInFlight("Fence wait failed");
+    completed = fence->GetCompletedValue();
+    if (completed == UINT64_MAX || completed < 1) AbortInFlight("Fence did not complete");
+    if (!Check(device->GetDeviceRemovedReason(), "Device status")) return 1;
+    const D3D12_RANGE read{0, static_cast<SIZE_T>(total)}; mapped = nullptr;
+    if (!Check(readback->Map(0, &read, &mapped), "MapReadback") || !mapped) return 1;
+    const auto* pixels = static_cast<const std::uint8_t*>(mapped);
+    std::size_t changed = 0;
+    for (UINT y = 0; y < frame.height; ++y) for (UINT x = 0; x < frame.width; ++x) {
+        const auto* pixel = pixels+fp.Offset+y*fp.Footprint.RowPitch+x*4;
+        if (pixel[0] || pixel[1] || pixel[2]) ++changed;
+    }
+    const bool ok = changed && WriteImage(output, pixels, fp, frame.width, frame.height);
+    const D3D12_RANGE no_write{0, 0}; readback->Unmap(0, &no_write);
+    if (!changed) { std::fprintf(stderr, "PBR preview produced no visible pixels\n"); return 1; }
+    if (!ok) { std::fprintf(stderr, "image write failed; partial file may remain\n"); return 1; }
+    std::printf("sceneir_pbr_dx12=ok textures=%zu draws=%zu triangles=%zu lights=%zu changed_pixels=%zu\n",
+                frame.textures.size(), frame.draws.size(), frame.vertices.size()/3, frame.lights.size(), changed);
+    return 0;
+}
+} // namespace
+
+int wmain(int argc, wchar_t** argv) {
+    if (argc != 4 || std::wcscmp(argv[2], L"--output") || !argv[3][0]) {
+        std::fwprintf(stderr, L"usage: t3render_scene_pbr_d3d12 <pbr.bin> --output <new-image.ppm>\n"); return 2;
+    }
+    Frame frame;
+    if (!ReadPacket(argv[1], frame)) return 2;
+    return Render(frame, argv[3]);
+}

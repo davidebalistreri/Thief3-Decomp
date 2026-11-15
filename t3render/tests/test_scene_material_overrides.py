@@ -142,6 +142,22 @@ class BedroomSelectionTests(unittest.TestCase):
             self.assertEqual(result["mips"][0][:4], bytes((0x12, 0x34, 0x56, 255)))
             self.assertEqual(result["mips"][-1], bytes((0x12, 0x34, 0x56, 255)))
             self.assertIs(textures.resolve("wood_floor_v2", "albedo"), result)
+            for channel in ("normal", "roughness", "ao"):
+                shutil.copyfile(path, path.with_name(f"wood_floor_v2_{channel}.png"))
+            smaller = overrides.GodotTextures(root, texture_size=512)
+            for channel in ("albedo", "normal", "roughness", "ao"):
+                value = smaller.resolve("wood_floor_v2", channel)
+                self.assertEqual((value["width"], value["height"], len(value["mips"])), (512, 512, 10))
+                self.assertEqual(value["mips"][-1], bytes((0x12, 0x34, 0x56, 255)))
+            for invalid in (0, 3, 2048, True):
+                with self.subTest(size=invalid), self.assertRaisesRegex(ValueError, "power of two"):
+                    overrides.GodotTextures(root, texture_size=invalid)
+            subprocess.run(["magick", "-size", "1024x1024", "xc:black", "-fill", "white", "-draw",
+                            "rectangle 512,0 1023,1023", str(path)], check=True, timeout=30)
+            linear = overrides.GodotTextures(root, texture_size=512, linear_albedo_mips=True)
+            ordinary = overrides.GodotTextures(root, texture_size=512)
+            self.assertTrue(186 <= linear.resolve("wood_floor_v2", "albedo")["mips"][-1][0] <= 190)
+            self.assertTrue(126 <= ordinary.resolve("wood_floor_v2", "albedo")["mips"][-1][0] <= 130)
             with self.assertRaises(ValueError):
                 textures.resolve("../wood_floor_v2", "albedo")
 

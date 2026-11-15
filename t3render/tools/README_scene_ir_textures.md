@@ -1,5 +1,7 @@
 # Textured SceneIR D3D12 preview
 
+For the separate initial PBR/HDR consumer, see [the modern preview](README_scene_pbr.md).
+
 `t3render_scene_d3d12` is a standalone SceneIR consumer, independent of the
 legacy D3D8 replay. `scene_ir_to_textured_packet.py` turns a synchronized scoped
 SceneIR v1 into a bounded local packet with expanded world-space vertices, UV0,

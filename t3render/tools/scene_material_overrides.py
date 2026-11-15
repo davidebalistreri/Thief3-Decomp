@@ -94,12 +94,18 @@ class BedroomSelection:
 
 class GodotTextures:
     """Load generated local PNGs, retaining hashes and generating bounded mips."""
-    def __init__(self, materials_dir):
+    def __init__(self, materials_dir, texture_size=TEXTURE_SIZE, linear_albedo_mips=False):
         self.materials_dir = Path(materials_dir)
+        if type(texture_size) is not int or not 1 <= texture_size <= TEXTURE_SIZE or texture_size & (texture_size - 1):
+            raise ValueError("override texture size must be a power of two up to 1024")
+        self.texture_size = texture_size
+        if type(linear_albedo_mips) is not bool:
+            raise ValueError("linear albedo mip mode must be boolean")
+        self.linear_albedo_mips = linear_albedo_mips
         self.cache = {}
 
     def resolve(self, name, kind):
-        if name not in AREAS or kind not in ("albedo", "normal"):
+        if name not in AREAS or kind not in ("albedo", "normal", "roughness", "ao"):
             raise ValueError("unknown bedroom override texture")
         key = (name, kind)
         if key in self.cache:
@@ -115,19 +121,25 @@ class GodotTextures:
             expected = 2048 if name == "stone_wall_v2" else 1024
             if info != f"PNG {expected} {expected}\n".encode():
                 raise ValueError(f"unexpected override PNG dimensions or frames: {path}")
-            args = ["magick", "png:-", "-alpha", "on", "-filter", "Triangle", "-resize",
-                    f"{TEXTURE_SIZE}x{TEXTURE_SIZE}!", "-depth", "8"]
-            for level in range(11):
+            linear = kind == "albedo" and self.linear_albedo_mips
+            args = ["magick", "png:-", "-alpha", "on"]
+            if linear:
+                args.extend(["-colorspace", "RGB"])
+            args.extend(["-filter", "Triangle", "-resize", f"{self.texture_size}x{self.texture_size}!"])
+            for level in range(self.texture_size.bit_length()):
                 if level:
-                    size = TEXTURE_SIZE >> level
+                    size = self.texture_size >> level
                     args.extend(["-resize", f"{size}x{size}!"])
-                args.extend(["-write", "rgba:-"])
+                if linear:
+                    args.extend(["(", "+clone", "-colorspace", "sRGB", "-depth", "8", "-write", "rgba:-", "+delete", ")"])
+                else:
+                    args.extend(["-depth", "8", "-write", "rgba:-"])
             args.append("null:")
             pixels = subprocess.run(args, input=raw, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     check=True, timeout=60).stdout
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             raise ValueError(f"cannot decode override PNG: {path}") from exc
-        sizes = [(TEXTURE_SIZE >> level)**2 * 4 for level in range(11)]
+        sizes = [(self.texture_size >> level)**2 * 4 for level in range(self.texture_size.bit_length())]
         if len(pixels) != sum(sizes):
             raise ValueError(f"invalid override mip data: {path}")
         mips, offset = [], 0
@@ -135,16 +147,16 @@ class GodotTextures:
             mips.append(pixels[offset:offset+size])
             offset += size
         value = {"name": f"{name}_{kind}", "bundle": "local_godot_remaster", "format": "RGBA8",
-                 "width": TEXTURE_SIZE, "height": TEXTURE_SIZE, "mips": mips,
+                 "width": self.texture_size, "height": self.texture_size, "mips": mips,
                  "usage": 1 if kind == "normal" else 0, "source_sha256": hashlib.sha256(raw).hexdigest()}
         self.cache[key] = value
         return value
 
 
 class BedroomOverrides(BedroomSelection):
-    def __init__(self, scene, materials_dir):
+    def __init__(self, scene, materials_dir, texture_size=TEXTURE_SIZE, linear_albedo_mips=False):
         super().__init__(scene)
-        self.textures = GodotTextures(materials_dir)
+        self.textures = GodotTextures(materials_dir, texture_size, linear_albedo_mips)
 
     def resolve(self, name, kind):
         return self.textures.resolve(name, kind)

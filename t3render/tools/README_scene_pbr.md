@@ -275,7 +275,7 @@ environment. The packet, manifest and PPM use exclusive creation. See the
 [Highball setup](README_synthetic_replay.md#repeat-on-highball); TDS does not
 need to be running.
 
-For the separate static-camera temporal prototype and its GPU buffer export,
+For static-camera temporal accumulation, its GPU pass and CPU reference,
 see [offline temporal accumulation](README_scene_temporal.md).
 
 ## Verification

@@ -5,7 +5,9 @@ import hashlib
 import json
 from pathlib import Path
 import struct
+import subprocess
 import sys
+import tempfile
 import unittest
 
 HERE = Path(__file__).resolve().parent
@@ -177,6 +179,21 @@ class TemporalResolveTests(unittest.TestCase):
         manifest["packet_sha256"] = "0"*64
         with self.assertRaisesRegex(ValueError, "provenance"):
             temporal.validate_runtime(old, source, json.dumps(manifest).encode())
+
+    def test_validation_only_never_creates_a_resolved_artifact(self):
+        with tempfile.TemporaryDirectory(prefix="t3render-temporal-validate-") as directory:
+            root = Path(directory)
+            packet, history = root/"packet.bin", root/"history.bin"
+            packet.write_bytes(self.packet); history.write_bytes(self.raw)
+            args = [sys.executable, str(HERE.parent/"tools"/"scene_temporal_resolve.py"), str(history), str(history),
+                    "--previous-packet", str(packet), "--current-packet", str(packet), "--synthetic", "--validate-only"]
+            result = subprocess.run(args, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["source"], "synthetic")
+            self.assertEqual({p.name for p in root.iterdir()}, {"packet.bin", "history.bin"})
+            invalid = subprocess.run(args + ["--weight", "nan"], capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(invalid.returncode, 0)
+            self.assertIn("history weight", invalid.stderr)
 
 
 if __name__ == "__main__":

@@ -46,7 +46,8 @@ def parse(raw, packet):
         raise ValueError("temporal camera does not match packet")
     return {"raw": raw, "width": width, "height": height, "digest": digest.hex(), "view": matrix[:16],
             "projection": matrix[16:], "camera": camera, "scale": scale, "exposure": exposure,
-            "jitter": jitter, "flags": flags, "packet_version": int(chr(packet_header[0][6]))}
+            "jitter": jitter, "flags": flags, "packet_version": int(chr(packet_header[0][6])),
+            "min_depth": packet_header[3], "max_depth": packet_header[4]}
 
 
 def validate_runtime(temporal, scene_raw, manifest_raw):
@@ -56,6 +57,7 @@ def validate_runtime(temporal, scene_raw, manifest_raw):
             type(manifest.get("version")) is not int or manifest["version"] != temporal["packet_version"] or
             manifest.get("packet_sha256") != temporal["digest"] or
             manifest.get("scene_sha256") != hashlib.sha256(scene_raw).hexdigest() or
+            type(manifest.get("source_frame")) is not int or
             manifest.get("source_frame") != scene.source.frame_id or
             manifest.get("source_fingerprints") != scene.source.fingerprints or
             scene.source.kind != "runtime" or scene.source.camera_synchronized is not True or scene.camera is None or
@@ -81,8 +83,8 @@ def validate_runtime(temporal, scene_raw, manifest_raw):
 
 
 def compatible(previous, current, previous_runtime=None, current_runtime=None):
-    if (previous["width"], previous["height"], previous["scale"], previous["flags"]) != (
-            current["width"], current["height"], current["scale"], current["flags"]):
+    if (previous["width"], previous["height"], previous["min_depth"], previous["max_depth"], previous["scale"], previous["flags"]) != (
+            current["width"], current["height"], current["min_depth"], current["max_depth"], current["scale"], current["flags"]):
         raise ValueError("temporal frames have incompatible dimensions, units or effects")
     if (previous_runtime is None) != (current_runtime is None):
         raise ValueError("cannot combine runtime and synthetic temporal sources")
@@ -267,15 +269,20 @@ def main(argv=None):
     parser.add_argument("--previous-manifest", type=Path)
     parser.add_argument("--current-manifest", type=Path)
     parser.add_argument("--synthetic", action="store_true")
+    parser.add_argument("--validate-only", action="store_true", help="validate provenance without resolving or writing output")
     parser.add_argument("--weight", type=float, default=.8)
     parser.add_argument("--upscale", type=int, choices=(1, 2), default=1,
                         help="optional 2x depth-aware spatial reconstruction of the preview")
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     try:
         paths = (args.previous_scene, args.current_scene, args.previous_manifest, args.current_manifest)
         if (args.synthetic and any(p is not None for p in paths)) or (not args.synthetic and any(p is None for p in paths)):
             raise ValueError("supply both runtime scenes and manifests, or select --synthetic")
+        if (args.validate_only and args.output is not None) or (not args.validate_only and args.output is None):
+            raise ValueError("supply --output for a resolve, or use --validate-only")
+        if not math.isfinite(args.weight) or not 0 <= args.weight <= .95:
+            raise ValueError("temporal history weight must be between 0 and 0.95")
         previous_raw = preview.read_limited(args.previous, MAX_BYTES)
         current_raw = preview.read_limited(args.current, MAX_BYTES)
         previous = parse(previous_raw, preview.read_limited(args.previous_packet, 64*1024*1024))
@@ -287,6 +294,12 @@ def main(argv=None):
             new_runtime = validate_runtime(current, preview.read_limited(args.current_scene, preview.MAX_INPUT),
                                            preview.read_limited(args.current_manifest, preview.MAX_INPUT))
         compatible(previous, current, old_runtime, new_runtime)
+        if args.validate_only:
+            print(json.dumps({"status": "valid", "source": "synthetic" if args.synthetic else "runtime",
+                              "previous_frame": None if args.synthetic else old_runtime[0].source.frame_id,
+                              "current_frame": None if args.synthetic else new_runtime[0].source.frame_id,
+                              "previous_packet_sha256": previous["digest"], "current_packet_sha256": current["digest"]}, indent=2))
+            return 0
         result, motion, stats = resolve(previous, current, args.weight)
         manifest = {"schema": "t3.scene.temporal-history", "version": 1,
                     "source": "synthetic" if args.synthetic else "runtime",

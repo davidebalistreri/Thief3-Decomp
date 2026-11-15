@@ -1,6 +1,7 @@
 // Independent SceneIR material/light preview; no D3D8 render-state replay.
 #include "scene_d3d12_common.hpp"
 #include "scene_pbr_packet.hpp"
+#include "scene_temporal_history.hpp"
 #include <bcrypt.h>
 #include <cmath>
 #include <string>
@@ -45,6 +46,10 @@ struct Constants {
     float jitter[4];
 };
 static_assert(sizeof(Constants) == 720, "unexpected PBR constant-buffer layout");
+struct PreviousConstants {
+    float view[16], projection[16], camera_scale[4], jitter_weight[4];
+};
+static_assert(sizeof(PreviousConstants) == 160, "unexpected temporal constant-buffer layout");
 
 bool WriteTemporal(const wchar_t* path, const Frame& frame, const std::uint8_t* digest,
                    float jitter_x, float jitter_y, std::uint32_t flags,
@@ -67,8 +72,36 @@ bool WriteTemporal(const wchar_t* path, const Frame& frame, const std::uint8_t* 
     return true;
 }
 
+bool UploadHistoryImage(ID3D12Device* device, ID3D12GraphicsCommandList* list, UINT width, UINT height,
+                        const std::vector<std::uint8_t>& bytes, GpuTexture& gpu) {
+    if (bytes.size() != std::size_t(width)*height*8) return false;
+    const auto desc = Image(width, height, 1, kHdr, D3D12_RESOURCE_FLAG_NONE);
+    const auto default_heap = Heap(D3D12_HEAP_TYPE_DEFAULT), upload_heap = Heap(D3D12_HEAP_TYPE_UPLOAD);
+    if (!Check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST,
+               nullptr, IID_PPV_ARGS(gpu.texture.put())), "CreateHistoryTexture")) return false;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{}; UINT rows = 0; UINT64 row_size = 0, total = 0;
+    device->GetCopyableFootprints(&desc, 0, 1, 0, &fp, &rows, &row_size, &total);
+    if (rows != height || row_size != UINT64(width)*8 || fp.Footprint.RowPitch < row_size || !total || total > SIZE_MAX ||
+        fp.Offset > total || row_size > total-fp.Offset || UINT64(height-1) > (total-fp.Offset-row_size)/fp.Footprint.RowPitch) return false;
+    const auto upload_desc = Buffer(total);
+    if (!Check(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &upload_desc,
+               D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(gpu.upload.put())), "CreateHistoryUpload")) return false;
+    void* mapped = nullptr; const D3D12_RANGE no_read{0, 0};
+    if (!Check(gpu.upload->Map(0, &no_read, &mapped), "MapHistoryUpload") || !mapped) return false;
+    for (UINT y = 0; y < height; ++y)
+        std::memcpy(static_cast<std::uint8_t*>(mapped)+fp.Offset+UINT64(y)*fp.Footprint.RowPitch,
+                    bytes.data()+std::size_t(y)*width*8, std::size_t(width)*8);
+    const D3D12_RANGE written{0, static_cast<SIZE_T>(total)}; gpu.upload->Unmap(0, &written);
+    D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = gpu.texture.p; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = gpu.upload.p; src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; src.PlacedFootprint = fp;
+    list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    Transition(list, gpu.texture.p, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    return true;
+}
+
 int Render(const Frame& frame, const wchar_t* output, bool indirect, bool gtao, bool volumetric, bool reflections, bool filmic,
-           const wchar_t* temporal_output, float jitter_x, float jitter_y, const std::uint8_t* digest) {
+           const wchar_t* temporal_output, float jitter_x, float jitter_y, const std::uint8_t* digest,
+           const t3render::temporal::History* history, float history_weight) {
     const bool use_gbuffer = indirect || gtao || volumetric || reflections || temporal_output;
     ComPtr<ID3D12Device> device;
     if (!SelectDevice(device)) return 1;
@@ -483,7 +516,59 @@ float4 main(float4 position:SV_Position):SV_Target {
     return float4(saturate(c),1);
 #endif
 })";
-    ComPtr<ID3DBlob> vs, ps, tone_vs, tone_ps, shadow_vs, shadow_ps;
+    static const char temporal_ps_source[] = R"(
+Texture2D current_color:register(t12); Texture2D current_position:register(t6);
+Texture2D history_color:register(t10); Texture2D history_position:register(t11);
+cbuffer Scene : register(b0) {
+    row_major float4x4 view; row_major float4x4 projection;
+    float4 size_scale_count; float4 camera_exposure; float4 ambient;
+    float4 light_position_radius[16]; float4 light_color_intensity[16];
+    float4 shadow_settings; float4 jitter;
+};
+cbuffer Previous : register(b3) {
+    row_major float4x4 previous_view; row_major float4x4 previous_projection;
+    float4 previous_camera_scale; float4 previous_jitter_weight;
+};
+struct Output { float4 display:SV_Target0; float4 hdr_color:SV_Target1; };
+Output main(float4 position:SV_Position) {
+    int2 size=int2(size_scale_count.xy), pixel=int2(position.xy);
+    float3 color=current_color.Load(int3(pixel,0)).rgb;
+    float4 p=current_position.Load(int3(pixel,0));
+    if(p.w>0.5) {
+        float3 world=camera_exposure.xyz+p.xyz/size_scale_count.z;
+        float4 clip=mul(mul(float4(world,1),previous_view),previous_projection);
+        if(clip.w>0.00000001&&clip.z>=0&&clip.z<=clip.w) {
+            float2 screen=float2((clip.x/clip.w*0.5+0.5)*size.x+0.5+previous_jitter_weight.x,
+                                 (0.5-clip.y/clip.w*0.5)*size.y+0.5+previous_jitter_weight.y);
+            if(all(screen>=0)&&all(screen<float2(size))) {
+                int2 q=int2(screen);
+                float4 old_position=history_position.Load(int3(q,0));
+                float3 expected=p.xyz+(camera_exposure.xyz-previous_camera_scale.xyz)*size_scale_count.z;
+                float3 difference=old_position.xyz-expected;
+                if(old_position.w>0.5&&dot(difference,difference)<=0.0025) {
+                    float3 low=color, high=color;
+                    [unroll] for(int y=-1;y<=1;++y) [unroll] for(int x=-1;x<=1;++x) {
+                        int2 nearby=clamp(pixel+int2(x,y),int2(0,0),size-1);
+                        float3 sample=current_color.Load(int3(nearby,0)).rgb;
+                        low=min(low,sample); high=max(high,sample);
+                    }
+                    float3 old=clamp(history_color.Load(int3(q,0)).rgb,low,high);
+                    color=lerp(color,old,previous_jitter_weight.z);
+                }
+            }
+        }
+    }
+    color=min(max(color,0),65504);
+    float3 mapped=max(color*camera_exposure.w,0);
+#if T3_FILMIC
+    mapped=(mapped*(2.51*mapped+0.03))/(mapped*(2.43*mapped+0.59)+0.14);
+#else
+    mapped=mapped/(1+mapped);
+#endif
+    mapped=lerp(mapped*12.92,1.055*pow(mapped,1/2.4)-0.055,step(0.0031308,mapped));
+    Output o; o.display=float4(saturate(mapped),1); o.hdr_color=float4(color,1); return o;
+})";
+    ComPtr<ID3DBlob> vs, ps, tone_vs, tone_ps, shadow_vs, shadow_ps, temporal_ps;
     const std::string options = std::string(use_gbuffer ? "#define T3_GBUFFER 1\n" : "#define T3_GBUFFER 0\n") +
                                 (indirect ? "#define T3_INDIRECT 1\n" : "#define T3_INDIRECT 0\n") +
                                 (gtao ? "#define T3_GTAO 1\n" : "#define T3_GTAO 0\n") +
@@ -495,10 +580,12 @@ float4 main(float4 position:SV_Position):SV_Target {
     const std::string shadow_option = frame.shadow_size ? "#define T3_SHADOWS 1\n" : "#define T3_SHADOWS 0\n";
     const std::string pixel_source = shadow_option + options + ps_source;
     const std::string tone_source = shadow_option + options + tone_ps_source;
+    const std::string temporal_source = options + temporal_ps_source;
     if (!Compile(compile, vs_source, "vs_5_0", vs) || !Compile(compile, pixel_source.c_str(), "ps_5_0", ps) ||
         (frame.shadow_size && (!Compile(compile, shadow_vs_source, "vs_5_0", shadow_vs) ||
                                !Compile(compile, shadow_ps_source, "ps_5_0", shadow_ps))) ||
-        !Compile(compile, tone_vs_source, "vs_5_0", tone_vs) || !Compile(compile, tone_source.c_str(), "ps_5_0", tone_ps)) return 1;
+        !Compile(compile, tone_vs_source, "vs_5_0", tone_vs) || !Compile(compile, tone_source.c_str(), "ps_5_0", tone_ps) ||
+        (history && !Compile(compile, temporal_source.c_str(), "ps_5_0", temporal_ps))) return 1;
 
     D3D12_COMMAND_QUEUE_DESC queue_desc{}; queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     ComPtr<ID3D12CommandQueue> queue; ComPtr<ID3D12CommandAllocator> allocator; ComPtr<ID3D12Fence> fence;
@@ -507,8 +594,8 @@ float4 main(float4 position:SV_Position):SV_Target {
         !Check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.put())), "CreateFence")) return 1;
     Handle event{CreateEventW(nullptr, FALSE, FALSE, nullptr)};
     if (!event.p) return 1;
-    D3D12_DESCRIPTOR_RANGE ranges[10]{};
-    D3D12_ROOT_PARAMETER params[13]{};
+    D3D12_DESCRIPTOR_RANGE ranges[13]{};
+    D3D12_ROOT_PARAMETER params[17]{};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; params[0].Descriptor.ShaderRegister = 0;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     for (UINT i = 0; i < 6; ++i) {
@@ -531,6 +618,15 @@ float4 main(float4 position:SV_Position):SV_Target {
     params[12].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[12].Constants.ShaderRegister = 2; params[12].Constants.Num32BitValues = 3;
     params[12].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    params[13].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; params[13].Descriptor.ShaderRegister = 3;
+    params[13].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    for (UINT i = 10; i < 13; ++i) {
+        ranges[i].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; ranges[i].NumDescriptors = 1;
+        ranges[i].BaseShaderRegister = i;
+        params[i+4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[i+4].DescriptorTable.NumDescriptorRanges = 1; params[i+4].DescriptorTable.pDescriptorRanges = &ranges[i];
+        params[i+4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    }
     D3D12_STATIC_SAMPLER_DESC samplers[2]{};
     auto& sampler = samplers[0];
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -542,7 +638,7 @@ float4 main(float4 position:SV_Position):SV_Target {
     shadow_sampler.MaxAnisotropy = 1; shadow_sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
     shadow_sampler.MaxLOD = D3D12_FLOAT32_MAX; shadow_sampler.ShaderRegister = 1;
     shadow_sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    D3D12_ROOT_SIGNATURE_DESC root_desc{}; root_desc.NumParameters = frame.has_emission ? 13 : use_gbuffer ? 12 : 8; root_desc.pParameters = params;
+    D3D12_ROOT_SIGNATURE_DESC root_desc{}; root_desc.NumParameters = history ? 17 : frame.has_emission ? 13 : use_gbuffer ? 12 : 8; root_desc.pParameters = params;
     root_desc.NumStaticSamplers = 2; root_desc.pStaticSamplers = samplers;
     root_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
     ComPtr<ID3DBlob> root_blob, root_errors; ComPtr<ID3D12RootSignature> root;
@@ -574,7 +670,7 @@ float4 main(float4 position:SV_Position):SV_Target {
     desc.NumRenderTargets = use_gbuffer ? 5 : 1;
     for (UINT i = 0; i < desc.NumRenderTargets; ++i) desc.RTVFormats[i] = kHdr;
     desc.DSVFormat = DXGI_FORMAT_D32_FLOAT; desc.SampleDesc.Count = 1;
-    ComPtr<ID3D12PipelineState> pipeline, tone_pipeline, shadow_pipeline;
+    ComPtr<ID3D12PipelineState> pipeline, tone_pipeline, shadow_pipeline, temporal_pipeline;
     if (!Check(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(pipeline.put())), "CreatePbrPipeline")) return 1;
     if (frame.shadow_size) {
         auto shadow_desc = desc;
@@ -594,11 +690,15 @@ float4 main(float4 position:SV_Position):SV_Target {
     if (temporal_output) desc.RTVFormats[1] = kHdr;
     desc.RTVFormats[0] = kColor; desc.DSVFormat = DXGI_FORMAT_UNKNOWN;
     if (!Check(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(tone_pipeline.put())), "CreateTonePipeline")) return 1;
+    if (history) {
+        desc.PS = {temporal_ps->GetBufferPointer(), temporal_ps->GetBufferSize()};
+        if (!Check(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(temporal_pipeline.put())), "CreateTemporalPipeline")) return 1;
+    }
     ComPtr<ID3D12GraphicsCommandList> list;
     if (!Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.p, pipeline.p,
                                          IID_PPV_ARGS(list.put())), "CreateList")) return 1;
     D3D12_DESCRIPTOR_HEAP_DESC heap_desc{}; heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heap_desc.NumDescriptors = static_cast<UINT>(frame.textures.size()*2+1+(frame.shadow_size ? 1 : 0)+(use_gbuffer ? 4 : 0));
+    heap_desc.NumDescriptors = static_cast<UINT>(frame.textures.size()*2+1+(frame.shadow_size ? 1 : 0)+(use_gbuffer ? 4 : 0)+(history ? 3 : 0));
     heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ComPtr<ID3D12DescriptorHeap> srv_heap;
     if (!Check(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(srv_heap.put())), "CreateSrvHeap")) return 1;
@@ -623,7 +723,7 @@ float4 main(float4 position:SV_Position):SV_Target {
     D3D12_CLEAR_VALUE clear{}; clear.Format = kHdr;
     D3D12_CLEAR_VALUE output_clear{}; output_clear.Format = kColor;
     D3D12_CLEAR_VALUE depth_clear{}; depth_clear.Format = DXGI_FORMAT_D32_FLOAT; depth_clear.DepthStencil.Depth = 1;
-    ComPtr<ID3D12Resource> hdr, target, depth, temporal_linear;
+    ComPtr<ID3D12Resource> hdr, target, depth, temporal_linear, temporal_resolved;
     if (!Check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &hdr_desc, D3D12_RESOURCE_STATE_RENDER_TARGET,
              &clear, IID_PPV_ARGS(hdr.put())), "CreateHdr") ||
         !Check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &output_desc, D3D12_RESOURCE_STATE_RENDER_TARGET,
@@ -632,6 +732,8 @@ float4 main(float4 position:SV_Position):SV_Target {
              &depth_clear, IID_PPV_ARGS(depth.put())), "CreateDepth")) return 1;
     if (temporal_output && !Check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &hdr_desc,
                  D3D12_RESOURCE_STATE_RENDER_TARGET, &clear, IID_PPV_ARGS(temporal_linear.put())), "CreateTemporalLinear")) return 1;
+    if (history && !Check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &hdr_desc,
+                 D3D12_RESOURCE_STATE_RENDER_TARGET, &clear, IID_PPV_ARGS(temporal_resolved.put())), "CreateTemporalResolved")) return 1;
     D3D12_SHADER_RESOURCE_VIEW_DESC hdr_srv{}; hdr_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     hdr_srv.Format = kHdr; hdr_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; hdr_srv.Texture2D.MipLevels = 1;
     device->CreateShaderResourceView(hdr.p, &hdr_srv, cpu_srv); cpu_srv.ptr += srv_step;
@@ -660,8 +762,16 @@ float4 main(float4 position:SV_Position):SV_Target {
             device->CreateShaderResourceView(image.p, &hdr_srv, cpu_srv); cpu_srv.ptr += srv_step;
         }
     }
+    GpuTexture previous_color, previous_position;
+    if (history) {
+        if (!UploadHistoryImage(device.p, list.p, frame.width, frame.height, history->color, previous_color) ||
+            !UploadHistoryImage(device.p, list.p, frame.width, frame.height, history->position, previous_position)) return 1;
+        device->CreateShaderResourceView(previous_color.texture.p, &hdr_srv, cpu_srv); cpu_srv.ptr += srv_step;
+        device->CreateShaderResourceView(previous_position.texture.p, &hdr_srv, cpu_srv); cpu_srv.ptr += srv_step;
+        device->CreateShaderResourceView(temporal_linear.p, &hdr_srv, cpu_srv); cpu_srv.ptr += srv_step;
+    }
     heap_desc = {}; heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    heap_desc.NumDescriptors = 2+shadow_faces+(use_gbuffer ? 4 : 0)+(temporal_output ? 1 : 0);
+    heap_desc.NumDescriptors = 2+shadow_faces+(use_gbuffer ? 4 : 0)+(temporal_output ? 1 : 0)+(history ? 1 : 0);
     ComPtr<ID3D12DescriptorHeap> rtv_heap, dsv_heap;
     if (!Check(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(rtv_heap.put())), "CreateRtvHeap")) return 1;
     heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; heap_desc.NumDescriptors = frame.shadow_size ? 2 : 1;
@@ -683,6 +793,11 @@ float4 main(float4 position:SV_Position):SV_Target {
     if (temporal_output) {
         temporal_rtv = hdr_rtv; temporal_rtv.ptr += UINT64(2+shadow_faces+4)*rtv_step;
         device->CreateRenderTargetView(temporal_linear.p, nullptr, temporal_rtv);
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE resolved_rtv{};
+    if (history) {
+        resolved_rtv = temporal_rtv; resolved_rtv.ptr += rtv_step;
+        device->CreateRenderTargetView(temporal_resolved.p, nullptr, resolved_rtv);
     }
     device->CreateDepthStencilView(depth.p, nullptr, dsv);
     D3D12_CPU_DESCRIPTOR_HANDLE shadow_dsv{};
@@ -754,6 +869,23 @@ float4 main(float4 position:SV_Position):SV_Target {
     mapped = nullptr;
     if (!Check(constants->Map(0, &no_read, &mapped), "MapConstants") || !mapped) return 1;
     std::memcpy(mapped, &cb, sizeof(cb)); const D3D12_RANGE cb_written{0, sizeof(cb)}; constants->Unmap(0, &cb_written);
+    ComPtr<ID3D12Resource> previous_constants;
+    if (history) {
+        const auto desc = Buffer((sizeof(PreviousConstants)+255)&~std::size_t(255));
+        if (!Check(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &desc,
+                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(previous_constants.put())), "CreatePreviousConstants")) return 1;
+        PreviousConstants previous{};
+        std::memcpy(previous.view, history->view, sizeof(previous.view));
+        std::memcpy(previous.projection, history->projection, sizeof(previous.projection));
+        for (unsigned i = 0; i < 3; ++i) previous.camera_scale[i] = history->camera[i];
+        previous.camera_scale[3] = history->scale;
+        previous.jitter_weight[0] = history->jitter[0]; previous.jitter_weight[1] = history->jitter[1];
+        previous.jitter_weight[2] = history_weight;
+        mapped = nullptr;
+        if (!Check(previous_constants->Map(0, &no_read, &mapped), "MapPreviousConstants") || !mapped) return 1;
+        std::memcpy(mapped, &previous, sizeof(previous));
+        const D3D12_RANGE written{0, sizeof(previous)}; previous_constants->Unmap(0, &written);
+    }
     list->SetGraphicsRootSignature(root.p);
     ID3D12DescriptorHeap* heaps[] = {srv_heap.p}; list->SetDescriptorHeaps(1, heaps);
     list->SetGraphicsRootConstantBufferView(0, constants->GetGPUVirtualAddress());
@@ -823,13 +955,27 @@ float4 main(float4 position:SV_Position):SV_Target {
     auto hdr_handle = gpu_base; hdr_handle.ptr += UINT64(frame.textures.size()*2)*srv_step;
     list->SetGraphicsRootDescriptorTable(5, hdr_handle);
     list->DrawInstanced(3, 1, 0, 0);
+    if (history) {
+        Transition(list.p, temporal_linear.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        D3D12_CPU_DESCRIPTOR_HANDLE resolved_rtvs[] = {output_rtv, resolved_rtv};
+        list->OMSetRenderTargets(2, resolved_rtvs, FALSE, nullptr);
+        list->SetPipelineState(temporal_pipeline.p);
+        list->SetGraphicsRootConstantBufferView(13, previous_constants->GetGPUVirtualAddress());
+        auto handle = gpu_base;
+        handle.ptr += UINT64(frame.textures.size()*2+1+(frame.shadow_size ? 1 : 0)+4)*srv_step;
+        for (UINT i = 0; i < 3; ++i) {
+            list->SetGraphicsRootDescriptorTable(i+14, handle); handle.ptr += srv_step;
+        }
+        list->DrawInstanced(3, 1, 0, 0);
+    }
     if (temporal_output) {
-        Transition(list.p, temporal_linear.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        if (history) Transition(list.p, temporal_resolved.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        else Transition(list.p, temporal_linear.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
         Transition(list.p, gbuffer[0].p, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
         D3D12_TEXTURE_COPY_LOCATION destination{}; destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         destination.PlacedFootprint = temporal_fp;
         D3D12_TEXTURE_COPY_LOCATION source{}; source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        destination.pResource = temporal_color_readback.p; source.pResource = temporal_linear.p;
+        destination.pResource = temporal_color_readback.p; source.pResource = history ? temporal_resolved.p : temporal_linear.p;
         list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
         destination.pResource = temporal_position_readback.p; source.pResource = gbuffer[0].p;
         list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
@@ -885,13 +1031,14 @@ float4 main(float4 position:SV_Position):SV_Target {
 
 int wmain(int argc, wchar_t** argv) {
     const auto usage = []() {
-        std::fwprintf(stderr, L"usage: t3render_scene_pbr_d3d12 <pbr.bin> --output <new-image.ppm> [--indirect] [--gtao] [--volumetric] [--reflections] [--filmic] [--temporal-output <new.bin> [--jitter <x> <y>]]\n");
+        std::fwprintf(stderr, L"usage: t3render_scene_pbr_d3d12 <pbr.bin> --output <new-image.ppm> [effects] [--temporal-output <new.bin> [--jitter <x> <y>]] [--temporal-input <history.bin> --previous-packet <pbr.bin> [--history-weight <0..0.95>]]\n");
         return 2;
     };
-    if (argc < 4 || argc > 14 || std::wcscmp(argv[2], L"--output") || !argv[3][0]) return usage();
+    if (argc < 4 || argc > 20 || std::wcscmp(argv[2], L"--output") || !argv[3][0]) return usage();
     bool indirect = false, gtao = false, volumetric = false, reflections = false, filmic = false;
-    bool jitter_set = false; float jitter_x = 0, jitter_y = 0;
+    bool jitter_set = false, weight_set = false; float jitter_x = 0, jitter_y = 0, history_weight = .8f;
     const wchar_t* temporal_output = nullptr;
+    const wchar_t* temporal_input = nullptr; const wchar_t* previous_packet = nullptr;
     for (int i = 4; i < argc; ++i) {
         if (!std::wcscmp(argv[i], L"--indirect") && !indirect) indirect = true;
         else if (!std::wcscmp(argv[i], L"--gtao") && !gtao) gtao = true;
@@ -900,6 +1047,15 @@ int wmain(int argc, wchar_t** argv) {
         else if (!std::wcscmp(argv[i], L"--filmic") && !filmic) filmic = true;
         else if (!std::wcscmp(argv[i], L"--temporal-output") && !temporal_output && i+1 < argc && argv[i+1][0])
             temporal_output = argv[++i];
+        else if (!std::wcscmp(argv[i], L"--temporal-input") && !temporal_input && i+1 < argc && argv[i+1][0])
+            temporal_input = argv[++i];
+        else if (!std::wcscmp(argv[i], L"--previous-packet") && !previous_packet && i+1 < argc && argv[i+1][0])
+            previous_packet = argv[++i];
+        else if (!std::wcscmp(argv[i], L"--history-weight") && !weight_set && i+1 < argc) {
+            wchar_t* end = nullptr; const wchar_t* value = argv[++i]; history_weight = std::wcstof(value, &end);
+            if (!end || end == value || *end || !std::isfinite(history_weight) || history_weight < 0 || history_weight > .95f) return usage();
+            weight_set = true;
+        }
         else if (!std::wcscmp(argv[i], L"--jitter") && !jitter_set && i+2 < argc) {
             wchar_t* end_x = nullptr; wchar_t* end_y = nullptr;
             const wchar_t* x = argv[++i]; const wchar_t* y = argv[++i];
@@ -910,9 +1066,35 @@ int wmain(int argc, wchar_t** argv) {
         }
         else return usage();
     }
-    if ((jitter_set && !temporal_output) || (temporal_output && !std::wcscmp(temporal_output, argv[3]))) return usage();
+    if ((jitter_set && !temporal_output) || (temporal_output && !std::wcscmp(temporal_output, argv[3])) ||
+        ((temporal_input || previous_packet || weight_set) && !(temporal_input && previous_packet && temporal_output)) ||
+        (temporal_input && temporal_output && !std::wcscmp(temporal_input, temporal_output))) return usage();
     Frame frame;
     std::uint8_t digest[32]{};
     if (!ReadPacket(argv[1], frame, temporal_output ? digest : nullptr)) return 2;
-    return Render(frame, argv[3], indirect, gtao, volumetric, reflections, filmic, temporal_output, jitter_x, jitter_y, digest);
+    t3render::temporal::History history;
+    if (temporal_input) {
+        Frame previous; std::uint8_t previous_digest[32]{};
+        if (!ReadPacket(previous_packet, previous, previous_digest)) return 2;
+        FILE* file = _wfopen(temporal_input, L"rb");
+        if (!file) { std::fprintf(stderr, "cannot open temporal history\n"); return 2; }
+        constexpr std::size_t max_history = 208 + std::size_t(2048)*2048*16;
+        if (_fseeki64(file, 0, SEEK_END)) { std::fclose(file); return 2; }
+        const auto length = _ftelli64(file);
+        if (length < 208 || static_cast<std::uint64_t>(length) > max_history || _fseeki64(file, 0, SEEK_SET)) {
+            std::fclose(file); std::fprintf(stderr, "invalid temporal history size\n"); return 2;
+        }
+        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(length));
+        const std::size_t size = std::fread(bytes.data(), 1, bytes.size(), file);
+        const bool error = size != bytes.size() || std::fgetc(file) != EOF || std::ferror(file) != 0;
+        const bool close_error = std::fclose(file) != 0;
+        const std::uint32_t flags = (indirect ? 1u : 0u) | (gtao ? 2u : 0u) |
+                                    (volumetric ? 4u : 0u) | (reflections ? 8u : 0u) | (filmic ? 16u : 0u);
+        if (error || close_error || !t3render::temporal::ParseHistory(bytes.data(), size, previous, frame, previous_digest, flags, history)) {
+            std::fprintf(stderr, "invalid or incompatible temporal history\n"); return 2;
+        }
+        std::printf("temporal_frame_order=unverified; validate SceneIR provenance separately\n");
+    }
+    return Render(frame, argv[3], indirect, gtao, volumetric, reflections, filmic, temporal_output, jitter_x, jitter_y, digest,
+                  temporal_input ? &history : nullptr, history_weight);
 }

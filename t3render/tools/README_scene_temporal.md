@@ -9,13 +9,20 @@ pointers. The regular PPM is still produced. With zero jitter, the local
 frame-1001 image differs from the non-export path by at most one channel level
 on one pixel.
 
-`scene_temporal_resolve.py` is an **offline CPU prototype**, not an integrated
-real-time TAA implementation. It reprojects each current static world position
-through the previous camera, computes a current-to-previous pixel vector,
-rejects out-of-frame or position-mismatched history, clamps accepted HDR
-history to the current 3x3 color neighborhood, and blends before the existing
-exposure/Reinhard/sRGB conversion. Its history output can be used in a later
-resolve. The default history weight is 0.8, adjustable from 0 to 0.95.
+The renderer can also resolve history on GPU with `--temporal-input
+<history.bin> --previous-packet <previous.bin> --temporal-output <new.bin>`.
+It checks the previous packet hash and camera, dimensions, units, lighting,
+textures, shadow settings and effect flags before using history. The new HDR
+buffer contains the resolved result and can feed another frame. Its default
+history weight is 0.8; `--history-weight` accepts 0 to 0.95.
+
+The GPU pass and the separate **offline CPU reference**
+`scene_temporal_resolve.py` reproject each current static world position
+through the previous camera, compute a current-to-previous pixel vector,
+reject out-of-frame or position-mismatched history, clamp accepted HDR history
+to the current 3x3 color neighborhood, and blend before the existing display
+conversion. This is a standalone frame consumer, not yet an integrated
+real-time game loop. The CPU reference accepts `--weight` from 0 to 0.95.
 When the exported renderer uses `--filmic`, the resolve applies the same
 filmic curve; frames with different effect or curve flags cannot be combined.
 
@@ -37,6 +44,17 @@ world positions differ by more than 0.05 m. Object motion vectors, animated
 geometry, transparency, temporal denoising and GPU history reuse are absent;
 nearest history sampling and a fixed rejection threshold can ghost or flicker.
 This is a static-scene camera-motion prototype, not a production TAA claim.
+
+The GPU packet does not contain SceneIR frame IDs. Before a runtime GPU
+resolve, run `scene_temporal_resolve.py <previous-history> <current-unresolved>
+--previous-packet <previous-packet> --current-packet <current-packet>
+--previous-scene <previous-scene> --current-scene <current-scene>
+--previous-manifest <previous-manifest> --current-manifest <current-manifest>
+--validate-only`. Then use the same current packet, effects and jitter for the
+GPU resolve. This validates provenance without writing a resolved artifact;
+the GPU parser independently checks pixel bounds. Direct GPU use prints that
+frame order is unverified and must not be presented as synchronized runtime
+history without this check.
 
 Synthetic examples must use `--synthetic`; their manifest records
 `source = synthetic` and has no frame IDs. In particular, rerendering frame
@@ -66,8 +84,11 @@ the same packet at horizontal jitters -0.375, -0.125, 0.125 and 0.375 and use
 --jittered <current.ppm>` compares the result with the current sample.
 
 On the local D3D12 path, mean RGB-channel error against the four-sample
-reference fell from 6 to 0 for this texture fixture. A camera translation
-produced one-pixel vectors, while a 0.2 m depth change rejected all 4,096
-fixture pixels. These are synthetic checks; no two-frame runtime capture has
-been claimed. `test_scene_temporal_resolve.py` also covers history rejection,
-clamping, malformed buffers and runtime provenance.
+reference fell from 6 to 0 for this texture fixture on both CPU and GPU. A
+camera translation produced one-pixel vectors, while a 0.2 m depth change
+rejected all 4,096 fixture pixels; the GPU matched both controls. On the
+synthetic frame-1001 pair, CPU and GPU differed in 9,886 pixels with mean
+absolute RGB difference 0.00424 and maximum channel difference 8 on a 0–255
+scale. These are synthetic checks; no two-frame runtime capture has been
+claimed. `test_scene_temporal_resolve.py` covers history rejection, clamping and
+runtime provenance; `test_scene_temporal_history.py` tests the GPU input parser.

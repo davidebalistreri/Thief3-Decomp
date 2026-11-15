@@ -22,6 +22,7 @@ from scene_ir import SceneSnapshot
 HEADER = struct.Struct("<8sII32s32f7fI")
 MOTION_HEADER = struct.Struct("<8sII32s")
 MAX_BYTES = HEADER.size + 2048*2048*16
+GEOMETRY_OVERRIDES = ("generated_bed", "generated_candlesticks", "generated_arch", "generated_bedroom_details")
 
 
 def parse(raw, packet):
@@ -73,6 +74,10 @@ def validate_runtime(temporal, scene_raw, manifest_raw):
                 len(light["color_linear"]) != 3 for light in manifest["lights"]) or
             not isinstance(manifest.get("calibration_sha256"), str) or
             not re.fullmatch(r"[0-9a-f]{64}", manifest["calibration_sha256"]) or
+            any(value is not None and (not isinstance(value, dict) or
+                not isinstance(value.get("source_sha256"), str) or
+                not re.fullmatch(r"[0-9a-f]{64}", value["source_sha256"]))
+                for value in (manifest.get(key) for key in GEOMETRY_OVERRIDES)) or
             (scene.camera.viewport.width, scene.camera.viewport.height) != (temporal["width"], temporal["height"])):
         raise ValueError("temporal runtime provenance does not match the synchronized SceneIR")
     floats = lambda values: struct.unpack(f"<{len(values)}f", struct.pack(f"<{len(values)}f", *values))
@@ -105,14 +110,18 @@ def compatible(previous, current, previous_runtime=None, current_runtime=None):
         def flame_signature(manifest):
             value = manifest.get("candle_flames")
             return None if value is None else (value.get("source_sha256"), value.get("radiance_linear"))
+        def geometry_signature(manifest):
+            return tuple(None if manifest.get(key) is None else manifest[key]["source_sha256"]
+                         for key in GEOMETRY_OVERRIDES)
         def light_signature(manifest):
             return sorted((light["id"], tuple(light["position"]), tuple(light["color_linear"]),
                            light.get("intensity_candela"), light.get("radius_m")) for light in manifest["lights"])
         if (material_signature(old_manifest) != material_signature(new_manifest) or
                 shadow_signature(old_manifest) != shadow_signature(new_manifest) or
                 flame_signature(old_manifest) != flame_signature(new_manifest) or
+                geometry_signature(old_manifest) != geometry_signature(new_manifest) or
                 light_signature(old_manifest) != light_signature(new_manifest)):
-            raise ValueError("runtime temporal frames have incompatible material or lighting settings")
+            raise ValueError("runtime temporal frames have incompatible material, geometry or lighting settings")
 
 
 def _decode(raw, offset, count, position=False):

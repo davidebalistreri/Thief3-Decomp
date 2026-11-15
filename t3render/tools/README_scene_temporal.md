@@ -38,7 +38,9 @@ For runtime inputs, supply the synchronized SceneIR and PBR packet manifest
 for **both** frames. The tool verifies each scene, packet hash, camera, frame
 ID and fingerprint; it requires increasing frame IDs, matching map/assets,
 light calibration and positions, material and shadow settings, dimensions,
-units and effect flags. These checks do not prove that actor transforms or
+units and effect flags. Enabled generated bed, candlestick, arch and bedroom
+detail geometry must have the same GLB hashes in both manifests; enabling,
+disabling or changing an override invalidates history. These checks do not prove that actor transforms or
 lighting were unchanged between captures. History is rejected per pixel when
 world positions differ by more than 0.05 m. Object motion vectors, animated
 geometry, transparency and temporal denoising are absent;

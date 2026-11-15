@@ -168,6 +168,22 @@ class TemporalResolveTests(unittest.TestCase):
         newer_lights = replace(lights, source=changed.source, camera=camera)
         new, new_runtime, _, _ = capture(changed, newer_lights)
         temporal.compatible(old, new, old_runtime, new_runtime)
+        for key in temporal.GEOMETRY_OVERRIDES:
+            previous_manifest = copy.deepcopy(old_runtime[1])
+            current_manifest = copy.deepcopy(new_runtime[1])
+            previous_manifest[key] = {"source_sha256": "b"*64}
+            current_manifest[key] = {"source_sha256": "b"*64}
+            temporal.compatible(old, new, (old_runtime[0], previous_manifest), (new_runtime[0], current_manifest))
+            current_manifest[key]["source_sha256"] = "c"*64
+            with self.subTest(override=key, change="asset"), self.assertRaisesRegex(ValueError, "geometry"):
+                temporal.compatible(old, new, (old_runtime[0], previous_manifest), (new_runtime[0], current_manifest))
+            del current_manifest[key]
+            with self.subTest(override=key, change="disabled"), self.assertRaisesRegex(ValueError, "geometry"):
+                temporal.compatible(old, new, (old_runtime[0], previous_manifest), (new_runtime[0], current_manifest))
+            for invalid in ({}, {"source_sha256": "x"*64}, []):
+                bad = copy.deepcopy(manifest); bad[key] = invalid
+                with self.subTest(override=key, invalid=invalid), self.assertRaisesRegex(ValueError, "provenance"):
+                    temporal.validate_runtime(old, source, json.dumps(bad).encode())
         wrong_lights = copy.deepcopy(new_runtime[1])
         wrong_lights["lights"][0]["position"][0] += 1
         with self.assertRaisesRegex(ValueError, "lighting settings"):

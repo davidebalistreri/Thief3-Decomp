@@ -34,6 +34,7 @@ DIRECT_MAGIC = b"T3SCN05\0"
 SPOT_MAGIC = b"T3SCN06\0"
 PROJECTOR_MAGIC = b"T3SCN07\0"
 FOG_MAGIC = b"T3SCN08\0"
+NORMAL_MAGIC = b"T3SCN09\0"
 MAX_BYTES = 64 * 1024 * 1024
 MAX_TEXTURES = 64
 MAX_DRAWS = 8192
@@ -63,6 +64,48 @@ def transform_normal(normal, matrix):
     return tuple(x / length for x in value)
 
 
+def tangent_frames(vertices, indices, tangents, matrix):
+    """Transform source tangents and infer each triangle's sign from its UVs.
+
+    Degenerate/ambiguous UV triangles use flat vertex normals, marked with w=0.
+    The inferred basis is an explicit preview hypothesis, not a T3 convention.
+    """
+    def dot(a, b):
+        return sum(x*y for x, y in zip(a, b))
+    def cross(a, b):
+        return (a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0])
+    def normalize(v):
+        length = math.sqrt(dot(v, v))
+        return tuple(x/length for x in v) if math.isfinite(length) and length > 1e-10 else None
+    result, fallback = [], 0
+    for offset in range(0, len(vertices), 3):
+        tri = vertices[offset:offset+3]
+        uv1 = (tri[1][3] - tri[0][3], tri[1][4] - tri[0][4])
+        uv2 = (tri[2][3] - tri[0][3], tri[2][4] - tri[0][4])
+        det = uv1[0]*uv2[1] - uv1[1]*uv2[0]
+        bitangent = None
+        if abs(det) > 1e-10:
+            edge1 = [tri[1][i] - tri[0][i] for i in range(3)]
+            edge2 = [tri[2][i] - tri[0][i] for i in range(3)]
+            bitangent = normalize([(edge2[i]*uv1[0] - edge1[i]*uv2[0])/det for i in range(3)])
+        directions, signs = [], []
+        for vertex, index in zip(tri, indices[offset:offset+3]):
+            source = tangents[index]
+            transformed = [sum(source[i] * matrix[i*4+j] for i in range(3)) for j in range(3)]
+            normal = vertex[5:8]
+            projection = dot(transformed, normal)
+            direction = normalize([transformed[i] - projection*normal[i] for i in range(3)])
+            alignment = dot(cross(normal, direction), bitangent) if direction is not None and bitangent is not None else 0
+            directions.append(direction)
+            signs.append(1 if alignment > 1e-4 else -1 if alignment < -1e-4 else 0)
+        if 0 in signs or len(set(signs)) != 1:
+            fallback += 1
+            result.extend((*vertex, 0, 0, 0, 0) for vertex in tri)
+        else:
+            result.extend((*vertex, *direction, signs[0]) for vertex, direction in zip(tri, directions))
+    return result, fallback
+
+
 def digest_file(path):
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -75,6 +118,7 @@ class TextureResolver:
     def __init__(self, bundles):
         self.bundles = bundles
         self.cache = {}
+        self.normal_cache = {}
         self.textures = {}
         self.decoded_bytes = 0
 
@@ -112,6 +156,20 @@ class TextureResolver:
                 return self.decode_texture(bundle, matches[0], name, parts)
         raise ValueError(f"missing projector texture {name}")
 
+    def resolve_normal(self, name):
+        key = name.lower()
+        if key not in self.normal_cache:
+            bundle, resource = self.find(name, TYPE_MATERIAL)
+            texture_name = parse_material(resource, bundle.split(resource)).texture(1)
+            if not texture_name:
+                raise ValueError(f"material {name} has no normal texture")
+            texture_bundle, texture_resource = self.find(texture_name, TYPE_TEXTURE)
+            value = self.decode_texture(texture_bundle, texture_resource, texture_name)
+            if value["usage"] != 1:
+                raise ValueError(f"texture {texture_name} is not an offline normal map")
+            self.normal_cache[key] = value
+        return self.normal_cache[key]
+
     def decode_texture(self, texture_bundle, texture_resource, texture_name, parts=None):
         texture_key = (str(texture_bundle.path), texture_resource.name.lower())
         if texture_key in self.textures:
@@ -136,7 +194,8 @@ class TextureResolver:
                 raise ValueError(f"invalid decoded texture {texture_name}")
             mips.append(bytes(rgba))
         value = {"name": texture.name, "bundle": texture_bundle.path.name,
-                 "format": texture.format, "width": texture.width, "height": texture.height, "mips": mips}
+                 "format": texture.format, "width": texture.width, "height": texture.height, "mips": mips,
+                 "usage": texture.usage}
         self.decoded_bytes += decoded_size
         self.textures[texture_key] = value
         return value
@@ -247,6 +306,8 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
         isinstance(value, dict) and value.get("mode") == "spot_approximation" for value in direct_candidates.values())
     projector_packet = direct_candidates is not None and any(
         isinstance(value, dict) and value.get("projector_candidate") is not None for value in direct_candidates.values())
+    normal_packet = direct_candidates is not None and any(
+        isinstance(value, dict) and value.get("normal_sampler_candidate") is not None for value in direct_candidates.values())
     if projector_packet and any(isinstance(value, dict) and value.get("projector_candidate") is not None and
                                 value.get("mode") != "spot_approximation" for value in direct_candidates.values()):
         raise ValueError("projector texture candidates require spotlight draws")
@@ -278,6 +339,13 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
                     "point_approximation", "skipped_spot", "spot_approximation"):
                 raise ValueError("invalid direct candidate")
         is_lit = light is not None and light["mode"] in ("point_approximation", "spot_approximation")
+        normal_observation = light.get("normal_sampler_candidate") if light is not None else None
+        normal_program = {"point_approximation": "omnilightnormal11_light_vertex",
+                          "spot_approximation": "spotlightnormal11_light_vertex"}
+        if normal_observation is not None and (not is_lit or not isinstance(normal_observation, dict) or
+                normal_observation.get("status") != "candidate" or normal_observation.get("stage") != 0 or
+                str(light.get("program_hypothesis", "")).lower() != normal_program.get(light["mode"])):
+            raise ValueError("normal map candidate requires a sampled normal-light program and stage-0 texture")
         fog_value = fog_candidates.get(submission.draw_id) if fog_candidates is not None else None
         if fog_candidates is not None and submission.draw_id in fog_candidates:
             if not isinstance(fog_value, dict):
@@ -294,6 +362,8 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
                 raise ValueError("invalid fog candidate parameters")
         if is_lit and geometry.normals is None:
             raise ValueError("direct-light candidate requires source normals")
+        if normal_observation is not None and geometry.tangents is None:
+            raise ValueError("normal map candidate requires source tangents")
         normal_xform = normal_matrix(matrix) if is_lit else None
         tex = resolver.resolve(material_name)
         tex_key = (tex["bundle"], tex["name"].lower())
@@ -303,7 +373,8 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             texture_indices[tex_key] = len(textures)
             textures.append(tex)
         vertices = []
-        for index in geometry.indices[section.first_index:section.first_index + section.index_count]:
+        indices = geometry.indices[section.first_index:section.first_index + section.index_count]
+        for index in indices:
             position = transform_point(geometry.positions[index], matrix)
             uv = geometry.uv0[index]
             if (abs(position[3] - 1) > 1e-6 or any(not math.isfinite(v) or abs(v) > 1000000 for v in position[:3] + uv)):
@@ -316,6 +387,12 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             else:
                 normal = transform_normal(geometry.normals[index], normal_xform) if is_lit else (0, 0, 0)
             vertices.append((*position[:3], *uv, *normal) if extended_packet else (*position[:3], *uv))
+        fallback_triangles = 0
+        if normal_packet:
+            if normal_observation is not None:
+                vertices, fallback_triangles = tangent_frames(vertices, indices, geometry.tangents, matrix)
+            else:
+                vertices = [(*vertex, 0, 0, 0, 0) for vertex in vertices]
         triangle_count += len(vertices) // 3
         if not vertices or triangle_count > MAX_TRIANGLES:
             raise ValueError("triangle count exceeds renderer bounds")
@@ -330,11 +407,29 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
                 state["blend_enable"] != 1 or state["blend_src"] != 4 or state["blend_dst"] != 5 or
                 state["blend_op"] != 0 or state["color_mask"] != 7 or state["alpha_compare"] != 0):
             raise ValueError("fog candidates require source-alpha blending with depth testing and no depth writes")
+        if normal_observation is not None and state["alpha_compare"] != 0:
+            raise ValueError("normal map candidates require disabled alpha test")
         if sampler_candidates is not None and submission.draw_id not in sampler_candidates:
             raise ValueError("sampler candidate missing for submitted draw")
         candidate = sampler_candidates[submission.draw_id] if sampler_candidates is not None else {"status": "not_selected"}
         sampler = ({"status": "preview_default", "stage": None, "mip_lod_bias": 0.0}
                    if candidate == {"status": "not_selected"} else match_sampler(candidate, tex))
+        draw_texture_index = texture_indices[tex_key]
+        normal_tex = None
+        if normal_observation is not None:
+            if sampler["status"] != "preview_default":
+                raise ValueError("normal map candidates require their own stage-0 sampler")
+            normal_tex = resolver.resolve_normal(material_name)
+            if normal_tex.get("usage") != 1:
+                raise ValueError("normal map candidate requires an offline normal texture")
+            sampler = match_sampler(normal_observation, normal_tex)
+            normal_key = (normal_tex["bundle"], normal_tex["name"].lower())
+            if normal_key not in texture_indices:
+                if len(textures) == MAX_TEXTURES:
+                    raise ValueError("texture count exceeds renderer bounds")
+                texture_indices[normal_key] = len(textures)
+                textures.append(normal_tex)
+            draw_texture_index = texture_indices[normal_key]
         color = ambient_candidates.get(submission.draw_id) if ambient_candidates is not None else None
         if ambient_candidates is not None and submission.draw_id in ambient_candidates and (
                 not isinstance(color, (tuple, list)) or len(color) != 4 or any(
@@ -390,7 +485,9 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
         else:
             projector = (0,) * 12
             mode = 6 if fog_value is not None else 2 if is_lit else 3 if light is not None else 1 if color is not None else 0
-        draws.append((texture_indices[tex_key], vertices, state, sampler, color, mode, light_values, projector, projector_index))
+        if normal_tex is not None:
+            mode = {2: 7, 4: 8, 5: 9}[mode]
+        draws.append((draw_texture_index, vertices, state, sampler, color, mode, light_values, projector, projector_index))
         source_draws.append({"draw": submission.draw_id, "target_kind": submission.target_kind,
                              "target_id": submission.target_id, "section": submission.section,
                              "render_pass": submission.render_pass, "stage": submission.stage,
@@ -400,18 +497,22 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             source_draws[-1]["ambient_candidate"] = list(color)
         if light is not None:
             source_draws[-1]["direct_candidate"] = light
+        if normal_tex is not None:
+            source_draws[-1]["normal_map_candidate"] = {"texture": normal_tex["name"], "bundle": normal_tex["bundle"],
+                                                        "flat_fallback_triangles": fallback_triangles}
         if fog_value is not None:
             source_draws[-1]["fog_candidate"] = fog_value
     camera = scene.camera
     viewport = camera.viewport
     size = (struct.calcsize("<8sIIff32fII") + sum(12 + sum(len(mip) for mip in tex["mips"]) for tex in textures) +
             sum(56 + (20 if ambient_candidates is not None or extended_packet else 0) +
-                (32 if extended_packet else 0) + len(vertices) * (32 if extended_packet else 20)
-                + (48 if spot_packet or fog_candidates is not None else 0) + (4 if projector_packet or fog_candidates is not None else 0)
+                (32 if extended_packet else 0) + len(vertices) * (48 if normal_packet else 32 if extended_packet else 20)
+                + (48 if spot_packet or fog_candidates is not None or normal_packet else 0) +
+                (4 if projector_packet or fog_candidates is not None or normal_packet else 0)
                 for _, vertices, _, _, _, _, _, _, _ in draws))
     if size > MAX_BYTES:
         raise ValueError("packet exceeds renderer bounds")
-    magic = (FOG_MAGIC if fog_candidates is not None else PROJECTOR_MAGIC if projector_packet else SPOT_MAGIC if spot_packet else
+    magic = (NORMAL_MAGIC if normal_packet else FOG_MAGIC if fog_candidates is not None else PROJECTOR_MAGIC if projector_packet else SPOT_MAGIC if spot_packet else
              DIRECT_MAGIC if direct_candidates is not None else AMBIENT_MAGIC if ambient_candidates is not None else MAGIC)
     body = bytearray(struct.pack("<8sIIff32fII", magic,
                                  viewport.width, viewport.height,
@@ -428,12 +529,12 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             body.extend(struct.pack("<I4f", mode, *(color if color is not None else (0, 0, 0, 0))))
         if extended_packet:
             body.extend(struct.pack("<8f", *light_values))
-        if spot_packet or fog_candidates is not None:
+        if spot_packet or fog_candidates is not None or normal_packet:
             body.extend(struct.pack("<12f", *projector))
-        if projector_packet or fog_candidates is not None:
+        if projector_packet or fog_candidates is not None or normal_packet:
             body.extend(struct.pack("<I", projector_index))
         for vertex in vertices:
-            body.extend(struct.pack("<8f" if extended_packet else "<5f", *vertex))
+            body.extend(struct.pack("<12f" if normal_packet else "<8f" if extended_packet else "<5f", *vertex))
     if len(body) != size:
         raise ValueError("packet size mismatch")
     stats = {"render_pass": render_pass, "stage": stage, "triangles": triangle_count, "draws": source_draws,
@@ -489,6 +590,8 @@ def main(argv=None):
     parser.add_argument("--spot-candidates", action="store_true",
                         help="also preview validated spotlight projector candidates with an approximate circular mask")
     parser.add_argument("--spot-projector-candidate", help="explicitly hypothesize a metadata-compatible offline projector texture")
+    parser.add_argument("--normal-map-candidates", action="store_true",
+                        help="preview metadata-compatible offline normal maps for sampled normal-light candidates")
     parser.add_argument("--offline-actors", type=Path, help="fingerprinted t3map actor export for candidate light or fog colors")
     parser.add_argument("--direct-preview-gain", type=float, default=1.0,
                         help="uncalibrated visual gain for candidate direct lights (default: 1)")
@@ -522,6 +625,11 @@ def main(argv=None):
             raise ValueError("spot candidates require a direct candidate stage")
         if args.spot_projector_candidate is not None and not args.spot_candidates:
             raise ValueError("projector texture candidate requires spotlight candidates")
+        if args.normal_map_candidates and args.direct_candidate_stage is None:
+            raise ValueError("normal map candidates require a direct candidate stage")
+        if args.normal_map_candidates and (args.sampler_candidate_stage is not None or
+                                           args.direct_candidate_stage in sampler_scopes):
+            raise ValueError("normal map candidates select their own sampler for the direct stage")
         states = None
         samplers = {} if args.sampler_candidate_stage is not None or sampler_scopes else None
         if args.state_trace is not None:
@@ -572,7 +680,8 @@ def main(argv=None):
             current, scope = matching[0]
             direct_values = direct.from_trace(current, offline, offline_bytes, args.state_trace, kernel_path, args.offline_actors,
                                               *scope, args.direct_preview_gain, preview_spots=args.spot_candidates,
-                                              projector_candidate=args.spot_projector_candidate)
+                                              projector_candidate=args.spot_projector_candidate,
+                                              preview_normal_maps=args.normal_map_candidates)
         fog_values = None
         if args.fog_candidate_stage is not None:
             matching = [(current, select_scope(current, args.render_pass, args.stage) if current is scene else select_scope(current))
@@ -593,7 +702,7 @@ def main(argv=None):
         finally:
             for bundle in bundles:
                 bundle.close()
-        manifest = {"schema": "t3.scene.textured-packet", "version": 8 if body[:8] == FOG_MAGIC else 7 if body[:8] == PROJECTOR_MAGIC else 6 if body[:8] == SPOT_MAGIC else 5 if direct_values is not None else 4 if ambient_values is not None else 3,
+        manifest = {"schema": "t3.scene.textured-packet", "version": 9 if body[:8] == NORMAL_MAGIC else 8 if body[:8] == FOG_MAGIC else 7 if body[:8] == PROJECTOR_MAGIC else 6 if body[:8] == SPOT_MAGIC else 5 if direct_values is not None else 4 if ambient_values is not None else 3,
                     "source_frame": scene.source.frame_id,
                     "scene_sha256": hashlib.sha256(raw).hexdigest(), "packet_sha256": hashlib.sha256(body).hexdigest(),
                     "state_source": "revalidated_same_frame_trace" if states is not None else "opaque_preview_defaults",
@@ -622,6 +731,8 @@ def main(argv=None):
             manifest["limitations"].append("Fog is a vertex-distance hypothesis from a pre-Reset program and sampled constants; its color is from offline LevelInfo, not a verified runtime pixel shader.")
         else:
             manifest["limitations"].append("Fog is omitted.")
+        if body[:8] == NORMAL_MAGIC:
+            manifest["limitations"].append("Normal maps and tangent space are offline metadata-compatible hypotheses; bitangent sign is inferred per triangle from UVs and ambiguous triangles use flat normals.")
         write_pair(args.output, body, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))
     except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, struct.error) as exc:

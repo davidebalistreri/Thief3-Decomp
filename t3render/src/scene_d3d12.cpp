@@ -182,25 +182,30 @@ int Render(const Frame& frame, const wchar_t* output) {
     // the same location as the pixel input; SV_Position is a built-in.
     static const char vs_source[] =
         "cbuffer Camera:register(b0){row_major float4x4 view;row_major float4x4 proj;float2 size;}"
-        "struct O{float4 uv:TEXCOORD0;float3 world:TEXCOORD1;float3 normal:TEXCOORD2;float4 p:SV_Position;};"
-        "O main(float3 p:POSITION,float2 uv:TEXCOORD0,float3 n:NORMAL){O o;o.p=mul(mul(float4(p,1),view),proj);"
-        "o.p.x+=o.p.w/size.x;o.p.y-=o.p.w/size.y;o.uv=float4(uv,0,0);o.world=p;o.normal=n;return o;}";
+        "struct O{float4 uv:TEXCOORD0;float3 world:TEXCOORD1;float3 normal:TEXCOORD2;float4 tangent:TEXCOORD3;float4 p:SV_Position;};"
+        "O main(float3 p:POSITION,float2 uv:TEXCOORD0,float3 n:NORMAL,float4 t:TANGENT){O o;o.p=mul(mul(float4(p,1),view),proj);"
+        "o.p.x+=o.p.w/size.x;o.p.y-=o.p.w/size.y;o.uv=float4(uv,0,0);o.world=p;o.normal=n;o.tangent=t;return o;}";
     static const char ps_source[] =
         "Texture2D diffuse:register(t0);SamplerState samp:register(s0);"
         "Texture2D projector_texture:register(t1);SamplerState projector_sampler:register(s1);"
         "cbuffer Alpha:register(b1){uint mode;float reference;float lod_bias;uint shading;float4 ambient_color;"
         "float4 light_position_inverse_radius;float4 light_color_energy;float4 projector_x;float4 projector_y;float4 projector_w;}"
-        "float4 main(float4 uv:TEXCOORD0,float3 world:TEXCOORD1,float3 normal:TEXCOORD2):SV_Target{"
+        "float4 main(float4 uv:TEXCOORD0,float3 world:TEXCOORD1,float3 normal:TEXCOORD2,float4 tangent:TEXCOORD3):SV_Target{"
         "float4 c=diffuse.SampleBias(samp,uv.xy,lod_bias);"
         "bool keep=(mode==0)||(mode==2&&c.a<reference)||(mode==3&&c.a==reference)||"
         "(mode==4&&c.a<=reference)||(mode==5&&c.a>reference)||(mode==6&&c.a!=reference)||"
         "(mode==7&&c.a>=reference)||(mode==8);if(!keep)discard;"
         "if(shading==1)c.rgb=ambient_color.rgb;"
-        "if(shading==2||shading==4||shading==5){float3 to_light=light_position_inverse_radius.xyz-world;"
+        "if(shading>=7&&abs(tangent.w)>0.5){float3 n=normalize(normal);"
+        "float3 t=tangent.xyz-n*dot(n,tangent.xyz);float3 mapped=c.rgb*2-1;"
+        "float t2=dot(t,t),m2=dot(mapped,mapped);if(t2>0.00000001&&m2>0.00000001){"
+        "t*=rsqrt(t2);mapped*=rsqrt(m2);float3 b=cross(n,t)*tangent.w;"
+        "normal=normalize(t*mapped.x+b*mapped.y+n*mapped.z);}}"
+        "if(shading==2||shading==4||shading==5||shading>=7){float3 to_light=light_position_inverse_radius.xyz-world;"
         "float distance=length(to_light);float falloff=saturate(1-distance*light_position_inverse_radius.w);"
-        "float3 cone=1;if(shading==4||shading==5){float4 spot_world=float4(world,1);float w=dot(spot_world,projector_w);"
+        "float3 cone=1;if(shading==4||shading==5||shading==8||shading==9){float4 spot_world=float4(world,1);float w=dot(spot_world,projector_w);"
         "float2 uv_proj=float2(dot(spot_world,projector_x),dot(spot_world,projector_y))/max(w,0.000001);"
-        "if(shading==5)cone=(w>0)?projector_texture.SampleLevel(projector_sampler,uv_proj,0).rgb:0;"
+        "if(shading==5||shading==9)cone=(w>0)?projector_texture.SampleLevel(projector_sampler,uv_proj,0).rgb:0;"
         "else cone=(w>0)?saturate(4*(1-length((uv_proj-0.5)*2))):0;"
         "falloff=saturate(1-max(w,0)*light_position_inverse_radius.w);}"
         "float diffuse_term=saturate(dot(normalize(normal),to_light/max(distance,0.000001)));"
@@ -253,10 +258,11 @@ int Render(const Frame& frame, const wchar_t* output) {
     D3D12_INPUT_ELEMENT_DESC input[] = {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 20, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}};
+        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 20, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}};
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{}; pso.pRootSignature = root.p;
     pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()}; pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
-    pso.InputLayout = {input, 3}; pso.SampleMask = UINT_MAX;
+    pso.InputLayout = {input, 4}; pso.SampleMask = UINT_MAX;
     for (auto& blend : pso.BlendState.RenderTarget) {
         blend.SrcBlend = blend.SrcBlendAlpha = D3D12_BLEND_ONE;
         blend.DestBlend = blend.DestBlendAlpha = D3D12_BLEND_ZERO;

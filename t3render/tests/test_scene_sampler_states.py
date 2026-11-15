@@ -65,7 +65,11 @@ class SamplerObservationTests(unittest.TestCase):
             cases = [(["--sampler-scope", "1:2"], "require a state trace"),
                      (trace + ["--sampler-scope", "1:2", "--sampler-scope", "1:0"], "must be unique"),
                      (trace + ["--sampler-scope", "1:2", "--sampler-candidate-stage", "2"], "exclude the global"),
-                     (trace + ["--sampler-scope", "9:0"], "must identify a selected scene")]
+                     (trace + ["--sampler-scope", "9:0"], "must identify a selected scene"),
+                     (trace + ["--normal-map-candidates", "--direct-candidate-stage", "1", "--offline-actors", "actors",
+                               "--sampler-scope", "1:0"], "select their own sampler"),
+                     (trace + ["--normal-map-candidates", "--direct-candidate-stage", "1", "--offline-actors", "actors",
+                               "--sampler-candidate-stage", "0"], "select their own sampler")]
             for args, expected in cases:
                 error = io.StringIO()
                 with self.subTest(args=args), contextlib.redirect_stderr(error):

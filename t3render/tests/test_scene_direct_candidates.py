@@ -34,6 +34,20 @@ def spot_sample():
 
 
 class DirectCandidateTests(unittest.TestCase):
+    def test_normal_map_observation_requires_normal_program_and_bound_sampler(self):
+        states = {"13": 1, "14": 1, "16": 2, "17": 2, "18": 2, "19": 3212836864, "20": 0, "24": 0}
+        stage = {"stage": 0, "states": states, "texture": {"type": 3, "width": 512, "height": 512,
+                 "levels": 10, "format": struct.unpack("<I", b"DXT1")[0], "id": "0x1234"}}
+        light = {"mode": "point_approximation", "program_hypothesis": "OmniLightNormal11_Light_Vertex"}
+        result = direct.normal_sampler_observation({"stages": [stage]}, light)
+        self.assertEqual(result["lod_bias"], -1)
+        self.assertNotIn("id", result)
+        self.assertIsNone(direct.normal_sampler_observation({}, dict(light, program_hypothesis="OmniLight11_Light_Vertex")))
+        self.assertIsNone(direct.normal_sampler_observation({}, dict(light, mode="skipped_spot")))
+        for bad in (dict(stage, texture=None), dict(stage, texture_hr=-1)):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                direct.normal_sampler_observation({"stages": [bad]}, light)
+
     def test_omni_uses_sampled_position_and_explicit_offline_color(self):
         constants, program, binary = sample()
         light = SimpleNamespace(id="light:map:lamp", kind="omni", position=(1, 2, 3), color=(1, .8, .6))

@@ -12,6 +12,7 @@ import analyze_scene_bridge as bridge
 import build_bridge_runtime_snapshot as runtime
 import correlate_runtime_light_candidates as candidates
 import scene_ir_to_d3d12_packet as preview
+import scene_legacy_states as legacy_states
 import trace_to_ir
 from t3common import rotator_matrix
 
@@ -56,6 +57,17 @@ def projector_texture_observation(draw, name):
                 type(texture.get(key)) is not int or texture[key] <= 0 for key in ("width", "height", "levels", "format"))):
         raise ValueError("unsupported spot projector sampler or texture metadata")
     return {"name": name, **{key: texture[key] for key in ("width", "height", "levels", "format")}}
+
+
+def normal_sampler_observation(draw, light):
+    """Observe stage 0 only for sampled normal-light program hypotheses."""
+    if (light["mode"] == "skipped_spot" or light["program_hypothesis"].lower() not in
+            ("omnilightnormal11_light_vertex", "spotlightnormal11_light_vertex")):
+        return None
+    sampler = legacy_states.sampler_candidate(draw, 0)
+    if sampler["status"] != "candidate":
+        raise ValueError("normal map candidate requires a bound sampled texture")
+    return sampler
 
 
 def direct_light(draw, outcome, header, frame_begin, cb, pb, hb, shader_index, lights, actors, gain,
@@ -121,7 +133,7 @@ def offline_actors(scene, offline, offline_bytes, actors_path):
 
 
 def from_trace(scene, offline, offline_bytes, trace, kernel, actors_path, render_pass, stage, gain,
-               *, preview_spots=False, projector_candidate=None):
+               *, preview_spots=False, projector_candidate=None, preview_normal_maps=False):
     if (isinstance(gain, bool) or not isinstance(gain, (int, float)) or
             not math.isfinite(gain) or not 0 <= gain <= 4):
         raise ValueError("direct preview gain must be between 0 and 4")
@@ -149,7 +161,12 @@ def from_trace(scene, offline, offline_bytes, trace, kernel, actors_path, render
     for sub in submissions:
         draw = bridge.one(records, "draw", sub.draw_id)
         outcome = bridge.one(records, "draw_result", sub.draw_id)
-        result[sub.draw_id] = direct_light(draw, outcome, header, frame_begin, cb, pb, hb, index,
-                                          offline.lights, actors, gain, preview_spots=preview_spots,
-                                          projector_candidate=projector_candidate)
+        light = direct_light(draw, outcome, header, frame_begin, cb, pb, hb, index,
+                             offline.lights, actors, gain, preview_spots=preview_spots,
+                             projector_candidate=projector_candidate)
+        if preview_normal_maps:
+            normal_sampler = normal_sampler_observation(draw, light)
+            if normal_sampler is not None:
+                light["normal_sampler_candidate"] = normal_sampler
+        result[sub.draw_id] = light
     return result

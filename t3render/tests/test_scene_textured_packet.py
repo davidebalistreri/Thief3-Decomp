@@ -21,6 +21,7 @@ import scene_direct_fixture as direct_fixture
 import scene_spot_fixture as spot_fixture
 import scene_projector_fixture as projector_fixture
 import scene_fog_fixture as fog_fixture
+import scene_normal_fixture as normal_fixture
 from t3texture import Mip, Texture
 from test_scoped_scene_snapshot import fixture
 
@@ -195,6 +196,79 @@ class TexturedScenePacketTests(unittest.TestCase):
         matrix[10] = 0
         with self.assertRaisesRegex(ValueError, "singular"):
             packet.normal_matrix(matrix)
+
+    def test_tangent_basis_tracks_mirrored_transforms_uvs_and_degenerate_fallback(self):
+        vertices = [(0, 0, 0, 0, 0, 0, 0, 1), (1, 0, 0, 1, 0, 0, 0, 1),
+                    (0, 1, 0, 0, 1, 0, 0, 1)]
+        tangents = [(1, 0, 0)] * 3
+        indices = [0, 1, 2]
+        frames, fallback = packet.tangent_frames(vertices, indices, tangents, packet.preview.IDENTITY)
+        self.assertEqual(fallback, 0)
+        self.assertEqual(frames[0][8:], (1, 0, 0, 1))
+        mirrored_uv = [*vertices[:2], (0, 1, 0, 0, -1, 0, 0, 1)]
+        frames, fallback = packet.tangent_frames(mirrored_uv, indices, tangents, packet.preview.IDENTITY)
+        self.assertEqual((fallback, frames[0][11]), (0, -1))
+        matrix = [-2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 4, 0, 0, 0, 0, 1]
+        mirrored = [(-2*v[0], 3*v[1], v[2], *v[3:]) for v in vertices]
+        frames, fallback = packet.tangent_frames(mirrored, indices, tangents, matrix)
+        self.assertEqual((fallback, frames[0][8:]), (0, (-1, 0, 0, -1)))
+        degenerate_uv = [(v[0], v[1], v[2], 0, 0, *v[5:]) for v in vertices]
+        frames, fallback = packet.tangent_frames(degenerate_uv, indices, tangents, packet.preview.IDENTITY)
+        self.assertEqual(fallback, 1)
+        self.assertEqual([v[8:] for v in frames], [(0, 0, 0, 0)] * 3)
+
+    def test_normal_map_packet_uses_observed_metadata_and_flat_fallback(self):
+        class NormalResolver(Resolver):
+            def resolve_normal(self, name):
+                return {"name": "normal", "bundle": "fixture.ibt", "format": "A8R8G8B8", "width": 2, "height": 2,
+                        "mips": [bytes([128, 128, 255, 255] * 4)], "usage": 1}
+        scene = scoped_scene()
+        states = {s.draw_id: dict(packet.legacy_states.DEFAULT) for s in scene.submissions}
+        states[2].update(depth_write=0, blend_enable=1, blend_src=1, blend_dst=1, color_mask=7)
+        sampler = {"status": "candidate", "stage": 0, "lod_bias": -1, "width": 2, "height": 2, "levels": 1, "format": 21}
+        light = {"mode": "point_approximation", "program_hypothesis": "OmniLightNormal11_Light_Vertex",
+                 "position": [1, 2, 3], "inverse_radius_candidate": .1, "offline_color": [1, .8, .6],
+                 "offline_energy": .5, "gain": 1, "normal_sampler_candidate": sampler}
+        raw, info = packet.create_packet(scene, NormalResolver(), draw_states=states, direct_candidates={2: light})
+        self.assertEqual(raw[:8], b"T3SCN09\0")
+        self.assertEqual(self.parse(raw).returncode, 0)
+        self.assertEqual(info["draws"][0]["normal_map_candidate"]["texture"], "normal")
+        self.assertEqual(info["draws"][0]["normal_map_candidate"]["flat_fallback_triangles"], 0)
+        self.assertEqual(info["draws"][0]["sampler"]["mip_lod_bias"], -1)
+        for invalid in (dict(light, program_hypothesis="OmniLight11_Light_Vertex"),
+                        dict(light, program_hypothesis="SpotLightNormal11_Light_Vertex"),
+                        dict(light, normal_sampler_candidate=dict(sampler, width=4)),
+                        dict(light, normal_sampler_candidate=dict(sampler, status="unbound"))):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                packet.create_packet(scene, NormalResolver(), draw_states=states, direct_candidates={2: invalid})
+        data = scene.to_dict()
+        data["bsp_blocks"][0]["geometry"]["tangents"] = None
+        with self.assertRaisesRegex(ValueError, "tangents"):
+            packet.create_packet(packet.SceneSnapshot.from_dict(data), NormalResolver(), draw_states=states,
+                                 direct_candidates={2: light})
+        states[2]["alpha_compare"] = 5
+        with self.assertRaisesRegex(ValueError, "alpha test"):
+            packet.create_packet(scene, NormalResolver(), draw_states=states, direct_candidates={2: light})
+
+    def test_normal_gpu_fixture_and_parser_reject_invalid_basis(self):
+        raw = normal_fixture.fixture()
+        self.assertEqual(self.parse(raw).returncode, 0)
+        # Six-vertex first draw follows five 1x1 textures, then the second draw.
+        second = 160 + 5*16 + 160 + 6*48
+        for offset, value in ((second + 56, struct.pack("<I", 10)),
+                              (second + 40, struct.pack("<I", 5)),
+                              (second + 160 + 32, struct.pack("<f", 0)),
+                              (second + 160 + 44, struct.pack("<f", .5))):
+            self.assertEqual(self.parse(raw[:offset] + value + raw[offset+4:]).returncode, 2)
+        image = bytearray(b"P6\n64 64\n255\n" + bytes(64*64*3))
+        header = len(b"P6\n64 64\n255\n")
+        for (x, y), color in normal_fixture.EXPECTED.items():
+            offset = header + (y*64+x)*3
+            image[offset:offset+3] = bytes(color)
+        self.assertEqual(normal_fixture.verify(image), 6)
+        image[header + (32*64+5)*3] = 0
+        with self.assertRaisesRegex(ValueError, "wrong pixel"):
+            normal_fixture.verify(image)
 
     def test_direct_packet_roundtrip_rejects_missing_normals_or_invalid_light(self):
         scene = scoped_scene()
@@ -407,6 +481,29 @@ class TexturedScenePacketTests(unittest.TestCase):
             texture.mips[1].level = 2
             with self.assertRaisesRegex(ValueError, "mip chain"):
                 packet.TextureResolver([first, second]).resolve("stone")
+
+    def test_offline_normal_map_requires_material_binding_and_normal_usage(self):
+        class Bundle:
+            path = Path("fixture.ibt")
+            def __init__(self, resources):
+                self.resources = resources
+            def split(self, resource):
+                return resource.payload
+        mat = SimpleNamespace(name="Wall", type=packet.TYPE_MATERIAL,
+                              payload=SimpleNamespace(texture=lambda stage: "Wall_N" if stage == 1 else None))
+        tex = Texture("Wall_N", "A8R8G8B8", 1, 1, 1, 0, [Mip(1, 1, bytes((255, 128, 128, 255)), 0)])
+        resource = SimpleNamespace(name="Wall_N", type=packet.TYPE_TEXTURE, payload=tex)
+        with mock.patch.object(packet, "parse_material", side_effect=lambda resource, payload: payload), \
+             mock.patch.object(packet, "parse_texture", side_effect=lambda resource, payload: payload):
+            bundle = Bundle([mat, resource])
+            result = packet.TextureResolver([bundle]).resolve_normal("Wall")
+            self.assertEqual((result["name"], result["usage"]), ("Wall_N", 1))
+            tex.usage = 0
+            with self.assertRaisesRegex(ValueError, "not an offline normal"):
+                packet.TextureResolver([bundle]).resolve_normal("Wall")
+            mat.payload = SimpleNamespace(texture=lambda stage: None)
+            with self.assertRaisesRegex(ValueError, "no normal texture"):
+                packet.TextureResolver([bundle]).resolve_normal("Wall")
 
 
 if __name__ == "__main__":

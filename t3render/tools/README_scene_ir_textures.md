@@ -104,8 +104,8 @@ explicit and defaults to 1. Spot candidates contribute zero unless explicitly
 enabled; no spot is silently treated as an omni light.
 
 This does not observe a runtime light object, pixel shader, color or energy.
-It does not implement stencil shadows, normal maps, emissions, missing scene
-objects or HUD. The preview does not write candidates into SceneIR's light
+It does not implement stencil shadows, emissions, missing scene objects or HUD;
+normal maps are omitted unless explicitly enabled below. The preview does not write candidates into SceneIR's light
 list. The packet manifest labels every point or spot and records the offline
 light ID, program hypothesis and parameters. The baseline point-light path
 writes packet version 5, while versions 1–4 remain readable.
@@ -204,6 +204,44 @@ sampler and light fixtures also pass; packet versions 1–7 remain readable.
 
 The fixture, packets and rendered images contain game-derived data and stay
 local under `build/`.
+
+## Normal-map candidates
+
+`--normal-map-candidates` optionally shades direct candidates using each
+fingerprinted offline MatLib stage-1 normal texture. It requires a direct
+candidate stage and selects only sampled pre-Reset `OmniLightNormal11` or
+`SpotLightNormal11` program hypotheses. For those draws, captured texture
+stage 0 must be bound and have supported linear wrap sampling; its dimensions,
+format and mip count must match the offline texture, whose asset usage must
+identify a normal map. The observed mip bias is applied. This metadata match is
+not proof of runtime texture identity or of the active post-Reset shader.
+
+The preview transforms source tangents with the instance transform and normals
+with its inverse transpose. It infers bitangent sign per triangle from the UV
+derivatives; degenerate or inconsistent bases fall back to the geometric
+normal. RGB is interpreted as tangent-space XYZ. UV origin, tangent handedness,
+the original normal-map channel convention and shader behavior are not
+verified. These assumptions stay in the packet manifest and do not change
+SceneIR. Alpha-tested normal candidates are rejected because their original
+alpha source is unknown. The global sampler option and a sampler scope for the
+direct stage are rejected because normal candidates select stage 0 themselves.
+
+Append `--normal-map-candidates` to the four-stage fog preview above, including
+`--sampler-scope 4:0`, and use a new output path. Frame 1001 yields 112 normal
+map draws (63 omni, 49 spot) and 8,437 submitted triangles, of which 1,066 use
+the flat-normal fallback. On the local Highball/DX12 path, the normal-mapped
+preview changed 156,163 pixels versus the same packet with flat vertex normals.
+Against the synchronized D3D8 screenshot, whole-image mean absolute RGB error
+changed from `(7.483, 5.965, 4.341)` to `(7.459, 5.953, 4.337)`; in the wall
+rectangle `(600,160)`–`(800,320)` it changed from `(11.810, 7.541, 1.642)` to
+`(11.408, 7.251, 1.418)`. These metrics include unrendered geometry and do not
+establish parity. The GPU fixture checks tangent-space direction, mirrored
+bitangents, flat fallback and the textured projector path. Packet v9 adds
+tangents; versions 1–8 and their synthetic GPU fixtures remain supported.
+With the separate uncalibrated gain-2 experiment, wall error changes from
+`(7.739, 6.289, 7.309)` to `(5.930, 5.043, 6.922)` with normal maps; floor
+and bed regions worsen slightly. Neither result validates the light colors or
+the original tangent convention.
 
 The optional `--state-trace <trace> --offline-scene <fixture>` revalidates the
 trace fingerprint and rebuilds the bounded bed-and-BSP scoped snapshot before

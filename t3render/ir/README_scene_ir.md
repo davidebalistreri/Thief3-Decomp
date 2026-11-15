@@ -59,6 +59,11 @@ separate reference captures cannot upgrade their status. The v1 preview
 requires one unambiguous pass/stage and renders only its submitted sections.
 The format supports lights, but an empty runtime list is not evidence that no
 lights exist: the producer documents missing light coverage in limitations.
+An optional [light-candidate producer](../tools/README_bridge_runtime_checkpoint.md#light-position-candidates-frame-1001)
+adds positions sampled from scoped draw constants. Those entries have
+`candidate:` IDs and explicit source limitations; their identities and kinds
+remain hypotheses, and unknown properties remain null. They do not establish
+the existence, identity or current state of runtime light objects.
 
 ## Conventions
 

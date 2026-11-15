@@ -107,6 +107,38 @@ images remain local under `build/`.
 
 ## Light position candidates: frame 1001
 
+An opt-in scoped SceneIR v1 can now carry these as **candidate** lights. After
+revalidating the stage-3 snapshot, `build_scoped_light_snapshot.py` matches its
+draw constants against fingerprinted offline lights and groups repeated,
+consistent positions and pre-Reset shader hypotheses. IDs are prefixed with
+`candidate:` and use the offline light identity; `color`, `radius`, `intensity`
+and `enabled` remain null. The snapshot's source limitations explicitly state
+that no runtime light object or binding has been observed. The sidecar lists
+supporting same-frame draw IDs without process addresses. A consumer must not
+interpret these candidates as a verified runtime light list.
+
+Using a freshly generated stage-3 snapshot with the self-attached candidates
+from above (stage/anchor `3/78`):
+
+```sh
+python3 -B t3render/tools/build_scoped_light_snapshot.py \
+  build/t3render-captures/scene-bridge-submission-20261115-001/bedroom.jsonl \
+  --scene build/t3render-offline/bedroom-runtime-1001-candidates-light-base.scene.json \
+  --offline-scene build/t3render-offline/SouthQuarter1_int1.lights.scene.json \
+  --offline-actors build/assets/godot/SouthQuarter1_int1/SouthQuarter1_int1.actors.json \
+  --game-dir "$T3_GAME_DIR" --pass 0 --stage 3 \
+  --output build/t3render-offline/bedroom-runtime-1001-light-candidates-v1.scene.json
+```
+
+The local frame-1001 stage-3 capture yields nine candidates across 127 scoped
+draws: five omni and four spot hypotheses. The textured packet exporter requires
+the original trace, offline fixture, actor export and game assets to revalidate
+these lights before pairing draw states; modifying a candidate or removing its
+provenance marker fails revalidation. The candidate entries do not themselves
+change the legacy lighting preview: its separate direct-light approximation
+still uses offline color and energy. Camera, visibility and the limitations of
+the other scene entries are unchanged. All game-derived outputs stay local.
+
 The offline importer now places mesh-actor lights at `hp_lighttarget` plus
 offset, rotated without `DrawScale`. Against a regenerated fixture, stage-3
 bed draws yield four unique positional candidates: `Light__15` (draws 78/79),

@@ -92,8 +92,11 @@ def sampler_candidate(draw, stage):
 
 
 def from_trace(scene, offline, offline_bytes, trace, render_pass, stage, *, sampler_stage=None, samplers=None,
-               self_attached_actors=None, self_attached_game=None):
+               self_attached_actors=None, self_attached_game=None, light_actors=None, light_game=None):
     """Rebuild the scoped snapshot before pairing any state to its draw."""
+    # Import lazily: the light adapter uses this module's sampler translator.
+    import scene_light_candidates as lights
+
     digest = scene.source.fingerprints.get("trace")
     offline_digest = hashlib.sha256(offline_bytes).hexdigest()
     if not digest or scene.source.fingerprints.get("offline_scene") != offline_digest:
@@ -105,15 +108,28 @@ def from_trace(scene, offline, offline_bytes, trace, render_pass, stage, *, samp
                (s.render_pass, s.stage) == (render_pass, stage)]
     if not anchors:
         raise ValueError("state matching requires a scoped mesh anchor")
+    has_lights = lights.LIMITATION in scene.source.limitations
+    base = scene
+    if has_lights:
+        data = scene.to_dict()
+        if data["source"]["limitations"].count(lights.LIMITATION) != 1:
+            raise ValueError("ambiguous light candidate provenance")
+        data["source"]["limitations"].remove(lights.LIMITATION)
+        data["lights"] = []
+        base = scoped.SceneSnapshot.from_dict(data)
     self_assets = (scoped.self_attached.load(offline, records, self_attached_actors, self_attached_game)
-                   if scoped.SELF_ATTACHED_LIMITATION in scene.source.limitations else None)
+                   if scoped.SELF_ATTACHED_LIMITATION in base.source.limitations else None)
     rebuilt, _ = scoped.build(offline, records, scene.source.frame_id, render_pass, stage,
                               anchors[0].draw_id, digest, offline_digest,
-                              include_asset_candidates=scoped.CANDIDATE_LIMITATION in scene.source.limitations,
-                              allow_quantized_rotators=scoped.QUANTIZED_LIMITATION in scene.source.limitations,
+                              include_asset_candidates=scoped.CANDIDATE_LIMITATION in base.source.limitations,
+                              allow_quantized_rotators=scoped.QUANTIZED_LIMITATION in base.source.limitations,
                               self_attached_assets=self_assets)
-    if rebuilt.to_dict() != scene.to_dict():
+    if rebuilt.to_dict() != base.to_dict():
         raise ValueError("scene does not match the revalidated scoped capture")
+    if has_lights:
+        rebuilt, _ = lights.from_trace(base, offline, offline_bytes, trace, light_actors, light_game, render_pass, stage)
+        if rebuilt.to_dict() != scene.to_dict():
+            raise ValueError("scene does not match revalidated light candidates")
     result = {}
     for submission in scene.submissions:
         if (submission.render_pass, submission.stage) == (render_pass, stage):

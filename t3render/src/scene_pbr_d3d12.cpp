@@ -29,8 +29,8 @@ struct Constants {
 };
 static_assert(sizeof(Constants) == 704, "unexpected PBR constant-buffer layout");
 
-int Render(const Frame& frame, const wchar_t* output, bool indirect, bool gtao) {
-    const bool use_gbuffer = indirect || gtao;
+int Render(const Frame& frame, const wchar_t* output, bool indirect, bool gtao, bool volumetric) {
+    const bool use_gbuffer = indirect || gtao || volumetric;
     ComPtr<ID3D12Device> device;
     if (!SelectDevice(device)) return 1;
     Module module{LoadLibraryExW(L"d3dcompiler_47.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
@@ -205,6 +205,9 @@ Texture2D hdr:register(t4);
 Texture2D positions:register(t6); Texture2D normals:register(t7);
 Texture2D diffuse_light:register(t8); Texture2D surface_albedo:register(t9);
 #endif
+#if T3_VOLUMETRIC && T3_SHADOWS
+TextureCubeArray volume_shadows:register(t5); SamplerState volume_shadow_sampler:register(s1);
+#endif
 cbuffer Scene : register(b0) {
     row_major float4x4 view; row_major float4x4 projection;
     float4 size_scale_count; float4 camera_exposure; float4 ambient;
@@ -313,6 +316,39 @@ float ambient_visibility(int2 pixel) {
     return full>0.00001?saturate(visible/full):1;
 }
 #endif
+#if T3_VOLUMETRIC
+float3 volume_lighting(float3 ray, float distance) {
+    const float extinction=0.06, scattering=0.045, anisotropy=0.2;
+    const float inv4pi=0.07957747155;
+    float travel=min(distance,50), ds=travel/16;
+    float3 direction=ray/max(distance,0.00001), sum=0;
+    [loop] for(int sample_index=0;sample_index<16;++sample_index) {
+        float along=(sample_index+0.5)*ds;
+        float3 sample_position=direction*along;
+        float transmittance=exp(-extinction*along);
+        [loop] for(uint i=0;i<(uint)size_scale_count.w;++i) {
+            float3 light=(light_position_radius[i].xyz-camera_exposure.xyz)*size_scale_count.z-sample_position;
+            float d2=dot(light,light), d=sqrt(d2);
+            if(d<0.00001) continue;
+            float3 to_light=light/d;
+            float cosine=clamp(dot(to_light,direction),-1,1);
+            float phase=(1-anisotropy*anisotropy)*inv4pi/
+                        pow(max(1+anisotropy*anisotropy-2*anisotropy*cosine,0.01),1.5);
+            float visible=1;
+#if T3_SHADOWS
+            if(d<shadow_settings.x) {
+                float depth=volume_shadows.SampleLevel(volume_shadow_sampler,float4(-to_light,(float)i),0).r;
+                visible=(d-shadow_settings.y)/shadow_settings.x<=depth?1:0;
+            }
+#endif
+            float radius=light_position_radius[i].w;
+            float3 intensity=light_color_intensity[i].rgb*light_color_intensity[i].w;
+            sum+=intensity/max(d2,radius*radius)*exp(-extinction*d)*visible*phase*transmittance*scattering*ds;
+        }
+    }
+    return min(max(sum,0),65504);
+}
+#endif
 float4 main(float4 position:SV_Position):SV_Target {
     float3 c=hdr.Load(int3(position.xy,0)).rgb;
 #if T3_GTAO
@@ -327,6 +363,13 @@ float4 main(float4 position:SV_Position):SV_Target {
 #endif
     c+=bounce;
 #endif
+#if T3_VOLUMETRIC
+    float4 endpoint=positions.Load(int3(position.xy,0));
+    if(endpoint.w>0.5) {
+        float distance=length(endpoint.xyz);
+        if(distance>0.00001) c=c*exp(-0.06*distance)+volume_lighting(endpoint.xyz,distance);
+    }
+#endif
     c=max(c*camera_exposure.w,0);
     c=c/(1+c);
     c=lerp(c*12.92,1.055*pow(c,1/2.4)-0.055,step(0.0031308,c));
@@ -336,9 +379,11 @@ float4 main(float4 position:SV_Position):SV_Target {
     const std::string options = std::string(use_gbuffer ? "#define T3_GBUFFER 1\n" : "#define T3_GBUFFER 0\n") +
                                 (indirect ? "#define T3_INDIRECT 1\n" : "#define T3_INDIRECT 0\n") +
                                 (gtao ? "#define T3_GTAO 1\n" : "#define T3_GTAO 0\n") +
+                                (volumetric ? "#define T3_VOLUMETRIC 1\n" : "#define T3_VOLUMETRIC 0\n") +
                                 (frame.has_emission ? "#define T3_EMISSION 1\n" : "#define T3_EMISSION 0\n");
-    const std::string pixel_source = std::string(frame.shadow_size ? "#define T3_SHADOWS 1\n" : "#define T3_SHADOWS 0\n") + options + ps_source;
-    const std::string tone_source = options + tone_ps_source;
+    const std::string shadow_option = frame.shadow_size ? "#define T3_SHADOWS 1\n" : "#define T3_SHADOWS 0\n";
+    const std::string pixel_source = shadow_option + options + ps_source;
+    const std::string tone_source = shadow_option + options + tone_ps_source;
     if (!Compile(compile, vs_source, "vs_5_0", vs) || !Compile(compile, pixel_source.c_str(), "ps_5_0", ps) ||
         (frame.shadow_size && (!Compile(compile, shadow_vs_source, "vs_5_0", shadow_vs) ||
                                !Compile(compile, shadow_ps_source, "ps_5_0", shadow_ps))) ||
@@ -678,17 +723,18 @@ float4 main(float4 position:SV_Position):SV_Target {
 
 int wmain(int argc, wchar_t** argv) {
     const auto usage = []() {
-        std::fwprintf(stderr, L"usage: t3render_scene_pbr_d3d12 <pbr.bin> --output <new-image.ppm> [--indirect] [--gtao]\n");
+        std::fwprintf(stderr, L"usage: t3render_scene_pbr_d3d12 <pbr.bin> --output <new-image.ppm> [--indirect] [--gtao] [--volumetric]\n");
         return 2;
     };
-    if (argc < 4 || argc > 6 || std::wcscmp(argv[2], L"--output") || !argv[3][0]) return usage();
-    bool indirect = false, gtao = false;
+    if (argc < 4 || argc > 7 || std::wcscmp(argv[2], L"--output") || !argv[3][0]) return usage();
+    bool indirect = false, gtao = false, volumetric = false;
     for (int i = 4; i < argc; ++i) {
         if (!std::wcscmp(argv[i], L"--indirect") && !indirect) indirect = true;
         else if (!std::wcscmp(argv[i], L"--gtao") && !gtao) gtao = true;
+        else if (!std::wcscmp(argv[i], L"--volumetric") && !volumetric) volumetric = true;
         else return usage();
     }
     Frame frame;
     if (!ReadPacket(argv[1], frame)) return 2;
-    return Render(frame, argv[3], indirect, gtao);
+    return Render(frame, argv[3], indirect, gtao, volumetric);
 }

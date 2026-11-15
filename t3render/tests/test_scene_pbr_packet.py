@@ -17,6 +17,7 @@ import scene_pbr_fixture as gpu_fixture
 import scene_pbr_shadow_fixture as shadow_fixture
 import scene_pbr_indirect_fixture as indirect_fixture
 import scene_pbr_gtao_fixture as gtao_fixture
+import scene_pbr_volumetric_fixture as volumetric_fixture
 from scene_ir import VisualLight
 from test_scene_material_overrides import FakeRemaster, scene_fixture
 from test_scene_textured_packet import Resolver
@@ -367,6 +368,21 @@ class PbrPacketTests(unittest.TestCase):
                 gtao_fixture.verify(base, contact, kind)
         with self.assertRaisesRegex(ValueError, "contact occlusion"):
             gtao_fixture.verify(base, base, "blocker")
+
+    def test_volumetric_gpu_fixture_checks_extinction_scattering_and_shadow(self):
+        for kind in volumetric_fixture.KINDS:
+            self.assertEqual(self.parse(volumetric_fixture.fixture(kind)).returncode, 0)
+        header = b"P6\n64 64\n255\n"
+        def image(value):
+            return header+bytes([value, value, value])*64*64
+        base, extinction, scatter = image(38), image(35), image(110)
+        volumetric_fixture.verify(base, extinction, base, scatter, extinction)
+        with self.assertRaisesRegex(ValueError, "extinction missing"):
+            volumetric_fixture.verify(base, base, base, scatter, extinction)
+        with self.assertRaisesRegex(ValueError, "scattering missing"):
+            volumetric_fixture.verify(base, extinction, base, extinction, extinction)
+        with self.assertRaisesRegex(ValueError, "did not occlude"):
+            volumetric_fixture.verify(base, extinction, base, scatter, scatter)
 
 
 if __name__ == "__main__":

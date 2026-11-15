@@ -32,8 +32,8 @@ Reinhard and sRGB display pass. The PPM is an SDR preview of the HDR buffer.
 
 This is a first PBR preview, not a physically calibrated lighting solution:
 source strengths, color and exposure are artistic; the SDK metre scale and
-tangent basis are assumptions. Metallic materials, volumetrics, reflections
-and temporal effects are absent. The
+tangent basis are assumptions. Metallic materials, reflections and temporal
+effects are absent. The
 render is a partial runtime-selected scene, and offline asset bindings for
 some actors remain candidates. Height maps are not used. The legacy renderer
 and its benchmark remain independent.
@@ -105,6 +105,28 @@ The local frame-1001 render adds one pair of flames, 248 triangles. Against
 the same indirect/GTAO preview without flames, 62 pixels change and the mean
 absolute RGB difference is 0.0006 on a 0–255 scale. The small projected flames
 and incomplete screen-space bounce are not a final candle-lighting solution.
+
+## Volumetric preview
+
+`--volumetric` integrates a homogeneous participating medium from the camera
+to each visible surface. Sixteen midpoint samples accumulate point-light
+scattering with a Henyey–Greenstein phase approximation and exponential
+extinction along both view and light paths. Existing point shadow maps occlude
+the scattering when available; without them, scattering is unshadowed. The
+result is combined in linear HDR before exposure and tonemapping.
+
+The fixed preview coefficients are extinction 0.06/m, scattering 0.045/m and
+anisotropy 0.2; they are artistic assumptions, not measurements of TDS.
+Scattering is integrated for at most 50 m and only up to the first visible
+surface. Empty background, multiple scattering, moving media, temporal
+stabilization and spatial density variation are absent. Sixteen steps and
+single shadow samples can band, leak or miss fine features. The option is off
+by default and is not a real-time performance claim.
+
+On the frame-1001 PBR/indirect/GTAO/flame preview it changes 786,225 pixels,
+with mean absolute RGB difference 11.976 on a 0–255 scale. The same frame
+without the option remains byte-identical to the previous version. This is an
+art-directed preview of a partial runtime scene, not parity with TDS.
 
 ## Point-light shadow maps
 
@@ -219,7 +241,7 @@ Add `--candle-flames build/assets/godot/remaster/garrett_home/highpoly/generated
 to include the generated flame geometry. This requires the existing Godot
 replacement asset and shadows; its packet and manifest remain under `build/`.
 
-Run `t3render_scene_pbr_d3d12 <packet> --output <new.ppm> [--indirect] [--gtao]` in a D3D12
+Run `t3render_scene_pbr_d3d12 <packet> --output <new.ppm> [--indirect] [--gtao] [--volumetric]` in a D3D12
 environment. The packet, manifest and PPM use exclusive creation. See the
 [Highball setup](README_synthetic_replay.md#repeat-on-highball); TDS does not
 need to be running.
@@ -276,3 +298,9 @@ its colored bounce, while `verify --off` checks that ambient-only illumination
 does not produce a bounce. Both controls passed on the local GPU. The portable
 `test_scene_pbr_flames.py` also checks GLB bounds, qualified selection,
 transforms, offline on/off state and version-4 parser limits.
+
+`scene_pbr_volumetric_fixture.py` provides `unlit`, `lit` and `shadow` packets.
+Render the first two with and without `--volumetric`, and render `shadow` with
+it; `verify` compares all five. The local GPU test verified extinction,
+scattering and an occluder affecting only the shadow map. A version-1 packet
+without shadow maps was also rendered with the option enabled.

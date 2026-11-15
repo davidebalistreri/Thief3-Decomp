@@ -16,6 +16,8 @@ rejects out-of-frame or position-mismatched history, clamps accepted HDR
 history to the current 3x3 color neighborhood, and blends before the existing
 exposure/Reinhard/sRGB conversion. Its history output can be used in a later
 resolve. The default history weight is 0.8, adjustable from 0 to 0.95.
+When the exported renderer uses `--filmic`, the resolve applies the same
+filmic curve; frames with different effect or curve flags cannot be combined.
 
 `--upscale 2` optionally reconstructs the output image at twice the width and
 height, in linear HDR before tonemapping. It uses bilinear weights while

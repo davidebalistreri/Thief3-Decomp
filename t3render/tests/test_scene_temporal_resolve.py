@@ -116,9 +116,20 @@ class TemporalResolveTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "upscale"):
                 temporal.image(small(positions), invalid)
 
+    def test_filmic_temporal_display_uses_the_recorded_curve(self):
+        ordinary = raw_history(self.packet, color=(1, 1, 1))
+        filmic = raw_history(self.packet, color=(1, 1, 1), flags=16)
+        plain, mapped = temporal.image(ordinary), temporal.image(filmic)
+        offset = len(b"P6\n64 64\n255\n")
+        self.assertEqual(plain[offset], 188)
+        self.assertTrue(230 <= mapped[offset] <= 233)
+        with self.assertRaisesRegex(ValueError, "effects"):
+            temporal.compatible(temporal.parse(ordinary, self.packet), temporal.parse(filmic, self.packet))
+
     def test_invalid_headers_pixels_and_settings_fail_closed(self):
         for raw in (self.raw[:-1], b"badmagic"+self.raw[8:],
-                    self.raw[:16]+bytes(32)+self.raw[48:]):
+                    self.raw[:16]+bytes(32)+self.raw[48:],
+                    self.raw[:temporal.HEADER.size-4]+struct.pack("<I", 32)+self.raw[temporal.HEADER.size:]):
             with self.subTest(raw=raw[:8]), self.assertRaises(ValueError):
                 temporal.parse(raw, self.packet)
         for change in ((temporal.HEADER.size, struct.pack("<H", 0x7c00)),

@@ -31,7 +31,7 @@ def parse(raw, packet):
     magic, width, height, digest = header[:4]
     matrix, camera, scale, exposure, jitter, flags = header[4:36], header[36:39], header[39], header[40], header[41:43], header[43]
     if (magic != b"T3TEMP01" or not 1 <= width <= 2048 or not 1 <= height <= 2048 or
-            len(raw) != HEADER.size+width*height*16 or flags > 15 or
+            len(raw) != HEADER.size+width*height*16 or flags > 31 or
             any(not math.isfinite(x) or abs(x) > 1000000 for x in (*matrix, *camera)) or
             not math.isfinite(scale) or not .00001 <= scale <= 1 or
             not math.isfinite(exposure) or not .01 <= exposure <= 32 or
@@ -192,7 +192,8 @@ def image(raw, upscale=1):
     if type(upscale) is not int or upscale not in (1, 2):
         raise ValueError("temporal preview upscale must be 1 or 2")
     width, height = struct.unpack_from("<II", raw, 8)
-    exposure = HEADER.unpack_from(raw)[40]
+    header = HEADER.unpack_from(raw)
+    exposure, filmic = header[40], bool(header[43] & 16)
     pixels = _decode(raw, HEADER.size, width*height)
     positions = _decode(raw, HEADER.size+width*height*8, width*height, position=True) if upscale == 2 else None
     out_width, out_height = width*upscale, height*upscale
@@ -201,7 +202,8 @@ def image(raw, upscale=1):
     def display(rgb):
         for value in rgb:
             value = max(value*exposure, 0)
-            value = value/(1+value)
+            value = ((value*(2.51*value+.03))/(value*(2.43*value+.59)+.14)
+                     if filmic else value/(1+value))
             value = 12.92*value if value <= .0031308 else 1.055*value**(1/2.4)-.055
             result.append(max(0, min(255, round(value*255))))
     if upscale == 1:

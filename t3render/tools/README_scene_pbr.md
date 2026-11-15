@@ -30,6 +30,15 @@ is modulated by AO. Scene-linear light accumulates in an RGBA16F target;
 energy is clamped to the finite half-float range before a separate exposure,
 Reinhard and sRGB display pass. The PPM is an SDR preview of the HDR buffer.
 
+`--filmic` optionally replaces Reinhard with the fitted curve
+`x(2.51x+0.03)/(x(2.43x+0.59)+0.14)` after exposure and before sRGB encoding.
+This is an artistic filmic approximation, not a complete ACES color-management
+pipeline or automatic exposure. The original Reinhard curve remains default;
+the temporal export records the selected curve for its CPU resolve.
+With the existing frame-1001 calibration, this option changes all 786,432
+pixels with mean absolute RGB difference 10.978 on a 0–255 scale. Highlights
+may require a different artistic exposure.
+
 This is a first PBR preview, not a physically calibrated lighting solution:
 source strengths, color and exposure are artistic; the SDK metre scale and
 tangent basis are assumptions. Metallic materials and temporal effects are
@@ -261,7 +270,7 @@ Add `--candle-flames build/assets/godot/remaster/garrett_home/highpoly/generated
 to include the generated flame geometry. This requires the existing Godot
 replacement asset and shadows; its packet and manifest remain under `build/`.
 
-Run `t3render_scene_pbr_d3d12 <packet> --output <new.ppm> [--indirect] [--gtao] [--volumetric] [--reflections]` in a D3D12
+Run `t3render_scene_pbr_d3d12 <packet> --output <new.ppm> [--indirect] [--gtao] [--volumetric] [--reflections] [--filmic]` in a D3D12
 environment. The packet, manifest and PPM use exclusive creation. See the
 [Highball setup](README_synthetic_replay.md#repeat-on-highball); TDS does not
 need to be running.
@@ -286,6 +295,9 @@ sRGB filtering, roughness, AO, normal direction, inverse
 square distance in metres, HDR values above one and finite output at extreme
 energy. The extracted shared D3D12 helpers were also checked by rendering the
 existing legacy shadow packet again and comparing its PPM byte for byte.
+The standard fixture also accepts `verify --filmic` to check the alternate
+curve against independently computed HDR values; the local GPU and temporal
+CPU display results matched on that fixture.
 
 For shadow-map verification, `scene_pbr_shadow_fixture.py create <new.bin>`
 creates a synthetic receiver and occluder; use `--baseline` for the unshadowed

@@ -67,7 +67,7 @@ bool WriteTemporal(const wchar_t* path, const Frame& frame, const std::uint8_t* 
     return true;
 }
 
-int Render(const Frame& frame, const wchar_t* output, bool indirect, bool gtao, bool volumetric, bool reflections,
+int Render(const Frame& frame, const wchar_t* output, bool indirect, bool gtao, bool volumetric, bool reflections, bool filmic,
            const wchar_t* temporal_output, float jitter_x, float jitter_y, const std::uint8_t* digest) {
     const bool use_gbuffer = indirect || gtao || volumetric || reflections || temporal_output;
     ComPtr<ID3D12Device> device;
@@ -471,7 +471,11 @@ float4 main(float4 position:SV_Position):SV_Target {
     float3 linear_result=min(max(c,0),65504);
 #endif
     c=max(c*camera_exposure.w,0);
+#if T3_FILMIC
+    c=(c*(2.51*c+0.03))/(c*(2.43*c+0.59)+0.14);
+#else
     c=c/(1+c);
+#endif
     c=lerp(c*12.92,1.055*pow(c,1/2.4)-0.055,step(0.0031308,c));
 #if T3_TEMPORAL_EXPORT
     ToneOutput o; o.display=float4(saturate(c),1); o.hdr_color=float4(linear_result,1); return o;
@@ -485,6 +489,7 @@ float4 main(float4 position:SV_Position):SV_Target {
                                 (gtao ? "#define T3_GTAO 1\n" : "#define T3_GTAO 0\n") +
                                 (volumetric ? "#define T3_VOLUMETRIC 1\n" : "#define T3_VOLUMETRIC 0\n") +
                                 (reflections ? "#define T3_REFLECTIONS 1\n" : "#define T3_REFLECTIONS 0\n") +
+                                (filmic ? "#define T3_FILMIC 1\n" : "#define T3_FILMIC 0\n") +
                                 (temporal_output ? "#define T3_TEMPORAL_EXPORT 1\n" : "#define T3_TEMPORAL_EXPORT 0\n") +
                                 (frame.has_emission ? "#define T3_EMISSION 1\n" : "#define T3_EMISSION 0\n");
     const std::string shadow_option = frame.shadow_size ? "#define T3_SHADOWS 1\n" : "#define T3_SHADOWS 0\n";
@@ -863,7 +868,7 @@ float4 main(float4 position:SV_Position):SV_Target {
             temporal_color_readback->Unmap(0, &no_write); return 1;
         }
         const std::uint32_t flags = (indirect ? 1u : 0u) | (gtao ? 2u : 0u) |
-                                    (volumetric ? 4u : 0u) | (reflections ? 8u : 0u);
+                                    (volumetric ? 4u : 0u) | (reflections ? 8u : 0u) | (filmic ? 16u : 0u);
         const bool saved = WriteTemporal(temporal_output, frame, digest, jitter_x, jitter_y, flags,
                                          static_cast<const std::uint8_t*>(color), static_cast<const std::uint8_t*>(position), temporal_fp);
         temporal_position_readback->Unmap(0, &no_write); temporal_color_readback->Unmap(0, &no_write);
@@ -880,11 +885,11 @@ float4 main(float4 position:SV_Position):SV_Target {
 
 int wmain(int argc, wchar_t** argv) {
     const auto usage = []() {
-        std::fwprintf(stderr, L"usage: t3render_scene_pbr_d3d12 <pbr.bin> --output <new-image.ppm> [--indirect] [--gtao] [--volumetric] [--reflections] [--temporal-output <new.bin> [--jitter <x> <y>]]\n");
+        std::fwprintf(stderr, L"usage: t3render_scene_pbr_d3d12 <pbr.bin> --output <new-image.ppm> [--indirect] [--gtao] [--volumetric] [--reflections] [--filmic] [--temporal-output <new.bin> [--jitter <x> <y>]]\n");
         return 2;
     };
-    if (argc < 4 || argc > 13 || std::wcscmp(argv[2], L"--output") || !argv[3][0]) return usage();
-    bool indirect = false, gtao = false, volumetric = false, reflections = false;
+    if (argc < 4 || argc > 14 || std::wcscmp(argv[2], L"--output") || !argv[3][0]) return usage();
+    bool indirect = false, gtao = false, volumetric = false, reflections = false, filmic = false;
     bool jitter_set = false; float jitter_x = 0, jitter_y = 0;
     const wchar_t* temporal_output = nullptr;
     for (int i = 4; i < argc; ++i) {
@@ -892,6 +897,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (!std::wcscmp(argv[i], L"--gtao") && !gtao) gtao = true;
         else if (!std::wcscmp(argv[i], L"--volumetric") && !volumetric) volumetric = true;
         else if (!std::wcscmp(argv[i], L"--reflections") && !reflections) reflections = true;
+        else if (!std::wcscmp(argv[i], L"--filmic") && !filmic) filmic = true;
         else if (!std::wcscmp(argv[i], L"--temporal-output") && !temporal_output && i+1 < argc && argv[i+1][0])
             temporal_output = argv[++i];
         else if (!std::wcscmp(argv[i], L"--jitter") && !jitter_set && i+2 < argc) {
@@ -908,5 +914,5 @@ int wmain(int argc, wchar_t** argv) {
     Frame frame;
     std::uint8_t digest[32]{};
     if (!ReadPacket(argv[1], frame, temporal_output ? digest : nullptr)) return 2;
-    return Render(frame, argv[3], indirect, gtao, volumetric, reflections, temporal_output, jitter_x, jitter_y, digest);
+    return Render(frame, argv[3], indirect, gtao, volumetric, reflections, filmic, temporal_output, jitter_x, jitter_y, digest);
 }

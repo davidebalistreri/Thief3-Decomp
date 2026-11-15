@@ -272,6 +272,14 @@ class PbrPacketTests(unittest.TestCase):
             offset = len(header)+(y*64+x)*3
             image[offset:offset+3] = bytes(gpu_fixture.expected(x,y,roughness,ao,normal)[0])
         self.assertEqual(len(gpu_fixture.verify(image)), 4)
+        filmic = bytearray(image)
+        for x, y, roughness, ao, normal in gpu_fixture.TILES:
+            offset = len(header)+(y*64+x)*3
+            filmic[offset:offset+3] = bytes(gpu_fixture.expected_filmic(x,y,roughness,ao,normal))
+        self.assertEqual(len(gpu_fixture.verify_filmic(filmic)), 4)
+        filmic[len(header)+(16*64+16)*3] = 0
+        with self.assertRaisesRegex(ValueError, "wrong filmic pixel"):
+            gpu_fixture.verify_filmic(filmic)
         image[len(header)+(16*64+16)*3] = 0
         with self.assertRaisesRegex(ValueError, "wrong PBR pixel"):
             gpu_fixture.verify(image)

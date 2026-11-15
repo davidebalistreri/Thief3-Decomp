@@ -102,6 +102,30 @@ def verify(image, unit_scale=1.0):
     return actual
 
 
+def expected_filmic(x, y, roughness, ao, normal, unit_scale=1.0):
+    hdr = expected(x, y, roughness, ao, normal, unit_scale)[1]
+    values = []
+    for c in hdr:
+        c = max(0, min(1, c*(2.51*c+.03)/(c*(2.43*c+.59)+.14)))
+        values.append(round(255*(12.92*c if c<=.0031308 else 1.055*c**(1/2.4)-.055)))
+    return tuple(values)
+
+
+def verify_filmic(image, unit_scale=1.0):
+    header = b"P6\n64 64\n255\n"
+    if not image.startswith(header) or len(image) != len(header)+64*64*3:
+        raise ValueError("invalid filmic fixture image")
+    actual = {}
+    for x, y, roughness, ao, normal in TILES:
+        offset = len(header)+(y*64+x)*3
+        value = tuple(image[offset:offset+3])
+        wanted = expected_filmic(x, y, roughness, ao, normal, unit_scale)
+        if any(abs(a-b)>4 for a,b in zip(value,wanted)):
+            raise ValueError(f"wrong filmic pixel at {x},{y}: {value}, expected {wanted}")
+        actual[f"{x},{y}"] = {"rgb": value, "expected": wanted}
+    return actual
+
+
 def verify_extreme(image):
     header = b"P6\n64 64\n255\n"
     if not image.startswith(header) or len(image) != len(header)+64*64*3:
@@ -133,14 +157,18 @@ def main():
     group.add_argument("--extreme", action="store_true")
     group.add_argument("--half-unit", action="store_true")
     group.add_argument("--srgb-filter", action="store_true")
+    parser.add_argument("--filmic", action="store_true", help="verify the filmic display curve")
     args=parser.parse_args()
     try:
+        if args.filmic and (args.extreme or args.srgb_filter):
+            raise ValueError("filmic verification is available for the standard PBR fixture")
         if args.action=="create":
             contents = fixture_srgb_filter() if args.srgb_filter else fixture(args.extreme, .5 if args.half_unit else 1)
             with args.path.open("xb") as stream: stream.write(contents)
         else:
             pixels = (verify_extreme(args.path.read_bytes()) if args.extreme else
                       verify_srgb_filter(args.path.read_bytes()) if args.srgb_filter else
+                      verify_filmic(args.path.read_bytes(), .5 if args.half_unit else 1) if args.filmic else
                       verify(args.path.read_bytes(), .5 if args.half_unit else 1))
             print(f"pbr_hdr_srgb_roughness_ao_normal=PASS pixels={pixels}")
     except (OSError, ValueError) as exc:

@@ -17,7 +17,24 @@ struct Vertex { float x, y, z, u, v; };
 static_assert(sizeof(Vertex) == 20, "unexpected vertex layout");
 struct Mip { std::uint32_t width, height; std::vector<std::uint8_t> rgba; };
 struct Texture { std::vector<Mip> mips; };
-struct Draw { std::uint32_t texture, first_vertex, vertex_count; };
+// API-neutral render-state vocabulary. Compare: never, less, equal, less/equal,
+// greater, not equal, greater/equal, always (1..8); alpha compare 0 is disabled.
+// Blend factors: zero, one, source color, inverse source color, source alpha,
+// inverse source alpha, destination color, inverse destination color,
+// destination alpha, inverse destination alpha (0..9). Blend operations: add,
+// subtract, reverse subtract, min, max (0..4). Cull: none, back, front (0..2).
+struct DrawStyle {
+    std::uint32_t depth_enable = 1, depth_write = 1, depth_compare = 2, cull = 1;
+    std::uint32_t blend_enable = 0, blend_src = 1, blend_dst = 0, blend_op = 0;
+    std::uint32_t alpha_compare = 0, alpha_ref = 0, color_mask = 15;
+    bool same_pipeline(const DrawStyle& rhs) const {
+        // Alpha compare/reference are shader constants and do not affect the PSO.
+        return depth_enable == rhs.depth_enable && depth_write == rhs.depth_write && depth_compare == rhs.depth_compare &&
+               cull == rhs.cull && blend_enable == rhs.blend_enable && blend_src == rhs.blend_src &&
+               blend_dst == rhs.blend_dst && blend_op == rhs.blend_op && color_mask == rhs.color_mask;
+    }
+};
+struct Draw { std::uint32_t texture, first_vertex, vertex_count; DrawStyle state; };
 struct Frame {
     std::uint32_t width = 0, height = 0;
     float min_depth = 0, max_depth = 1;
@@ -60,9 +77,11 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
     if (!bytes || size > kMaxPacketBytes) return false;
     Reader reader(bytes, size);
     char magic[8];
-    const char expected[8] = {'T', '3', 'S', 'C', 'N', '0', '1', '\0'};
+    const char v1[8] = {'T', '3', 'S', 'C', 'N', '0', '1', '\0'};
+    const char v2[8] = {'T', '3', 'S', 'C', 'N', '0', '2', '\0'};
     Frame frame;
-    if (!reader.bytes(magic, sizeof(magic)) || std::memcmp(magic, expected, sizeof(magic)) ||
+    if (!reader.bytes(magic, sizeof(magic)) ||
+        (std::memcmp(magic, v1, sizeof(magic)) && std::memcmp(magic, v2, sizeof(magic))) ||
         !reader.u32(frame.width) || !reader.u32(frame.height) || !frame.width || !frame.height ||
         frame.width > 2048 || frame.height > 2048 || !reader.f32(frame.min_depth) ||
         !reader.f32(frame.max_depth) || frame.min_depth < 0 || frame.max_depth > 1 ||
@@ -95,8 +114,19 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
     for (std::uint32_t i = 0; i < draw_count; ++i) {
         std::uint32_t texture, count;
         if (!reader.u32(texture) || !reader.u32(count) || texture >= texture_count || !count || count % 3 ||
-            count > kMaxTriangles * 3 - frame.vertices.size() || std::size_t(count) * 20 > reader.remaining()) return false;
-        Draw draw{texture, static_cast<std::uint32_t>(frame.vertices.size()), count};
+            count > kMaxTriangles * 3 - frame.vertices.size()) return false;
+        Draw draw{texture, static_cast<std::uint32_t>(frame.vertices.size()), count, {}};
+        if (!std::memcmp(magic, v2, sizeof(magic))) {
+            auto& s = draw.state;
+            if (!reader.u32(s.depth_enable) || !reader.u32(s.depth_write) || !reader.u32(s.depth_compare) ||
+                !reader.u32(s.cull) || !reader.u32(s.blend_enable) || !reader.u32(s.blend_src) ||
+                !reader.u32(s.blend_dst) || !reader.u32(s.blend_op) || !reader.u32(s.alpha_compare) ||
+                !reader.u32(s.alpha_ref) || !reader.u32(s.color_mask) || s.depth_enable > 1 || s.depth_write > 1 ||
+                !s.depth_compare || s.depth_compare > 8 || s.cull > 2 || s.blend_enable > 1 ||
+                s.blend_src > 9 || s.blend_dst > 9 || s.blend_op > 4 || s.alpha_compare > 8 ||
+                s.alpha_ref > 255 || s.color_mask > 15) return false;
+        }
+        if (std::size_t(count) * 20 > reader.remaining()) return false;
         for (std::uint32_t n = 0; n < count; ++n) {
             Vertex vertex{};
             if (!reader.f32(vertex.x) || !reader.f32(vertex.y) || !reader.f32(vertex.z) ||

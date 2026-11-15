@@ -23,8 +23,9 @@ from scene_ir import SceneSnapshot, transform_point  # noqa: E402
 from t3common import game_dir, resolve_map  # noqa: E402
 from t3texture import TYPE_MATERIAL, TYPE_TEXTURE, decode_rgba, mip_size, parse_material, parse_texture  # noqa: E402
 import scene_ir_to_d3d12_packet as preview  # noqa: E402
+import scene_legacy_states as legacy_states  # noqa: E402
 
-MAGIC = b"T3SCN01\0"
+MAGIC = b"T3SCN02\0"
 MAX_BYTES = 64 * 1024 * 1024
 MAX_TEXTURES = 64
 MAX_DRAWS = 8192
@@ -96,7 +97,7 @@ class TextureResolver:
         return value
 
 
-def create_packet(scene, resolver, render_pass=None, stage=None):
+def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=None):
     if scene.version != 1 or scene.source.kind != "runtime" or scene.source.camera_synchronized is not True:
         raise ValueError("textured preview requires a synchronized scoped runtime SceneIR v1")
     preview.validate_camera(scene.camera)
@@ -150,14 +151,18 @@ def create_packet(scene, resolver, render_pass=None, stage=None):
         triangle_count += len(vertices) // 3
         if not vertices or triangle_count > MAX_TRIANGLES:
             raise ValueError("triangle count exceeds renderer bounds")
-        draws.append((texture_indices[tex_key], vertices))
+        if draw_states is not None and submission.draw_id not in draw_states:
+            raise ValueError("captured state missing for submitted draw")
+        state = legacy_states.validate(dict(legacy_states.DEFAULT if draw_states is None else draw_states[submission.draw_id]))
+        draws.append((texture_indices[tex_key], vertices, state))
         source_draws.append({"draw": submission.draw_id, "target_kind": submission.target_kind,
                              "target_id": submission.target_id, "section": submission.section,
-                             "material": material_name, "texture": tex["name"], "triangles": len(vertices) // 3})
+                             "material": material_name, "texture": tex["name"], "triangles": len(vertices) // 3,
+                             "state": state})
     camera = scene.camera
     viewport = camera.viewport
     size = (struct.calcsize("<8sIIff32fII") + sum(12 + sum(len(mip) for mip in tex["mips"]) for tex in textures) +
-            sum(8 + len(vertices) * 20 for _, vertices in draws))
+            sum(52 + len(vertices) * 20 for _, vertices, _ in draws))
     if size > MAX_BYTES:
         raise ValueError("packet exceeds renderer bounds")
     body = bytearray(struct.pack("<8sIIff32fII", MAGIC, viewport.width, viewport.height,
@@ -167,8 +172,8 @@ def create_packet(scene, resolver, render_pass=None, stage=None):
         body.extend(struct.pack("<III", tex["width"], tex["height"], len(tex["mips"])))
         for mip in tex["mips"]:
             body.extend(mip)
-    for texture_index, vertices in draws:
-        body.extend(struct.pack("<II", texture_index, len(vertices)))
+    for texture_index, vertices, state in draws:
+        body.extend(struct.pack("<13I", texture_index, len(vertices), *(state[key] for key in legacy_states.FIELDS)))
         for vertex in vertices:
             body.extend(struct.pack("<5f", *vertex))
     if len(body) != size:
@@ -206,11 +211,26 @@ def main(argv=None):
     parser.add_argument("--game-dir")
     parser.add_argument("--pass", dest="render_pass", type=int)
     parser.add_argument("--stage", type=int)
+    parser.add_argument("--state-trace", type=Path, help="optional synchronized legacy state observation")
+    parser.add_argument("--offline-scene", type=Path, help="original fixture used to revalidate scoped state")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         raw = preview.read_limited(args.scene, preview.MAX_INPUT)
         scene = SceneSnapshot.from_json(raw)
+        if (args.state_trace is None) != (args.offline_scene is None):
+            raise ValueError("state trace and offline scene must be supplied together")
+        states = None
+        if args.state_trace is not None:
+            scopes = {(s.render_pass, s.stage) for s in scene.submissions if
+                      (args.render_pass is None or s.render_pass == args.render_pass) and
+                      (args.stage is None or s.stage == args.stage)}
+            if len(scopes) != 1:
+                raise ValueError("select an unambiguous submission pass and stage")
+            selected_pass, selected_stage = next(iter(scopes))
+            offline_bytes = preview.read_limited(args.offline_scene, preview.MAX_INPUT)
+            states = legacy_states.from_trace(scene, SceneSnapshot.from_json(offline_bytes), offline_bytes,
+                                               args.state_trace, selected_pass, selected_stage)
         game = game_dir(args.game_dir)
         local_path = resolve_map(game, scene.source.map, ".ibt")
         kernel_path = local_path.parent / "Kernel_GFXALL.ibt"
@@ -224,17 +244,18 @@ def main(argv=None):
         try:
             for _, path in paths:
                 bundles.append(IBT(path))
-            body, stats = create_packet(scene, TextureResolver(bundles), args.render_pass, args.stage)
+            body, stats = create_packet(scene, TextureResolver(bundles), args.render_pass, args.stage, states)
         finally:
             for bundle in bundles:
                 bundle.close()
-        manifest = {"schema": "t3.scene.textured-packet", "version": 1, "source_frame": scene.source.frame_id,
+        manifest = {"schema": "t3.scene.textured-packet", "version": 2, "source_frame": scene.source.frame_id,
                     "scene_sha256": hashlib.sha256(raw).hexdigest(), "packet_sha256": hashlib.sha256(body).hexdigest(),
+                    "state_source": "revalidated_same_frame_trace" if states is not None else "opaque_preview_defaults",
                     "source_fingerprints": scene.source.fingerprints, "source_limitations": list(scene.source.limitations),
                     "limitations": ["Diffuse textures are resolved from offline MatLib and fingerprinted assets, not GPU readback.",
                                     "UV0 is used without a flip; clip depth 0..1 and half-pixel correction are assumptions.",
-                                    "Linear wrap sampler with mips; opaque unlit rendering, approximate culling and depth.",
-                                    "No alpha blending, fog, runtime lights, missing objects or HUD."], **stats}
+                                    "Linear wrap sampler with mips; shader output and culling convention remain approximations.",
+                                    "No fog, runtime lights, legacy shaders, missing objects or HUD."], **stats}
         write_pair(args.output, body, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))
     except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, struct.error) as exc:

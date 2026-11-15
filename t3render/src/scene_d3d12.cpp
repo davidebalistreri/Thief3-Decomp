@@ -187,7 +187,11 @@ int Render(const Frame& frame, const wchar_t* output) {
         "o.p.x+=o.p.w/size.x;o.p.y-=o.p.w/size.y;o.uv=float4(uv,0,0);return o;}";
     static const char ps_source[] =
         "Texture2D diffuse:register(t0);SamplerState samp:register(s0);"
-        "float4 main(float4 uv:TEXCOORD0):SV_Target{return float4(diffuse.Sample(samp,uv.xy).rgb,1);}";
+        "cbuffer Alpha:register(b1){uint mode;float reference;}"
+        "float4 main(float4 uv:TEXCOORD0):SV_Target{float4 c=diffuse.Sample(samp,uv.xy);"
+        "bool keep=(mode==0)||(mode==2&&c.a<reference)||(mode==3&&c.a==reference)||"
+        "(mode==4&&c.a<=reference)||(mode==5&&c.a>reference)||(mode==6&&c.a!=reference)||"
+        "(mode==7&&c.a>=reference)||(mode==8);if(!keep)discard;return c;}";
     ComPtr<ID3DBlob> vs, ps;
     if (!Compile(compile, vs_source, "vs_5_0", vs) || !Compile(compile, ps_source, "ps_5_0", ps)) return 1;
 
@@ -199,18 +203,21 @@ int Render(const Frame& frame, const wchar_t* output) {
     Handle event{CreateEventW(nullptr, FALSE, FALSE, nullptr)};
     if (!event.p) return 1;
     D3D12_DESCRIPTOR_RANGE range{}; range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; range.NumDescriptors = 1;
-    D3D12_ROOT_PARAMETER params[2]{};
+    D3D12_ROOT_PARAMETER params[3]{};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[0].Constants.ShaderRegister = 0; params[0].Constants.Num32BitValues = 36;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
     params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     params[1].DescriptorTable.NumDescriptorRanges = 1; params[1].DescriptorTable.pDescriptorRanges = &range;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[2].Constants.ShaderRegister = 1; params[2].Constants.Num32BitValues = 4;
+    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_STATIC_SAMPLER_DESC sampler{}; sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     sampler.MaxAnisotropy = 1; sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
     sampler.MaxLOD = D3D12_FLOAT32_MAX; sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    D3D12_ROOT_SIGNATURE_DESC root_desc{}; root_desc.NumParameters = 2; root_desc.pParameters = params;
+    D3D12_ROOT_SIGNATURE_DESC root_desc{}; root_desc.NumParameters = 3; root_desc.pParameters = params;
     root_desc.NumStaticSamplers = 1; root_desc.pStaticSamplers = &sampler;
     root_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
     ComPtr<ID3DBlob> root_blob, root_errors; ComPtr<ID3D12RootSignature> root;
@@ -238,9 +245,47 @@ int Render(const Frame& frame, const wchar_t* output) {
     pso.DepthStencilState.BackFace = pso.DepthStencilState.FrontFace;
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pso.NumRenderTargets = 1; pso.RTVFormats[0] = kColor; pso.DSVFormat = DXGI_FORMAT_D32_FLOAT; pso.SampleDesc.Count = 1;
-    ComPtr<ID3D12PipelineState> pipeline; ComPtr<ID3D12GraphicsCommandList> list;
-    if (!Check(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(pipeline.put())), "CreatePipeline") ||
-        !Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.p, pipeline.p, IID_PPV_ARGS(list.put())), "CreateList")) return 1;
+    const D3D12_BLEND color_factors[] = {D3D12_BLEND_ZERO, D3D12_BLEND_ONE, D3D12_BLEND_SRC_COLOR,
+        D3D12_BLEND_INV_SRC_COLOR, D3D12_BLEND_SRC_ALPHA, D3D12_BLEND_INV_SRC_ALPHA, D3D12_BLEND_DEST_COLOR,
+        D3D12_BLEND_INV_DEST_COLOR, D3D12_BLEND_DEST_ALPHA, D3D12_BLEND_INV_DEST_ALPHA};
+    const D3D12_BLEND alpha_factors[] = {D3D12_BLEND_ZERO, D3D12_BLEND_ONE, D3D12_BLEND_SRC_ALPHA,
+        D3D12_BLEND_INV_SRC_ALPHA, D3D12_BLEND_SRC_ALPHA, D3D12_BLEND_INV_SRC_ALPHA, D3D12_BLEND_DEST_ALPHA,
+        D3D12_BLEND_INV_DEST_ALPHA, D3D12_BLEND_DEST_ALPHA, D3D12_BLEND_INV_DEST_ALPHA};
+    const D3D12_BLEND_OP operations[] = {D3D12_BLEND_OP_ADD, D3D12_BLEND_OP_SUBTRACT, D3D12_BLEND_OP_REV_SUBTRACT,
+                                         D3D12_BLEND_OP_MIN, D3D12_BLEND_OP_MAX};
+    const D3D12_COMPARISON_FUNC comparisons[] = {D3D12_COMPARISON_FUNC_NEVER, D3D12_COMPARISON_FUNC_LESS,
+        D3D12_COMPARISON_FUNC_EQUAL, D3D12_COMPARISON_FUNC_LESS_EQUAL, D3D12_COMPARISON_FUNC_GREATER,
+        D3D12_COMPARISON_FUNC_NOT_EQUAL, D3D12_COMPARISON_FUNC_GREATER_EQUAL, D3D12_COMPARISON_FUNC_ALWAYS};
+    const D3D12_CULL_MODE culls[] = {D3D12_CULL_MODE_NONE, D3D12_CULL_MODE_BACK, D3D12_CULL_MODE_FRONT};
+    struct Pipeline { DrawStyle state; ComPtr<ID3D12PipelineState> object; };
+    std::vector<std::unique_ptr<Pipeline>> pipelines;
+    std::vector<std::size_t> draw_pipelines;
+    for (const auto& draw : frame.draws) {
+        const auto& state = draw.state;
+        std::size_t index = 0;
+        while (index < pipelines.size() && !pipelines[index]->state.same_pipeline(state)) ++index;
+        if (index == pipelines.size()) {
+            if (pipelines.size() == 128) { std::fprintf(stderr, "too many pipeline variants\n"); return 1; }
+            auto variant = std::make_unique<Pipeline>(); variant->state = state;
+            auto description = pso;
+            auto& blend = description.BlendState.RenderTarget[0];
+            blend.BlendEnable = state.blend_enable != 0;
+            blend.SrcBlend = color_factors[state.blend_src]; blend.DestBlend = color_factors[state.blend_dst];
+            blend.SrcBlendAlpha = alpha_factors[state.blend_src]; blend.DestBlendAlpha = alpha_factors[state.blend_dst];
+            blend.BlendOp = blend.BlendOpAlpha = operations[state.blend_op];
+            blend.RenderTargetWriteMask = static_cast<UINT8>(state.color_mask);
+            description.RasterizerState.CullMode = culls[state.cull];
+            description.DepthStencilState.DepthEnable = state.depth_enable != 0;
+            description.DepthStencilState.DepthWriteMask = state.depth_write ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+            description.DepthStencilState.DepthFunc = comparisons[state.depth_compare - 1];
+            if (!Check(device->CreateGraphicsPipelineState(&description, IID_PPV_ARGS(variant->object.put())), "CreatePipeline")) return 1;
+            pipelines.push_back(std::move(variant));
+        }
+        draw_pipelines.push_back(index);
+    }
+    ComPtr<ID3D12GraphicsCommandList> list;
+    if (!Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.p, pipelines[0]->object.p,
+                                         IID_PPV_ARGS(list.put())), "CreateList")) return 1;
     D3D12_DESCRIPTOR_HEAP_DESC heap_desc{}; heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heap_desc.NumDescriptors = static_cast<UINT>(frame.textures.size()); heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ComPtr<ID3D12DescriptorHeap> srv_heap;
@@ -307,9 +352,14 @@ int Render(const Frame& frame, const wchar_t* output) {
     const D3D12_VERTEX_BUFFER_VIEW vb{vertices->GetGPUVirtualAddress(), static_cast<UINT>(vertex_bytes), sizeof(Vertex)};
     list->IASetVertexBuffers(0, 1, &vb); list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     const auto gpu_base = srv_heap->GetGPUDescriptorHandleForHeapStart();
-    for (const auto& draw : frame.draws) {
+    for (std::size_t i = 0; i < frame.draws.size(); ++i) {
+        const auto& draw = frame.draws[i];
         auto handle = gpu_base; handle.ptr += UINT64(draw.texture) * srv_step;
-        list->SetGraphicsRootDescriptorTable(1, handle); list->DrawInstanced(draw.vertex_count, 1, draw.first_vertex, 0);
+        struct AlphaConstants { std::uint32_t mode; float reference, padding[2]; } alpha{draw.state.alpha_compare, draw.state.alpha_ref / 255.0f, {0, 0}};
+        list->SetPipelineState(pipelines[draw_pipelines[i]]->object.p);
+        list->SetGraphicsRootDescriptorTable(1, handle);
+        list->SetGraphicsRoot32BitConstants(2, 4, &alpha, 0);
+        list->DrawInstanced(draw.vertex_count, 1, draw.first_vertex, 0);
     }
     Transition(list.p, target.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
     D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = readback.p; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint = fp;

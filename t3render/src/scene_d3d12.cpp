@@ -187,8 +187,8 @@ int Render(const Frame& frame, const wchar_t* output) {
         "o.p.x+=o.p.w/size.x;o.p.y-=o.p.w/size.y;o.uv=float4(uv,0,0);return o;}";
     static const char ps_source[] =
         "Texture2D diffuse:register(t0);SamplerState samp:register(s0);"
-        "cbuffer Alpha:register(b1){uint mode;float reference;}"
-        "float4 main(float4 uv:TEXCOORD0):SV_Target{float4 c=diffuse.Sample(samp,uv.xy);"
+        "cbuffer Alpha:register(b1){uint mode;float reference;float lod_bias;}"
+        "float4 main(float4 uv:TEXCOORD0):SV_Target{float4 c=diffuse.SampleBias(samp,uv.xy,lod_bias);"
         "bool keep=(mode==0)||(mode==2&&c.a<reference)||(mode==3&&c.a==reference)||"
         "(mode==4&&c.a<=reference)||(mode==5&&c.a>reference)||(mode==6&&c.a!=reference)||"
         "(mode==7&&c.a>=reference)||(mode==8);if(!keep)discard;return c;}";
@@ -355,7 +355,8 @@ int Render(const Frame& frame, const wchar_t* output) {
     for (std::size_t i = 0; i < frame.draws.size(); ++i) {
         const auto& draw = frame.draws[i];
         auto handle = gpu_base; handle.ptr += UINT64(draw.texture) * srv_step;
-        struct AlphaConstants { std::uint32_t mode; float reference, padding[2]; } alpha{draw.state.alpha_compare, draw.state.alpha_ref / 255.0f, {0, 0}};
+        struct AlphaConstants { std::uint32_t mode; float reference, bias, padding; } alpha{
+            draw.state.alpha_compare, draw.state.alpha_ref / 255.0f, draw.state.mip_lod_bias, 0};
         list->SetPipelineState(pipelines[draw_pipelines[i]]->object.p);
         list->SetGraphicsRootDescriptorTable(1, handle);
         list->SetGraphicsRoot32BitConstants(2, 4, &alpha, 0);

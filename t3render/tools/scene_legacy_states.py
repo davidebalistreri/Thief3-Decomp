@@ -4,6 +4,8 @@ This adapter is optional and diagnostic. SceneIR remains the source of geometry,
 visibility and provenance. No COM objects, addresses or D3D enums enter it.
 """
 import hashlib
+import math
+import struct
 
 import analyze_scene_bridge as bridge
 import build_bridge_runtime_snapshot as runtime
@@ -53,7 +55,43 @@ def translate(states):
             "color_mask": value(168, range(16))}
 
 
-def from_trace(scene, offline, offline_bytes, trace, render_pass, stage):
+def sampler_candidate(draw, stage):
+    """Read a stage's sampler and texture metadata, without a resource identity."""
+    entries = draw.get("stages")
+    if not isinstance(entries, list):
+        raise ValueError("missing texture stages")
+    selected = [item for item in entries if isinstance(item, dict) and type(item.get("stage")) is int and item["stage"] == stage]
+    if len(selected) != 1:
+        raise ValueError("sampler stage missing or ambiguous")
+    entry = selected[0]
+    if "texture" not in entry:
+        raise ValueError("texture observation missing")
+    if "texture_hr" in entry:
+        if type(entry["texture_hr"]) is not int or entry["texture_hr"] >= 0:
+            raise ValueError("invalid texture getter result")
+        return {"status": "unavailable", "stage": stage}
+    texture = entry["texture"]
+    if texture is None:
+        return {"status": "unbound", "stage": stage}
+    state = entry.get("states")
+    if not isinstance(state, dict) or any(type(state.get(key)) is not int or state[key] != expected
+            for key, expected in (("13", 1), ("14", 1), ("16", 2), ("17", 2), ("18", 2), ("20", 0), ("24", 0))):
+        raise ValueError("unsupported sampler state or texture transform")
+    bits = state.get("19")
+    if type(bits) is not int or not 0 <= bits <= 0xffffffff:
+        raise ValueError("invalid sampler LOD bias")
+    bias = struct.unpack("<f", struct.pack("<I", bits))[0]
+    if not math.isfinite(bias) or not -16 <= bias < 16:
+        raise ValueError("sampler LOD bias exceeds renderer bounds")
+    if not isinstance(texture, dict) or texture.get("type") != 3 or any(
+            type(texture.get(key)) is not int or texture[key] <= 0 for key in ("width", "height", "levels", "format")):
+        raise ValueError("unsupported texture metadata")
+    return {"status": "candidate", "stage": stage, "lod_bias": bias,
+            "width": texture["width"], "height": texture["height"],
+            "levels": texture["levels"], "format": texture["format"]}
+
+
+def from_trace(scene, offline, offline_bytes, trace, render_pass, stage, *, sampler_stage=None, samplers=None):
     """Rebuild the scoped snapshot before pairing any state to its draw."""
     digest = scene.source.fingerprints.get("trace")
     offline_digest = hashlib.sha256(offline_bytes).hexdigest()
@@ -76,4 +114,8 @@ def from_trace(scene, offline, offline_bytes, trace, render_pass, stage):
             if draw is None:
                 raise ValueError("captured draw missing or ambiguous")
             result[submission.draw_id] = translate(draw.get("render_states"))
+            if sampler_stage is not None:
+                if samplers is None or type(sampler_stage) is not int or not 0 <= sampler_stage < 8:
+                    raise ValueError("invalid sampler stage")
+                samplers[submission.draw_id] = sampler_candidate(draw, sampler_stage)
     return result

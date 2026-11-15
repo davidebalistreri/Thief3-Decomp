@@ -84,7 +84,7 @@ class TexturedScenePacketTests(unittest.TestCase):
                     raw[:152] + struct.pack("<I", 65) + raw[156:],
                     raw[:160] + struct.pack("<I", 2049) + raw[164:],
                     raw[:188] + struct.pack("<I", 9) + raw[192:],
-                    raw[:240] + struct.pack("<I", 0x7fc00000) + raw[244:]):
+                    raw[:244] + struct.pack("<I", 0x7fc00000) + raw[248:]):
             with self.subTest(length=len(bad)):
                 self.assertEqual(self.parse(bad).returncode, 2)
 

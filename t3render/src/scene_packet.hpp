@@ -27,8 +27,9 @@ struct DrawStyle {
     std::uint32_t depth_enable = 1, depth_write = 1, depth_compare = 2, cull = 1;
     std::uint32_t blend_enable = 0, blend_src = 1, blend_dst = 0, blend_op = 0;
     std::uint32_t alpha_compare = 0, alpha_ref = 0, color_mask = 15;
+    float mip_lod_bias = 0.0f;
     bool same_pipeline(const DrawStyle& rhs) const {
-        // Alpha compare/reference are shader constants and do not affect the PSO.
+        // Alpha compare/reference and LOD bias are shader constants, not PSO state.
         return depth_enable == rhs.depth_enable && depth_write == rhs.depth_write && depth_compare == rhs.depth_compare &&
                cull == rhs.cull && blend_enable == rhs.blend_enable && blend_src == rhs.blend_src &&
                blend_dst == rhs.blend_dst && blend_op == rhs.blend_op && color_mask == rhs.color_mask;
@@ -79,9 +80,11 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
     char magic[8];
     const char v1[8] = {'T', '3', 'S', 'C', 'N', '0', '1', '\0'};
     const char v2[8] = {'T', '3', 'S', 'C', 'N', '0', '2', '\0'};
+    const char v3[8] = {'T', '3', 'S', 'C', 'N', '0', '3', '\0'};
     Frame frame;
     if (!reader.bytes(magic, sizeof(magic)) ||
-        (std::memcmp(magic, v1, sizeof(magic)) && std::memcmp(magic, v2, sizeof(magic))) ||
+        (std::memcmp(magic, v1, sizeof(magic)) && std::memcmp(magic, v2, sizeof(magic)) &&
+         std::memcmp(magic, v3, sizeof(magic))) ||
         !reader.u32(frame.width) || !reader.u32(frame.height) || !frame.width || !frame.height ||
         frame.width > 2048 || frame.height > 2048 || !reader.f32(frame.min_depth) ||
         !reader.f32(frame.max_depth) || frame.min_depth < 0 || frame.max_depth > 1 ||
@@ -116,7 +119,7 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
         if (!reader.u32(texture) || !reader.u32(count) || texture >= texture_count || !count || count % 3 ||
             count > kMaxTriangles * 3 - frame.vertices.size()) return false;
         Draw draw{texture, static_cast<std::uint32_t>(frame.vertices.size()), count, {}};
-        if (!std::memcmp(magic, v2, sizeof(magic))) {
+        if (std::memcmp(magic, v1, sizeof(magic))) {
             auto& s = draw.state;
             if (!reader.u32(s.depth_enable) || !reader.u32(s.depth_write) || !reader.u32(s.depth_compare) ||
                 !reader.u32(s.cull) || !reader.u32(s.blend_enable) || !reader.u32(s.blend_src) ||
@@ -125,6 +128,8 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
                 !s.depth_compare || s.depth_compare > 8 || s.cull > 2 || s.blend_enable > 1 ||
                 s.blend_src > 9 || s.blend_dst > 9 || s.blend_op > 4 || s.alpha_compare > 8 ||
                 s.alpha_ref > 255 || s.color_mask > 15) return false;
+            if (!std::memcmp(magic, v3, sizeof(magic)) &&
+                (!reader.f32(s.mip_lod_bias, 16.0f) || s.mip_lod_bias >= 16.0f)) return false;
         }
         if (std::size_t(count) * 20 > reader.remaining()) return false;
         for (std::uint32_t n = 0; n < count; ++n) {

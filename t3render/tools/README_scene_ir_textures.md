@@ -39,11 +39,20 @@ pixel shaders or light contributions. A stage-3 snapshot and packet were also
 revalidated locally: 59 scoped submissions and 1,684 asset-backed triangles.
 It is evidence only: this standalone renderer clears depth, so stage 3's equal
 depth test cannot reproduce that stage without the preceding depth history;
-the submissions have not been composed as lighting. The adapter does not infer sampler-to-asset
-identity: most stage-1 draws have a bound stage-2 texture with linear wrap and
-mip bias -1, while the current preview uses bias 0, and one draw has no bound
-texture. Treat this as a recorded discrepancy rather than a verified sampler
-match. No runtime addresses or D3D state enums are added to SceneIR.
+the submissions have not been composed as lighting. No runtime addresses or
+D3D state enums are added to SceneIR.
+
+The optional `--sampler-candidate-stage 2` requires the trace and offline
+fixture above. It accepts only linear wrap filtering, zero max mip and no
+texture transform, then compares the observed texture dimensions, format and
+mip count with each offline asset. A metadata match is an explicit hypothesis,
+not proof of texture identity or the shader's UV routing. A failed getter or
+unbound stage stays a separately labeled bias-0 fallback; unsupported states
+or mismatched metadata fail. In frame 1001, 17 draws use the observed bias -1
+under this hypothesis and draw 9 has the unbound fallback. With otherwise
+identical v3 packets and renderer, this changes 638,471 of 786,432 pixels, with
+mean absolute channel difference 4.10/255. This A/B measurement is not a D3D8
+parity claim; lighting and shader behavior remain missing.
 
 ## Reproduce
 
@@ -69,6 +78,8 @@ To use the revalidated states instead of preview defaults, append:
 --state-trace build/t3render-captures/scene-bridge-submission-20261115-001/bedroom.jsonl \
 --offline-scene build/t3render-offline/SouthQuarter1_int1.scene.json
 ```
+
+Append `--sampler-candidate-stage 2` to apply the separate sampler hypothesis.
 
 ```powershell
 .\build\t3render-mingw\t3render_scene_d3d12.exe `
@@ -103,5 +114,8 @@ the fixture detects a failure that otherwise can yield an empty render.
 `scene_pipeline_fixture.py create <new.bin>` and `verify <image.ppm>` exercise
 alpha test, source-alpha/additive/multiply blending, color masking, depth
 comparison and writes, disabled depth, and front/back/disabled culling. Its 11
-GPU pixel checks passed locally on Highball. Existing version-1 packets remain
-readable; the exporter writes version 2 with API-neutral per-draw state.
+GPU pixel checks passed locally on Highball. `scene_sampler_fixture.py create
+<new.bin>` and `verify <image.ppm>` check biases -1, 0 and +1 on distinct mips;
+all three pixels passed on the same GPU environment. Existing version-1 and
+version-2 packets remain readable; the exporter writes version 3 with a
+per-draw bias and API-neutral state.

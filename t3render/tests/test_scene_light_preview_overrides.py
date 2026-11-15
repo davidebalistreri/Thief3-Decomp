@@ -23,6 +23,9 @@ class LightPreviewOverridesTests(unittest.TestCase):
         self.assertNotIn("preview_rgb_multiplier", result[18])
         self.assertNotIn("preview_rgb_multiplier", light)
         self.assertEqual(result[17]["offline_color"], [1, .8, .6])
+        with_falloff = self.document([{"light_id": light["offline_light_id"], "rgb_multiplier": [1, 1, 1],
+                                       "falloff_mix": .5}])
+        self.assertEqual(overrides.apply(candidates, overrides.parse(with_falloff))[17]["preview_falloff_mix"], .5)
 
     def test_rejects_ambiguous_out_of_range_or_unmatched_overrides(self):
         entry = {"light_id": "light:map:lamp", "rgb_multiplier": [1, 1, 1]}
@@ -31,6 +34,9 @@ class LightPreviewOverridesTests(unittest.TestCase):
                         [dict(entry, rgb_multiplier=[1, float("nan"), 1])], [dict(entry, extra=1)]):
             with self.subTest(entries=entries), self.assertRaises(ValueError):
                 overrides.parse(self.document(entries))
+        for mix in (-1, 1.01, True, float("nan")):
+            with self.subTest(mix=mix), self.assertRaises(ValueError):
+                overrides.parse(self.document([dict(entry, falloff_mix=mix)]))
         with self.assertRaises(ValueError):
             overrides.parse('{"schema":"t3.scene.light-preview-overrides","version":1,"version":1,"lights":[]}')
         parsed = overrides.parse(self.document([entry]))

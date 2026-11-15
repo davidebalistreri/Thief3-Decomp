@@ -1,4 +1,4 @@
-"""Apply explicit, semantic RGB multipliers to offline light hypotheses.
+"""Apply explicit, semantic visual controls to offline light hypotheses.
 
 These are visual calibration controls, not observations of runtime light state.
 """
@@ -20,7 +20,8 @@ def parse(raw):
         raise ValueError("invalid light preview override document")
     result = {}
     for item in data["lights"]:
-        if not isinstance(item, dict) or set(item) != {"light_id", "rgb_multiplier"}:
+        if (not isinstance(item, dict) or not {"light_id", "rgb_multiplier"} <= set(item) or
+                set(item) - {"light_id", "rgb_multiplier", "falloff_mix"}):
             raise ValueError("invalid light preview override entry")
         identity, rgb = item["light_id"], item["rgb_multiplier"]
         if (not isinstance(identity, str) or not identity.startswith("light:") or len(identity) <= 6 or len(identity) > 1024 or
@@ -28,7 +29,14 @@ def parse(raw):
                     isinstance(v, bool) or not isinstance(v, (int, float)) or
                     not 0 <= v <= MAX_MULTIPLIER or not math.isfinite(v) for v in rgb)):
             raise ValueError("invalid or duplicate light preview override")
-        result[identity] = tuple(rgb)
+        value = {"preview_rgb_multiplier": list(rgb)}
+        if "falloff_mix" in item:
+            blend = item["falloff_mix"]
+            if (isinstance(blend, bool) or not isinstance(blend, (int, float)) or
+                    not 0 <= blend <= 1 or not math.isfinite(blend)):
+                raise ValueError("invalid light preview falloff mix")
+            value["preview_falloff_mix"] = blend
+        result[identity] = value
     return result
 
 
@@ -43,7 +51,7 @@ def apply(candidates, overrides):
         identity = item.get("offline_light_id")
         value = overrides.get(identity)
         if value is not None and item.get("mode") in ("point_approximation", "spot_approximation"):
-            result[draw_id] = {**item, "preview_rgb_multiplier": list(value)}
+            result[draw_id] = {**item, **value}
             used.add(identity)
         else:
             result[draw_id] = dict(item)

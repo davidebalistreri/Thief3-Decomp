@@ -214,7 +214,8 @@ int Render(const Frame& frame, const wchar_t* output) {
         "if(t2>0.00000001){t*=rsqrt(t2);float3 b=cross(n,t)*tangent.w;"
         "float3 lt=float3(dot(t,to_light),dot(b,to_light),dot(n,to_light));"
         "float len2=dot(lt,lt);if(len2>0.00000001)diffuse_term=saturate(dot(c.rgb*2-1,lt*rsqrt(len2)));}}"
-        "c.rgb=light_color_energy.rgb*(light_color_energy.w*diffuse_term*falloff*falloff*cone);}"
+        "float attenuation=falloff*lerp(falloff,1,ambient_color.w);"
+        "c.rgb=light_color_energy.rgb*(light_color_energy.w*diffuse_term*attenuation*cone);}"
         "if(shading==3)c.rgb=0;"
         "if(shading==6)c=float4(light_color_energy.rgb,saturate(normal.x));return c;}";
     ComPtr<ID3DBlob> vs, ps;
@@ -399,7 +400,9 @@ int Render(const Frame& frame, const wchar_t* output) {
             float color[4], light_position[4], light_color[4], projector[3][4];
         } alpha{
             draw.state.alpha_compare, draw.state.alpha_ref / 255.0f, draw.state.mip_lod_bias, draw.shading,
-            {draw.ambient_color[0], draw.ambient_color[1], draw.ambient_color[2], draw.ambient_color[3]},
+            {draw.ambient_color[0], draw.ambient_color[1], draw.ambient_color[2],
+             (draw.shading == 2 || draw.shading == 4 || draw.shading == 5 || draw.shading >= 7)
+                 ? draw.light_falloff_mix : draw.ambient_color[3]},
             {draw.light_position[0], draw.light_position[1], draw.light_position[2], draw.light_inverse_radius},
             {draw.light_color[0], draw.light_color[1], draw.light_color[2], draw.light_energy},
             {{draw.spot_projector[0][0], draw.spot_projector[0][1], draw.spot_projector[0][2], draw.spot_projector[0][3]},

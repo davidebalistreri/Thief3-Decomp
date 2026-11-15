@@ -180,7 +180,7 @@ IDs; these IDs include the map fingerprint and are independent of draw IDs:
   "schema": "t3.scene.light-preview-overrides",
   "version": 1,
   "lights": [
-    {"light_id": "light:MAP:MAP_SHA256:ACTOR", "rgb_multiplier": [2.0, 1.8, 1.2]}
+    {"light_id": "light:MAP:MAP_SHA256:ACTOR", "rgb_multiplier": [2.0, 1.8, 1.2], "falloff_mix": 1.0}
   ]
 }
 ```
@@ -192,6 +192,11 @@ bounds. Duplicate, unmatched or disabled light candidates fail closed. The
 option requires `--direct-candidate-stage`; it changes no SceneIR light and is
 off by default. The packet manifest retains the original offline color,
 records the chosen multipliers per affected draw, and hashes the override file.
+The optional `falloff_mix` in `0..1` interpolates the preview's squared linear
+falloff (`0`, the default) with linear falloff (`1`) for that light. Neither
+curve has been verified against the legacy attenuation lookup. This uses packet
+v11; older packets continue to use squared linear falloff even if their unused
+ambient-alpha field is nonzero.
 
 For the local frame-1001 comparison, a single-frame experiment assigns
 `(2, 1.8, 1.2)` to the four fingerprint-qualified `D_384__0`, `D_384__5`,
@@ -207,6 +212,17 @@ to `(9.983, 7.348, 3.717)`. The floor and dummy rectangles also improve, while
 wall blue is slightly worse. This fit can overfit the captured camera, and
 missing geometry, shadows, flames and HUD still prevent parity. The scene,
 override file, packet and images remain local under `build/`.
+
+Setting `falloff_mix` to `1` for `D_384__0` in that same calibration changes
+only the version and the falloff field of its 27 draws. Compared with the
+previous calibrated preview, mean absolute RGB error changes from `(6.006,
+5.084, 4.228)` to `(4.888, 4.266, 3.786)` over the whole screenshot; in the
+half-open target rectangle `(115,215)`–`(196,390)` it changes from `(10.270,
+7.649, 4.952)` to `(2.770, 2.863, 2.705)`. The wall rectangle is unchanged and
+the floor and dummy improve. These image-specific multipliers and falloff are
+visual hypotheses, not runtime light measurements. The new GPU fixture checks
+both curves and confirms that the nonzero unused field in a v10 packet does
+not alter its legacy output.
 
 ## Distance-fog candidate
 

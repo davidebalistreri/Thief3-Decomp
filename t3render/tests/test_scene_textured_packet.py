@@ -23,6 +23,7 @@ import scene_projector_fixture as projector_fixture
 import scene_fog_fixture as fog_fixture
 import scene_normal_fixture as normal_fixture
 import scene_shader_normal_fixture as shader_normal_fixture
+import scene_falloff_fixture as falloff_fixture
 from t3texture import Mip, Texture
 from test_scoped_scene_snapshot import fixture
 
@@ -371,6 +372,26 @@ class TexturedScenePacketTests(unittest.TestCase):
         image[len(header) + (32 * 64 + 16) * 3] = 0
         with self.assertRaisesRegex(ValueError, "wrong pixel"):
             direct_fixture.verify(image)
+
+    def test_falloff_packet_is_explicit_bounded_and_preserves_older_packets(self):
+        scene = scoped_scene()
+        states = {s.draw_id: dict(packet.legacy_states.DEFAULT) for s in scene.submissions}
+        states[2].update(depth_write=0, blend_enable=1, blend_src=1, blend_dst=1, color_mask=7)
+        light = {"mode": "point_approximation", "position": [1, 2, 3], "inverse_radius_candidate": .1,
+                 "offline_color": [1, .8, .6], "offline_energy": .5, "gain": 1, "preview_falloff_mix": .5}
+        raw, info = packet.create_packet(scene, Resolver(), draw_states=states, direct_candidates={2: light})
+        self.assertEqual(raw[:8], b"T3SCN11\0")
+        self.assertEqual(struct.unpack_from("<f", raw, 188 + 72)[0], .5)
+        self.assertNotIn("ambient_candidate", info["draws"][0])
+        self.assertEqual(self.parse(raw).returncode, 0)
+        for value in (-.1, 1.01, float("nan")):
+            bad = raw[:188+72] + struct.pack("<f", value) + raw[188+76:]
+            self.assertEqual(self.parse(bad).returncode, 2)
+            with self.assertRaisesRegex(ValueError, "falloff mix"):
+                packet.create_packet(scene, Resolver(), draw_states=states,
+                                     direct_candidates={2: dict(light, preview_falloff_mix=value)})
+        for version in (10, 11):
+            self.assertEqual(self.parse(falloff_fixture.fixture(version)).returncode, 0)
 
     def test_spot_packet_and_fixture_validate_projector_and_normals(self):
         scene = scoped_scene()

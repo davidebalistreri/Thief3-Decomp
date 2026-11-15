@@ -39,6 +39,7 @@ PROJECTOR_MAGIC = b"T3SCN07\0"
 FOG_MAGIC = b"T3SCN08\0"
 NORMAL_MAGIC = b"T3SCN09\0"
 SHADER_NORMAL_MAGIC = b"T3SCN10\0"
+FALLOFF_MAGIC = b"T3SCN11\0"
 MAX_BYTES = 64 * 1024 * 1024
 MAX_TEXTURES = 64
 MAX_DRAWS = 8192
@@ -334,6 +335,11 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
         isinstance(value, dict) and value.get("normal_sampler_candidate") is not None for value in direct_candidates.values())
     shader_normal_packet = direct_candidates is not None and any(
         isinstance(value, dict) and value.get("shader_basis_candidate") is not None for value in direct_candidates.values())
+    falloff_packet = direct_candidates is not None and any(
+        isinstance(value, dict) and "preview_falloff_mix" in value for value in direct_candidates.values())
+    if falloff_packet:
+        # V11 uses the V10 vertex/projector layout even with flat normals.
+        normal_packet = True
     if projector_packet and any(isinstance(value, dict) and value.get("projector_candidate") is not None and
                                 value.get("mode") != "spot_approximation" for value in direct_candidates.values()):
         raise ValueError("projector texture candidates require spotlight draws")
@@ -365,6 +371,8 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
                     "point_approximation", "skipped_spot", "spot_approximation"):
                 raise ValueError("invalid direct candidate")
         is_lit = light is not None and light["mode"] in ("point_approximation", "spot_approximation")
+        if not is_lit and light is not None and "preview_falloff_mix" in light:
+            raise ValueError("light preview falloff requires an enabled direct candidate")
         normal_observation = light.get("normal_sampler_candidate") if light is not None else None
         shader_basis = light.get("shader_basis_candidate") if light is not None else None
         normal_program = {"point_approximation": "omnilightnormal11_light_vertex",
@@ -477,6 +485,7 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
                 isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or not 0 <= x <= 1
                 for x in color)):
             raise ValueError("invalid ambient candidate color")
+        packet_color = color
         if is_lit:
             position, inverse, rgb = light.get("position"), light.get("inverse_radius_candidate"), light.get("offline_color")
             energy, gain = light.get("offline_energy"), light.get("gain")
@@ -501,6 +510,12 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
                 raise ValueError("light preview energy exceeds renderer bounds")
             adjusted_rgb = tuple(rgb[i] * factors[i] / maximum for i in range(3)) if maximum else (0, 0, 0)
             light_values = (*position, inverse, *adjusted_rgb, adjusted_energy)
+            blend = light.get("preview_falloff_mix", 0)
+            if (isinstance(blend, bool) or not isinstance(blend, (int, float)) or
+                    not 0 <= blend <= 1 or not math.isfinite(blend)):
+                raise ValueError("invalid light preview falloff mix")
+            if falloff_packet:
+                packet_color = (0, 0, 0, blend)
         else:
             light_values = (0,) * 8
         if fog_value is not None:
@@ -538,7 +553,7 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             mode = 6 if fog_value is not None else 2 if is_lit else 3 if light is not None else 1 if color is not None else 0
         if normal_tex is not None:
             mode = ({2: 10, 4: 11, 5: 12} if shader_basis is not None else {2: 7, 4: 8, 5: 9})[mode]
-        draws.append((draw_texture_index, vertices, state, sampler, color, mode, light_values, projector, projector_index))
+        draws.append((draw_texture_index, vertices, state, sampler, packet_color, mode, light_values, projector, projector_index))
         source_draws.append({"draw": submission.draw_id, "target_kind": submission.target_kind,
                              "target_id": submission.target_id, "section": submission.section,
                              "render_pass": submission.render_pass, "stage": submission.stage,
@@ -564,7 +579,7 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
                 for _, vertices, _, _, _, _, _, _, _ in draws))
     if size > MAX_BYTES:
         raise ValueError("packet exceeds renderer bounds")
-    magic = (SHADER_NORMAL_MAGIC if shader_normal_packet else NORMAL_MAGIC if normal_packet else FOG_MAGIC if fog_candidates is not None else PROJECTOR_MAGIC if projector_packet else SPOT_MAGIC if spot_packet else
+    magic = (FALLOFF_MAGIC if falloff_packet else SHADER_NORMAL_MAGIC if shader_normal_packet else NORMAL_MAGIC if normal_packet else FOG_MAGIC if fog_candidates is not None else PROJECTOR_MAGIC if projector_packet else SPOT_MAGIC if spot_packet else
              DIRECT_MAGIC if direct_candidates is not None else AMBIENT_MAGIC if ambient_candidates is not None else MAGIC)
     body = bytearray(struct.pack("<8sIIff32fII", magic,
                                  viewport.width, viewport.height,
@@ -779,7 +794,7 @@ def main(argv=None):
         finally:
             for bundle in bundles:
                 bundle.close()
-        manifest = {"schema": "t3.scene.textured-packet", "version": 10 if body[:8] == SHADER_NORMAL_MAGIC else 9 if body[:8] == NORMAL_MAGIC else 8 if body[:8] == FOG_MAGIC else 7 if body[:8] == PROJECTOR_MAGIC else 6 if body[:8] == SPOT_MAGIC else 5 if direct_values is not None else 4 if ambient_values is not None else 3,
+        manifest = {"schema": "t3.scene.textured-packet", "version": 11 if body[:8] == FALLOFF_MAGIC else 10 if body[:8] == SHADER_NORMAL_MAGIC else 9 if body[:8] == NORMAL_MAGIC else 8 if body[:8] == FOG_MAGIC else 7 if body[:8] == PROJECTOR_MAGIC else 6 if body[:8] == SPOT_MAGIC else 5 if direct_values is not None else 4 if ambient_values is not None else 3,
                     "source_frame": scene.source.frame_id,
                     "scene_sha256": hashlib.sha256(raw).hexdigest(), "packet_sha256": hashlib.sha256(body).hexdigest(),
                     "state_source": "revalidated_same_frame_trace" if states is not None else "opaque_preview_defaults",
@@ -796,11 +811,16 @@ def main(argv=None):
         if ambient_values is not None:
             manifest["limitations"].append("Ambient RGB uses sampled vertex constants with a pre-Reset shader hypothesis; the active GPU and pixel shaders are unproven.")
         if direct_values is not None:
-            manifest["limitations"].append("Point-light Lambert shading and squared linear falloff are approximations; the coefficient's radius meaning is unproven.")
+            manifest["limitations"].append(
+                "Point-light Lambert shading and linear/squared falloff are preview approximations; the coefficient's radius meaning is unproven."
+                if body[:8] == FALLOFF_MAGIC else
+                "Point-light Lambert shading and squared linear falloff are approximations; the coefficient's radius meaning is unproven.")
             manifest["limitations"].append("Light colors and energies come from offline actor data; runtime light identity, colors, intensity and shadows are unproven.")
             if light_override_digest is not None:
                 manifest["light_preview_override_sha256"] = light_override_digest
                 manifest["limitations"].append("Semantic RGB multipliers are a user-supplied preview calibration, not observed runtime lighting.")
+                if body[:8] == FALLOFF_MAGIC:
+                    manifest["limitations"].append("Falloff mixes between linear and squared linear are preview hypotheses, not observed legacy attenuation.")
             if any("projector_candidate" in light for light in direct_values.values()):
                 manifest["limitations"].append("The projected texture is an offline metadata-compatible hypothesis, not an observed GPU texture identity.")
             elif any(light.get("mode") == "spot_approximation" for light in direct_values.values()):
@@ -811,11 +831,11 @@ def main(argv=None):
             manifest["limitations"].append("Fog is a vertex-distance hypothesis from a pre-Reset program and sampled constants; its color is from offline LevelInfo, not a verified runtime pixel shader.")
         else:
             manifest["limitations"].append("Fog is omitted.")
-        if body[:8] in (NORMAL_MAGIC, SHADER_NORMAL_MAGIC):
+        if any("normal_map_candidate" in draw for draw in stats["draws"]):
             manifest["limitations"].append("Normal maps and tangent space are offline metadata-compatible hypotheses; triangles with ambiguous tangent bases use flat normals.")
             if any(draw.get("normal_map_candidate", {}).get("basis") == "inferred_uv" for draw in stats["draws"]):
                 manifest["limitations"].append("The UV-based normal preview infers bitangent sign per triangle from UV derivatives.")
-        if body[:8] == SHADER_NORMAL_MAGIC:
+        if body[:8] in (SHADER_NORMAL_MAGIC, FALLOFF_MAGIC) and args.shader_normal_basis:
             manifest["limitations"].append("The optional shader basis and unnormalized normal sample follow a pre-Reset vertex/pixel asset hypothesis; active runtime programs and light lookup textures are unverified.")
         write_pair(args.output, body, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))

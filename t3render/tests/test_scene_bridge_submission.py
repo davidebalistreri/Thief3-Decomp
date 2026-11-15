@@ -121,6 +121,38 @@ class SubmissionTests(unittest.TestCase):
         selected = self.validated(records)
         self.assertEqual(module.submission_for_draw(selected, 2, 4)["status"], "unknown")
 
+    def test_other_actor_scope_is_opt_in_and_does_not_prove_its_resource(self):
+        records = scoped_fixture()
+        observation, begin = records[2], records[3]
+        entry = copy.deepcopy(observation["target"]["entry"])
+        entry.update(list_index=1, address=0x201, owner_candidate=0x301, owner_object_index=6,
+                     owner_fname=(259 << 16) | 7, owner_backlink=0x201)
+        observation["entries"].append(entry)
+        observation.update(count=2, entries_attempted=2)
+        observation["target"]["list_scanned"] = 2
+        begin.update(element=entry["address"], owner=entry["owner_candidate"], owner_index=6,
+                     owner_fname=entry["owner_fname"], backlink=entry["address"],
+                     mesh_node=0x9100, asset_proxy=0, asset_resource=0, asset_name=None)
+        selected = self.validated(records)
+        self.assertEqual(module.submission_for_draw(selected, 2, 4)["status"], "unknown")
+        candidate = module.submission_for_draw(selected, 2, 4, allow_asset_candidates=True)
+        self.assertEqual((candidate["kind"], candidate["actor"]), ("static_mesh_candidate", "StaticMeshActor__258"))
+        self.assertNotIn("resource_name", candidate)
+        for change in ("backlink", "identity", "truncated", "unstable", "duplicate_name"):
+            altered = copy.deepcopy(selected)
+            obs = next(row for row in altered if row["event"] == "scene_bridge_observation")
+            scope = next(row for row in altered if row["event"] == "scene_bridge_submission_begin")
+            if change == "backlink": scope["backlink"] += 1
+            elif change == "identity": scope["owner_fname"] += 1
+            elif change == "truncated": obs["entries_truncated"] = True
+            elif change == "unstable": obs["entries"][1]["owner_stable"] = False
+            else:
+                obs["entries"].append(copy.deepcopy(obs["entries"][1]))
+                obs["count"] += 1
+            with self.subTest(change=change):
+                self.assertEqual(module.submission_for_draw(altered, 2, 4, allow_asset_candidates=True)["status"],
+                                 "unknown")
+
 
 if __name__ == "__main__":
     unittest.main()

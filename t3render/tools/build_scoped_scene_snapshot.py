@@ -23,7 +23,71 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ir"))
 from scene_ir import SceneSnapshot  # noqa: E402
 
 
-def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, scene_digest):
+CANDIDATE_LIMITATION = ("Additional mesh actors have scoped runtime ownership and transforms, but their mesh, "
+                        "geometry and materials are offline candidates, not observed runtime bindings.")
+TRANSLATION_TOLERANCE_T3 = 0.001
+MATRIX_TOLERANCE = 0.000001
+
+
+def candidate_transform_matches(offline, runtime):
+    """Allow small T3 float/trigonometric differences; retain the runtime matrix."""
+    if runtime is None or len(offline) != 16 or len(runtime) != 16:
+        return False
+    return all(abs(a - b) <= (TRANSLATION_TOLERANCE_T3 if index in (12, 13, 14) else MATRIX_TOLERANCE)
+               for index, (a, b) in enumerate(zip(offline, runtime)))
+
+
+def candidate_mesh_draws(scene, records, render_pass, stage):
+    """Match submitted actors to offline assets without claiming their live mesh binding."""
+    instances = {}
+    for instance in scene.mesh_instances:
+        instances.setdefault(instance.id.rsplit(":", 1)[-1], []).append(instance)
+    meshes = {mesh.id: mesh for mesh in scene.static_mesh_resources}
+    result = []
+    for draw in (r for r in records if r.get("event") == "draw"):
+        proof = bridge.submission_for_draw(records, draw.get("op_id"), render_pass, allow_asset_candidates=True)
+        if proof.get("kind") != "static_mesh_candidate" or proof.get("stage") != stage:
+            continue
+        matches = instances.get(proof["actor"], [])
+        if len(matches) != 1 or matches[0].resource_id not in meshes:
+            continue
+        instance = matches[0]
+        observations = [r for r in records if r.get("event") == "scene_bridge_observation" and
+                        r.get("ticket") == proof["observation_ticket"]]
+        if len(observations) != 1:
+            continue
+        observation = observations[0]
+        entries = [e for e in observation.get("entries", []) if isinstance(e, dict) and
+                   bridge.fullname(e.get("owner_name"), e.get("owner_fname")) == proof["actor"]]
+        if len(entries) != 1:
+            continue
+        transform = bridge.decode_floats(entries[0].get("object_matrix_bits"), 16)
+        if not candidate_transform_matches(instance.transform, transform):
+            continue
+        geometry = meshes[instance.resource_id].geometry
+        index = proof["section"]
+        if index >= len(geometry.sections):
+            continue
+        section = geometry.sections[index]
+        first, count = draw.get("min_vertex_index"), draw.get("num_vertices")
+        indices = geometry.indices[section.first_index:section.first_index + section.index_count]
+        if (draw.get("call") != "DrawIndexedPrimitive" or type(draw.get("primitive_type")) is not int or
+                draw.get("primitive_type") != 4 or not bridge.uint(draw.get("start_index")) or
+                not bridge.uint(draw.get("primitive_count"), nonzero=True) or
+                not bridge.uint(first) or not bridge.uint(count, nonzero=True) or not indices or
+                first + count > len(geometry.positions) or
+                draw.get("start_index") != section.first_index or
+                draw.get("primitive_count") != section.index_count // 3 or
+                any(i < first or i >= first + count for i in indices)):
+            continue
+        result.append({"kind": "static_mesh_candidate", "draw": draw["op_id"], "section": index,
+                       "stage": stage, "target_id": instance.id, "resource_id": instance.resource_id,
+                       "same_frame_lock_shadow": "unverified"})
+    return result
+
+
+def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, scene_digest,
+          *, include_asset_candidates=False):
     report = verifier.verify(scene, records, frame, render_pass, trace_digest, scene_digest)
     if report["status"] != "validated" or stage not in report["validated_stages"]:
         raise ValueError("selected frame, pass and stage lack validated mesh and BSP submissions")
@@ -31,9 +95,13 @@ def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, 
     anchors = [item for item in verified if item["kind"] == "static_mesh" and item["draw"] == anchor_draw]
     if len(anchors) != 1:
         raise ValueError("anchor must be a verified mesh submission in the selected stage")
+    if include_asset_candidates:
+        verified.extend(candidate_mesh_draws(scene, records, render_pass, stage))
+        verified.sort(key=lambda item: item["draw"])
 
     def observation(draw_id):
-        proof = bridge.submission_for_draw(records, draw_id, render_pass)
+        proof = bridge.submission_for_draw(records, draw_id, render_pass,
+                                           allow_asset_candidates=include_asset_candidates)
         if proof.get("status") != "matched" or proof.get("stage") != stage:
             raise ValueError("submission proof changed")
         found = [item for item in records if item.get("event") == "scene_bridge_observation" and
@@ -56,6 +124,7 @@ def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, 
     instance = next(x for x in scene.mesh_instances if x.id.endswith(":" + bridge.TARGET_ACTOR))
     blocks = {block.source_index: block for block in scene.bsp_blocks}
     submissions = []
+    instance_transforms = {instance.id: transform}
     for item in verified:
         draw = bridge.one(records, "draw", item["draw"])
         probe = observation(item["draw"])
@@ -67,6 +136,18 @@ def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, 
             if probe["target"]["entry"].get("object_matrix_bits") != matrix_bits:
                 continue
             kind, target_id = "mesh_instance", instance.id
+        elif item["kind"] == "static_mesh_candidate":
+            entries = [e for e in probe["entries"] if isinstance(e, dict) and
+                       bridge.fullname(e.get("owner_name"), e.get("owner_fname")) == item["target_id"].rsplit(":", 1)[-1]]
+            if len(entries) != 1:
+                continue
+            candidate_transform = bridge.decode_floats(entries[0].get("object_matrix_bits"), 16)
+            if candidate_transform is None:
+                continue
+            kind, target_id = "mesh_instance", item["target_id"]
+            if target_id in instance_transforms and instance_transforms[target_id] != candidate_transform:
+                raise ValueError("candidate actor transform changed between submissions")
+            instance_transforms[target_id] = candidate_transform
         else:
             candidates = [x for x in probe["bsp"]["candidates"] if x["source_index"] == item["runtime_index"]]
             if (len(candidates) != 1 or comparison.compare_f32(
@@ -93,19 +174,31 @@ def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, 
                           "BSP IDs and source indices come from the heuristic offline scanner; metadata matching does not prove payload identity.",
                           "Viewport is from the matching draws; probe viewport depth can differ. Near/far, skin and runtime lights are unknown.",
                           "Repeated runtime reads cannot exclude ABA or unobserved writes."]}
+    if include_asset_candidates:
+        data["source"]["limitations"].append(CANDIDATE_LIMITATION)
+        data["source"]["limitations"].append(
+            "Offline actor transforms matched within 0.001 T3 units of translation and 0.000001 in other matrix entries.")
     data["camera"] = {"source": {"kind": "runtime", "frame_id": frame, "fingerprint": trace_digest},
                       "view": view, "projection": projection,
                       "viewport": {"x": viewport["x"], "y": viewport["y"], "width": viewport["width"],
                                    "height": viewport["height"], "min_depth": viewport["min_z"], "max_depth": viewport["max_z"]},
                       "near": None, "far": None}
-    data["static_mesh_resources"] = [x for x in data["static_mesh_resources"] if x["id"] == instance.resource_id]
-    data["mesh_instances"] = [x for x in data["mesh_instances"] if x["id"] == instance.id]
-    data["mesh_instances"][0].update(transform=transform, skin=None)
+    selected_instances = {s["target_id"] for s in submissions if s["target_kind"] == "mesh_instance"}
+    candidate_ids = sorted({item["target_id"] for item in verified if item["kind"] == "static_mesh_candidate" and
+                            item["target_id"] in selected_instances})
+    if include_asset_candidates:
+        data["source"]["limitations"].append("Offline asset candidate actors: " + (", ".join(candidate_ids) or "none"))
+    data["mesh_instances"] = [x for x in data["mesh_instances"] if x["id"] in selected_instances]
+    selected_resources = {x["resource_id"] for x in data["mesh_instances"]}
+    data["static_mesh_resources"] = [x for x in data["static_mesh_resources"] if x["id"] in selected_resources]
+    for item in data["mesh_instances"]:
+        item.update(transform=instance_transforms[item["id"]], skin=None)
     selected_blocks = {s["target_id"] for s in submissions if s["target_kind"] == "bsp_block"}
     data["bsp_blocks"] = [x for x in data["bsp_blocks"] if x["id"] in selected_blocks]
     used = {s["material_id"] for block in data["bsp_blocks"] for s in block["geometry"]["sections"]}
     used.update(s["material_id"] for mesh in data["static_mesh_resources"] for s in mesh["geometry"]["sections"])
-    used.update(data["mesh_instances"][0]["material_ids"])
+    for item in data["mesh_instances"]:
+        used.update(item["material_ids"])
     data["materials"] = [x for x in data["materials"] if x["id"] in used]
     data["lights"] = []
     snapshot = SceneSnapshot.from_dict(data)
@@ -114,6 +207,10 @@ def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, 
                 "offline_scene_sha256": scene_digest, "resource_key": report["resource_key"],
                 "submitted_sections": len(submissions), "bsp_blocks": len(selected_blocks),
                 "limitations": data["source"]["limitations"]}
+    if include_asset_candidates:
+        manifest["offline_asset_candidates"] = candidate_ids
+        manifest["candidate_transform_tolerances"] = {"translation_t3_units": TRANSLATION_TOLERANCE_T3,
+                                                       "other_matrix_entries": MATRIX_TOLERANCE}
     return snapshot, manifest
 
 
@@ -125,6 +222,8 @@ def main(argv=None):
     parser.add_argument("--pass", dest="render_pass", required=True, type=int)
     parser.add_argument("--stage", required=True, type=int)
     parser.add_argument("--anchor-draw", required=True, type=int)
+    parser.add_argument("--include-asset-candidates", action="store_true",
+                        help="include scoped actors with matching offline mesh candidates")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
@@ -148,7 +247,8 @@ def main(argv=None):
         raw = packet.read_limited(args.scene, packet.MAX_INPUT)
         scene = SceneSnapshot.from_json(raw)
         snapshot, manifest = build(scene, records, args.frame, args.render_pass, args.stage,
-                                   args.anchor_draw, trace_digest, hashlib.sha256(raw).hexdigest())
+                                   args.anchor_draw, trace_digest, hashlib.sha256(raw).hexdigest(),
+                                   include_asset_candidates=args.include_asset_candidates)
         body = snapshot.to_json(indent=2) + "\n"
         manifest["snapshot_sha256"] = hashlib.sha256(body.encode()).hexdigest()
         packet.write_pair(args.output, body, manifest)

@@ -90,7 +90,7 @@ def fullname(name, fname):
     return f"{name}__{number - 1}" if number else name
 
 
-def owner_link(entry, table_complete):
+def owner_link(entry, table_complete, actor=TARGET_ACTOR):
     if not isinstance(entry, dict) or table_complete is not True:
         return False
     return (entry.get("vtable") == EXPECTED_ELEMENT_VTABLE and entry.get("type") == 4 and
@@ -98,7 +98,7 @@ def owner_link(entry, table_complete):
             uint(entry.get("address"), nonzero=True) and uint(entry.get("owner_candidate"), nonzero=True) and
             entry.get("owner_backlink") == entry.get("address") and
             uint(entry.get("owner_object_index")) and uint(entry.get("owner_class"), nonzero=True) and
-            fullname(entry.get("owner_name"), entry.get("owner_fname")) == TARGET_ACTOR)
+            isinstance(actor, str) and bool(actor) and fullname(entry.get("owner_name"), entry.get("owner_fname")) == actor)
 
 
 def synchronized(frame_result, frame_end, draw_result):
@@ -152,7 +152,7 @@ def one(records, event, op_id=None):
     return values[0] if len(values) == 1 else None
 
 
-def submission_for_draw(records, draw_id, expected_pass):
+def submission_for_draw(records, draw_id, expected_pass, *, allow_asset_candidates=False):
     """Match a balanced same-thread section scope to a unique semantic entry.
 
     The caller must first validate the complete trace with trace_summary.
@@ -232,6 +232,31 @@ def submission_for_draw(records, draw_id, expected_pass):
                 matches.append({"status": "matched", "kind": "static_mesh", "actor": TARGET_ACTOR,
                                 "resource_name": asset["name"], "section": begin["section"], "stage": begin["stage"],
                                 "observation_ticket": observation["ticket"]})
+            if allow_asset_candidates and observation.get("entries_truncated") is False:
+                entries = observation.get("entries")
+                if not isinstance(entries, list) or observation.get("count") != len(entries):
+                    continue
+                candidates = [entry for entry in entries if isinstance(entry, dict) and
+                              entry.get("address") == begin.get("element")]
+                if len(candidates) != 1:
+                    continue
+                entry = candidates[0]
+                actor = fullname(entry.get("owner_name"), entry.get("owner_fname"))
+                # The target bed has a stronger property and node proof above;
+                # never downgrade it to this weaker offline-binding path.
+                if (actor and actor != TARGET_ACTOR and
+                        sum(fullname(e.get("owner_name"), e.get("owner_fname")) == actor
+                            for e in entries if isinstance(e, dict)) == 1 and
+                        owner_link(entry, observation.get("object_table_complete"), actor) and
+                        begin.get("owner") == entry.get("owner_candidate") and
+                        begin.get("owner_index") == entry.get("owner_object_index") and
+                        begin.get("owner_fname") == entry.get("owner_fname") and
+                        begin.get("backlink") == entry.get("owner_backlink") and
+                        uint(begin.get("mesh_node"), nonzero=True) and
+                        begin.get("matrix_bits") == entry.get("object_matrix_bits")):
+                    matches.append({"status": "matched", "kind": "static_mesh_candidate", "actor": actor,
+                                    "section": begin["section"], "stage": begin["stage"],
+                                    "observation_ticket": observation["ticket"]})
         elif begin.get("type") == 5 and begin.get("vtable") == 0x10e4a668:
             bsp = observation.get("bsp") or {}
             if bsp.get("source_stable") is not True or not trace_summary._bridge_bsp(bsp, observation.get("entries")):

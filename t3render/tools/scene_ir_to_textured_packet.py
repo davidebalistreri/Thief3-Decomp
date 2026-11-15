@@ -340,6 +340,7 @@ def main(argv=None):
                                     "No stencil, fog, runtime lights, legacy shaders, missing objects or HUD."], **stats}
         if extra_scenes:
             manifest["additional_scene_sha256"] = [hashlib.sha256(data).hexdigest() for data in extra_raw]
+            manifest["additional_source_limitations"] = [list(other.source.limitations) for other in extra_scenes]
             manifest["limitations"].append("Partial selected draws share a depth buffer; omitted draws and stencil operations are not reconstructed.")
         write_pair(args.output, body, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))

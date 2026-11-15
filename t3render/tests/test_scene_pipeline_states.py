@@ -16,7 +16,7 @@ import build_scoped_scene_snapshot as scoped
 import scene_legacy_states as states
 import scene_pipeline_fixture as gpu_fixture
 import scene_ir_to_textured_packet as packet
-from test_scoped_scene_snapshot import fixture
+from test_scoped_scene_snapshot import fixture, candidate_fixture
 import test_scene_textured_packet as packet_tests
 
 
@@ -75,6 +75,26 @@ class LegacyStateTests(unittest.TestCase):
             path.write_bytes(raw + b" ")
             with self.assertRaises(ValueError):
                 states.from_trace(scene, offline, offline_bytes, path, 4, 1)
+
+    def test_candidate_snapshot_revalidates_and_cannot_hide_provenance(self):
+        offline, records = candidate_fixture()
+        for row in records:
+            if row.get("event") == "draw":
+                row["render_states"] = observed_state()
+        offline_bytes = offline.to_json().encode()
+        offline_digest = hashlib.sha256(offline_bytes).hexdigest()
+        raw = "".join(json.dumps(row) + "\n" for row in records).encode()
+        digest = hashlib.sha256(raw).hexdigest()
+        scene, _ = scoped.build(offline, records, 3, 4, 1, 4, digest, offline_digest,
+                                include_asset_candidates=True)
+        with tempfile.TemporaryDirectory(prefix="t3render-candidate-state-") as directory:
+            path = Path(directory) / "trace.jsonl"
+            path.write_bytes(raw)
+            self.assertEqual(set(states.from_trace(scene, offline, offline_bytes, path, 4, 1)), {2, 3, 4, 5, 6})
+            data = scene.to_dict()
+            data["source"]["limitations"].remove(scoped.CANDIDATE_LIMITATION)
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                states.from_trace(packet.SceneSnapshot.from_dict(data), offline, offline_bytes, path, 4, 1)
 
     def test_missing_or_invalid_state_cannot_be_serialized(self):
         scene, records = fixture()

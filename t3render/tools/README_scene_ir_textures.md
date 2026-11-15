@@ -26,11 +26,18 @@ is much brighter than D3D8 because it is unlit. The captured shadows remain
 unavailable after Reset; the separate frame 2722's byte evidence is not
 attributed to frame 1001. No game was launched for this render.
 
+The optional [expanded snapshot](README_bridge_runtime_checkpoint.md#additional-submitted-mesh-candidates-frame-1001)
+adds submitted actors whose offline asset bindings are explicitly candidates.
+Its local stage-1 preview has 51 submissions, 2,997 triangles and 11 textures;
+it includes a candle holder and a crate near the bed. The renderer preserves
+the candidate limitations and actor IDs in its packet manifest. The objects
+and textures are not runtime mesh-payload or material-binding proof.
+
 The optional `--state-trace <trace> --offline-scene <fixture>` revalidates the
 trace fingerprint and rebuilds the bounded bed-and-BSP scoped snapshot before
 mapping its draw states to the renderer's neutral vocabulary. This currently
-requires the exact snapshot produced by `build_scoped_scene_snapshot.py` and
-does not generalize to other actors. It fails on unsupported or
+requires an exact snapshot produced by `build_scoped_scene_snapshot.py`,
+including its explicit candidate limitations when enabled. It fails on unsupported or
 unobserved states. For all 18 frame-1001 stage-1 draws it observes disabled alpha
 test and blending, depth LESS/write, CCW culling, and no fixed-function fog or lighting. The stage-3
 draws use additive blending, stage 4 uses two-times modulation, and stage 6 uses
@@ -48,7 +55,8 @@ from the same frame, pass, camera and asset fingerprints into one packet, in
 captured operation order with a shared depth buffer. It rejects conflicting
 resources, repeated draws and intervening color/depth clears. It requires
 `--state-trace` and `--offline-scene`; each snapshot is revalidated before
-its states are paired. Omitted draws and stencil operations are not recreated,
+its states are paired, and each source's limitations are retained in the
+manifest. Omitted draws and stencil operations are not recreated,
 so the depth and visibility history remains partial. In particular, stage 3
 still uses an unlit diffuse shader, not the captured lighting shader.
 

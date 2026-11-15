@@ -100,11 +100,13 @@ def from_trace(scene, offline, offline_bytes, trace, render_pass, stage, *, samp
     bridge.trace_summary.summarize(trace)
     records = runtime.read_frame(trace, scene.source.frame_id, digest)
     anchors = [s for s in scene.submissions if s.target_kind == "mesh_instance" and
+               s.target_id.endswith(":" + bridge.TARGET_ACTOR) and
                (s.render_pass, s.stage) == (render_pass, stage)]
     if not anchors:
         raise ValueError("state matching requires a scoped mesh anchor")
     rebuilt, _ = scoped.build(offline, records, scene.source.frame_id, render_pass, stage,
-                              anchors[0].draw_id, digest, offline_digest)
+                              anchors[0].draw_id, digest, offline_digest,
+                              include_asset_candidates=scoped.CANDIDATE_LIMITATION in scene.source.limitations)
     if rebuilt.to_dict() != scene.to_dict():
         raise ValueError("scene does not match the revalidated scoped capture")
     result = {}

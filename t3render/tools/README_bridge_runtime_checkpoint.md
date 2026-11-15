@@ -1,5 +1,39 @@
 # Runtime bridge checkpoint: frame 2722
 
+## Additional submitted mesh candidates: frame 1001
+
+The optional `--include-asset-candidates` path extends the stage-1 snapshot
+without another game run. It matches a complete observed list entry to a
+balanced same-thread submission, requires a unique offline actor name, compares
+its runtime and offline transforms within 0.001 T3 units of translation and
+0.000001 for the other matrix entries, and checks the submitted section's
+index range and draw counts. The serialized transform is the runtime one.
+
+These checks do **not** read the additional actors' live mesh properties,
+mesh-node names, materials or vertex/index contents. The offline mesh and
+material bindings remain candidates, identified by actor ID in both the
+snapshot limitations and its manifest; they are not equivalent to the bed's
+stronger resource proof. Ambiguous actors, unstable scopes, transform
+mismatches and incompatible draw metadata are excluded. The original strict
+bed-and-BSP path remains the default.
+
+```sh
+python3 -B t3render/tools/build_scoped_scene_snapshot.py \
+  build/t3render-captures/scene-bridge-submission-20261115-001/bedroom.jsonl \
+  --scene build/t3render-offline/SouthQuarter1_int1.scene.json \
+  --frame 1001 --pass 0 --stage 1 --anchor-draw 8 \
+  --include-asset-candidates \
+  --output build/t3render-offline/bedroom-runtime-1001-candidates.scene.json
+```
+
+This local capture yields the bed, 26 additional candidate actors, nine BSP
+blocks and 51 submitted sections. It includes a candidate candle holder and
+nearby crate, but does not establish their runtime mesh or light bindings. The
+same-frame textured DX12 preview has 2,997 triangles and 11 offline textures;
+it is unlit and does not establish parity. The packet exporter revalidates the
+expanded snapshot before attaching captured draw states. The generated scene,
+sidecar, packet and images remain local under `build/`.
+
 ## Light position candidates: frame 1001
 
 The offline importer now places mesh-actor lights at `hp_lighttarget` plus

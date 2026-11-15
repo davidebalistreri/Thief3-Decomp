@@ -27,6 +27,35 @@ def fixture():
     return scene, records
 
 
+def candidate_fixture():
+    scene, records = fixture()
+    data = scene.to_dict()
+    candidate = copy.deepcopy(data["mesh_instances"][0])
+    candidate["id"] = "actor:StaticMeshActor__258"
+    data["mesh_instances"].append(candidate)
+    scene = builder.SceneSnapshot.from_dict(data)
+    observation = next(row for row in records if row["event"] == "scene_bridge_observation")
+    entry = copy.deepcopy(observation["target"]["entry"])
+    entry.update(list_index=2, address=0x201, owner_candidate=0x301, owner_object_index=6,
+                 owner_fname=(259 << 16) | 7, owner_backlink=0x201)
+    observation["entries"].append(entry)
+    observation.update(count=3, entries_attempted=3)
+    observation["target"]["list_scanned"] = 3
+    begin = copy.deepcopy(next(row for row in records if row["event"] == "scene_bridge_submission_begin" and row["type"] == 4))
+    begin.update(ticket=15, section=1, element=entry["address"], owner=entry["owner_candidate"], owner_index=6,
+                 owner_fname=entry["owner_fname"], backlink=entry["address"], mesh_node=0x9100,
+                 asset_proxy=0, asset_resource=0, asset_name=None)
+    draw = copy.deepcopy(next(row for row in records if row["event"] == "draw" and row["op_id"] == 4))
+    draw.update(op_id=6, submission_ticket=15)
+    frame = next(row for row in records if row["event"] == "scene_bridge_frame")
+    frame.update(submission_started=5, submission_completed=5)
+    index = records.index(frame)
+    records[index:index] = [begin, draw, {"event": "draw_result", "frame": 3, "op_id": 6, "hr": 0},
+                            {"event": "scene_bridge_submission_end", "frame": 3, "ticket": 15,
+                             "thread_id": 9, "stable": True}]
+    return scene, records
+
+
 class ScopedSceneSnapshotTests(unittest.TestCase):
     def build(self, scene, records):
         with tempfile.TemporaryDirectory(prefix="t3render-scoped-scene-") as directory:
@@ -101,6 +130,63 @@ class ScopedSceneSnapshotTests(unittest.TestCase):
             preview.create_packet(snapshot, snapshot.camera, [snapshot.mesh_instances[0].id], [0], stage=2)
         with self.assertRaisesRegex(ValueError, "not found"):
             preview.create_packet(snapshot, snapshot.camera, [], [0], render_pass=4, stage=3)
+
+    def test_candidate_mesh_is_opt_in_and_distinctly_limited(self):
+        scene, records = candidate_fixture()
+        with tempfile.TemporaryDirectory(prefix="t3render-candidate-trace-") as directory:
+            path = Path(directory) / "trace.jsonl"
+            path.write_text("".join(json.dumps(row) + "\n" for row in records))
+            builder.bridge.trace_summary.summarize(path)
+        normal, _ = builder.build(scene, records, 3, 4, 1, 4, "b" * 64, "c" * 64)
+        snapshot, manifest = builder.build(scene, records, 3, 4, 1, 4, "b" * 64, "c" * 64,
+                                           include_asset_candidates=True)
+        self.assertEqual(len(normal.mesh_instances), 1)
+        self.assertEqual(len(snapshot.mesh_instances), 2)
+        self.assertEqual(manifest["offline_asset_candidates"], ["actor:StaticMeshActor__258"])
+        self.assertIn(builder.CANDIDATE_LIMITATION, snapshot.source.limitations)
+        self.assertEqual(snapshot.submissions[-1].draw_id, 6)
+        self.assertEqual(snapshot.submissions[-1].lock_shadow, "unverified")
+        self.assertIsNone(snapshot.mesh_instances[1].skin)
+
+    def test_candidate_mesh_requires_unique_actor_matching_transform_and_draw_ranges(self):
+        scene, records = candidate_fixture()
+        for change in ("transform", "start_index", "vertex_range", "oversized_range", "duplicate", "unstable"):
+            candidate_scene = scene
+            candidate_records = copy.deepcopy(records)
+            if change == "transform":
+                data = scene.to_dict()
+                data["mesh_instances"][1]["transform"][12] += 1
+                candidate_scene = builder.SceneSnapshot.from_dict(data)
+            elif change == "duplicate":
+                data = scene.to_dict()
+                extra = copy.deepcopy(data["mesh_instances"][1])
+                extra["id"] = "actor:other:StaticMeshActor__258"
+                data["mesh_instances"].append(extra)
+                candidate_scene = builder.SceneSnapshot.from_dict(data)
+            elif change == "unstable":
+                next(row for row in candidate_records if row.get("ticket") == 15 and
+                     row["event"] == "scene_bridge_submission_end")["stable"] = False
+            else:
+                draw = next(row for row in candidate_records if row["event"] == "draw" and row["op_id"] == 6)
+                if change == "start_index": draw["start_index"] += 3
+                elif change == "vertex_range": draw["num_vertices"] = 1
+                else: draw["num_vertices"] = 4
+            with self.subTest(change=change):
+                snapshot, _ = builder.build(candidate_scene, candidate_records, 3, 4, 1, 4, "b" * 64, "c" * 64,
+                                            include_asset_candidates=True)
+                self.assertEqual(len(snapshot.mesh_instances), 1)
+                self.assertNotIn(6, [sub.draw_id for sub in snapshot.submissions])
+
+    def test_candidate_tolerance_keeps_observed_transform(self):
+        scene, records = candidate_fixture()
+        data = scene.to_dict()
+        data["mesh_instances"][1]["transform"][12] += 0.0005
+        snapshot, manifest = builder.build(builder.SceneSnapshot.from_dict(data), records, 3, 4, 1, 4,
+                                           "b" * 64, "c" * 64, include_asset_candidates=True)
+        candidate = next(item for item in snapshot.mesh_instances if item.id.endswith("StaticMeshActor__258"))
+        observed = next(row for row in records if row["event"] == "draw" and row["op_id"] == 6)
+        self.assertEqual(candidate.transform, tuple(observed["transforms"]["world"][0]))
+        self.assertEqual(manifest["candidate_transform_tolerances"]["translation_t3_units"], 0.001)
 
 
 if __name__ == "__main__":

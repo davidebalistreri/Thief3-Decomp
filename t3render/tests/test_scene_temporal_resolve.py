@@ -93,6 +93,29 @@ class TemporalResolveTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "did not improve"):
             fixture.verify(ideal, noisy, noisy)
 
+    def test_hdr_upscale_interpolates_and_preserves_depth_edges(self):
+        header = list(temporal.HEADER.unpack_from(self.raw))
+        header[1:3] = [2, 2]
+        colors = ((0, 0, 0, 1), (1, 0, 0, 1), (0, 1, 0, 1), (0, 0, 1, 1))
+        def small(positions):
+            return temporal.HEADER.pack(*header) + b"".join(struct.pack("<4e", *x) for x in colors) + \
+                b"".join(struct.pack("<4e", *x) for x in positions)
+        positions = [(0, 0, 0, 1)]*4
+        output = temporal.image(small(positions), 2)
+        self.assertTrue(output.startswith(b"P6\n4 4\n255\n"))
+        offset = len(b"P6\n4 4\n255\n") + (1*4+1)*3
+        def mapped(v):
+            v = v/(1+v)
+            return round(255*(12.92*v if v <= .0031308 else 1.055*v**(1/2.4)-.055))
+        self.assertEqual(tuple(output[offset:offset+3]), (mapped(.1875), mapped(.1875), mapped(.0625)))
+        split = [(0, 0, 0, 1), (10, 0, 0, 1), (0, 0, 0, 1), (10, 0, 0, 1)]
+        edge = temporal.image(small(split), 2)
+        offset = len(b"P6\n4 4\n255\n") + 3
+        self.assertEqual(tuple(edge[offset:offset+3]), (0, 0, 0))
+        for invalid in (0, 3, True):
+            with self.assertRaisesRegex(ValueError, "upscale"):
+                temporal.image(small(positions), invalid)
+
     def test_invalid_headers_pixels_and_settings_fail_closed(self):
         for raw in (self.raw[:-1], b"badmagic"+self.raw[8:],
                     self.raw[:16]+bytes(32)+self.raw[48:]):

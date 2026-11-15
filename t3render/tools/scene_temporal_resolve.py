@@ -188,17 +188,49 @@ def resolve(previous, current, weight=.8):
                                       "max_reprojection_pixels": max_motion}
 
 
-def image(raw):
+def image(raw, upscale=1):
+    if type(upscale) is not int or upscale not in (1, 2):
+        raise ValueError("temporal preview upscale must be 1 or 2")
     width, height = struct.unpack_from("<II", raw, 8)
     exposure = HEADER.unpack_from(raw)[40]
     pixels = _decode(raw, HEADER.size, width*height)
-    result = bytearray(f"P6\n{width} {height}\n255\n".encode())
-    for index in range(width*height):
-        for value in pixels[index*4:index*4+3]:
+    positions = _decode(raw, HEADER.size+width*height*8, width*height, position=True) if upscale == 2 else None
+    out_width, out_height = width*upscale, height*upscale
+    result = bytearray(f"P6\n{out_width} {out_height}\n255\n".encode())
+
+    def display(rgb):
+        for value in rgb:
             value = max(value*exposure, 0)
             value = value/(1+value)
             value = 12.92*value if value <= .0031308 else 1.055*value**(1/2.4)-.055
             result.append(max(0, min(255, round(value*255))))
+    if upscale == 1:
+        for index in range(width*height):
+            display(pixels[index*4:index*4+3])
+        return bytes(result)
+
+    for y in range(out_height):
+        sy = (y+.5)/2-.5
+        y0 = math.floor(sy)
+        for x in range(out_width):
+            sx = (x+.5)/2-.5
+            x0 = math.floor(sx)
+            ax, ay = min(width-1, max(0, math.floor(sx+.5))), min(height-1, max(0, math.floor(sy+.5)))
+            anchor = (ay*width+ax)*4
+            rgba = [0., 0., 0.]
+            total = 0.
+            for ny in (y0, y0+1):
+                for nx in (x0, x0+1):
+                    cx, cy = min(width-1, max(0, nx)), min(height-1, max(0, ny))
+                    at = (cy*width+cx)*4
+                    weight = (1-abs(sx-nx))*(1-abs(sy-ny))
+                    if positions[at+3] != positions[anchor+3]:
+                        continue
+                    if positions[anchor+3] and sum((positions[at+k]-positions[anchor+k])**2 for k in range(3)) > .15**2:
+                        continue
+                    for k in range(3): rgba[k] += pixels[at+k]*weight
+                    total += weight
+            display([value/total for value in rgba] if total > 0 else pixels[anchor:anchor+3])
     return bytes(result)
 
 
@@ -234,6 +266,8 @@ def main(argv=None):
     parser.add_argument("--current-manifest", type=Path)
     parser.add_argument("--synthetic", action="store_true")
     parser.add_argument("--weight", type=float, default=.8)
+    parser.add_argument("--upscale", type=int, choices=(1, 2), default=1,
+                        help="optional 2x depth-aware spatial reconstruction of the preview")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
@@ -265,9 +299,13 @@ def main(argv=None):
                     "packet_sha256": current["digest"], "history_sha256": hashlib.sha256(result).hexdigest(),
                     "motion_sha256": hashlib.sha256(motion).hexdigest(),
                     "limitations": ["Reprojection uses static world positions and camera motion; object motion vectors are not available.",
-                                    "History is nearest sampled, position rejected and neighborhood clamped; temporal stability is not guaranteed."],
+                                    "History is nearest sampled, position rejected and neighborhood clamped; temporal stability is not guaranteed.",
+                                    "Upscaling is a depth-aware spatial preview; history and motion remain at native resolution."],
+                    "upscale": args.upscale, "image_size": [current["width"]*args.upscale, current["height"]*args.upscale],
                     **stats}
-        _write_outputs(args.output, result, image(result), motion, manifest)
+        picture = image(result, args.upscale)
+        manifest["image_sha256"] = hashlib.sha256(picture).hexdigest()
+        _write_outputs(args.output, result, picture, motion, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))
     except (OSError, ValueError, TypeError, KeyError, IndexError, struct.error) as exc:
         print(f"error: {exc}", file=sys.stderr)

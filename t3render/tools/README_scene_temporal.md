@@ -17,6 +17,14 @@ history to the current 3x3 color neighborhood, and blends before the existing
 exposure/Reinhard/sRGB conversion. Its history output can be used in a later
 resolve. The default history weight is 0.8, adjustable from 0 to 0.95.
 
+`--upscale 2` optionally reconstructs the output image at twice the width and
+height, in linear HDR before tonemapping. It uses bilinear weights while
+rejecting neighbors across invalid-position boundaries or more than 0.15 m
+apart; this avoids some cross-edge bleeding. History and motion vectors stay
+at their native resolution. This is an offline spatial preview, not temporal
+super-resolution or a claim of recovered detail; distant or slanted surfaces
+can fall back toward nearest sampling. The default is no upscaling.
+
 For runtime inputs, supply the synchronized SceneIR and PBR packet manifest
 for **both** frames. The tool verifies each scene, packet hash, camera, frame
 ID and fingerprint; it requires increasing frame IDs, matching map/assets,

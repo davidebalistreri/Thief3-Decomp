@@ -79,7 +79,7 @@ def validate_camera(camera):
         raise ValueError("camera matrix exceeds diagnostic backend bounds")
 
 
-def create_packet(scene, camera, instance_ids, bsp_indices, excluded_materials=()):
+def create_packet(scene, camera, instance_ids, bsp_indices, excluded_materials=(), render_pass=None, stage=None):
     c = scene.conventions
     if (c.length_unit != "t3_unit" or c.axes != "t3_xyz" or c.up_axis != "z" or
             c.matrix_layout != "row_major" or c.matrix_vectors != "row" or
@@ -94,6 +94,21 @@ def create_packet(scene, camera, instance_ids, bsp_indices, excluded_materials=(
     # Match the SDK's resource naming rules, which use lower(), not casefold().
     excluded = {name.lower() for name in excluded_materials}
     vertices, sources, skipped = [], [], []
+    scoped_sections = None
+    if scene.version == 1 and scene.source.kind == "runtime":
+        scopes = {(s.render_pass, s.stage) for s in scene.submissions}
+        if render_pass is None or stage is None:
+            candidates = {(p, s) for p, s in scopes if (render_pass is None or p == render_pass) and
+                          (stage is None or s == stage)}
+            if len(candidates) != 1:
+                raise ValueError("runtime SceneIR requires an unambiguous submission pass and stage")
+            render_pass, stage = next(iter(candidates))
+        if (render_pass, stage) not in scopes:
+            raise ValueError("submission pass and stage not found")
+        scoped_sections = {(s.target_kind, s.target_id, s.section) for s in scene.submissions
+                           if (s.render_pass, s.stage) == (render_pass, stage)}
+    elif render_pass is not None or stage is not None:
+        raise ValueError("submission pass and stage require runtime SceneIR v1")
 
     def add_geometry(kind, identifier, geometry, matrix, material_ids=()):
         if (any(abs(matrix[i]) > 1e-6 for i in (3, 7, 11)) or abs(matrix[15] - 1) > 1e-6):
@@ -101,6 +116,9 @@ def create_packet(scene, camera, instance_ids, bsp_indices, excluded_materials=(
         # A SceneIR mesh without explicit sections represents one complete
         # triangle list, not an empty mesh.
         for number, section in enumerate(geometry.sections or (None,)):
+            if scoped_sections is not None and (kind, identifier, number) not in scoped_sections:
+                skipped.append({"kind": kind, "id": identifier, "section": number, "reason": "not_submitted_in_selected_scope"})
+                continue
             material = material_ids[number] if material_ids else section.material_id if section else None
             name = materials.get(material) if material is not None else None
             if name is not None and name.lower() in excluded:
@@ -126,12 +144,16 @@ def create_packet(scene, camera, instance_ids, bsp_indices, excluded_materials=(
         if identifier not in instances:
             raise ValueError(f"mesh instance not found: {identifier}")
         instance = instances[identifier]
+        if scoped_sections is not None and not any(k == "mesh_instance" and i == identifier for k, i, _ in scoped_sections):
+            raise ValueError(f"mesh instance not submitted in selected scope: {identifier}")
         add_geometry("mesh_instance", identifier, resources[instance.resource_id].geometry,
                      instance.transform, instance.material_ids)
     for index in bsp_indices:
         matching = [block for block in scene.bsp_blocks if block.source_index == index]
         if len(matching) != 1:
             raise ValueError(f"BSP index is missing or ambiguous: {index}")
+        if scoped_sections is not None and not any(k == "bsp_block" and i == matching[0].id for k, i, _ in scoped_sections):
+            raise ValueError(f"BSP block not submitted in selected scope: {index}")
         add_geometry("bsp_block", matching[0].id, matching[0].geometry, IDENTITY)
     if not vertices:
         raise ValueError("selected geometry contains no triangles")
@@ -144,7 +166,8 @@ def create_packet(scene, camera, instance_ids, bsp_indices, excluded_materials=(
     packet = "\n".join(lines) + "\n"
     if len(packet.encode("ascii")) > 1024 * 1024:
         raise ValueError("packet exceeds diagnostic backend input limit")
-    return packet, {"triangles": len(vertices) // 3, "sources": sources, "excluded_sections": skipped}
+    return packet, {"triangles": len(vertices) // 3, "sources": sources, "excluded_sections": skipped,
+                    "submission_scope": {"render_pass": render_pass, "stage": stage} if scoped_sections is not None else None}
 
 
 def read_limited(path, limit):
@@ -183,6 +206,8 @@ def main(argv=None):
     parser.add_argument("--instance", action="append", default=[])
     parser.add_argument("--bsp", action="append", default=[], type=int)
     parser.add_argument("--exclude-material", action="append", default=[])
+    parser.add_argument("--submission-pass", type=int)
+    parser.add_argument("--submission-stage", type=int)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
@@ -200,7 +225,8 @@ def main(argv=None):
             camera_source = {"kind": "scene_ir_camera", "origin": camera.source.kind,
                              "frame_id": camera.source.frame_id, "fingerprint": camera.source.fingerprint}
             camera_digest = None
-        packet, stats = create_packet(scene, camera, args.instance, args.bsp, args.exclude_material)
+        packet, stats = create_packet(scene, camera, args.instance, args.bsp, args.exclude_material,
+                                     args.submission_pass, args.submission_stage)
         runtime = scene.source.kind == "runtime"
         manifest = {"kind": "runtime_scene_ir_preview_producer_assertion" if runtime else "offline_scene_ir_preview_not_runtime_frame",
                     "map": scene.source.map, "scene_source": scene.source.kind,
@@ -215,6 +241,7 @@ def main(argv=None):
                         "A separate camera does not establish synchronization with scene objects.",
                         "Clip depth 0..1 is assumed even when the scene convention is unknown.",
                         "Flat colors, approximate CCW culling and new D32 LESS depth are diagnostic only.",
+                        "Sections are grouped by selection, not replayed in original submission order.",
                         "Textures, lighting, original depth history and unselected objects are absent."]}
         write_pair(args.output, packet, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))

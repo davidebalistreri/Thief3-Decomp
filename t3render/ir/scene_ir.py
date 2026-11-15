@@ -1,4 +1,4 @@
-"""Version 0 semantic scene interchange, independent of graphics APIs.
+"""Versioned semantic scene interchange, independent of graphics APIs.
 
 This module owns only plain values. Importers must explicitly state the origin
 and conventions of their data; unknown engine facts are not inferred here.
@@ -347,6 +347,31 @@ class VisualLight:
 
 
 @dataclass(frozen=True)
+class Submission:
+    """A section observed inside a particular runtime submission scope."""
+    target_kind: str
+    target_id: str
+    section: int
+    render_pass: int
+    stage: int
+    draw_id: int
+    lock_shadow: str
+
+    @classmethod
+    def parse(cls, obj, where):
+        _object(obj, tuple(f.name for f in fields(cls)), where)
+        draw_id = _integer(obj["draw_id"], where + ".draw_id")
+        if not draw_id:
+            raise ValueError(f"{where}.draw_id: expected a positive operation ID")
+        return cls(_enum(obj["target_kind"], ("mesh_instance", "bsp_block"), where + ".target_kind"),
+                   _id(obj["target_id"], where + ".target_id"),
+                   _integer(obj["section"], where + ".section"),
+                   _integer(obj["render_pass"], where + ".render_pass"),
+                   _integer(obj["stage"], where + ".stage"), draw_id,
+                   _enum(obj["lock_shadow"], ("matched", "unverified"), where + ".lock_shadow"))
+
+
+@dataclass(frozen=True)
 class SceneSnapshot:
     schema: str
     version: int
@@ -358,13 +383,14 @@ class SceneSnapshot:
     bsp_blocks: tuple
     materials: tuple
     lights: tuple
+    submissions: tuple = ()
 
     @classmethod
     def from_dict(cls, obj):
-        names = tuple(f.name for f in fields(cls))
-        _object(obj, names, "scene")
-        if obj["schema"] != "t3.scene" or type(obj["version"]) is not int or obj["version"] != 0:
+        if not isinstance(obj, dict) or obj.get("schema") != "t3.scene" or type(obj.get("version")) is not int or obj["version"] not in (0, 1):
             raise ValueError("scene: unsupported schema or version")
+        names = tuple(f.name for f in fields(cls))
+        _object(obj, names if obj["version"] == 1 else names[:-1], "scene")
         source = Source.parse(obj["source"], "source")
         camera = _optional(obj["camera"], Camera.parse, "camera")
         if source.camera_synchronized is True and (camera is None or camera.source.kind != "runtime" or
@@ -379,6 +405,7 @@ class SceneSnapshot:
         blocks = _list(obj["bsp_blocks"], BspBlock.parse, "bsp_blocks")
         materials = _list(obj["materials"], MaterialRef.parse, "materials")
         lights = _list(obj["lights"], VisualLight.parse, "lights")
+        submissions = _list(obj["submissions"], Submission.parse, "submissions") if obj["version"] == 1 else ()
         for group in (meshes, instances, blocks, materials, lights):
             if len({item.id for item in group}) != len(group):
                 raise ValueError("scene: duplicate identifiers")
@@ -395,8 +422,24 @@ class SceneSnapshot:
                 raise ValueError("scene: instance material count must match sections")
             if any(mat is not None and mat not in material_ids for mat in instance.material_ids):
                 raise ValueError("scene: instance references missing material")
+        if submissions:
+            if source.kind != "runtime" or source.camera_synchronized is not True or not source.fingerprints.get("trace"):
+                raise ValueError("scene: submissions require a synchronized runtime source and trace fingerprint")
+            instance_by_id = {instance.id: instance for instance in instances}
+            block_by_id = {block.id: block for block in blocks}
+            for submission in submissions:
+                if submission.target_kind == "mesh_instance":
+                    instance = instance_by_id.get(submission.target_id)
+                    geometry = mesh_by_id[instance.resource_id].geometry if instance else None
+                else:
+                    block = block_by_id.get(submission.target_id)
+                    geometry = block.geometry if block else None
+                if geometry is None or submission.section >= len(geometry.sections):
+                    raise ValueError("scene: submission references missing target or section")
+            if len({item.draw_id for item in submissions}) != len(submissions):
+                raise ValueError("scene: duplicate submission draw ID")
         return cls(obj["schema"], obj["version"], source, Conventions.parse(obj["conventions"], "conventions"),
-                   camera, meshes, instances, blocks, materials, lights)
+                   camera, meshes, instances, blocks, materials, lights, submissions)
 
     @classmethod
     def from_json(cls, value):
@@ -413,6 +456,10 @@ class SceneSnapshot:
 
     def to_dict(self):
         data = _plain(self)
+        if self.version == 0:
+            if self.submissions:
+                raise ValueError("scene: version 0 cannot contain submissions")
+            del data["submissions"]
         SceneSnapshot.from_dict(data)
         return data
 

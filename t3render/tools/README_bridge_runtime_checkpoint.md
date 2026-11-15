@@ -1,5 +1,42 @@
 # Runtime bridge checkpoint: frame 2722
 
+## Scoped SceneIR v1: frame 1001
+
+The bridge v0 contract is frozen at the verified per-section `+0x24`
+submission for static meshes and BSP. The local frame-1001 capture can now
+produce a partial SceneIR v1 directly from the scoped proof:
+
+```sh
+python3 -B t3render/tools/build_scoped_scene_snapshot.py \
+  build/t3render-captures/scene-bridge-submission-20261115-001/bedroom.jsonl \
+  --scene build/t3render-offline/SouthQuarter1_int1.scene.json \
+  --frame 1001 --pass 0 --stage 1 --anchor-draw 8 \
+  --output build/t3render-offline/bedroom-runtime-1001-v1.scene.json
+```
+
+The producer revalidates the trace and proof, and selects only verified
+submissions with the anchor's camera matrices, draw viewport and thread. The
+result contains the runtime bed transform, nine BSP blocks and 18 scoped draws
+in pass 0/stage 1. It contains no runtime lights: their observation remains
+unimplemented. All geometry, material bindings and IDs are from the offline
+fixture, matched to runtime names and metadata; per-draw lock-shadow status is
+`unverified` in this capture. The separate frame 2722's byte comparisons do
+not establish frame-1001 payload contents. Skin and near/far remain unknown.
+The camera viewport comes from the selected draws (`0..0.5`), not the probe's
+different depth range. The output and its manifest remain local under `build/`.
+
+The existing SceneIR preview supports v1 and uses only submitted sections of
+the selected pass/stage. When there is more than one scope, select it explicitly
+with `--submission-pass` and `--submission-stage`. The frame-1001 scene above
+produces a 450-triangle flat diagnostic packet with BSP indices 1, 2, 4, 5, 6,
+7, 9, 11 and 19; it is not a textured or lit parity render. The producer remains
+limited to the verified target mesh and observed BSP candidates; it is not yet
+a general live scene bridge. The packet was parsed and rendered on the local
+Highball/D3D12 environment without launching TDS. In the local image the bed,
+floor and wall silhouettes are recognizable against the frame-1001 screenshot;
+textures, lights, other objects and HUD are missing. No pixel parity is claimed.
+See [SceneIR v1](../ir/README_scene_ir.md).
+
 ## Scoped submission checkpoint: frame 1001
 
 The later frame 1001 directly brackets the per-section virtual draw call at

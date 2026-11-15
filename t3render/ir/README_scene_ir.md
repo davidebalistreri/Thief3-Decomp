@@ -1,4 +1,4 @@
-# Scene IR v0
+# Scene IR v0 and v1
 
 `scene_ir.py` describes a semantic scene as plain data. It is distinct from the
 diagnostic draw trace and its Render IR. It has no graphics API types or process
@@ -36,6 +36,29 @@ Section materials may be unknown, or an instance can select a material per
 section for its skin. BSP entries include source index and optional source
 offset because original block IDs may repeat. Null light fields, including
 `enabled`, mean unknown; radius/intensity do not imply a physical calibration.
+
+## Scoped submissions in v1
+
+Version 1 adds a `submissions` array to the v0 fields. Each entry refers to a
+mesh instance or BSP block and one of its sections, with `render_pass`, `stage`,
+the trace's `draw_id`, and `lock_shadow` (`matched` or `unverified`). The source
+frame and trace fingerprint identify the capture. A submission is a producer's
+claim of direct scoped ownership, not an API command or a persistent resource
+ID. Target and section references must resolve, draw IDs must be unique, and a
+nonempty array requires a synchronized runtime camera and trace fingerprint.
+Offline v1 scenes may have an empty array. Existing v0 documents continue to
+round-trip unchanged. No process addresses, COM or UObject pointers belong in
+either format.
+
+The scoped snapshot producer described in
+[the runtime checkpoint](../tools/README_bridge_runtime_checkpoint.md) emits
+only verified submissions for one pass and stage with the anchor's camera,
+draw viewport and thread. Geometry remains asset-backed and an unlisted section
+is not claimed visible. Lock shadows apply only to the same draw and frame;
+separate reference captures cannot upgrade their status. The v1 preview
+requires one unambiguous pass/stage and renders only its submitted sections.
+The format supports lights, but an empty runtime list is not evidence that no
+lights exist: the producer documents missing light coverage in limitations.
 
 ## Conventions
 

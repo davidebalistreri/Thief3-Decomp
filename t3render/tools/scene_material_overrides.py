@@ -17,7 +17,7 @@ MATERIALS = {"stmwall512d_d": "stone_wall_v2", "hsefloorb_d": "wood_floor_v2"}
 AREAS = {"stone_wall_v2": ((-.25, -.10, -2.10), (4.85, 4.10, 3.35)),
          "wood_floor_v2": ((-6.0, -.08, -1.6), (5.0, .08, 3.2))}
 SOURCE_SIZES = {"stone_wall_v2": 2048, "wood_floor_v2": 1024, "bed_wool_v2": 512, "pillow_linen": 512,
-                "candlestick_metal_v2": 1024}
+                "candlestick_metal_v2": 1024, "arch_stone_v2": 1024}
 MAX_PNG_BYTES = 16 * 1024 * 1024
 TEXTURE_SIZE = 1024
 

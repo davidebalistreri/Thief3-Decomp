@@ -163,6 +163,29 @@ one selected holder has 4,328 triangles, with 392 tangent fallback triangles.
 With all other preview options unchanged, the D3D12 render changes 3,228
 pixels and has mean absolute RGB difference 0.054 on a 0–255 scale.
 
+## Semantic high-poly arch detail
+
+`--arch-high <rosette_high.glb>` selects the submitted bedroom candidate
+`StaticMeshActor__59 / GENsknDOORFRMarc4x10half` and requires both its stone
+and rosette sections in the selected scope. The original stone geometry is
+preserved and uses `stone_wall_v2`; its `CIVGoodness_D` rosette is replaced
+by generated relief using `arch_stone_v2`, and generated stone jambs are
+added. The local bounds are checked against the corresponding source
+sections before applying the scoped actor transform. Removing the option
+restores the original packet. The original submitted rosette is not added
+again as an offline caster; the generated and preserved geometry use the
+offline actor's cast flag and light ownership rules.
+
+The actor's mesh binding is a fingerprinted offline candidate; the runtime
+transform and submission are scoped observations. The generated GLB hash,
+actor, sections and counts appear in the manifest. UV-inferred tangents and
+the material mapping are preview approximations. Frame 1001 contains 6,696
+generated triangles, with 360 tangent fallback triangles; the D3D12 preview
+changes 43,705 pixels versus the same preview without this option, with mean
+absolute RGB difference 0.108 on a 0–255 scale. The camera shows mainly the
+arch edge, so this image does not establish a detailed visual comparison of
+the rosette.
+
 ## Volumetric preview
 
 `--volumetric` integrates a homogeneous participating medium from the camera
@@ -322,6 +345,8 @@ to use the generated high-poly bed instead of the original bed sections.
 Add `--candlestick-high build/assets/godot/remaster/garrett_home/highpoly/generated/candlestick_high.glb`
 to replace the scoped bedroom candlestick metal and wax; optionally use the
 same GLB with `--candle-flames` for emissive flame geometry.
+Add `--arch-high build/assets/godot/remaster/garrett_home/highpoly/generated/rosette_high.glb`
+for the bedroom arch's generated rosette and jambs.
 
 Run `t3render_scene_pbr_d3d12 <packet> --output <new.ppm> [--indirect] [--gtao] [--volumetric] [--reflections] [--filmic]` in a D3D12
 environment. The packet, manifest and PPM use exclusive creation. See the

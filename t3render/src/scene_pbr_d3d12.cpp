@@ -418,6 +418,8 @@ float4 main(float4 position:SV_Position):SV_Target {
             list->SetGraphicsRoot32BitConstants(7, 20, shadow_constants, 0);
             for (const auto& draw : frame.draws)
                 if (draw.shadow_mask & (1u << light)) list->DrawInstanced(draw.vertex_count, 1, draw.first_vertex, 0);
+            for (const auto& caster : frame.offline_casters)
+                if (caster.shadow_mask & (1u << light)) list->DrawInstanced(caster.vertex_count, 1, caster.first_vertex, 0);
         }
         Transition(list.p, shadow_map.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         auto shadow_handle = gpu_base; shadow_handle.ptr += UINT64(frame.textures.size()*2+1)*srv_step;
@@ -468,8 +470,11 @@ float4 main(float4 position:SV_Position):SV_Target {
     const D3D12_RANGE no_write{0, 0}; readback->Unmap(0, &no_write);
     if (!changed) { std::fprintf(stderr, "PBR preview produced no visible pixels\n"); return 1; }
     if (!ok) { std::fprintf(stderr, "image write failed; partial file may remain\n"); return 1; }
-    std::printf("sceneir_pbr_dx12=ok textures=%zu draws=%zu triangles=%zu lights=%zu changed_pixels=%zu\n",
-                frame.textures.size(), frame.draws.size(), frame.vertices.size()/3, frame.lights.size(), changed);
+    std::size_t visible_vertices = 0;
+    for (const auto& draw : frame.draws) visible_vertices += draw.vertex_count;
+    std::printf("sceneir_pbr_dx12=ok textures=%zu draws=%zu triangles=%zu offline_caster_triangles=%zu lights=%zu changed_pixels=%zu\n",
+                frame.textures.size(), frame.draws.size(), visible_vertices/3,
+                (frame.vertices.size()-visible_vertices)/3, frame.lights.size(), changed);
     return 0;
 }
 } // namespace

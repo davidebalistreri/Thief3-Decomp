@@ -15,33 +15,47 @@ AXES = (
 IDENTITY = (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
 
 
-def fixture(face, shadow=True, two_lights=False, asymmetric=False, hard=False, short_range=False, behind=False):
+def fixture(face, shadow=True, two_lights=False, asymmetric=False, hard=False, short_range=False, behind=False,
+            offline_caster=None):
     if type(face) is not int or not 0 <= face < len(AXES):
         raise ValueError("face must be in 0..6 (6 is a cubemap seam)")
+    if offline_caster is not None and (not shadow or type(offline_caster) is not bool):
+        raise ValueError("offline caster fixture requires shadow maps")
     right, up, forward = AXES[face]
     def world(x, y, z):
         return tuple(x*right[i]+y*up[i]+z*forward[i] for i in range(3))
     view = tuple(v for row in range(3) for v in (right[row], up[row], forward[row], 0)) + (0, 0, 0, 1)
     count = 2 if two_lights else 1
-    body = bytearray(struct.pack("<8sIIff32f4f4fIII", b"T3PBR02\0" if shadow else b"T3PBR01\0",
+    magic = b"T3PBR03\0" if offline_caster is not None else b"T3PBR02\0" if shadow else b"T3PBR01\0"
+    body = bytearray(struct.pack("<8sIIff32f4f4fIII", magic,
                                  64, 64, 0, 1, *view, *IDENTITY, *world(0, 0, -2), 1,
-                                 .02, .02, .02, 1, 4, 2, count))
+                                 .02, .02, .02, 1, 4, 1 if offline_caster is not None else 2, count))
     if shadow:
         body.extend(struct.pack("<I4f", 128, .05, 1 if short_range else 10, .005, 0 if hard else .5))
+        if offline_caster is not None:
+            body.extend(struct.pack("<I", int(offline_caster)))
     colors = ((1, 0, 0), (0, 0, 1)) if two_lights else ((1, 1, 1),)
     for color in colors:
         body.extend(struct.pack("<8f", *world(0, 0, -.7), .2, *color, 3))
     for rgba in ((180, 180, 180, 255), (128, 128, 255, 255), (204, 204, 204, 255), (255, 255, 255, 255)):
         body.extend(struct.pack("<III4B", 1, 1, 1, *rgba))
     blocker = (.1, .06, .3, .18) if asymmetric else (-.2, -.2, .2, .2)
-    for (left, bottom, right_edge, top), z, mask in (
-            ((-1, -1, 1, 1), .7, (1 << count)-1), (blocker, 1.2 if behind else -.1, 1)):
+    geometry = [((-1, -1, 1, 1), .7, (1 << count)-1)]
+    if offline_caster is None:
+        geometry.append((blocker, 1.2 if behind else -.1, 1))
+    for (left, bottom, right_edge, top), z, mask in geometry:
         body.extend(struct.pack("<5I", 0, 1, 2, 3, 6))
         if shadow:
             body.extend(struct.pack("<I", mask))
         for x, y in ((left, bottom), (left, top), (right_edge, top),
                      (left, bottom), (right_edge, top), (right_edge, bottom)):
             body.extend(struct.pack("<12f", *world(x, y, z), .5, .5, *world(0, 0, -1), 0, 0, 0, 0))
+    if offline_caster:
+        left, bottom, right_edge, top = blocker
+        body.extend(struct.pack("<II", 1, 6))
+        for x, y in ((left, bottom), (left, top), (right_edge, top),
+                     (left, bottom), (right_edge, top), (right_edge, bottom)):
+            body.extend(struct.pack("<3f", *world(x, y, 1.2 if behind else -.1)))
     return bytes(body)
 
 
@@ -121,13 +135,16 @@ def main():
     parser.add_argument("--hard", action="store_true")
     parser.add_argument("--short-range", action="store_true")
     parser.add_argument("--behind", action="store_true")
+    parser.add_argument("--offline-caster", action="store_true",
+                        help="use packet v3 with a shadow-only blocker; --baseline omits it")
     parser.add_argument("--soft-reference", type=Path)
     args = parser.parse_args()
     try:
         if args.action == "create":
             with args.path.open("xb") as stream:
-                stream.write(fixture(args.face, not args.baseline, args.two_lights, args.asymmetric,
-                                     args.hard, args.short_range, args.behind))
+                stream.write(fixture(args.face, not args.baseline or args.offline_caster, args.two_lights, args.asymmetric,
+                                     args.hard, args.short_range, args.behind,
+                                     offline_caster=not args.baseline if args.offline_caster else None))
         else:
             if args.reference is None:
                 raise ValueError("--reference is required for verification")

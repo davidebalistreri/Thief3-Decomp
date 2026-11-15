@@ -58,6 +58,24 @@ Off-screen objects and sections omitted from the capture, non-opaque
 textures, and dynamic shadow-state changes can therefore produce missing or
 incorrect shadows. The previous unshadowed version-1 packet remains supported.
 
+`--shadows --offline-shadow-casters` optionally adds static caster candidates
+from the fingerprinted offline SceneIR and actor export. Packet version 3
+stores their positions separately: they contribute only to shadow maps, not the
+visible geometry pass. BSP sections and unattached `StaticMeshActor` sections
+with an enabled offline cast flag are considered when their world-space bounds
+intersect a light's shadow range. Sections already submitted in the selected
+scope are not duplicated; hidden, missing-material and non-opaque diffuse
+sections are omitted. If an instance was observed in the scoped frame, its
+runtime transform is used for its unsubmitted sections; otherwise its offline
+transform is used. A manifest records the selection, exclusions and light masks.
+
+These additions are **offline candidates**, not an observation of visibility,
+runtime transforms or shadow flags. Save-game changes and unresolved
+attachments can make them inaccurate or incomplete. Bounds are a coarse range
+filter, not an occlusion or room-membership test. Both the candidate count and
+the total GPU shadow work are bounded; exceeding a limit rejects the packet.
+The default version-1 and version-2 packet bytes are unchanged.
+
 Defaults are 512² per face, near 0.05 m, far 15 m, bias 0.015 m and softness
 0.5. `--shadow-map-size`, `--shadow-near-m`, `--shadow-far-m`,
 `--shadow-bias-m` and `--shadow-softness` change them; softness 0 gives a hard
@@ -72,6 +90,12 @@ triangles) cast for each light. Shadow maps change 651,125 pixels compared
 with the same unshadowed PBR image, with mean absolute RGB difference 7.012
 on a 0–255 scale. This measures a visual change, not parity with TDS. The
 version-1 PBR image remains byte-identical when shadows are not enabled.
+
+For the same frame, the optional offline selection adds 213 sections and 8,911
+triangles, with 6,066 shadow draws and 272,352 shadow triangle submissions in
+total. Compared with the scoped-only shadow render, 2,601 pixels change and
+mean absolute RGB difference is 0.002 on a 0–255 scale. This is a measurement
+of the preview, not proof of runtime shadow correctness.
 
 For the local frame 1001, five preview omni lights, 26 textures, 59 draws and
 3,553 triangles render the bedroom; one candle-wax section is excluded for
@@ -122,6 +146,7 @@ python3 -B t3render/tools/scene_pbr_packet.py \
 
 To build the shadowed alternative, append `--shadows` and choose a different
 output path; all other arguments and the calibration stay the same.
+Add `--offline-shadow-casters` as well to opt into offline candidates.
 
 Run `t3render_scene_pbr_d3d12 <packet> --output <new.ppm>` in a D3D12
 environment. The packet, manifest and PPM use exclusive creation. See the
@@ -133,6 +158,8 @@ need to be running.
 `python3 -B -m unittest discover -s t3render/tests -p test_scene_pbr_packet.py`
 tests semantic selection, per-channel bindings, opacity exclusions, matching
 frame/camera, calibration bounds, and the independent C++ packet parser.
+`test_scene_pbr_offline_casters.py` additionally checks offline provenance,
+selection, deduplication, transforms, opacity and parser/work limits.
 
 For GPU verification, create a new fixture with
 `python3 -B t3render/tools/scene_pbr_fixture.py create <new.bin>`, render it
@@ -155,3 +182,7 @@ at verification; `--short-range` checks the far-distance fallback and
 local Highball/D3D12 path, these fixtures passed for the six faces, seam,
 asymmetric occluders, independent light layers, soft versus hard penumbrae,
 range fallback and an off-axis receiver self-shadow case.
+`--offline-caster` produces a version-3 fixture with a shadow-only blocker;
+add `--baseline` to omit that blocker while keeping the visible geometry
+identical. The local GPU test passed with the blocker shadowing the receiver
+and leaving an unoccluded sample unchanged.

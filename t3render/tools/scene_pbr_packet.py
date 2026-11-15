@@ -18,12 +18,14 @@ import scene_ir_to_d3d12_packet as preview
 import scene_ir_to_textured_packet as legacy
 import scene_legacy_states as states
 import scene_material_overrides as overrides
+import scene_pbr_offline_casters as offline_casters
 from ibt import IBT
 from scene_ir import SceneSnapshot, transform_point
 from t3common import game_dir, resolve_map
 
 MAGIC = b"T3PBR01\0"
 SHADOW_MAGIC = b"T3PBR02\0"
+OFFLINE_CASTER_MAGIC = b"T3PBR03\0"
 MAX_LIGHTS = 16
 MAX_TRIANGLES = 100000
 MAX_DRAWS = 8192
@@ -31,6 +33,11 @@ MAX_TEXTURES = 64
 MAX_BYTES = 64 * 1024 * 1024
 MAX_SHADOW_DRAWS = 65536
 MAX_SHADOW_TRIANGLES = 6000000
+
+
+def _bit_count(mask):
+    # macOS ships Python 3.9, which predates int.bit_count().
+    return bin(mask).count("1")
 
 
 def _number(value, low, high, name):
@@ -119,7 +126,7 @@ def shadow_owners(scene, lights, actors):
 
 
 def create_packet(scene, light_scene, calibration, resolver, remaster, render_pass=None, stage=None,
-                  shadows=None, actors=None):
+                  shadows=None, actors=None, offline=None, offline_raw=None, caster_resolve=None):
     render_pass, stage = legacy.select_scope(scene, render_pass, stage)
     legacy.select_scope(light_scene)
     if (light_scene.source.kind != "runtime" or scene.source.frame_id != light_scene.source.frame_id or
@@ -136,6 +143,10 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
         raise ValueError("PBR preview requires an invertible camera view")
     ambient, exposure, lights = load_calibration(calibration, light_scene)
     shadow = shadow_parameters(shadows) if shadows is not None else None
+    if offline is not None and (shadow is None or offline_raw is None or caster_resolve is None):
+        raise ValueError("offline shadow casters require shadows, fixture bytes and a material resolver")
+    if offline is None and (offline_raw is not None or caster_resolve is not None):
+        raise ValueError("offline caster inputs require an offline scene")
     owners = shadow_owners(scene, lights, actors) if shadow is not None else None
     resources = {m.id: m for m in scene.static_mesh_resources}
     instances = {m.id: m for m in scene.mesh_instances}
@@ -241,18 +252,27 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
                 records[-1]["shadow_caster_lights"] = [lights[n]["id"] for n in range(len(lights)) if shadow_mask & (1 << n)]
     if not draws:
         raise ValueError("PBR preview has no opaque submitted geometry")
+    casters, caster_stats = [], None
+    if offline is not None:
+        casters, caster_stats = offline_casters.select(scene, offline, offline_raw, actors, caster_resolve,
+                                                        lights, shadow, owners, render_pass, stage)
     if shadow is not None:
-        calls = sum(mask.bit_count()*6 for _, _, mask in draws)
-        work = sum(mask.bit_count()*6*(len(vertices)//3) for _, vertices, mask in draws)
+        calls = sum(_bit_count(mask)*6 for _, _, mask in draws)
+        work = sum(_bit_count(mask)*6*(len(vertices)//3) for _, vertices, mask in draws)
+        calls += sum(_bit_count(caster["shadow_mask"])*6 for caster in casters)
+        work += sum(_bit_count(caster["shadow_mask"])*6*(len(caster["vertices"])//3) for caster in casters)
         if calls > MAX_SHADOW_DRAWS or work > MAX_SHADOW_TRIANGLES:
             raise ValueError("shadow maps exceed renderer work bounds")
     viewport = scene.camera.viewport
-    body = bytearray(struct.pack("<8sIIff32f4f4fIII", SHADOW_MAGIC if shadow else MAGIC, viewport.width, viewport.height,
+    magic = OFFLINE_CASTER_MAGIC if offline is not None else SHADOW_MAGIC if shadow else MAGIC
+    body = bytearray(struct.pack("<8sIIff32f4f4fIII", magic, viewport.width, viewport.height,
                                  viewport.min_depth, viewport.max_depth, *scene.camera.view, *scene.camera.projection,
                                  *camera, scale, *ambient, exposure, len(textures), len(draws), len(lights)))
     if shadow is not None:
         body.extend(struct.pack("<I4f", shadow["size"], shadow["near_m"], shadow["far_m"],
                                 shadow["bias_m"], shadow["softness"]))
+        if offline is not None:
+            body.extend(struct.pack("<I", len(casters)))
     for light in lights:
         body.extend(struct.pack("<8f", *light["position"], light["radius_m"], *light["color_linear"],
                                 light["intensity_candela"]))
@@ -266,6 +286,10 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
             body.extend(struct.pack("<I", shadow_mask))
         for vertex in vertices:
             body.extend(struct.pack("<12f", *vertex))
+    for caster in casters:
+        body.extend(struct.pack("<II", caster["shadow_mask"], len(caster["vertices"])))
+        for vertex in caster["vertices"]:
+            body.extend(struct.pack("<3f", *vertex))
     if len(body) > MAX_BYTES:
         raise ValueError("PBR packet exceeds bounds")
     stats = {"render_pass": render_pass, "stage": stage, "triangles": triangles, "draws": records,
@@ -277,6 +301,14 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
     if shadow is not None:
         stats["shadow_maps"] = {**shadow, "casters": "scoped_opaque_geometry_with_offline_cast_flags",
                                 "draw_calls": calls, "triangle_submissions": work}
+        if caster_stats is not None:
+            stats["shadow_maps"]["casters"] = "scoped_opaque_geometry_and_offline_candidates"
+            stats["shadow_maps"]["offline_candidates"] = {
+                **caster_stats,
+                "sections": [{k: value for k, value in caster.items() if k != "vertices"} | {
+                    "triangles": len(caster["vertices"])//3,
+                    "lights": [lights[n]["id"] for n in range(len(lights)) if caster["shadow_mask"] & (1 << n)]}
+                    for caster in casters]}
     return bytes(body), stats
 
 
@@ -293,6 +325,8 @@ def main(argv=None):
     parser.add_argument("--stage", type=int)
     parser.add_argument("--bedroom-remaster-materials", type=Path)
     parser.add_argument("--shadows", action="store_true", help="render point-light shadow maps from selected opaque geometry")
+    parser.add_argument("--offline-shadow-casters", action="store_true",
+                        help="add bounded static caster candidates from the offline fixture")
     parser.add_argument("--shadow-map-size", type=int)
     parser.add_argument("--shadow-near-m", type=float)
     parser.add_argument("--shadow-far-m", type=float)
@@ -301,8 +335,8 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        if not args.shadows and any(x is not None for x in (args.shadow_map_size, args.shadow_near_m,
-                                                             args.shadow_far_m, args.shadow_bias_m, args.shadow_softness)):
+        if not args.shadows and (args.offline_shadow_casters or any(x is not None for x in (args.shadow_map_size,
+                args.shadow_near_m, args.shadow_far_m, args.shadow_bias_m, args.shadow_softness))):
             raise ValueError("shadow parameters require --shadows")
         scene_raw = preview.read_limited(args.scene, preview.MAX_INPUT)
         light_raw = preview.read_limited(args.light_scene, preview.MAX_INPUT)
@@ -337,11 +371,15 @@ def main(argv=None):
                       if args.shadows else None)
             actors = direct.offline_actors(scene, offline, offline_raw, args.offline_actors) if shadow is not None else None
             body, stats = create_packet(scene, light_scene, calibration, legacy.TextureResolver(bundles), remaster,
-                                        args.render_pass, args.stage, shadows=shadow, actors=actors)
+                                        args.render_pass, args.stage, shadows=shadow, actors=actors,
+                                        offline=offline if args.offline_shadow_casters else None,
+                                        offline_raw=offline_raw if args.offline_shadow_casters else None,
+                                        caster_resolve=(lambda name: legacy.TextureResolver(bundles).resolve(name))
+                                        if args.offline_shadow_casters else None)
         finally:
             for bundle in bundles:
                 bundle.close()
-        manifest = {"schema": "t3.scene.pbr-packet", "version": 2 if shadow is not None else 1,
+        manifest = {"schema": "t3.scene.pbr-packet", "version": 3 if args.offline_shadow_casters else 2 if shadow is not None else 1,
                     "source_frame": scene.source.frame_id,
                     "scene_sha256": hashlib.sha256(scene_raw).hexdigest(),
                     "light_scene_sha256": hashlib.sha256(light_raw).hexdigest(),
@@ -355,7 +393,11 @@ def main(argv=None):
                                     "Override AO, roughness and normals are generated offline; tangent space and the SDK unit scale are assumptions."],
                     **stats}
         if shadow is not None:
-            manifest["limitations"].append("Shadow maps use only selected opaque runtime-scope geometry and offline cast flags; off-screen casters and runtime flags are unknown.")
+            manifest["limitations"].append("Shadow maps use selected opaque runtime-scope geometry and offline cast flags; runtime shadow flags are unknown.")
+            if args.offline_shadow_casters:
+                manifest["limitations"].append("Additional static casters are offline candidates, not frame observations; save-game changes, attachments and dynamic state can make them incorrect or incomplete.")
+            else:
+                manifest["limitations"].append("Off-screen casters are unavailable in this preview.")
         legacy.write_pair(args.output, body, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))
     except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, struct.error) as exc:

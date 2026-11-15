@@ -2,6 +2,7 @@
 from pathlib import Path
 import shutil
 import struct
+import math
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,7 @@ import build_scoped_scene_snapshot as builder
 import scene_ir_to_textured_packet as packet
 import scene_texture_fixture as gpu_fixture
 import scene_ambient_fixture as ambient_fixture
+import scene_direct_fixture as direct_fixture
 from t3texture import Mip, Texture
 from test_scoped_scene_snapshot import fixture
 
@@ -176,6 +178,62 @@ class TexturedScenePacketTests(unittest.TestCase):
         image[len(header) + (32 * 64 + 16) * 3] = 0
         with self.assertRaisesRegex(ValueError, "wrong pixel"):
             ambient_fixture.verify(image)
+
+    def test_normal_transform_preserves_perpendicularity_under_nonuniform_scale(self):
+        matrix = [0, 2, 0, 0, -3, 0, 0, 0, 0, 0, 4, 0, 5, 6, 7, 1]
+        normal = packet.transform_normal((1, 1, 0), packet.normal_matrix(matrix))
+        self.assertAlmostEqual(normal[0], -2 / math.sqrt(13))
+        self.assertAlmostEqual(normal[1], 3 / math.sqrt(13))
+        self.assertAlmostEqual(normal[0] * 3 + normal[1] * 2, 0)
+        mirror = [-2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 4, 0, 0, 0, 0, 1]
+        flipped = packet.transform_normal((1, 1, 0), packet.normal_matrix(mirror))
+        self.assertAlmostEqual(flipped[0], -3 / math.sqrt(13))
+        self.assertAlmostEqual(flipped[1], 2 / math.sqrt(13))
+        matrix[10] = 0
+        with self.assertRaisesRegex(ValueError, "singular"):
+            packet.normal_matrix(matrix)
+
+    def test_direct_packet_roundtrip_rejects_missing_normals_or_invalid_light(self):
+        scene = scoped_scene()
+        states = {s.draw_id: dict(packet.legacy_states.DEFAULT) for s in scene.submissions}
+        states[2].update(depth_write=0, blend_enable=1, blend_src=1, blend_dst=1, color_mask=7)
+        light = {"mode": "point_approximation", "position": [1, 2, 3], "inverse_radius_candidate": .1,
+                 "offline_color": [1, .8, .6], "offline_energy": .5, "gain": 1}
+        raw, info = packet.create_packet(scene, Resolver(), draw_states=states, direct_candidates={2: light})
+        self.assertEqual(raw[:8], b"T3SCN05\0")
+        self.assertEqual(info["draws"][0]["direct_candidate"]["mode"], "point_approximation")
+        self.assertEqual(self.parse(raw).returncode, 0)
+        data = scene.to_dict()
+        data["bsp_blocks"][0]["geometry"]["normals"] = None
+        with self.assertRaisesRegex(ValueError, "normals"):
+            packet.create_packet(packet.SceneSnapshot.from_dict(data), Resolver(), draw_states=states,
+                                 direct_candidates={2: light})
+        for invalid in (dict(light, inverse_radius_candidate=0), dict(light, inverse_radius_candidate=1e-60),
+                        dict(light, offline_color=[1, 2, 3]),
+                        dict(light, position=[float("nan"), 0, 0]), {"mode": "unsupported"}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                packet.create_packet(scene, Resolver(), draw_states=states, direct_candidates={2: invalid})
+        states[2]["depth_write"] = 1
+        with self.assertRaisesRegex(ValueError, "additive RGB"):
+            packet.create_packet(scene, Resolver(), draw_states=states, direct_candidates={2: light})
+
+    def test_direct_gpu_fixture_checks_point_and_skipped_spot(self):
+        raw = direct_fixture.fixture()
+        self.assertEqual(self.parse(raw).returncode, 0)
+        # Second draw starts after one texture and the first six-vertex draw.
+        for bad in (raw[:532] + struct.pack("<I", 4) + raw[536:],
+                    raw[:564] + bytes(4) + raw[568:],
+                    raw[:604] + bytes(12) + raw[616:]):
+            self.assertEqual(self.parse(bad).returncode, 2)
+        header = b"P6\n64 64\n255\n"
+        image = bytearray(header + bytes(64 * 64 * 3))
+        for (x, y), color in direct_fixture.EXPECTED.items():
+            offset = len(header) + (y * 64 + x) * 3
+            image[offset:offset + 3] = bytes(color)
+        self.assertEqual(direct_fixture.verify(image), 2)
+        image[len(header) + (32 * 64 + 16) * 3] = 0
+        with self.assertRaisesRegex(ValueError, "wrong pixel"):
+            direct_fixture.verify(image)
 
     def test_exclusive_write_does_not_overwrite_or_leave_first_file(self):
         with tempfile.TemporaryDirectory(prefix="t3render-textured-output-") as directory:

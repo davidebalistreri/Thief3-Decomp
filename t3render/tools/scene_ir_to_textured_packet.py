@@ -25,13 +25,38 @@ from t3texture import TYPE_MATERIAL, TYPE_TEXTURE, decode_rgba, mip_size, parse_
 import scene_ir_to_d3d12_packet as preview  # noqa: E402
 import scene_legacy_states as legacy_states  # noqa: E402
 import scene_ambient_candidates as ambient  # noqa: E402
+import scene_direct_candidates as direct  # noqa: E402
 
 MAGIC = b"T3SCN03\0"
 AMBIENT_MAGIC = b"T3SCN04\0"
+DIRECT_MAGIC = b"T3SCN05\0"
 MAX_BYTES = 64 * 1024 * 1024
 MAX_TEXTURES = 64
 MAX_DRAWS = 8192
 MAX_TRIANGLES = 100000
+
+
+def normal_matrix(matrix):
+    """Inverse transpose of the row-vector affine transform's linear part."""
+    a, b, c, d, e, f, g, h, i = (matrix[k] for k in (0, 1, 2, 4, 5, 6, 8, 9, 10))
+    cofactors = (e*i-f*h, f*g-d*i, d*h-e*g,
+                 c*h-b*i, a*i-c*g, b*g-a*h,
+                 b*f-c*e, c*d-a*f, a*e-b*d)
+    determinant = a * cofactors[0] + b * cofactors[1] + c * cofactors[2]
+    if not math.isfinite(determinant) or abs(determinant) < 1e-12:
+        raise ValueError("cannot transform normals with a singular matrix")
+    result = tuple(x / determinant for x in cofactors)
+    if any(not math.isfinite(x) for x in result):
+        raise ValueError("normal transform is not finite")
+    return result
+
+
+def transform_normal(normal, matrix):
+    value = tuple(sum(normal[i] * matrix[i * 3 + j] for i in range(3)) for j in range(3))
+    length = math.sqrt(sum(x*x for x in value))
+    if not math.isfinite(length) or length < 1e-12:
+        raise ValueError("normal is zero or nonfinite")
+    return tuple(x / length for x in value)
 
 
 def digest_file(path):
@@ -137,7 +162,7 @@ def select_scope(scene, render_pass=None, stage=None):
 
 
 def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=None, sampler_candidates=None,
-                  additional_scenes=(), ambient_candidates=None):
+                  additional_scenes=(), ambient_candidates=None, direct_candidates=None):
     render_pass, stage = select_scope(scene, render_pass, stage)
     selections = [(scene, render_pass, stage)]
     if additional_scenes and draw_states is None:
@@ -175,6 +200,12 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
         if draw_states is None or not isinstance(ambient_candidates, dict) or not ambient_candidates or not (
                 set(ambient_candidates) <= {s.draw_id for s, _ in submissions}):
             raise ValueError("ambient candidates require revalidated submitted draws")
+    if direct_candidates is not None:
+        if draw_states is None or not isinstance(direct_candidates, dict) or not direct_candidates or not (
+                set(direct_candidates) <= {s.draw_id for s, _ in submissions}):
+            raise ValueError("direct candidates require revalidated submitted draws")
+        if ambient_candidates is not None and set(ambient_candidates) & set(direct_candidates):
+            raise ValueError("a draw cannot have ambient and direct candidates")
     if additional_scenes:
         # Trace operation IDs increase within a frame; restore their original
         # order when combining individually verified stage snapshots.
@@ -197,6 +228,14 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             raise ValueError("submitted section lacks a material or UV0")
         if any(abs(matrix[i]) > 1e-6 for i in (3, 7, 11)) or abs(matrix[15] - 1) > 1e-6:
             raise ValueError("only affine row-vector transforms are supported")
+        light = direct_candidates.get(submission.draw_id) if direct_candidates is not None else None
+        if direct_candidates is not None and submission.draw_id in direct_candidates:
+            if not isinstance(light, dict) or light.get("mode") not in ("point_approximation", "skipped_spot"):
+                raise ValueError("invalid direct candidate")
+        is_point = light is not None and light["mode"] == "point_approximation"
+        if is_point and geometry.normals is None:
+            raise ValueError("point-light candidate requires source normals")
+        normal_xform = normal_matrix(matrix) if is_point else None
         tex = resolver.resolve(material_name)
         tex_key = (tex["bundle"], tex["name"].lower())
         if tex_key not in texture_indices:
@@ -210,13 +249,18 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             uv = geometry.uv0[index]
             if (abs(position[3] - 1) > 1e-6 or any(not math.isfinite(v) or abs(v) > 1000000 for v in position[:3] + uv)):
                 raise ValueError("vertex exceeds renderer bounds")
-            vertices.append((*position[:3], *uv))
+            normal = transform_normal(geometry.normals[index], normal_xform) if is_point else (0, 0, 0)
+            vertices.append((*position[:3], *uv, *normal) if direct_candidates is not None else (*position[:3], *uv))
         triangle_count += len(vertices) // 3
         if not vertices or triangle_count > MAX_TRIANGLES:
             raise ValueError("triangle count exceeds renderer bounds")
         if draw_states is not None and submission.draw_id not in draw_states:
             raise ValueError("captured state missing for submitted draw")
         state = legacy_states.validate(dict(legacy_states.DEFAULT if draw_states is None else draw_states[submission.draw_id]))
+        if light is not None and (state["depth_enable"] != 1 or state["depth_write"] != 0 or
+                state["blend_enable"] != 1 or state["blend_src"] != 1 or state["blend_dst"] != 1 or
+                state["blend_op"] != 0 or state["color_mask"] != 7):
+            raise ValueError("direct candidates require additive RGB with depth testing and no depth writes")
         if sampler_candidates is not None and submission.draw_id not in sampler_candidates:
             raise ValueError("sampler candidate missing for submitted draw")
         sampler = (match_sampler(sampler_candidates[submission.draw_id], tex) if sampler_candidates is not None else
@@ -227,7 +271,24 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
                 isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or not 0 <= x <= 1
                 for x in color)):
             raise ValueError("invalid ambient candidate color")
-        draws.append((texture_indices[tex_key], vertices, state, sampler, color))
+        if is_point:
+            position, inverse, rgb = light.get("position"), light.get("inverse_radius_candidate"), light.get("offline_color")
+            energy, gain = light.get("offline_energy"), light.get("gain")
+            values = (position if isinstance(position, (tuple, list)) else [])
+            values = list(values) + [inverse] + (list(rgb) if isinstance(rgb, (tuple, list)) else []) + [energy, gain]
+            if (not isinstance(position, (tuple, list)) or len(position) != 3 or
+                    not isinstance(rgb, (tuple, list)) or len(rgb) != 3 or any(
+                        isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in values) or
+                    any(abs(x) > 1000000 for x in position) or not 0 < inverse <= 1 or
+                    any(not 0 <= x <= 1 for x in rgb) or not 0 <= energy <= 1 or not 0 <= gain <= 4):
+                raise ValueError("invalid point-light candidate parameters")
+            if struct.unpack("<f", struct.pack("<f", inverse))[0] <= 0:
+                raise ValueError("point-light inverse radius rounds to zero")
+            light_values = (*position, inverse, *rgb, energy * gain)
+        else:
+            light_values = (0,) * 8
+        mode = 2 if is_point else 3 if light is not None else 1 if color is not None else 0
+        draws.append((texture_indices[tex_key], vertices, state, sampler, color, mode, light_values))
         source_draws.append({"draw": submission.draw_id, "target_kind": submission.target_kind,
                              "target_id": submission.target_id, "section": submission.section,
                              "render_pass": submission.render_pass, "stage": submission.stage,
@@ -235,14 +296,18 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
                              "state": state, "sampler": sampler})
         if color is not None:
             source_draws[-1]["ambient_candidate"] = list(color)
+        if light is not None:
+            source_draws[-1]["direct_candidate"] = light
     camera = scene.camera
     viewport = camera.viewport
     size = (struct.calcsize("<8sIIff32fII") + sum(12 + sum(len(mip) for mip in tex["mips"]) for tex in textures) +
-            sum(56 + (20 if ambient_candidates is not None else 0) + len(vertices) * 20
-                for _, vertices, _, _, _ in draws))
+            sum(56 + (20 if ambient_candidates is not None or direct_candidates is not None else 0) +
+                (32 if direct_candidates is not None else 0) + len(vertices) * (32 if direct_candidates is not None else 20)
+                for _, vertices, _, _, _, _, _ in draws))
     if size > MAX_BYTES:
         raise ValueError("packet exceeds renderer bounds")
-    body = bytearray(struct.pack("<8sIIff32fII", AMBIENT_MAGIC if ambient_candidates is not None else MAGIC,
+    magic = DIRECT_MAGIC if direct_candidates is not None else AMBIENT_MAGIC if ambient_candidates is not None else MAGIC
+    body = bytearray(struct.pack("<8sIIff32fII", magic,
                                  viewport.width, viewport.height,
                                  viewport.min_depth, viewport.max_depth, *camera.view, *camera.projection,
                                  len(textures), len(draws)))
@@ -250,13 +315,15 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
         body.extend(struct.pack("<III", tex["width"], tex["height"], len(tex["mips"])))
         for mip in tex["mips"]:
             body.extend(mip)
-    for texture_index, vertices, state, sampler, color in draws:
+    for texture_index, vertices, state, sampler, color, mode, light_values in draws:
         body.extend(struct.pack("<13If", texture_index, len(vertices), *(state[key] for key in legacy_states.FIELDS),
                                 sampler["mip_lod_bias"]))
-        if ambient_candidates is not None:
-            body.extend(struct.pack("<I4f", int(color is not None), *(color if color is not None else (0, 0, 0, 0))))
+        if ambient_candidates is not None or direct_candidates is not None:
+            body.extend(struct.pack("<I4f", mode, *(color if color is not None else (0, 0, 0, 0))))
+        if direct_candidates is not None:
+            body.extend(struct.pack("<8f", *light_values))
         for vertex in vertices:
-            body.extend(struct.pack("<5f", *vertex))
+            body.extend(struct.pack("<8f" if direct_candidates is not None else "<5f", *vertex))
     if len(body) != size:
         raise ValueError("packet size mismatch")
     stats = {"render_pass": render_pass, "stage": stage, "triangles": triangle_count, "draws": source_draws,
@@ -302,6 +369,11 @@ def main(argv=None):
                         help="hypothesize a metadata-compatible texture stage; requires --state-trace")
     parser.add_argument("--ambient-candidate-stage", type=int,
                         help="use a pre-Reset ambient shader hypothesis for this submission stage")
+    parser.add_argument("--direct-candidate-stage", type=int,
+                        help="approximate scoped omni-light candidates for this submission stage")
+    parser.add_argument("--offline-actors", type=Path, help="fingerprinted t3map actor export for candidate light colors")
+    parser.add_argument("--direct-preview-gain", type=float, default=1.0,
+                        help="uncalibrated visual gain for candidate direct lights (default: 1)")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
@@ -317,6 +389,9 @@ def main(argv=None):
             raise ValueError("sampler candidate requires a state trace and stage 0..7")
         if args.ambient_candidate_stage is not None and (args.state_trace is None or args.ambient_candidate_stage < 0):
             raise ValueError("ambient candidate requires a state trace and a nonnegative stage")
+        if ((args.direct_candidate_stage is None) != (args.offline_actors is None) or
+                (args.direct_candidate_stage is not None and (args.state_trace is None or args.direct_candidate_stage < 0))):
+            raise ValueError("direct candidates require a state trace, offline actors and a nonnegative stage")
         states = None
         samplers = {} if args.sampler_candidate_stage is not None else None
         if args.state_trace is not None:
@@ -351,16 +426,27 @@ def main(argv=None):
                 raise ValueError("ambient candidate stage must identify exactly one scene")
             current, scope = matching[0]
             ambient_values = ambient.from_trace(current, args.state_trace, kernel_path, *scope)
+        direct_values = None
+        if args.direct_candidate_stage is not None:
+            matching = [(current, select_scope(current, args.render_pass, args.stage) if current is scene else select_scope(current))
+                        for current in (scene, *extra_scenes)]
+            matching = [(current, scope) for current, scope in matching if scope[1] == args.direct_candidate_stage]
+            if len(matching) != 1:
+                raise ValueError("direct candidate stage must identify exactly one scene")
+            current, scope = matching[0]
+            direct_values = direct.from_trace(current, offline, offline_bytes, args.state_trace, kernel_path, args.offline_actors,
+                                              *scope, args.direct_preview_gain)
         bundles = []
         try:
             for _, path in paths:
                 bundles.append(IBT(path))
             body, stats = create_packet(scene, TextureResolver(bundles), args.render_pass, args.stage, states, samplers,
-                                        additional_scenes=extra_scenes, ambient_candidates=ambient_values)
+                                        additional_scenes=extra_scenes, ambient_candidates=ambient_values,
+                                        direct_candidates=direct_values)
         finally:
             for bundle in bundles:
                 bundle.close()
-        manifest = {"schema": "t3.scene.textured-packet", "version": 4 if ambient_values is not None else 3,
+        manifest = {"schema": "t3.scene.textured-packet", "version": 5 if direct_values is not None else 4 if ambient_values is not None else 3,
                     "source_frame": scene.source.frame_id,
                     "scene_sha256": hashlib.sha256(raw).hexdigest(), "packet_sha256": hashlib.sha256(body).hexdigest(),
                     "state_source": "revalidated_same_frame_trace" if states is not None else "opaque_preview_defaults",
@@ -376,6 +462,9 @@ def main(argv=None):
             manifest["limitations"].append("Partial selected draws share a depth buffer; omitted draws and stencil operations are not reconstructed.")
         if ambient_values is not None:
             manifest["limitations"].append("Ambient RGB uses sampled vertex constants with a pre-Reset shader hypothesis; the active GPU and pixel shaders are unproven.")
+        if direct_values is not None:
+            manifest["limitations"].append("Point-light Lambert shading and squared linear falloff are approximations; the coefficient's radius meaning is unproven.")
+            manifest["limitations"].append("Light colors and energies come from offline actor data; runtime light identity, colors, intensity, shadows and spotlights are unproven.")
         write_pair(args.output, body, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))
     except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, struct.error) as exc:

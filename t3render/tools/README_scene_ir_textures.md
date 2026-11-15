@@ -86,6 +86,60 @@ The stage-1 snapshot is generated as described in the runtime checkpoint. All
 capture-derived outputs remain local. The optional mode writes packet version
 4; versions 1–3 remain readable and the default exporter still writes v3.
 
+## Direct-light candidates
+
+`--direct-candidate-stage 3` adds a diagnostic point-light approximation to
+the ambient and diffuse passes. It requires the same-frame state trace,
+the corrected offline SceneIR fixture, its fingerprint-matched actor export,
+and a matching kernel bundle. Each stage-3 draw must have a unique pre-Reset
+omni/spot program hypothesis, sampled constants and a unique offline light
+position within 0.01 T3 units. Ambiguous or missing inputs fail closed.
+
+Only omni candidates are shaded: register 20 supplies position; register 21.y
+is used **as if** it were inverse radius. Color and the approximate `t3map`
+energy are offline values; Lambert shading, squared linear falloff and the
+optional `--direct-preview-gain` are renderer choices, not measured legacy
+behavior. Normals use the inverse-transpose instance transform. The gain is
+explicit and defaults to 1. All spot candidates contribute zero pending a
+validated cone/direction; no spot is silently treated as an omni light.
+
+This does not observe a runtime light object, pixel shader, color or energy.
+It does not implement stencil shadows, normal maps, emissions, missing scene
+objects or HUD. The preview does not write candidates into SceneIR's light
+list. The packet manifest labels every point or skipped spot and records the
+offline light ID, program hypothesis and parameters. The normal and lighting
+path writes packet version 5, while versions 1–4 remain readable.
+
+Using the local frame-1001 capture and the corrected offline fixture, the
+expanded stage-1/3/4 packet contains 222 draws: 51 ambient, 69 approximate
+point-light contributions, 51 skipped spot contributions and 51 material
+modulation draws (four have other vertex-program hypotheses). Five offline
+omni lights have candidate positional matches. The local
+Highball/DX12 image lights the wall and candle holder, but is not legacy parity.
+An independent GPU fixture checks point lighting, texture modulation and the
+skipped-spot path; the earlier GPU fixtures still pass.
+
+After generating the corrected offline fixture as described in
+[the importer instructions](README_scene_ir_import.md), build the three scoped
+snapshots using `--include-asset-candidates` and the following stage/anchor
+pairs: `1/8`, `3/78`, `4/302`. Then, with those new local files:
+
+```sh
+python3 -B t3render/tools/scene_ir_to_textured_packet.py \
+  build/t3render-offline/bedroom-runtime-1001-lights-stage1.scene.json \
+  --additional-scene build/t3render-offline/bedroom-runtime-1001-lights-stage3.scene.json \
+  --additional-scene build/t3render-offline/bedroom-runtime-1001-lights-stage4.scene.json \
+  --game-dir "$T3_GAME_DIR" --pass 0 --stage 1 \
+  --state-trace build/t3render-captures/scene-bridge-submission-20261115-001/bedroom.jsonl \
+  --offline-scene build/t3render-offline/SouthQuarter1_int1.lights.scene.json \
+  --offline-actors build/assets/godot/SouthQuarter1_int1/SouthQuarter1_int1.actors.json \
+  --ambient-candidate-stage 1 --direct-candidate-stage 3 \
+  --output build/t3render-offline/bedroom-runtime-1001-direct.scene.bin
+```
+
+The fixture, packets and rendered images contain game-derived data and stay
+local under `build/`.
+
 The optional `--state-trace <trace> --offline-scene <fixture>` revalidates the
 trace fingerprint and rebuilds the bounded bed-and-BSP scoped snapshot before
 mapping its draw states to the renderer's neutral vocabulary. This currently

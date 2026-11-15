@@ -182,17 +182,24 @@ int Render(const Frame& frame, const wchar_t* output) {
     // the same location as the pixel input; SV_Position is a built-in.
     static const char vs_source[] =
         "cbuffer Camera:register(b0){row_major float4x4 view;row_major float4x4 proj;float2 size;}"
-        "struct O{float4 uv:TEXCOORD0;float4 p:SV_Position;};"
-        "O main(float3 p:POSITION,float2 uv:TEXCOORD0){O o;o.p=mul(mul(float4(p,1),view),proj);"
-        "o.p.x+=o.p.w/size.x;o.p.y-=o.p.w/size.y;o.uv=float4(uv,0,0);return o;}";
+        "struct O{float4 uv:TEXCOORD0;float3 world:TEXCOORD1;float3 normal:TEXCOORD2;float4 p:SV_Position;};"
+        "O main(float3 p:POSITION,float2 uv:TEXCOORD0,float3 n:NORMAL){O o;o.p=mul(mul(float4(p,1),view),proj);"
+        "o.p.x+=o.p.w/size.x;o.p.y-=o.p.w/size.y;o.uv=float4(uv,0,0);o.world=p;o.normal=n;return o;}";
     static const char ps_source[] =
         "Texture2D diffuse:register(t0);SamplerState samp:register(s0);"
-        "cbuffer Alpha:register(b1){uint mode;float reference;float lod_bias;uint ambient;float4 ambient_color;}"
-        "float4 main(float4 uv:TEXCOORD0):SV_Target{float4 c=diffuse.SampleBias(samp,uv.xy,lod_bias);"
+        "cbuffer Alpha:register(b1){uint mode;float reference;float lod_bias;uint shading;float4 ambient_color;"
+        "float4 light_position_inverse_radius;float4 light_color_energy;}"
+        "float4 main(float4 uv:TEXCOORD0,float3 world:TEXCOORD1,float3 normal:TEXCOORD2):SV_Target{"
+        "float4 c=diffuse.SampleBias(samp,uv.xy,lod_bias);"
         "bool keep=(mode==0)||(mode==2&&c.a<reference)||(mode==3&&c.a==reference)||"
         "(mode==4&&c.a<=reference)||(mode==5&&c.a>reference)||(mode==6&&c.a!=reference)||"
         "(mode==7&&c.a>=reference)||(mode==8);if(!keep)discard;"
-        "if(ambient!=0)c.rgb=ambient_color.rgb;return c;}";
+        "if(shading==1)c.rgb=ambient_color.rgb;"
+        "if(shading==2){float3 to_light=light_position_inverse_radius.xyz-world;"
+        "float distance=length(to_light);float falloff=saturate(1-distance*light_position_inverse_radius.w);"
+        "float diffuse_term=saturate(dot(normalize(normal),to_light/max(distance,0.000001)));"
+        "c.rgb=light_color_energy.rgb*(light_color_energy.w*diffuse_term*falloff*falloff);}"
+        "if(shading==3)c.rgb=0;return c;}";
     ComPtr<ID3DBlob> vs, ps;
     if (!Compile(compile, vs_source, "vs_5_0", vs) || !Compile(compile, ps_source, "ps_5_0", ps)) return 1;
 
@@ -212,7 +219,7 @@ int Render(const Frame& frame, const wchar_t* output) {
     params[1].DescriptorTable.NumDescriptorRanges = 1; params[1].DescriptorTable.pDescriptorRanges = &range;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[2].Constants.ShaderRegister = 1; params[2].Constants.Num32BitValues = 8;
+    params[2].Constants.ShaderRegister = 1; params[2].Constants.Num32BitValues = 16;
     params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_STATIC_SAMPLER_DESC sampler{}; sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
@@ -226,10 +233,11 @@ int Render(const Frame& frame, const wchar_t* output) {
         !Check(device->CreateRootSignature(0, root_blob->GetBufferPointer(), root_blob->GetBufferSize(), IID_PPV_ARGS(root.put())), "CreateRoot")) return 1;
     D3D12_INPUT_ELEMENT_DESC input[] = {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}};
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 20, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}};
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{}; pso.pRootSignature = root.p;
     pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()}; pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
-    pso.InputLayout = {input, 2}; pso.SampleMask = UINT_MAX;
+    pso.InputLayout = {input, 3}; pso.SampleMask = UINT_MAX;
     for (auto& blend : pso.BlendState.RenderTarget) {
         blend.SrcBlend = blend.SrcBlendAlpha = D3D12_BLEND_ONE;
         blend.DestBlend = blend.DestBlendAlpha = D3D12_BLEND_ZERO;
@@ -356,13 +364,17 @@ int Render(const Frame& frame, const wchar_t* output) {
     for (std::size_t i = 0; i < frame.draws.size(); ++i) {
         const auto& draw = frame.draws[i];
         auto handle = gpu_base; handle.ptr += UINT64(draw.texture) * srv_step;
-        struct AlphaConstants { std::uint32_t mode; float reference, bias; std::uint32_t ambient; float color[4]; } alpha{
+        struct AlphaConstants {
+            std::uint32_t mode; float reference, bias; std::uint32_t shading; float color[4], light_position[4], light_color[4];
+        } alpha{
             draw.state.alpha_compare, draw.state.alpha_ref / 255.0f, draw.state.mip_lod_bias, draw.ambient_candidate,
-            {draw.ambient_color[0], draw.ambient_color[1], draw.ambient_color[2], draw.ambient_color[3]}};
-        static_assert(sizeof(AlphaConstants) == 8 * sizeof(std::uint32_t), "unexpected pixel constants layout");
+            {draw.ambient_color[0], draw.ambient_color[1], draw.ambient_color[2], draw.ambient_color[3]},
+            {draw.light_position[0], draw.light_position[1], draw.light_position[2], draw.light_inverse_radius},
+            {draw.light_color[0], draw.light_color[1], draw.light_color[2], draw.light_energy}};
+        static_assert(sizeof(AlphaConstants) == 16 * sizeof(std::uint32_t), "unexpected pixel constants layout");
         list->SetPipelineState(pipelines[draw_pipelines[i]]->object.p);
         list->SetGraphicsRootDescriptorTable(1, handle);
-        list->SetGraphicsRoot32BitConstants(2, 8, &alpha, 0);
+        list->SetGraphicsRoot32BitConstants(2, 16, &alpha, 0);
         list->DrawInstanced(draw.vertex_count, 1, draw.first_vertex, 0);
     }
     Transition(list.p, target.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);

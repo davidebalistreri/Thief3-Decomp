@@ -127,6 +127,70 @@ bool updates_and_flat_adapter() {
     return true;
 }
 
+bool bedroom_material_selection() {
+    const std::string map="SouthQuarter1_int1";
+    const auto bed_id="mesh:"+map+":"+hash_a+":"+hash_b+":innbed1a1";
+    const auto actor="actor:"+map+":"+hash_a+":StaticMeshActor__1520";
+    SceneResidency scene;CHECK(scene.BeginMap(0,map,hash_a));const auto epoch=scene.epochs();
+    CHECK(scene.AddMaterial(epoch.map,{"mat:red","red"}));CHECK(scene.AddMaterial(epoch.map,{"mat:blue","blue"}));
+    CHECK(scene.AddMaterial(epoch.map,{"mat:floor","HSEfloorB_D"}));
+    CHECK(scene.AddMaterial(epoch.map,{"mat:wall","STMwall512D_D"}));
+    auto bed=resource(bed_id,ResourceKind::StaticMesh);bed.name="INNbed1A1";
+    CHECK(scene.AddResource(epoch.map,std::move(bed)));
+    Resource bsp;bsp.id="bsp:bedroom";bsp.name="bedroom";bsp.source_sha256=hash_a;bsp.kind=ResourceKind::BspBlock;
+    // Coordinates in the Godot bed-local frame: floor, ceiling, outside,
+    // and vertical wall. Convert to T3 Z-up and translate by the anchor.
+    const std::array<Vec3,12> points{{{0,0,0},{1,0,0},{0,0,1},
+                                      {0,0,0},{0,0,1},{1,0,0},
+                                      {7,0,0},{8,0,0},{7,0,1},
+                                      {1,0,0},{1,2,0},{1,0,1}}};
+    const float scale=0.01905f;
+    for (const auto& p:points) bsp.geometry.positions.push_back({p[0]/scale+10,p[2]/scale+20,p[1]/scale+30});
+    for (std::uint32_t i=0;i<points.size();++i) bsp.geometry.indices.push_back(i);
+    bsp.geometry.sections={{"floor",0,9,"mat:floor"},{"wall",9,3,"mat:wall"}};
+    CHECK(scene.AddResource(epoch.map,std::move(bsp)));
+    auto input=frame(epoch,1);input.conventions.meters_per_unit=scale;
+    input.meshes[0].instance_id=actor;input.meshes[0].resource_id=bed_id;
+    input.meshes[0].sections={0};input.meshes[0].transform[12]=10;
+    input.meshes[0].transform[13]=20;input.meshes[0].transform[14]=30;
+    input.bsp[0].resource_id="bsp:bedroom";input.bsp[0].sections={0,1};
+    CHECK(scene.Publish(input));auto current=scene.current();ResidentFlatFrame flat;
+    CHECK(BuildResidentFlatFrame(*current,flat,nullptr,false) && flat.draws.size()==3 && !flat.bedroom_material_runs);
+    CHECK(BuildResidentFlatFrame(*current,flat,nullptr,true));
+    CHECK(flat.bedroom_material_runs==2 && flat.draws.size()==4);
+    CHECK(flat.draws[1].first_index==0 && flat.draws[1].index_count==3 &&
+          flat.draws[1].material_id=="remaster:material:wood_floor_v2");
+    CHECK(flat.draws[2].first_index==3 && flat.draws[2].index_count==6 && flat.draws[2].material_id=="mat:floor");
+    CHECK(flat.draws[3].first_index==9 && flat.draws[3].index_count==3 &&
+          flat.draws[3].material_id=="remaster:material:stone_wall_v2");
+    CHECK(current->bsp[0].resource->geometry.sections[0].index_count==9 && current->materials.size()==4);
+
+    // Inverse transform handles nonuniform scale, rotation and translation;
+    // the indexed triangles remain in their original order.
+    auto rotated=*current;const Matrix transform{0,2,0,0, -3,0,0,0, 0,0,4,0, 11,-7,9,1};
+    rotated.meshes[0].selection.transform=transform;
+    auto shifted=std::make_shared<Resource>(*current->bsp[0].resource);
+    for (auto& p:shifted->geometry.positions) {
+        const Vec3 local{p[0]-10,p[1]-20,p[2]-30};
+        p={local[0]*transform[0]+local[1]*transform[4]+local[2]*transform[8]+transform[12],
+           local[0]*transform[1]+local[1]*transform[5]+local[2]*transform[9]+transform[13],
+           local[0]*transform[2]+local[1]*transform[6]+local[2]*transform[10]+transform[14]};
+    }
+    rotated.bsp[0].resource=shifted;
+    CHECK(BuildResidentFlatFrame(rotated,flat,nullptr,true) && flat.bedroom_material_runs==2 && flat.draws.size()==4);
+    CHECK(flat.draws[1].first_index==0 && flat.draws[2].index_count==6 && flat.draws[3].first_index==9);
+
+    auto moved=*current;moved.meshes[0].selection.transform[12]+=1000;
+    CHECK(BuildResidentFlatFrame(moved,flat,nullptr,true) && !flat.bedroom_material_runs && flat.draws.size()==3);
+    auto wrong=*current;wrong.map_sha256=hash_b;
+    CHECK(BuildResidentFlatFrame(wrong,flat,nullptr,true) && !flat.bedroom_material_runs);
+    wrong=*current;wrong.meshes[0].selection.transform[0]=0;
+    CHECK(BuildResidentFlatFrame(wrong,flat,nullptr,true) && !flat.bedroom_material_runs);
+    input.frame_id=2;input.meshes.clear();CHECK(scene.Publish(input));
+    CHECK(BuildResidentFlatFrame(*scene.current(),flat,nullptr,true) && !flat.bedroom_material_runs && flat.draws.size()==2);
+    return true;
+}
+
 bool atomic_validation_and_generations() {
     SceneResidency scene; CHECK(setup(scene));
     auto f = frame(scene.epochs(), 10); CHECK(scene.Publish(f));
@@ -252,7 +316,7 @@ bool submission_epoch_gate() {
 } // namespace
 
 int main() {
-    if (!updates_and_flat_adapter() || !atomic_validation_and_generations() ||
+    if (!updates_and_flat_adapter() || !bedroom_material_selection() || !atomic_validation_and_generations() ||
         !reset_and_map_change() || !concurrent_readers() || !submission_epoch_gate()) return 1;
     std::cout << "scene_live_fixture=ok\n";
 }

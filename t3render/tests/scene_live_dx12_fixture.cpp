@@ -19,6 +19,7 @@ const std::string fingerprint(64, 'a');
 Resource quad(const std::string& id, ResourceKind kind, float extent, float z, const char* material) {
     Resource value; value.id=id; value.name=id; value.kind=kind; value.source_sha256=fingerprint;
     value.geometry.positions={{-extent,-extent,z},{extent,-extent,z},{extent,extent,z},{-extent,extent,z}};
+    value.geometry.uv0={{0,0},{1,0},{1,1},{0,1}};
     value.geometry.indices={0,1,2,0,2,3}; value.geometry.sections={{"surface",0,6,material}};
     return value;
 }
@@ -58,6 +59,20 @@ bool run(HWND window) {
     std::vector<std::uint8_t> resident_image;
     CHECK(render_resident(resident_image) && resident_image==first);
     CHECK(resident_gpu->cache_stats().uploads==2 && resident_gpu->cache_stats().resources==2);
+    // Splitting an indexed section must preserve the image and resident GPU
+    // buffers; changing one range must affect only that triangle.
+    ResidentFlatFrame split;CHECK(BuildResidentFlatFrame(*scene.current(),split));
+    CHECK(split.draws[0].index_count==6);
+    auto other=split.draws[0];split.draws[0].index_count=3;other.first_index+=3;other.index_count=3;
+    split.draws.insert(split.draws.begin()+1,other);
+    std::vector<std::uint8_t> split_image,colored;
+    CHECK(resident_gpu->PrepareResident(split,true) && resident_gpu->Submit() && resident_gpu->Finish(&split_image));
+    CHECK(split_image==first && resident_gpu->cache_stats().uploads==2);
+    split.draws[1].color={1,0,0,1};
+    CHECK(resident_gpu->PrepareResident(split,true) && resident_gpu->Submit() && resident_gpu->Finish(&colored));
+    CHECK(colored!=first && resident_gpu->cache_stats().uploads==2);
+    auto invalid_range=FlatD3D12::Create(nullptr);CHECK(invalid_range);
+    split.draws[1].first_index=1;CHECK(!invalid_range->PrepareResident(split));
     const auto one_resource_budget=resident_gpu->cache_stats().bytes/2;
     CHECK(one_resource_budget>0 && one_resource_budget*2==resident_gpu->cache_stats().bytes);
     CHECK(pixel_is(first,64,32,32,flat.draws[0].ambient_color));
@@ -215,6 +230,78 @@ bool viewer_pipeline(const std::wstring& diagnostic_directory) {
     std::cout << "scene_live_viewer_fixture=ok source=synthetic frames=4 stale_drop=ok newer_frame=ok reset_clear=ok invalidated_first_frame_retirement=ok\n";
     return true;
 }
+bool synthetic_textures() {
+    auto library=std::make_shared<BedroomMaterialLibrary>();
+    const char* ids[]{"remaster:material:stone_wall_v2","remaster:material:wood_floor_v2"};
+    const std::uint8_t colors[][4]={{40,120,200,255},{190,90,30,255}};
+    for (unsigned i=0;i<2;++i) {
+        auto& material=library->materials[i];material.id=ids[i];
+        for (unsigned channel=0;channel<4;++channel) {
+            material.source_sha256[channel]=fingerprint;
+            material.channels[channel].mips.push_back({1,1,{colors[i][0],colors[i][1],colors[i][2],255}});
+        }
+    }
+    auto bad=std::make_shared<BedroomMaterialLibrary>(*library);bad->materials[0].channels[0].mips[0].rgba[3]=0;
+    CHECK(!FlatD3D12::Create(nullptr,128u*1024u*1024u,bad));
+    SceneResidency scene;CHECK(scene.BeginMap(0,"fixture",fingerprint));const auto epoch=scene.epochs();
+    CHECK(scene.AddMaterial(epoch.map,{"mat:bed","bed"}));CHECK(scene.AddMaterial(epoch.map,{"mat:wall","wall"}));
+    CHECK(scene.AddResource(epoch.map,quad("mesh:bed",ResourceKind::StaticMesh,0.3f,0.2f,"mat:bed")));
+    CHECK(scene.AddResource(epoch.map,quad("bsp:wall",ResourceKind::BspBlock,0.9f,0.8f,"mat:wall")));
+    auto frame=input(epoch,1);CHECK(scene.Publish(frame));
+    auto gpu=FlatD3D12::Create(nullptr,128u*1024u*1024u,library);CHECK(gpu);
+    auto render=[&](ResidentFlatFrame& resident,std::vector<std::uint8_t>& pixels) {
+        return gpu->PrepareResident(resident,true) && gpu->Submit() && gpu->Finish(&pixels);
+    };
+    ResidentFlatFrame resident;CHECK(BuildResidentFlatFrame(*scene.current(),resident));
+    std::vector<std::uint8_t> original,wall,floor,missing,reset_image;
+    CHECK(render(resident,original) && gpu->cache_stats().textured_draws==0);
+    resident.draws[0].material_id=ids[0];CHECK(render(resident,wall) && gpu->cache_stats().textured_draws==1);
+    const float wall_color[]{40.0f/255,120.0f/255,200.0f/255,1};
+    if (!pixel_is(wall,64,32,32,wall_color)) {
+        const auto at=(32u*64+32)*4;
+        std::cerr<<"texture pixel="<<unsigned(wall[at])<<','<<unsigned(wall[at+1])<<','
+                 <<unsigned(wall[at+2])<<','<<unsigned(wall[at+3])<<" original="
+                 <<unsigned(original[at])<<','<<unsigned(original[at+1])<<','<<unsigned(original[at+2]);
+        std::size_t changed=0,colored=0;
+        for (std::size_t i=0;i<wall.size();i+=4) {
+            if (wall[i]!=original[i] || wall[i+1]!=original[i+1] || wall[i+2]!=original[i+2]) ++changed;
+            if (wall[i]==40 && wall[i+1]==120 && wall[i+2]==200) ++colored;
+        }
+        std::cerr<<" changed="<<changed<<" colored="<<colored<<"\n";
+    }
+    CHECK(wall!=original && pixel_is(wall,64,32,32,wall_color));
+    resident.draws[0].material_id=ids[1];CHECK(render(resident,floor) && gpu->cache_stats().textured_draws==1);
+    const float floor_color[]{190.0f/255,90.0f/255,30.0f/255,1};
+    CHECK(floor!=wall && pixel_is(floor,64,32,32,floor_color));
+    auto no_uv=std::make_shared<Resource>(*resident.draws[0].resource);no_uv->id+="-without-uv";no_uv->geometry.uv0.clear();
+    resident.draws[0].resource=no_uv;CHECK(render(resident,missing) && missing==original && !gpu->cache_stats().textured_draws);
+    const auto reset=scene.BeginReset();CHECK(reset && scene.EndReset(reset,true));
+    frame=input(scene.epochs(),2);CHECK(scene.Publish(frame));CHECK(BuildResidentFlatFrame(*scene.current(),resident));
+    resident.draws[0].material_id=ids[0];
+    CHECK(render(resident,reset_image) && reset_image==wall && gpu->cache_stats().textured_draws==1);
+    auto pattern=std::make_shared<BedroomMaterialLibrary>(*library);
+    for (auto& material:pattern->materials) for (auto& channel:material.channels)
+        channel.mips={{2,2,{128,128,128,255, 128,128,128,255, 128,128,128,255, 128,128,128,255}},
+                      {1,1,{128,128,128,255}}};
+    pattern->materials[0].channels[0].mips[0].rgba={255,0,0,255, 0,255,0,255,
+                                                   255,0,0,255, 0,255,0,255};
+    auto pattern_gpu=FlatD3D12::Create(nullptr,128u*1024u*1024u,pattern);CHECK(pattern_gpu);
+    std::vector<std::uint8_t> pattern_image;
+    CHECK(pattern_gpu->PrepareResident(resident,true) && pattern_gpu->Submit() && pattern_gpu->Finish(&pattern_image));
+    const auto left=(32u*64+27)*4,right=(32u*64+37)*4;
+    CHECK(int(pattern_image[left])-int(pattern_image[left+1])>80 &&
+          int(pattern_image[right+1])-int(pattern_image[right])>80);
+    std::cout<<"scene_live_textures_fixture=ok source=synthetic albedo=sampled uv=varies switch=ok missing_uv=fallback reset=ok\n";
+    return true;
+}
+struct CatalogViewerFixture { std::shared_ptr<SceneResidency> scene; };
+std::shared_ptr<const Snapshot> catalog_viewer_current(void* context) noexcept {
+    try {return static_cast<CatalogViewerFixture*>(context)->scene->current();} catch (...) {return {};}
+}
+bool catalog_viewer_submit(void* context,const std::shared_ptr<const Snapshot>& snapshot,
+                           SubmitOperation operation,void* argument) noexcept {
+    return static_cast<CatalogViewerFixture*>(context)->scene->SubmitIfCurrent(snapshot,operation,argument);
+}
 // The catalog contains real offline assets, but the camera, selection and
 // transforms below are synthetic and do not constitute a TDS observation.
 bool catalog_override(const wchar_t* path) {
@@ -245,7 +332,7 @@ bool catalog_override(const wchar_t* path) {
     const std::string override_prefix="remaster:material:bed_high:";
     for (const auto& item:scene.current()->materials)
         CHECK(item.first.compare(0,override_prefix.size(),override_prefix)!=0);
-    auto gpu=FlatD3D12::Create(nullptr);CHECK(gpu);
+    auto gpu=FlatD3D12::Create(nullptr,128u*1024u*1024u,catalog.bedroom_materials);CHECK(gpu);
     auto render=[&](const MeshOverride* rule,std::vector<std::uint8_t>& pixels,std::uint32_t overrides) {
         ResidentFlatFrame resident;
         return BuildResidentFlatFrame(*scene.current(),resident,rule) && resident.override_instances==overrides &&
@@ -253,6 +340,13 @@ bool catalog_override(const wchar_t* path) {
     };
     std::vector<std::uint8_t> source,replaced,restored,moved,empty,after_reset;
     CHECK(render(nullptr,source,0));
+    if (catalog.bedroom_materials) {
+        ResidentFlatFrame textured;CHECK(BuildResidentFlatFrame(*scene.current(),textured));
+        for (auto& draw:textured.draws) draw.material_id=catalog.bedroom_materials->materials[0].id;
+        std::vector<std::uint8_t> pixels;
+        CHECK(gpu->PrepareResident(textured,true) && gpu->Submit() && gpu->Finish(&pixels));
+        CHECK(gpu->cache_stats().textured_draws==textured.draws.size() && pixels!=source);
+    }
     CHECK(render(catalog.bed_override.get(),replaced,1) && replaced!=source);
     CHECK(render(nullptr,restored,0) && restored==source && gpu->cache_stats().uploads==2);
     frame.frame_id=2;frame.meshes[0].transform[12]=dx*0.25f;CHECK(scene.Publish(frame));
@@ -263,9 +357,52 @@ bool catalog_override(const wchar_t* path) {
     const auto reset=scene.BeginReset();CHECK(reset && scene.EndReset(reset,true));
     frame.frame_id=4;frame.device_epoch=scene.epochs().device;frame.meshes.push_back(mesh);CHECK(scene.Publish(frame));
     CHECK(render(catalog.bed_override.get(),after_reset,1) && after_reset==replaced && gpu->cache_stats().uploads==3);
+    if (catalog.bedroom_materials) {
+        // Offline catalog geometry with a synthetic orthographic camera and
+        // selection; the anchor uses the previously observed bed transform.
+        frame.frame_id=5;frame.meshes[0].transform[12]=3398;frame.meshes[0].transform[13]=1514;
+        frame.meshes[0].transform[14]=272;
+        frame.camera.projection={.005f,0,0,0, 0,.005f,0,0, 0,0,.002f,0, -17.5f,-7.7f,-.4f,1};
+        for (const auto& block:catalog.binding.bsp) {
+            BspSelection selection;selection.resource_id=block->id;selection.binding=BindingEvidence::Candidate;
+            for (std::uint32_t i=0;i<block->geometry.sections.size();++i) selection.sections.push_back(i);
+            frame.bsp.push_back(std::move(selection));
+        }
+        CHECK(scene.Publish(frame));
+        ResidentFlatFrame plain,remaster;
+        CHECK(BuildResidentFlatFrame(*scene.current(),plain));
+        CHECK(BuildResidentFlatFrame(*scene.current(),remaster,nullptr,true) && remaster.bedroom_material_runs>0);
+        std::vector<std::uint8_t> before,with_materials;
+        CHECK(gpu->PrepareResident(plain,true) && gpu->Submit() && gpu->Finish(&before));
+        CHECK(gpu->PrepareResident(remaster,true) && gpu->Submit() && gpu->Finish(&with_materials));
+        CHECK(gpu->cache_stats().textured_draws==remaster.bedroom_material_runs && before!=with_materials);
+        std::cout<<"scene_live_bedroom_materials_fixture=ok source=offline camera=synthetic runs="
+                 <<remaster.bedroom_material_runs<<"\n";
+
+        auto context=std::make_shared<CatalogViewerFixture>();context->scene=catalog.residency;
+        ViewerProvider provider;provider.context=context;provider.current=catalog_viewer_current;
+        provider.submit_if_current=catalog_viewer_submit;provider.bed_override=catalog.bed_override;
+        provider.bedroom_materials=catalog.bedroom_materials;provider.bedroom_material_ids=true;
+        auto viewer=SceneViewer::Start(std::move(provider),false);CHECK(viewer);
+        viewer->Notify();CHECK(await_viewer(*viewer,1));
+        auto stats=viewer->stats();CHECK(stats.frame_id==5 && stats.bedroom_material_runs>0 &&
+                                         stats.textured_draws==stats.bedroom_material_runs);
+        auto hidden=frame;hidden.frame_id=6;hidden.meshes.clear();CHECK(scene.Publish(hidden));
+        viewer->Notify();CHECK(await_viewer(*viewer,2));stats=viewer->stats();
+        CHECK(stats.frame_id==6 && !stats.bedroom_material_runs && !stats.textured_draws);
+        const auto ticket=scene.BeginReset();CHECK(ticket);viewer->Notify();CHECK(await_viewer(*viewer,2,1));
+        CHECK(scene.EndReset(ticket,true));frame.frame_id=7;frame.device_epoch=scene.epochs().device;CHECK(scene.Publish(frame));
+        viewer->Notify();CHECK(await_viewer(*viewer,3,1));stats=viewer->stats();
+        CHECK(stats.frame_id==7 && stats.bedroom_material_runs>0 && stats.textured_draws==stats.bedroom_material_runs);
+        viewer->Stop();const auto deadline=GetTickCount64()+20000;
+        while (!viewer->stats().stopped && GetTickCount64()<deadline) Sleep(10);
+        CHECK(viewer->stats().stopped && !viewer->stats().failed);
+        std::cout<<"scene_live_material_viewer_fixture=ok source=offline visibility=changed reset=ok\n";
+    }
     std::cout << "scene_live_catalog_dx12_fixture=ok source=offline camera=synthetic original_override_restore=ok"
               << " movement=ok visibility=ok reset=ok vertices=" << catalog.bed_override->replacement->geometry.positions.size()
-              << " indices=" << catalog.bed_override->replacement->geometry.indices.size() << "\n";
+              << " indices=" << catalog.bed_override->replacement->geometry.indices.size()
+              << " materials=" << (catalog.bedroom_materials ? "offline" : "none") << "\n";
     return true;
 }
 } // namespace
@@ -289,7 +426,7 @@ int wmain(int argc, wchar_t** argv) {
                              CW_USEDEFAULT,CW_USEDEFAULT,128,128,nullptr,nullptr,cls.hInstance,nullptr);
         if (!hwnd) return 2;
     }
-    const bool ok=run(hwnd) && viewer_pipeline(diagnostic_directory) &&
+    const bool ok=run(hwnd) && viewer_pipeline(diagnostic_directory) && synthetic_textures() &&
                   (catalog_path.empty() || catalog_override(catalog_path.c_str()));
     if (hwnd) DestroyWindow(hwnd);
     return ok ? 0 : 1;

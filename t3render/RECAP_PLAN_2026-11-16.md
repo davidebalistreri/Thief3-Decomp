@@ -231,3 +231,12 @@ intatti snapshot e gameplay. La prova GPU Highball con il GLB reale e camera
 sintetica ha verificato sostituzione, ripristino, movimento, visibilità e Reset;
 non dimostra la sincronizzazione in TDS né un rendering PBR live. Dettagli e
 limiti sono documentati nel [README del consumer](ir/README_scene_live.md).
+
+Successivamente il viewer sperimentale ha acquisito gli albedo Godot di muro
+e pavimento tramite un catalogo offline v3. La selezione divide le sezioni BSP
+usando materiale e trasformazione del letto nello stesso snapshot; se il letto
+non è selezionato, torna agli ID originali. Il frame acquisito 2864 concorda
+con il precedente selettore offline su 16 sezioni e 67 triangoli. Fixture GPU
+e worker con asset offline e camera sintetica hanno verificato texture, UV,
+scomparsa del letto e Reset. Normali, roughness e AO sono nel catalogo ma non
+ancora usati dal viewer: PBR, integrazione TDS e prestazioni rimangono aperti.

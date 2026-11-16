@@ -17,6 +17,7 @@ from scene_ir import Geometry, SceneSnapshot, Section  # noqa: E402
 import scene_ir_to_textured_packet as packet  # noqa: E402
 import scene_ir_to_d3d12_packet as preview  # noqa: E402
 import scene_pbr_bed as generated_bed  # noqa: E402
+import scene_material_overrides as material_overrides  # noqa: E402
 
 MAX_BYTES = 64 * 1024 * 1024
 MAX_VERTICES = 1_000_000
@@ -105,7 +106,38 @@ def _bed_override(scene, bed, raw):
     return "remaster:mesh:bed_high:"+digest, digest, geometry
 
 
-def export(raw, bed_high=None):
+def _material_library(textures):
+    body = bytearray(_u32(2))
+    manifest = {}
+    expected_size = None
+    for name in ("stone_wall_v2", "wood_floor_v2"):
+        body += _text("remaster:material:" + name)
+        sources = {}
+        for kind in ("albedo", "normal", "roughness", "ao"):
+            value = textures.resolve(name, kind)
+            width, height, mips = value["width"], value["height"], value["mips"]
+            digest = value["source_sha256"]
+            if (type(width) is not int or width != height or not 1 <= width <= 1024 or width & (width-1) or
+                    not isinstance(digest, str) or len(digest) != 64 or
+                    any(c not in "0123456789abcdef" for c in digest) or len(mips) != width.bit_length()):
+                raise ValueError("invalid bedroom material texture metadata")
+            if expected_size is None:
+                expected_size = width
+            if width != expected_size:
+                raise ValueError("bedroom material textures must have matching sizes")
+            body += _text(digest) + struct.pack("<3I", width, height, len(mips))
+            for level, mip in enumerate(mips):
+                size = max(1, width >> level)
+                if (not isinstance(mip, bytes) or len(mip) != size*size*4 or
+                        (kind == "albedo" and any(alpha != 255 for alpha in mip[3::4]))):
+                    raise ValueError("invalid or nonopaque bedroom material mip")
+                body += mip
+            sources[kind] = digest
+        manifest[name] = sources
+    return body, manifest
+
+
+def export(raw, bed_high=None, bedroom_materials=None):
     if not isinstance(raw, bytes) or not raw or len(raw) > preview.MAX_INPUT:
         raise ValueError("offline SceneIR input is empty or too large")
     scene = SceneSnapshot.from_json(raw)
@@ -119,6 +151,10 @@ def export(raw, bed_high=None):
     map_name, map_sha = source.map, source.fingerprints.get("map")
     if ":" in map_name or not map_sha:
         raise ValueError("catalog requires a qualified map fingerprint")
+    if bedroom_materials is not None and (map_name != material_overrides.MAP or
+            conventions.meters_per_unit is None or
+            not math.isclose(conventions.meters_per_unit, material_overrides.SCALE, rel_tol=0, abs_tol=1e-9)):
+        raise ValueError("bedroom materials require SouthQuarter1_int1 and the SDK unit scale")
     actor_id = f"actor:{map_name}:{map_sha}:StaticMeshActor__1520"
     instances = [item for item in scene.mesh_instances if item.id == actor_id]
     if len(instances) != 1:
@@ -152,6 +188,9 @@ def export(raw, bed_high=None):
     extra_materials = [("remaster:material:bed_high:"+name, name) for name in generated_bed.MATERIALS] if replacement else []
     if any(identifier in material_by_id for identifier, _ in extra_materials):
         raise ValueError("generated bed material IDs collide with the offline scene")
+    if bedroom_materials is not None and any("remaster:material:"+name in material_by_id
+                                             for name in ("stone_wall_v2", "wood_floor_v2")):
+        raise ValueError("bedroom material IDs collide with the offline scene")
     if len(materials) + len(extra_materials) > 8192:
         raise ValueError("catalog material count exceeds bounds")
     enum = lambda value, choices: choices.index(value)
@@ -160,7 +199,7 @@ def export(raw, bed_high=None):
               enum(c.winding, ("unknown", "normal_aligned", "normal_opposed")),
               enum(c.uv_origin, ("unknown", "top_left", "bottom_left")),
               enum(c.clip_depth, ("unknown", "zero_to_one")))
-    body = bytearray(b"T3LCAT02" if replacement else b"T3LCAT01")
+    body = bytearray(b"T3LCAT03" if bedroom_materials is not None else b"T3LCAT02" if replacement else b"T3LCAT01")
     for value in (map_name, map_sha, hashlib.sha256(raw).hexdigest(), actor_id):
         body += _text(value)
     body += struct.pack("<4I", *values)
@@ -178,13 +217,19 @@ def export(raw, bed_high=None):
         body += _text(item, optional=True)
     for block in scene.bsp_blocks:
         body += _resource(block.id, f"BSP {block.source_index}", map_sha, block.geometry)
+    if bedroom_materials is not None:
+        body += _u32(int(replacement is not None))
     if replacement:
         identifier, digest, geometry = replacement
         body += _resource(identifier, "bed_high", digest, geometry)
+    material_sources = None
+    if bedroom_materials is not None:
+        packed, material_sources = _material_library(bedroom_materials)
+        body += packed
     if len(body) + 32 > MAX_BYTES:
         raise ValueError("catalog exceeds 64 MiB")
     data = bytes(body) + hashlib.sha256(body).digest()
-    manifest = {"schema": "t3.scene.live-catalog", "version": 2 if replacement else 1, "source": "offline",
+    manifest = {"schema": "t3.scene.live-catalog", "version": 3 if bedroom_materials is not None else 2 if replacement else 1, "source": "offline",
                 "offline_scene_sha256": hashlib.sha256(raw).hexdigest(), "catalog_sha256": hashlib.sha256(data).hexdigest(),
                 "map": map_name, "map_sha256": map_sha, "bed_resource_id": bed.id, "bed_actor_id": actor_id,
                 "bsp_blocks": len(scene.bsp_blocks), "materials": len(materials) + len(extra_materials),
@@ -196,6 +241,10 @@ def export(raw, bed_high=None):
                                     "vertices": len(replacement[2].positions), "indices": len(replacement[2].indices),
                                     "sections": len(replacement[2].sections),
                                     "scope": "viewer_only_when_semantic_bed_is_selected"}
+    if material_sources is not None:
+        manifest["bedroom_materials"] = {"sources_sha256": material_sources,
+                                         "scope": "viewer_only_when_same_frame_bed_anchor_is_selected"}
+        manifest["limitations"].append("Materials are offline visual assets; the flat viewer does not infer runtime lighting.")
     return data, manifest
 
 
@@ -204,11 +253,15 @@ def main(argv=None):
     parser.add_argument("offline_scene", type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--bed-high", type=Path, help="optional generated Godot bed GLB for the live viewer")
+    parser.add_argument("--bedroom-materials", type=Path, help="optional generated Godot material directory")
+    parser.add_argument("--bedroom-texture-size", type=int, default=512, help="power-of-two material texture size, up to 1024")
     args = parser.parse_args(argv)
     try:
         raw = preview.read_limited(args.offline_scene, preview.MAX_INPUT)
         high = preview.read_limited(args.bed_high, generated_bed.generated.MAX_GLB_BYTES) if args.bed_high else None
-        body, manifest = export(raw, high)
+        textures = (material_overrides.GodotTextures(args.bedroom_materials, args.bedroom_texture_size, True)
+                    if args.bedroom_materials else None)
+        body, manifest = export(raw, high, textures)
         packet.write_pair(args.output, body, manifest)
     except (OSError, ValueError, UnicodeError) as exc:
         parser.exit(2, f"{exc}\n")

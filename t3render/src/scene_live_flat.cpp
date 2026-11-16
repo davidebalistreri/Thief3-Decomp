@@ -1,4 +1,5 @@
 #include "scene_live_flat.hpp"
+#include "scene_live_materials.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -95,7 +96,8 @@ bool BuildFlatFrame(const Snapshot& snapshot, scene::Frame& output) {
     return true;
 }
 
-bool BuildResidentFlatFrame(const Snapshot& snapshot, ResidentFlatFrame& output, const MeshOverride* bed_override) {
+bool BuildResidentFlatFrame(const Snapshot& snapshot, ResidentFlatFrame& output, const MeshOverride* bed_override,
+                            bool bedroom_materials) {
     const auto& camera=snapshot.camera;
     if (!snapshot.map_epoch || !snapshot.device_epoch || !snapshot.continuity || snapshot.conventions.length_unit!=LengthUnit::T3Unit ||
         snapshot.conventions.axes!=Axes::T3Xyz || snapshot.conventions.up_axis!=UpAxis::Z ||
@@ -112,17 +114,19 @@ bool BuildResidentFlatFrame(const Snapshot& snapshot, ResidentFlatFrame& output,
     std::copy(camera.projection.begin(),camera.projection.end(),frame.camera.projection);
     std::size_t indices=0;
     auto append=[&](const std::shared_ptr<const Resource>& resource,const Matrix& transform,
-                    std::uint32_t section,const std::optional<std::string>& material) {
+                    std::uint32_t section,std::uint32_t first,std::uint32_t count,
+                    const std::optional<std::string>& material) {
         if (!resource || section>=resource->geometry.sections.size() || frame.draws.size()>=scene::kMaxDraws ||
             !std::all_of(transform.begin(),transform.end(),[](float v){return std::isfinite(v);}) ||
             std::fabs(transform[3])>1e-6f || std::fabs(transform[7])>1e-6f ||
             std::fabs(transform[11])>1e-6f || std::fabs(transform[15]-1)>1e-6f) return false;
         const auto& part=resource->geometry.sections[section];
-        if (!part.index_count || part.index_count%3 ||
+        if (!part.index_count || part.index_count%3 || !count || count%3 || first<part.first_index ||
+            (first-part.first_index)%3 || std::uint64_t{first}+count>std::uint64_t{part.first_index}+part.index_count ||
             std::uint64_t{part.first_index}+part.index_count>resource->geometry.indices.size() ||
-            part.index_count>scene::kMaxTriangles*3-indices) return false;
-        indices+=part.index_count;
-        frame.draws.push_back({resource,section,transform,MaterialColor(material)});return true;
+            count>scene::kMaxTriangles*3-indices) return false;
+        indices+=count;
+        frame.draws.push_back({resource,section,first,count,transform,material,MaterialColor(material)});return true;
     };
     for (const auto& mesh:snapshot.meshes) {
         if (!mesh.resource || (!mesh.selection.material_ids.empty() &&
@@ -139,21 +143,35 @@ bool BuildResidentFlatFrame(const Snapshot& snapshot, ResidentFlatFrame& output,
                 bed_override->replacement->geometry.sections.size()>scene::kMaxDraws) return false;
             for (std::size_t i=0;i<bed_override->replacement->geometry.sections.size();++i) {
                 const auto& part=bed_override->replacement->geometry.sections[i];
-                if (!append(bed_override->replacement,mesh.selection.transform,static_cast<std::uint32_t>(i),part.material_id)) return false;
+                if (!append(bed_override->replacement,mesh.selection.transform,static_cast<std::uint32_t>(i),
+                            part.first_index,part.index_count,part.material_id)) return false;
             }
             ++frame.override_instances;continue;
         }
         for (auto index:mesh.selection.sections) {
             const auto material=mesh.selection.material_ids.empty() ? mesh.resource->geometry.sections[index].material_id :
                                                                        mesh.selection.material_ids[index];
-            if (!append(mesh.resource,mesh.selection.transform,index,material)) return false;
+            const auto& part=mesh.resource->geometry.sections[index];
+            if (!append(mesh.resource,mesh.selection.transform,index,part.first_index,part.index_count,material)) return false;
         }
     }
+    BedroomAnchor anchor;
+    const bool have_anchor=bedroom_materials && FindBedroomAnchor(snapshot,anchor);
     for (const auto& block:snapshot.bsp) {
         if (!block.resource) return false;
         for (auto index:block.selection.sections) {
-            if (index>=block.resource->geometry.sections.size() ||
-                !append(block.resource,kIdentity,index,block.resource->geometry.sections[index].material_id)) return false;
+            if (index>=block.resource->geometry.sections.size()) return false;
+            const auto& part=block.resource->geometry.sections[index];
+            const auto found=part.material_id ? snapshot.materials.find(*part.material_id) : snapshot.materials.end();
+            if (have_anchor && found!=snapshot.materials.end()) {
+                std::vector<BedroomMaterialRun> runs;
+                if (!PartitionBedroomMaterial(anchor,*block.resource,index,found->second.name,runs)) return false;
+                for (const auto& run:runs) {
+                    if (!append(block.resource,kIdentity,index,run.first_index,run.index_count,
+                                run.replacement ? run.replacement : part.material_id)) return false;
+                    if (run.replacement) ++frame.bedroom_material_runs;
+                }
+            } else if (!append(block.resource,kIdentity,index,part.first_index,part.index_count,part.material_id)) return false;
         }
     }
     output=std::move(frame);return true;

@@ -49,5 +49,14 @@ int main(int argc,char** argv) {
                  <<rule.replacement->geometry.indices.size()<<" "<<rule.replacement->geometry.sections.size()<<" "
                  <<rule.replacement->source_sha256;
     }
+    if (catalog.bedroom_materials) {
+        for (const auto& material:catalog.bedroom_materials->materials) {
+            if (catalog.binding.materials.count(material.id)) return 7;
+            for (const auto& texture:material.channels) if (texture.mips.empty()) return 7;
+        }
+        const auto& wall=catalog.bedroom_materials->materials[0];
+        std::cout<<" bedroom_materials "<<catalog.bedroom_materials->materials.size()<<" "
+                 <<wall.channels[0].mips[0].width<<" "<<wall.channels[0].mips.size();
+    }
     std::cout<<"\n";
 }

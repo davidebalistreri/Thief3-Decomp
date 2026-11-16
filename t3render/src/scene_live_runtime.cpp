@@ -141,6 +141,7 @@ bool RuntimeInitialize() noexcept {
             if (path.empty() || !LoadCatalogFile(path.c_str(),catalog) || !SessionId(session)) return;
             FrameProvenance source;source.origin=FrameOrigin::LiveProcess;source.session_id=session;
             auto bed_override=catalog.bed_override;
+            auto bedroom_materials=catalog.bedroom_materials;
             auto driver=SceneDriver::Create(std::move(catalog),std::move(source),0,1);
             if (!driver) return;
             state.session_id=std::move(session);
@@ -150,6 +151,9 @@ bool RuntimeInitialize() noexcept {
                 provider.current=ViewerCurrent;provider.submit_if_current=ViewerSubmit;
                 provider.driver_stats=ViewerDriverStats;
                 provider.bed_override=std::move(bed_override);
+                provider.bedroom_materials=std::move(bedroom_materials);
+                provider.bedroom_material_ids=provider.bedroom_materials ||
+                    Environment(L"T3RENDER_SCENE_LIVE_BEDROOM_MATERIAL_IDS")==L"1";
                 provider.diagnostic_directory=Environment(L"T3RENDER_SCENE_LIVE_DIAGNOSTIC_DIR");
                 provider.diagnostic_session_id=state.session_id;
                 state.viewer=SceneViewer::Start(std::move(provider),true);

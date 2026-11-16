@@ -17,7 +17,7 @@ class SceneLiveTests(unittest.TestCase):
             binary = Path(directory) / "fixture"
             subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pthread",
                             str(ROOT / "tests/scene_live_fixture.cpp"), str(ROOT / "ir/scene_live.cpp"),
-                            str(ROOT / "src/scene_live_flat.cpp"), "-o", str(binary)],
+                            str(ROOT / "src/scene_live_flat.cpp"), str(ROOT / "src/scene_live_materials.cpp"), "-o", str(binary)],
                            check=True, capture_output=True, timeout=60)
             result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, timeout=30)
             self.assertIn("scene_live_fixture=ok", result.stdout)

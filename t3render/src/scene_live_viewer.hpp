@@ -15,6 +15,8 @@ struct ViewerProvider {
                               SubmitOperation, void*) noexcept = nullptr;
     DriverStats (*driver_stats)(void*) noexcept = nullptr;
     std::shared_ptr<const MeshOverride> bed_override;
+    std::shared_ptr<const BedroomMaterialLibrary> bedroom_materials;
+    bool bedroom_material_ids = false;
     // Optional existing local directory; copied matrices and at most two flat
     // images are diagnostic output, not a serialized engine-object trace.
     std::wstring diagnostic_directory;
@@ -26,9 +28,10 @@ struct ViewerStats {
     bool initialized = false, failed = false, stopped = false;
     std::uint64_t frames = 0, dropped = 0, cleared = 0, resident_retirements = 0;
     std::uint64_t map_epoch = 0, device_epoch = 0, frame_id = 0;
+    std::uint32_t bedroom_material_runs = 0, textured_draws = 0;
 };
 
-// Dedicated worker for the experimental flat preview. It consumes the latest
+// Dedicated worker for the experimental flat/albedo preview. It consumes the latest
 // available snapshot; snapshots superseded during preparation are dropped.
 // D3D12 and window calls do not run on the game's render thread.
 class SceneViewer {

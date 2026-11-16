@@ -191,8 +191,8 @@ If any original bed section is selected, all six replacement sections are
 drawn; selection is partial and does not prove that every part was visible in
 TDS. A stale source handle fails closed, including after a map reload. The
 diagnostic field `bed_override_instances` reports the number of replacements.
-The viewer still uses flat material-ID colors: no PBR materials, textures or
-gameplay changes are applied.
+Without the optional material library the viewer uses flat material-ID colors;
+no PBR lighting or gameplay changes are applied.
 
 The optional `--catalog <Windows-path-to-v2-catalog>` argument to
 `t3render_live_dx12_fixture.exe` exercises the Windows loader and D3D12 viewer
@@ -200,6 +200,52 @@ backend with local catalog geometry, a synthetic camera and synthetic selection.
 On Highball the real generated GLB (18,548 vertices, 61,260 indices) passed
 original → override → original, movement, visibility and Reset checks. This is
 an offline GPU fixture, not a runtime TDS result or a performance measurement.
+
+## Bedroom visual materials
+
+`--bedroom-materials /path/to/Godot/materials` adds the existing
+`stone_wall_v2` and `wood_floor_v2` textures to a version 3 local catalog.
+`--bedroom-texture-size` chooses a power-of-two size up to 1024 (default 512).
+The optional `--bed-high` can be combined with it. The exporter generates
+bounded mip chains, filtering albedo in linear space, and records source PNG
+hashes. The loader checks the trailer, dimensions, complete mips, opaque
+albedo and material IDs. Catalogs v1 and v2 remain supported. As with other
+catalog fields, a checksum does not authenticate the texture's origin.
+
+```sh
+python3 -B t3render/tools/export_live_catalog.py /path/to/offline-scene.json \
+  --bed-high /path/to/bed_high.glb \
+  --bedroom-materials /path/to/Godot/materials \
+  --bedroom-texture-size 512 --output /path/to/new-local-catalog.bin
+```
+
+The library is separate from semantic residency and is loaded once by the
+viewer worker. On a selected `SouthQuarter1_int1` bed in the same snapshot,
+the viewer partitions selected BSP sections by original material name,
+bed-relative triangle centroid and orientation, using the same bedroom rules
+as the existing offline preview. It keeps index order and the original
+geometry and splits only the necessary indexed ranges. Without that bed
+selection, or with an invalid anchor, it retains the source material IDs; it
+does not reuse a transform from an earlier frame. These bounds are an artistic
+region heuristic, not proof of room membership or total visibility.
+
+The D3D12 viewer uploads albedo mips once and samples them with UV0 and wrap
+addressing. Sections with missing UVs fall back to material-ID colors. Other
+materials also remain ID colors. Normal, roughness and AO are included for a
+future PBR consumer but are not sampled yet; this is an **unlit** albedo
+preview, not HDR lighting, PBR or a measurement of the game's materials.
+Diagnostics report `bedroom_material_runs` and `textured_draws`; a difference
+can indicate missing UVs. The separate `T3RENDER_SCENE_LIVE_BEDROOM_MATERIAL_IDS=1`
+flag enables only the partition/ID diagnostic with an older catalog. A v3
+catalog enables the material selection in the viewer automatically.
+
+Host tests compared 16 BSP sections from captured SceneIR frame 2864 with the
+existing offline selector (67 selected triangles). Highball fixtures tested
+UV interpolation, switching, missing-UV fallback and Reset; an offline
+45-block catalog with a synthetic camera exercised the real textures through
+the GPU and viewer worker. The fixture selected all catalog blocks itself;
+it is not a synchronized live frame or a performance test. TDS integration
+and the reported lag still require a later game session.
 
 The experimental combined proxy can opt in with
 `T3RENDER_EXPERIMENTAL_COMBINED=1`, `T3RENDER_SCENE_LIVE=1` and
@@ -227,9 +273,9 @@ produced in TDS.
 With the previous flags and `T3RENDER_SCENE_LIVE_DX12=1`, the experimental
 combined proxy starts a separate worker and a non-activating D3D12 window.
 Its device, queue, pipeline and swapchain persist across frames. Immutable
-mesh/BSP position and index buffers are cached by semantic resource identity;
-draws supply per-instance transforms and material-ID colors. The window displays a flat
-material-ID view of the **partial candidate selection**, not a full bedroom or
+mesh/BSP position, UV and index buffers are cached by semantic resource identity;
+draws supply per-instance transforms and material IDs. The window displays a flat
+or partially textured **partial candidate selection**, not a full bedroom or
 a production renderer. The worker takes the latest available snapshot and may
 drop superseded frames; no real-time performance or every-frame coverage is
 claimed. Window closing affects only the viewer.

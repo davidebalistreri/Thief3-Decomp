@@ -61,6 +61,25 @@ bool ResourceData(Reader& reader, ResourceKind kind, Resource& output) {
         !Digest(resource.source_sha256) || !GeometryData(reader,resource.geometry)) return false;
     output=std::move(resource);return true;
 }
+bool MaterialTextureData(Reader& reader, bool opaque, std::string& fingerprint, scene::Texture& output) {
+    std::uint32_t width=0,height=0,count=0;
+    if (!Text(reader,fingerprint) || !Digest(fingerprint) || !reader.u32(width) || !reader.u32(height) ||
+        !reader.u32(count) || !width || width>1024 || width!=height || (width&(width-1))) return false;
+    std::uint32_t levels=1;
+    for (auto size=width;size>1;size>>=1) ++levels;
+    if (count!=levels) return false;
+    scene::Texture texture;texture.mips.reserve(count);
+    for (std::uint32_t level=0;level<count;++level) {
+        const auto bytes=std::size_t(width)*height*4;
+        if (bytes>reader.remaining()) return false;
+        scene::Mip mip{width,height,std::vector<std::uint8_t>(bytes)};
+        if (!reader.bytes(mip.rgba.data(),bytes)) return false;
+        if (opaque) for (std::size_t i=3;i<bytes;i+=4) if (mip.rgba[i]!=255) return false;
+        texture.mips.push_back(std::move(mip));
+        width=std::max(1u,width/2);height=std::max(1u,height/2);
+    }
+    output=std::move(texture);return true;
+}
 bool BspKey(const std::string& id, const std::string& prefix) {
     if (id.compare(0,prefix.size(),prefix)!=0) return false;
     const auto suffix=id.substr(prefix.size());const auto separator=suffix.find(':');
@@ -116,7 +135,8 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
     LoadedCatalog loaded;std::string map, map_sha, actor;
     if (!reader.bytes(magic,sizeof(magic))) return false;
     const bool version_two=std::memcmp(magic,"T3LCAT02",8)==0;
-    if ((!version_two && std::memcmp(magic,"T3LCAT01",8)) || !Text(reader,map) || map.size()>128 || map.find(':')!=std::string::npos ||
+    const bool version_three=std::memcmp(magic,"T3LCAT03",8)==0;
+    if ((!version_two && !version_three && std::memcmp(magic,"T3LCAT01",8)) || !Text(reader,map) || map.size()>128 || map.find(':')!=std::string::npos ||
         !Text(reader,map_sha) || !Digest(map_sha) || !Text(reader,loaded.offline_scene_sha256) ||
         !Digest(loaded.offline_scene_sha256) || !Text(reader,actor) ||
         actor!="actor:"+map+":"+map_sha+":StaticMeshActor__1520") return false;
@@ -127,6 +147,8 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
     loaded.conventions.handedness=static_cast<Handedness>(handed);loaded.conventions.winding=static_cast<Winding>(winding);
     loaded.conventions.uv_origin=static_cast<UvOrigin>(uv);loaded.conventions.clip_depth=static_cast<ClipDepth>(clip);
     if (has_scale) { float value=0;if (!reader.f32(value) || value<=0) return false;loaded.conventions.meters_per_unit=value; }
+    if (version_three && (map!="SouthQuarter1_int1" || !loaded.conventions.meters_per_unit ||
+                          std::fabs(*loaded.conventions.meters_per_unit-0.01905f)>1e-9f)) return false;
     std::uint32_t material_count=0,bsp_count=0;
     if (!reader.u32(material_count) || !material_count || material_count>kMaxMaterials ||
         !reader.u32(bsp_count) || !bsp_count || bsp_count>kMaxBsp) return false;
@@ -141,7 +163,8 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
         if (!Text(reader,material.id) || !Text(reader,material.name) || catalog.materials.count(material.id) ||
             override_materials.count(material.id)) return false;
         const auto id=material.id;
-        if (version_two && id.compare(0,override_prefix.size(),override_prefix)==0)
+        if (version_three && (id=="remaster:material:stone_wall_v2" || id=="remaster:material:wood_floor_v2")) return false;
+        if ((version_two || version_three) && id.compare(0,override_prefix.size(),override_prefix)==0)
             override_materials.emplace(id,std::move(material));
         else {
             if (!residency->AddMaterial(epoch.map,material)) return false;
@@ -185,7 +208,9 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
         if (!resource) return false;
         catalog.bsp.push_back(std::move(resource));
     }
-    if (version_two) {
+    std::uint32_t has_override=version_two ? 1u : 0u;
+    if (version_three && (!reader.u32(has_override) || has_override>1)) return false;
+    if (has_override) {
         Resource replacement;
         if (!ResourceData(reader,ResourceKind::StaticMesh,replacement) ||
             !ValidBedOverride(*catalog.bed,replacement,loaded.conventions,override_materials)) return false;
@@ -193,6 +218,24 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
         rule->map=map;rule->map_sha256=map_sha;rule->instance_id=actor;
         rule->source=catalog.bed;rule->replacement=std::make_shared<const Resource>(std::move(replacement));
         loaded.bed_override=std::move(rule);
+    } else if (!override_materials.empty()) return false;
+    if (version_three) {
+        std::uint32_t count=0;
+        if (!reader.u32(count) || count!=2) return false;
+        auto library=std::make_shared<BedroomMaterialLibrary>();
+        static constexpr const char* ids[]{"remaster:material:stone_wall_v2", "remaster:material:wood_floor_v2"};
+        std::uint32_t size=0;
+        for (unsigned i=0;i<2;++i) {
+            auto& material=library->materials[i];
+            if (!Text(reader,material.id) || material.id!=ids[i]) return false;
+            for (unsigned channel=0;channel<4;++channel) {
+                if (!MaterialTextureData(reader,channel==0,material.source_sha256[channel],material.channels[channel])) return false;
+                const auto& mip=material.channels[channel].mips.front();
+                if (!size) size=mip.width;
+                if (mip.width!=size || mip.height!=size) return false;
+            }
+        }
+        loaded.bedroom_materials=std::move(library);
     }
     if (!reader.end()) return false;
     catalog.bsp_catalog_complete=true; // complete only relative to the offline exporter

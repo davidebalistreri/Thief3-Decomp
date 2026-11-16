@@ -20,6 +20,13 @@ import test_scene_ir
 import test_scene_pbr_bed as bed_tests
 
 
+class TinyTextures:
+    def resolve(self, name, kind):
+        pixel = bytes((30, 80, 170, 255)) if kind == "albedo" else bytes((128, 128, 255, 255))
+        return {"width": 2, "height": 2, "mips": [pixel * 4, pixel],
+                "source_sha256": hashlib.sha256((name + kind).encode()).hexdigest()}
+
+
 def fixture():
     data = test_scene_ir.example()
     source = data["source"]
@@ -128,6 +135,54 @@ class LiveCatalogTests(unittest.TestCase):
         data["conventions"]["meters_per_unit"] = None
         with self.assertRaisesRegex(ValueError, "unit scale"):
             catalog.export(json.dumps(data).encode(), bed_tests.glb(scene))
+
+    def test_material_library_round_trips_with_and_without_high_poly_bed(self):
+        data = fixture();data["conventions"]["meters_per_unit"] = .01905
+        scene = scene_ir.SceneSnapshot.from_dict(data)
+        high = bed_tests.glb(scene)
+        for replacement in (None, high):
+            body, manifest = catalog.export(json.dumps(data).encode(), replacement, TinyTextures())
+            with self.subTest(has_bed=bool(replacement)):
+                self.assertEqual(body[:8], b"T3LCAT03")
+                result = self.load(body).split()
+                self.assertEqual(result[:10], ["accepted", "SouthQuarter1_int1", "1", "1", "3", "3", "3", "3", "3", "1"])
+                self.assertEqual(result[-4:], ["bedroom_materials", "2", "2", "2"])
+                self.assertEqual(manifest["source"], "offline")
+                self.assertEqual(manifest["bedroom_materials"]["scope"], "viewer_only_when_same_frame_bed_anchor_is_selected")
+                self.assertEqual("override" in result, bool(replacement))
+
+        raw = bytearray(body[:-32])
+        marker = raw.find(b"remaster:material:stone_wall_v2")
+        self.assertGreater(marker, 0)
+        texture = marker + len(b"remaster:material:stone_wall_v2")
+        def reject(changed):
+            self.assertEqual(self.load(bytes(changed) + hashlib.sha256(changed).digest()), "rejected")
+        bad = raw.copy();bad[texture + 4 + 64 + 12 + 3] = 0  # albedo alpha
+        reject(bad)
+        bad = raw.copy();struct.pack_into("<I", bad, texture + 4 + 64, 3)  # non-power-of-two width
+        reject(bad)
+        bad = raw.copy();bad[texture + 4] = ord("z")  # invalid source fingerprint
+        reject(bad)
+
+    def test_material_export_rejects_nonopaque_and_mismatched_mips(self):
+        class InvalidTextures(TinyTextures):
+            def __init__(self, invalid): self.invalid = invalid
+            def resolve(self, name, kind):
+                item = super().resolve(name, kind)
+                if name == "stone_wall_v2" and kind == "albedo":
+                    if self.invalid == "alpha": item["mips"][0] = bytes((0, 0, 0, 0))*4
+                    else: item["mips"].pop()
+                return item
+        data = fixture();data["conventions"]["meters_per_unit"] = .01905
+        for invalid in ("alpha", "count"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                catalog.export(json.dumps(data).encode(), None, InvalidTextures(invalid))
+        data["materials"].append({"id": "remaster:material:stone_wall_v2", "name": "collision"})
+        with self.assertRaisesRegex(ValueError, "collide"):
+            catalog.export(json.dumps(data).encode(), None, TinyTextures())
+        data = fixture()
+        with self.assertRaisesRegex(ValueError, "unit scale"):
+            catalog.export(json.dumps(data).encode(), None, TinyTextures())
 
     def test_structurally_invalid_count_and_magic_are_rejected_even_with_new_digest(self):
         data, _ = catalog.export(json.dumps(fixture()).encode())

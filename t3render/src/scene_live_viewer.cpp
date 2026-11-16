@@ -146,6 +146,8 @@ struct Diagnostics {
            <<",\"mesh_instances\":"<<snapshot.meshes.size()<<",\"bsp_blocks\":"<<snapshot.bsp.size()
            <<",\"draws\":"<<frame.draws.size()<<",\"resident_resources\":"<<cache.resources
            <<",\"bed_override_instances\":"<<frame.override_instances
+           <<",\"bedroom_material_runs\":"<<frame.bedroom_material_runs
+           <<",\"textured_draws\":"<<cache.textured_draws
            <<",\"resident_bytes\":"<<cache.bytes<<",\"resource_uploads\":"<<cache.uploads
            <<",\"resource_evictions\":"<<cache.evictions<<",\"image\":"<<(image?"true":"false")<<",\"view\":[";
         for (unsigned i=0;i<16;++i) { if (i) out<<',';out<<snapshot.camera.view[i]; }
@@ -207,7 +209,8 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
         diagnostics.Open(state->provider.diagnostic_directory,state->provider.diagnostic_session_id);
         diagnostics.Event("viewer_started");
         if (state->window) { window = CreateViewerWindow(); if (!window) failed = true; }
-        auto gpu = failed || state->stop.load() ? nullptr : FlatD3D12::Create(window);
+        auto gpu = failed || state->stop.load() ? nullptr : FlatD3D12::Create(window,128u*1024u*1024u,
+                                                                               state->provider.bedroom_materials);
         if (!gpu && !state->stop.load()) failed = true;
         if (gpu) {
             diagnostics.Event("viewer_initialized");
@@ -245,13 +248,15 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
                     last.reset();
                     if (window) SetWindowTextW(window,L"T3Render — in attesa di SceneIR");
                     std::lock_guard<std::mutex> lock(state->mutex); ++state->stats.cleared;
+                    state->stats.bedroom_material_runs=state->stats.textured_draws=0;
                 }
                 continue;
             }
             if (current == last) continue;
             ResidentFlatFrame frame;
             const bool wants_image=diagnostics.WantsImage(*current);
-            if (!BuildResidentFlatFrame(*current, frame,state->provider.bed_override.get()) || !gpu->PrepareResident(frame,wants_image)) { failed = true; break; }
+            if (!BuildResidentFlatFrame(*current, frame,state->provider.bed_override.get(),state->provider.bedroom_material_ids) ||
+                !gpu->PrepareResident(frame,wants_image)) { failed = true; break; }
             Submission submission{gpu.get()};
             const bool submitted = state->provider.submit_if_current(state->provider.context.get(), current,
                                                                       SubmitPrepared, &submission);
@@ -290,6 +295,8 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
                 std::lock_guard<std::mutex> lock(state->mutex);
                 ++state->stats.frames; state->stats.map_epoch = current->map_epoch;
                 state->stats.device_epoch = current->device_epoch; state->stats.frame_id = current->frame_id;
+                state->stats.bedroom_material_runs=frame.bedroom_material_runs;
+                state->stats.textured_draws=gpu->cache_stats().textured_draws;
             }
         }
     } catch (...) { failed = true; }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "scene_live_binding.hpp"
+#include "scene_live_materials.hpp"
 
 namespace t3render::live {
 constexpr std::size_t kMaxCatalogBytes = 64u * 1024u * 1024u;
@@ -13,6 +14,7 @@ struct LoadedCatalog {
     Conventions conventions;
     std::string offline_scene_sha256;
     std::shared_ptr<const MeshOverride> bed_override;
+    std::shared_ptr<const BedroomMaterialLibrary> bedroom_materials;
 };
 // No state is published on failure. Catalog geometry is offline asset data.
 bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest digest,

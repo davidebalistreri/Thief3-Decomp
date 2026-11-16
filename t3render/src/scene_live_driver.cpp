@@ -43,7 +43,7 @@ struct SceneDriver::Impl {
         std::shared_ptr<const Resource> resource;ProbeCamera camera;scene_bridge::SubmissionSample before;
         std::uint32_t section=0;
     };
-    struct Present { ThreadToken thread;std::uint64_t window=0; };
+    struct Present { ThreadToken thread;std::uint64_t window=0,frame=0; };
     struct Reset { ThreadToken thread;std::uint64_t residency=0; };
     struct CachedBsp { scene_bridge::SubmissionSample sample;BspSelection selection; };
     struct ActorTrack { Identity identity{};std::uint64_t generation=0,last_seen=0;bool known=false; };
@@ -61,6 +61,10 @@ struct SceneDriver::Impl {
     std::unordered_map<std::uint32_t,CachedBsp> bsp_matches;
     std::unordered_map<std::string,ActorTrack> actor_tracks;
     std::shared_ptr<const scene_bridge::ProbeSnapshot> latest;
+    std::shared_ptr<const RawLightBatch> pending_light_raw;
+    std::shared_ptr<const RawLightFrame> published_light_raw;
+    std::shared_ptr<const Snapshot> light_raw_owner;
+    bool light_raw_seen=false,light_raw_conflict=false;
     ProbeCamera latest_camera;
     ThreadToken latest_thread{};
     std::uint64_t next_ticket=1,next_frame=0,generation=0,last_seen_frame=0;
@@ -76,9 +80,11 @@ struct SceneDriver::Impl {
         return next_ticket++;
     }
     bool Empty() const { return probes.empty() && light_samples.empty() && scopes.empty() && draws.empty() && presents.empty() && resets.empty(); }
+    void ClearLightRawInterval() {pending_light_raw.reset();light_raw_seen=false;light_raw_conflict=false;}
     void Lost() {
         ++diagnostics.losses;
         latest.reset();latest_thread={};bsp_matches.clear();
+        ClearLightRawInterval();published_light_raw.reset();light_raw_owner.reset();
         for (auto& item:actor_tracks) item.second.known=false;
         if (window) window->MarkLost();
     }
@@ -94,6 +100,7 @@ struct SceneDriver::Impl {
         const auto epoch=catalog.residency->epochs();
         window=std::make_unique<SceneWindow>(*catalog.residency,epoch,provenance,catalog.conventions,pass,stage);
         latest.reset();latest_thread={};bsp_matches.clear();identity_known=false;
+        ClearLightRawInterval();published_light_raw.reset();light_raw_owner.reset();
         for (auto& item:actor_tracks) item.second.known=false;
         return true;
     }
@@ -186,11 +193,12 @@ bool SceneDriver::CancelLightSample(std::uint64_t ticket,ThreadToken thread) noe
         if (!ticket || item==s.light_samples.end()) {s.Lost();return false;}
         const auto record=item->second;s.light_samples.erase(item);
         if (!SameThread(thread,record.thread)) {s.Lost();return false;}
+        s.pending_light_raw.reset();s.light_raw_seen=true;s.light_raw_conflict=true;
         return record.window && s.window && s.window->CancelLightSample(record.window,thread);
     } catch (...) {impl_->Disable();return false;}
 }
 bool SceneDriver::EndLightSample(std::uint64_t ticket,ThreadToken thread,bool stable,LightCoverage coverage,
-                                 const std::vector<VisualLight>& lights) noexcept {
+                                 const std::vector<VisualLight>& lights,std::shared_ptr<const RawLightBatch> raw) noexcept {
     try {
         auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
         if (s.disabled.load()) return false;
@@ -198,7 +206,22 @@ bool SceneDriver::EndLightSample(std::uint64_t ticket,ThreadToken thread,bool st
         if (!ticket || item==s.light_samples.end()) {s.Lost();return false;}
         const auto record=item->second;s.light_samples.erase(item);
         if (!SameThread(thread,record.thread)) {s.Lost();return false;}
-        return record.window && s.window && s.window->EndLightSample(record.window,thread,stable,coverage,lights);
+        const bool accepted=record.window && s.window && s.window->EndLightSample(record.window,thread,stable,coverage,lights);
+        const bool matches=accepted && raw && coverage==LightCoverage::Partial &&
+            RawLightBatchMatches(*raw,lights) &&
+            std::all_of(lights.begin(),lights.end(),[&](const VisualLight& light){return light.generation==s.next_frame+1;});
+        if (!s.light_raw_seen) {
+            s.light_raw_seen=true;s.light_raw_conflict=!matches;
+            if (matches) {
+                // Do not retain a caller-owned mutable alias. A diagnostic
+                // allocation failure must not invalidate the scene itself.
+                try {s.pending_light_raw=std::make_shared<const RawLightBatch>(*raw);}
+                catch (...) {s.pending_light_raw.reset();s.light_raw_conflict=true;}
+            }
+        } else if (!matches || !s.pending_light_raw || !(*s.pending_light_raw==*raw)) {
+            s.pending_light_raw.reset();s.light_raw_conflict=true;
+        }
+        return accepted;
     } catch (...) {impl_->Disable();return false;}
 }
 
@@ -381,7 +404,7 @@ std::uint64_t SceneDriver::BeginPresent(ThreadToken thread,std::uint64_t* frame_
         const auto id=s.Ticket();if (!id) { s.Disable();return 0; }
         const auto frame=s.next_frame++;
         const auto ticket=s.window ? s.window->BeginPresent(thread,frame,quiescent) : 0;
-        s.presents.emplace(id,Impl::Present{thread,ticket});
+        s.presents.emplace(id,Impl::Present{thread,ticket,frame});
         if (ticket && frame_id) *frame_id=frame;
         return id;
     } catch (...) { impl_->Disable();return 0; }
@@ -396,6 +419,22 @@ WindowResult SceneDriver::EndPresent(std::uint64_t ticket,ThreadToken thread,boo
         s.latest.reset();s.latest_thread={};
         if (!SameThread(thread,record.thread)) { s.Lost();return WindowResult::Rejected; }
         const auto result=record.window && s.window ? s.window->EndPresent(record.window,thread,succeeded) : WindowResult::Rejected;
+        s.published_light_raw.reset();s.light_raw_owner.reset();
+        if (result==WindowResult::Published && s.pending_light_raw && !s.light_raw_conflict) {
+            // Diagnostics are best effort and never affect scene publication.
+            try {
+                const auto owner=s.catalog.residency->current();
+                if (owner && owner->frame_id==record.frame && owner->light_coverage==LightCoverage::Partial &&
+                    RawLightBatchMatches(*s.pending_light_raw,owner->lights)) {
+                    auto raw=std::make_shared<RawLightFrame>();
+                    raw->map_epoch=owner->map_epoch;raw->device_epoch=owner->device_epoch;raw->frame_id=owner->frame_id;
+                    raw->continuity=owner->continuity;raw->provenance=owner->provenance;raw->camera=owner->camera;
+                    raw->batch=s.pending_light_raw;
+                    s.light_raw_owner=owner;s.published_light_raw=std::move(raw);
+                }
+            } catch (...) {s.published_light_raw.reset();s.light_raw_owner.reset();}
+        }
+        s.ClearLightRawInterval();
         if (result==WindowResult::Published) ++s.diagnostics.published;
         else if (result==WindowResult::Primed) ++s.diagnostics.primed;
         else {
@@ -439,6 +478,14 @@ void SceneDriver::MarkLost() noexcept {
 std::shared_ptr<const Snapshot> SceneDriver::current() const noexcept {
     try { return impl_->disabled.load() ? nullptr : impl_->catalog.residency->current(); }
     catch (...) { return {}; }
+}
+std::shared_ptr<const RawLightFrame> SceneDriver::LightDiagnosticsIfCurrent(const std::shared_ptr<const Snapshot>& expected) const noexcept {
+    try {
+        auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
+        if (s.disabled.load() || !expected || expected!=s.light_raw_owner || !s.published_light_raw ||
+            s.catalog.residency->current()!=expected || !RawLightFrameMatches(*s.published_light_raw,*expected)) return {};
+        return s.published_light_raw;
+    } catch (...) {return {};}
 }
 DriverStats SceneDriver::stats() const noexcept {
     try { auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);return s.diagnostics; }

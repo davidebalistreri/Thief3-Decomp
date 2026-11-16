@@ -23,6 +23,7 @@ struct RuntimeState {
     std::string session_id; // initialized before publishing driver; never changed afterwards
     bool static_meshes_enabled=false; // written before driver publication
     bool light_candidates_enabled=false;
+    bool light_raw_diagnostics_enabled=false;
     std::string map, map_sha256; // catalog fingerprint, not a runtime package measurement
     std::atomic<SceneDriver*> driver{nullptr};
     std::atomic<IDirect3DDevice8*> device{nullptr};
@@ -70,6 +71,10 @@ void NotifyViewer() noexcept {
     try { if (State().viewer) State().viewer->Notify(); } catch (...) {}
 }
 std::shared_ptr<const Snapshot> ViewerCurrent(void*) noexcept { return RuntimeCurrent(); }
+std::shared_ptr<const RawLightFrame> ViewerLightDiagnostics(void*,const std::shared_ptr<const Snapshot>& expected) noexcept {
+    try {auto* driver=Driver(true);return driver ? driver->LightDiagnosticsIfCurrent(expected) : nullptr;}
+    catch (...) {return {};}
+}
 DriverStats ViewerDriverStats(void*) noexcept {
     try { auto* driver=State().driver.load(std::memory_order_acquire);return driver ? driver->stats() : DriverStats{}; }
     catch (...) { return {}; }
@@ -155,17 +160,21 @@ bool RuntimeInitialize() noexcept {
             if (!driver) return;
             state.static_meshes_enabled=Environment(L"T3RENDER_SCENE_LIVE_STATIC_MESHES")==L"1";
             state.light_candidates_enabled=Environment(L"T3RENDER_SCENE_LIVE_LIGHTS")==L"1";
+            const bool viewer_enabled=Environment(L"T3RENDER_SCENE_LIVE_DX12")==L"1";
+            const auto diagnostic_directory=viewer_enabled ? Environment(L"T3RENDER_SCENE_LIVE_DIAGNOSTIC_DIR") : std::wstring{};
+            state.light_raw_diagnostics_enabled=state.light_candidates_enabled && !diagnostic_directory.empty();
             state.session_id=std::move(session);
             state.owned=std::move(driver);state.driver.store(state.owned.get(),std::memory_order_release);
-            if (Environment(L"T3RENDER_SCENE_LIVE_DX12")==L"1") {
+            if (viewer_enabled) {
                 ViewerProvider provider;provider.context=std::shared_ptr<void>(&state,[](void*){});
                 provider.current=ViewerCurrent;provider.submit_if_current=ViewerSubmit;
                 provider.driver_stats=ViewerDriverStats;
+                provider.light_diagnostics=state.light_raw_diagnostics_enabled ? ViewerLightDiagnostics : nullptr;
                 provider.bed_override=std::move(bed_override);
                 provider.bedroom_materials=std::move(bedroom_materials);
                 provider.bedroom_material_ids=provider.bedroom_materials ||
                     Environment(L"T3RENDER_SCENE_LIVE_BEDROOM_MATERIAL_IDS")==L"1";
-                provider.diagnostic_directory=Environment(L"T3RENDER_SCENE_LIVE_DIAGNOSTIC_DIR");
+                provider.diagnostic_directory=diagnostic_directory;
                 provider.diagnostic_session_id=state.session_id;
                 state.viewer=SceneViewer::Start(std::move(provider),true);
                 if (!state.viewer) OutputDebugStringW(L"T3Render: live DX12 viewer failed to start\n");
@@ -243,9 +252,11 @@ void RuntimeProbeEnd(std::uint64_t ticket,const scene_bridge::ProbeSnapshot& sna
                                       scene_bridge::VisibleLightCandidates{};
         std::vector<VisualLight> lights;
         const bool ready=BuildVisibleLightCandidates(sample,state.map,state.map_sha256,generation,lights);
+        const auto raw=ready && state.light_raw_diagnostics_enabled ?
+            BuildRawLightBatch(sample,state.map,state.map_sha256,generation,lights) : nullptr;
         // A nested callback may have marked loss while memory was being read.
         driver=Driver(false);if (!driver) return;
-        if (ready) (void)driver->EndLightSample(light_ticket,thread,true,LightCoverage::Partial,lights);
+        if (ready) (void)driver->EndLightSample(light_ticket,thread,true,LightCoverage::Partial,lights,raw);
         else (void)driver->CancelLightSample(light_ticket,thread);
     } catch (...) {RuntimeAbandon();}
 }

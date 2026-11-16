@@ -129,12 +129,11 @@ struct Diagnostics {
         if (ok) { if (!images) first_view=snapshot.camera.view; ++images; }
         return ok;
     }
-    void Frame(const Snapshot& snapshot, const ResidentFlatFrame& frame, const FlatCacheStats& cache, bool image) {
+    void Frame(const Snapshot& snapshot, const ResidentFlatFrame& frame, const FlatCacheStats& cache, bool image,
+               const RawLightFrame* raw) {
         if (log==INVALID_HANDLE_VALUE || entries>=4096) return;
         if (snapshot.provenance.origin==FrameOrigin::LiveProcess && snapshot.provenance.session_id!=session_id) return;
         std::ostringstream out;out.imbue(std::locale::classic());out<<std::setprecision(9);
-        const char* source=snapshot.provenance.origin==FrameOrigin::LiveProcess ? "live_process" :
-                           snapshot.provenance.origin==FrameOrigin::CapturedReplay ? "captured_replay" : "synthetic";
         const auto scope=!snapshot.meshes.empty() ? snapshot.meshes[0].selection.identity_scope :
                          !snapshot.bsp.empty() ? snapshot.bsp[0].selection.identity_scope : IdentityScope::Unknown;
         const char* identity_scope=scope==IdentityScope::VisibleList ? "visible_list" :
@@ -148,8 +147,8 @@ struct Diagnostics {
             else if (status==LightReadiness::Disabled) ++disabled_lights;
             else ++incomplete_lights;
         }
-        out<<"{\"event\":\"frame\",\"source\":\""<<source<<"\",\"frame\":"<<snapshot.frame_id
-           <<",\"identity_scope\":\""<<identity_scope<<"\""
+        out<<"{\"event\":\"frame\"";WriteFrameIdentity(out,snapshot);
+        out<<",\"identity_scope\":\""<<identity_scope<<"\""
            <<",\"render_pass\":"<<snapshot.render_pass<<",\"stage\":"<<snapshot.stage
            <<",\"map_epoch\":"<<snapshot.map_epoch<<",\"device_epoch\":"<<snapshot.device_epoch
            <<",\"continuity\":"<<snapshot.continuity
@@ -173,7 +172,7 @@ struct Diagnostics {
         for (unsigned i=0;i<16;++i) { if (i) out<<',';out<<snapshot.camera.view[i]; }
         out<<"],\"projection\":[";
         for (unsigned i=0;i<16;++i) { if (i) out<<',';out<<snapshot.camera.projection[i]; }
-        out<<']';WriteLightDetails(out,snapshot.lights);
+        out<<']';WriteLightDetails(out,snapshot.lights);WriteRawLightDetails(out,snapshot,raw);
         out<<"}\n";const auto text=out.str();
         if (WriteBytes(log,text.data(),text.size())) ++entries;
         else { CloseHandle(log);log=INVALID_HANDLE_VALUE; }
@@ -311,7 +310,9 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
                 continue;
             }
             const bool wrote_image=wants_image && diagnostics.Image(*current,frame.camera,pixels);
-            diagnostics.Frame(*current,frame,gpu->cache_stats(),wrote_image);
+            const auto light_raw=diagnostics.log!=INVALID_HANDLE_VALUE && state->provider.light_diagnostics ?
+                state->provider.light_diagnostics(state->provider.context.get(),current) : nullptr;
+            diagnostics.Frame(*current,frame,gpu->cache_stats(),wrote_image,light_raw.get());
             last = current; last_frame = std::move(frame.camera);
             if (window) {
                 wchar_t title[128]{};

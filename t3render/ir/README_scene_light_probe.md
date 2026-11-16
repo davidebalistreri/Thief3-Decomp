@@ -38,9 +38,43 @@ numbered instance displayed as `Light__15`.
 The published light coverage is always `Partial`; only the finite `+0x34`
 position is transferred as `Candidate`. Other raw words remain out of SceneIR.
 Invalid or unreadable samples are discarded without making light coverage
-complete. Optional viewer diagnostics record bounded IDs, position and field
-evidence per published frame. `--live-lights` in the bedroom runner enables
-this path; it is disabled by default.
+complete. `--live-lights` in the bedroom runner enables this path; it is
+disabled by default.
+
+With `T3RENDER_SCENE_LIVE_DIAGNOSTIC_DIR` and the viewer enabled, the frame
+JSONL can also include `light_raw`. It contains actor IDs and the raw integer
+bits copied at `+0x24`, `+0x34`, `+0x58..+0x7c`, `+0x88`, `+0x8c` and `+0x90`;
+unknown words `+0x80/+0x84` and process addresses are excluded. The words are
+diagnostic observations, not verified color, intensity, enabled state, radius
+or cone. They never enter SceneIR or activate PBR.
+
+The driver publishes this side channel only after the associated `Present`
+succeeds and the selected snapshot is published. Frame, session, epochs,
+continuity, camera and candidate values must match. A conflicting repeated
+sample, cancellation, Reset, rejected window or loss discards it; the viewer
+may also omit it when a newer snapshot supersedes that frame. A false
+`light_raw_available` is therefore unknown, not evidence of zero lights.
+The sample occurred within the Present interval, not necessarily at its end.
+This path performs bounded copying and optional worker-thread file output; its
+runtime cost has not been measured.
+
+After a future capture, `tools/compare_live_light_diagnostics.py` selects
+exactly one viewer record by `--session` and `--frame`, verifies the raw bits
+against the candidate position, and compares names and positions with an
+explicit offline SceneIR fixture. It rejects mismatched map fingerprints,
+duplicate frame records, and ambiguous normalized FNames; matching names are
+still candidates. The result includes the input hashes and camera position
+when the view is invertible. It does not use timestamps as synchronization or
+turn the report into a runtime SceneSnapshot. `--synthetic-fixture` is only
+for records explicitly marked synthetic; the resulting report preserves that
+origin. `--output` creates a new file rather than overwriting one.
+
+From the `t3sdk` root, with values copied from the viewer's frame record:
+
+```sh
+python3 -B t3render/tools/compare_live_light_diagnostics.py \
+  "$T3_VIEWER_LOG" "$T3_OFFLINE_SCENE" --session "$T3_LIVE_SESSION" --frame "$T3_PRESENT_FRAME"
+```
 
 Matching reads cannot exclude concurrent ABA, deallocation/reuse or changes
 outside the sampling interval. The selected list is neither a proven complete

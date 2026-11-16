@@ -14,11 +14,13 @@ struct ViewerProvider {
     bool (*submit_if_current)(void*, const std::shared_ptr<const Snapshot>&,
                               SubmitOperation, void*) noexcept = nullptr;
     DriverStats (*driver_stats)(void*) noexcept = nullptr;
+    // Optional diagnostic side channel; it must match the exact snapshot.
+    std::shared_ptr<const RawLightFrame> (*light_diagnostics)(void*,const std::shared_ptr<const Snapshot>&) noexcept = nullptr;
     std::shared_ptr<const MeshOverride> bed_override;
     std::shared_ptr<const BedroomMaterialLibrary> bedroom_materials;
     bool bedroom_material_ids = false;
-    // Optional existing local directory; copied matrices and at most two flat
-    // images are diagnostic output, not a serialized engine-object trace.
+    // Optional existing local directory; copied matrices, candidate light
+    // words and at most two flat images contain no engine-object addresses.
     std::wstring diagnostic_directory;
     // Process-session identity shared with the trace, never an engine pointer.
     // Required when diagnostics are requested.

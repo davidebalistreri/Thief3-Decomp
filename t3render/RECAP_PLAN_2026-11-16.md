@@ -384,3 +384,27 @@ saltato perché la fixture locale non era indicata; il test su quella stessa
 fixture era passato nel checkpoint precedente. Proxy e fixture compilano x86
 con MinGW. I messaggi di avvio nei test del runner provengono da mock: il
 gioco non è stato avviato.
+
+## Aggiornamento: diagnostica dei campi luce grezzi
+
+Quando il probe luci e la diagnostica del viewer sono abilitati, il driver può
+allegare al frame pubblicato un campione separato di parole grezze selezionate,
+senza indirizzi di processo e senza inserirle in SceneIR. Il viewer confronta
+frame, sessione, epoche, camera e valori candidati prima di scriverle; un
+campione divergente nello stesso intervallo, una cancellazione, un Reset o
+una finestra respinta elimina la diagnostica. Se il viewer perde un frame,
+anche il campione può mancare. Le parole sono bit non calibrati, non misure
+verificate di colore, intensità o stato della luce.
+
+Fixture sintetiche hanno verificato identità del frame, immutabilità del
+campione, differenze nei bit, Reset/cancellazione e JSON; il proxy x86 compila.
+Non è stato avviato TDS, quindi la raccolta e il suo impatto sulle prestazioni
+restano da verificare nel gioco.
+
+Il nuovo confronto diagnostico seleziona esattamente sessione e frame del log,
+verifica i bit della posizione e confronta nome e distanza con una fixture
+SceneIR dichiarata offline. Rifiuta identità ambigue e conserva `Candidate`.
+Una prova **sintetica** con la fixture `SouthQuarter1_int1` reale ha trovato
+`Light__15` nella posizione attesa; non è una nuova misura runtime. Il report
+include le impronte dei due file, la camera quando invertibile e i limiti di
+provenienza.

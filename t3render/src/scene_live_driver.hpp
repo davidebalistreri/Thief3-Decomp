@@ -1,6 +1,7 @@
 #pragma once
 
 #include "scene_live_catalog.hpp"
+#include "scene_live_light_raw.hpp"
 
 #include <memory>
 
@@ -41,12 +42,14 @@ public:
     std::uint64_t BeginProbe(ThreadToken thread) noexcept;
     void EndProbe(std::uint64_t ticket, ThreadToken thread, const scene_bridge::ProbeSnapshot& snapshot) noexcept;
     // Future adapters must bracket the full sample after the selected probe.
-    // Coverage and stability remain producer attestations.
+    // Coverage and stability remain producer attestations. The optional raw
+    // input must not be mutated during this call; the driver keeps its own copy.
     // When requested, generation is fresh per Present interval; it does not
     // claim persistence of the underlying actor across frames.
     std::uint64_t BeginLightSample(ThreadToken thread, std::uint64_t* generation = nullptr) noexcept;
     bool EndLightSample(std::uint64_t ticket, ThreadToken thread, bool stable, LightCoverage coverage,
-                        const std::vector<VisualLight>& lights) noexcept;
+                        const std::vector<VisualLight>& lights,
+                        std::shared_ptr<const RawLightBatch> raw = {}) noexcept;
     bool CancelLightSample(std::uint64_t ticket, ThreadToken thread) noexcept;
     // Begin the scope before sampling process memory, so Present cannot pass
     // an in-flight sample unnoticed. SetScopeSample must follow exactly once.
@@ -71,6 +74,9 @@ public:
     // Call for hook loss, reentry, untracked operations or a replaced device.
     void MarkLost() noexcept;
     std::shared_ptr<const Snapshot> current() const noexcept;
+    // Only the raw diagnostics attached to this exact current snapshot are
+    // returned. No diagnostic data enters the SceneIR or the lighting path.
+    std::shared_ptr<const RawLightFrame> LightDiagnosticsIfCurrent(const std::shared_ptr<const Snapshot>& expected) const noexcept;
     DriverStats stats() const noexcept;
     bool SubmitIfCurrent(const std::shared_ptr<const Snapshot>& expected,
                          bool (*submit)(void*) noexcept, void* context) noexcept;

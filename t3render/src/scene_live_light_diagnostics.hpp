@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../ir/scene_live.hpp"
+#include "scene_live_light_raw.hpp"
 
 #include <algorithm>
 #include <ostream>
@@ -38,6 +38,22 @@ inline const char* Evidence(BindingEvidence value) {
 }
 } // namespace light_diagnostic_detail
 
+// Record a per-frame session identity so raw values cannot be mistaken for a
+// different process session or a captured replay with the same frame number.
+inline void WriteFrameIdentity(std::ostream& out,const Snapshot& snapshot) {
+    const char* source=snapshot.provenance.origin==FrameOrigin::LiveProcess ? "live_process" :
+                       snapshot.provenance.origin==FrameOrigin::CapturedReplay ? "captured_replay" :
+                       snapshot.provenance.origin==FrameOrigin::Synthetic ? "synthetic" : "unknown";
+    out<<",\"source\":\""<<source<<"\",\"session_id\":";
+    light_diagnostic_detail::JsonString(out,snapshot.provenance.session_id);
+    out<<",\"frame\":"<<snapshot.frame_id<<",\"map\":";
+    light_diagnostic_detail::JsonString(out,snapshot.map);
+    out<<",\"map_sha256\":";light_diagnostic_detail::JsonString(out,snapshot.map_sha256);
+    if (snapshot.provenance.capture_sha256) {
+        out<<",\"capture_sha256\":";light_diagnostic_detail::JsonString(out,*snapshot.provenance.capture_sha256);
+    }
+}
+
 // Append bounded details to an existing frame JSON record. The scene has
 // already validated finite positions; no engine addresses or raw words leave.
 inline void WriteLightDetails(std::ostream& out,const std::vector<VisualLight>& lights) {
@@ -53,5 +69,29 @@ inline void WriteLightDetails(std::ostream& out,const std::vector<VisualLight>& 
         out<<'}';
     }
     out<<']';
+}
+
+// The optional raw record must match frame metadata and candidate values.
+// The producer separately attests the camera/Present interval. Integer words
+// preserve bits; they do not assert physical interpretation.
+inline void WriteRawLightDetails(std::ostream& out,const Snapshot& snapshot,const RawLightFrame* raw) {
+    if (!raw || !RawLightFrameMatches(*raw,snapshot)) {out<<",\"light_raw_available\":false";return;}
+    const auto& batch=*raw->batch;
+    out<<",\"light_raw_available\":true,\"light_raw\":{\"listed\":"<<batch.listed
+       <<",\"skipped\":"<<batch.skipped<<",\"truncated\":"<<(batch.truncated ? "true" : "false")<<",\"items\":[";
+    for (std::size_t i=0;i<batch.items.size();++i) {
+        if (i) out<<',';
+        const auto& item=batch.items[i];out<<"{\"id\":";light_diagnostic_detail::JsonString(out,item.candidate.id);
+        out<<",\"generation\":"<<item.candidate.generation
+           <<",\"field_24_bits\":["<<item.field_24[0]<<','<<item.field_24[1]<<','<<item.field_24[2]<<']'
+           <<",\"field_34_bits\":["<<item.field_34[0]<<','<<item.field_34[1]<<','<<item.field_34[2]<<']'
+           <<",\"field_58\":"<<item.field_58<<",\"field_5c\":"<<item.field_5c<<",\"field_60\":"<<item.field_60
+           <<",\"field_64\":"<<item.field_64
+           <<",\"field_68_bits\":["<<item.field_68[0]<<','<<item.field_68[1]<<','<<item.field_68[2]<<']'
+           <<",\"field_74_bits\":"<<item.field_74<<",\"field_78_bits\":"<<item.field_78
+           <<",\"field_7c_bits\":"<<item.field_7c<<",\"field_88_bits\":"<<item.field_88
+           <<",\"field_8c_bits\":"<<item.field_8c<<",\"field_90_bits\":"<<item.field_90<<'}';
+    }
+    out<<"]}";
 }
 } // namespace t3render::live

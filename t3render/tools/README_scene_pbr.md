@@ -170,7 +170,43 @@ repeated `replacement <new-output-path>`, `original <new-output-path>` and
 `quit` lines on stdin. Each output is exclusively created. The key must match
 the bundle's exact `variant.resource_key`; no draw number is used.
 
-The fixed snapshot and both variants remain in memory while the process runs.
+The stream also accepts `frame <original-packet-path><TAB><new-output-path>`.
+The packet may change only view, projection and camera position: the renderer
+checks every other byte against the bundle's original packet before updating
+the GPU constant buffer. The current bed selection stays active. Changes to
+viewport, geometry, transforms, materials, lights or other packet data are
+rejected. This is a bounded camera-only update, not general dynamic scenes.
+
+For captured frames, `scene_pbr_camera_sequence.py` checks the complete trace,
+each SceneIR and PBR manifest, consecutive synchronized Present windows and
+the semantic bed bundle before streaming the original and replacement renders.
+It also checks that the original packet bytes differ only in camera fields and
+rehashes inputs after rendering. For example, after creating an original PBR
+packet for each frame and a `--bed-variants` bundle for the first:
+
+```sh
+python3 -B t3render/tools/scene_pbr_camera_sequence.py \
+  --trace "$TRACE" --bundle "$BUNDLE" --bundle-manifest "$BUNDLE.manifest.json" \
+  --frame "$SCENE_A" "$PACKET_A" "$PACKET_A.manifest.json" \
+  --frame "$SCENE_B" "$PACKET_B" "$PACKET_B.manifest.json" \
+  --renderer "$PWD/build/t3render-mingw/t3render_scene_pbr_d3d12.exe" \
+  --highball-engine "$ENGINE" --highball-bottle "$BOTTLE" \
+  --effect indirect --effect gtao --effect filmic --output-dir "$NEW_OUTPUT_DIR"
+```
+
+The output directory must be new. Highball's child environment is constructed
+inside the process; no bottle settings are changed. For other Wine installs,
+use `--wine` with a Z: drive mapped to the host root and configure its
+environment externally. The stream validates finalized captures, not live TDS.
+
+The [frames 2864→2865 test](../benchmarks/runtime/2026-11-16-scene-sequence/result.json)
+used a single device and 36 resident textures, with calibrated offline fixture
+lights. Original and remaster images at both camera positions were byte-identical
+to their respective standalone renders. A packet with changed geometry was
+rejected before its next image. Temporal history is reset for these updates;
+dynamic visibility, object transforms and live frame delivery remain unimplemented.
+
+The resident geometry and both variants remain in memory while the process runs.
 The renderer builds a combined vertex buffer, deduplicates identical textures
 and reuses one D3D12 device, pipeline and GPU resource set across selections.
 Each render clears depth and shadow maps before drawing the selected variant.

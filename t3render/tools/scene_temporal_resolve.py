@@ -18,6 +18,7 @@ import sys
 
 import scene_ir_to_d3d12_packet as preview
 import scene_trace_session
+import compare_bridge_fixture as comparison
 from scene_ir import SceneSnapshot
 
 HEADER = struct.Struct("<8sII32s32f7fI")
@@ -82,6 +83,7 @@ def validate_runtime(temporal, scene_raw, manifest_raw):
             manifest.get("source_frame") != scene.source.frame_id or
             manifest.get("source_fingerprints") != scene.source.fingerprints or
             scene.source.kind != "runtime" or scene.source.camera_synchronized is not True or scene.camera is None or
+            scene.camera.viewport is None or scene.camera.view is None or scene.camera.projection is None or
             type(manifest.get("render_pass")) is not int or type(manifest.get("stage")) is not int or
             not any((s.render_pass, s.stage) == (manifest["render_pass"], manifest["stage"]) for s in scene.submissions) or
             not isinstance(manifest.get("textures"), list) or any(not isinstance(t, dict) or
@@ -104,8 +106,12 @@ def validate_runtime(temporal, scene_raw, manifest_raw):
             (scene.camera.viewport.width, scene.camera.viewport.height) != (temporal["width"], temporal["height"])):
         raise ValueError("temporal runtime provenance does not match the synchronized SceneIR")
     floats = lambda values: struct.unpack(f"<{len(values)}f", struct.pack(f"<{len(values)}f", *values))
+    position = comparison.camera_position(scene.camera.view)
     if (floats(scene.camera.view) != temporal["view"] or floats(scene.camera.projection) != temporal["projection"] or
-            scene.conventions.meters_per_unit is None or floats((scene.conventions.meters_per_unit,))[0] != temporal["scale"]):
+            scene.conventions.meters_per_unit is None or floats((scene.conventions.meters_per_unit,))[0] != temporal["scale"] or
+            position is None or floats(position) != temporal["camera"] or
+            floats((scene.camera.viewport.min_depth, scene.camera.viewport.max_depth)) !=
+            (temporal["min_depth"], temporal["max_depth"])):
         raise ValueError("temporal camera or units differ from SceneIR")
     _light_source(scene, manifest)
     return scene, manifest

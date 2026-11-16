@@ -55,6 +55,19 @@ bool ReadVariants(const wchar_t* path, Variants& variants) {
     return true;
 }
 
+bool ReadCameraUpdate(const wchar_t* path, Variants& variants) {
+    FILE* file = _wfopen(path, L"rb");
+    if (!file) { std::fprintf(stderr, "cannot open camera update packet\n"); return false; }
+    std::vector<std::uint8_t> bytes(t3render::scene::kMaxPacketBytes + 1);
+    const std::size_t size = std::fread(bytes.data(), 1, bytes.size(), file);
+    const bool error = std::ferror(file) != 0;
+    const bool close_error = std::fclose(file) != 0;
+    if (error || close_error || !variants.UpdateCamera(bytes.data(), size)) {
+        std::fprintf(stderr, "camera update changes resident scene or has invalid camera\n"); return false;
+    }
+    return true;
+}
+
 struct Constants {
     float view[16], projection[16];
     float size_scale_count[4], camera_exposure[4], ambient[4];
@@ -1145,9 +1158,28 @@ Output main(float4 position:SV_Position) {
             const auto split = line.find(L' ');
             if (split == std::wstring::npos || split + 1 == line.size()) return 2;
             const auto command = line.substr(0, split);
-            if ((command != L"original" && command != L"replacement") ||
-                !variant->variants->Select(variant->key, command == L"replacement")) return 2;
-            current_output = line.substr(split+1);
+            if (command == L"frame") {
+                const auto tab = line.find(L'\t', split+1);
+                if (tab == std::wstring::npos || tab == split+1 || tab+1 == line.size() ||
+                    line.find(L'\t', tab+1) != std::wstring::npos) return 2;
+                const auto path = line.substr(split+1, tab-split-1);
+                if (!ReadCameraUpdate(path.c_str(), *variant->variants)) return 2;
+                const auto& camera_frame = variant->variants->Current();
+                std::memcpy(cb.view, camera_frame.view, sizeof(cb.view));
+                std::memcpy(cb.projection, camera_frame.projection, sizeof(cb.projection));
+                for (unsigned i = 0; i < 3; ++i) cb.camera_exposure[i] = camera_frame.camera[i];
+                mapped = nullptr;
+                if (!Check(constants->Map(0, &no_read, &mapped), "MapUpdatedCamera") || !mapped) return 1;
+                std::memcpy(mapped, &cb, sizeof(cb));
+                const D3D12_RANGE written{0, sizeof(cb)}; constants->Unmap(0, &written);
+                current_output = line.substr(tab+1);
+                std::printf("variant_camera=updated temporal_history=reset\n");
+                std::fflush(stdout);
+            } else {
+                if ((command != L"original" && command != L"replacement") ||
+                    !variant->variants->Select(variant->key, command == L"replacement")) return 2;
+                current_output = line.substr(split+1);
+            }
         } else if (render_index == 0) {
             if (!variant->variants->Select(variant->key, true)) return 2;
             current_output = variant->replacement_output;

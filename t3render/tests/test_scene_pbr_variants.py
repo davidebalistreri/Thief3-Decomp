@@ -57,6 +57,30 @@ int main(int argc, char** argv) {
         }
     }
     if (!variants.Select(argv[1], false) || &variants.Current() != original) return 5;
+    std::uint32_t key_size = 0, old_size = 0;
+    std::memcpy(&key_size, raw.data()+8, 4); std::memcpy(&old_size, raw.data()+12, 4);
+    std::string update = raw.substr(20+key_size, old_size);
+    const float view_value = original->view[12] + .125f;
+    const float projection_value = original->projection[0] + .125f;
+    const float camera_value = original->camera[0] + .25f;
+    std::memcpy(&update[24+12*4], &view_value, 4); std::memcpy(&update[24+16*4], &projection_value, 4);
+    std::memcpy(&update[152], &camera_value, 4);
+    if (!variants.UpdateCamera(reinterpret_cast<const std::uint8_t*>(update.data()), update.size()) ||
+        variants.Current().view[12] != view_value || variants.Current().projection[0] != projection_value ||
+        variants.Current().camera[0] != camera_value ||
+        !variants.Select(argv[1], true) || variants.Current().view[12] != view_value ||
+        variants.Current().projection[0] != projection_value || variants.Current().camera[0] != camera_value ||
+        !variants.BuildCombined(combined, draws, casters)) return 7;
+    std::string invalid = update; invalid.back() ^= 1;
+    if (variants.UpdateCamera(reinterpret_cast<const std::uint8_t*>(invalid.data()), invalid.size()) ||
+        variants.Current().view[12] != view_value) return 8;
+    invalid = update; invalid[8] ^= 1;
+    if (variants.UpdateCamera(reinterpret_cast<const std::uint8_t*>(invalid.data()), invalid.size()) ||
+        variants.UpdateCamera(reinterpret_cast<const std::uint8_t*>(update.data()), update.size()-1)) return 8;
+    invalid = update; const std::uint32_t nan = 0x7fc00000;
+    std::memcpy(&invalid[24], &nan, 4);
+    if (variants.UpdateCamera(reinterpret_cast<const std::uint8_t*>(invalid.data()), invalid.size()) ||
+        variants.Current().view[12] != view_value || variants.Current().camera[0] != camera_value) return 8;
     std::cout << original->draws.size() << " " << replacement->draws.size() << "\n";
 }
 '''

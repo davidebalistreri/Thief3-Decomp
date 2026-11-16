@@ -65,6 +65,22 @@
     "gpu_image_sha256": "384a01ad857e2e1a892cd6351f96ab48aad9a3f7d6641ade847c21217d968f8b",
     "synthetic_subpixel_mean_error": {"jittered": 6, "resolved_cpu": 0, "resolved_gpu": 0}
   },
+  "resident_camera_and_bed_switch": {
+    "frames": [2864, 2865],
+    "resource": "INNbed1A1",
+    "bundle_sha256": "d29ee09b0a39b0837247ba4256daebd5c487b94323ec3f69a912a9320b0e78cd",
+    "renderer_sha256": "b70d2f5e49bea611ea4ce7847787b19abd7413d188c583a8df0e451d3a468c56",
+    "light_source": "offline_fixture",
+    "effects": ["shadow_maps", "ambient_indirect", "gtao", "filmic"],
+    "gpu_device_instances": 1,
+    "resident_textures": 36,
+    "original_triangles": 3629,
+    "replacement_triangles": 23821,
+    "original_and_replacement_match_standalone_at_both_cameras": true,
+    "changed_geometry_packet_rejected": true,
+    "temporal_history": "reset",
+    "runtime_game_integration": false
+  },
   "limitations": [
     "The scene is partial; geometry and resource fingerprints come from offline assets after runtime metadata matching.",
     "The 31 additional mesh bindings are offline candidates, not observed runtime mesh bindings.",

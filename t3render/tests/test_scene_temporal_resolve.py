@@ -186,6 +186,18 @@ class TemporalResolveTests(unittest.TestCase):
             item = temporal.parse(raw, packet)
             return item, temporal.validate_runtime(item, source, json.dumps(manifest).encode()), source, manifest
         old, old_runtime, source, manifest = capture(scene, lights)
+        wrong_camera = dict(old, camera=(old["camera"][0]+1, *old["camera"][1:]))
+        with self.assertRaisesRegex(ValueError, "camera"):
+            temporal.validate_runtime(wrong_camera, source, json.dumps(manifest).encode())
+        wrong_depth = dict(old, max_depth=.75)
+        with self.assertRaisesRegex(ValueError, "camera"):
+            temporal.validate_runtime(wrong_depth, source, json.dumps(manifest).encode())
+        for field in ("viewport", "view", "projection"):
+            data = scene.to_dict(); data["camera"][field] = None
+            missing = json.dumps(data).encode()
+            changed_manifest = dict(manifest, scene_sha256=hashlib.sha256(missing).hexdigest())
+            with self.subTest(camera_field=field), self.assertRaises(ValueError):
+                temporal.validate_runtime(old, missing, json.dumps(changed_manifest).encode())
         camera = replace(scene.camera, source=replace(scene.camera.source, frame_id=4))
         changed = replace(scene, source=replace(scene.source, frame_id=4), camera=camera)
         newer_lights = replace(lights, source=changed.source, camera=camera)

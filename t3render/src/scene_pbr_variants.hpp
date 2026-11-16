@@ -28,6 +28,7 @@ inline bool SameVariantContext(const Frame& a, const Frame& b) {
 class Variants {
     std::string resource_key_;
     Frame original_, replacement_;
+    std::vector<std::uint8_t> original_packet_;
     bool replacement_selected_ = false;
 public:
     bool Parse(const std::uint8_t* bytes, std::size_t size) {
@@ -52,6 +53,7 @@ public:
             !SameVariantContext(original, replacement)) return false;
         resource_key_ = std::move(key);
         original_ = std::move(original); replacement_ = std::move(replacement);
+        original_packet_ = std::move(raw_original);
         replacement_selected_ = false;
         return true;
     }
@@ -63,6 +65,28 @@ public:
     }
     const Frame& Current() const { return replacement_selected_ ? replacement_ : original_; }
     bool ReplacementSelected() const { return replacement_selected_; }
+
+    // A later packet may update only its camera. Check every other byte,
+    // including the complete geometry, materials and lights, before mutation.
+    // Runtime frame provenance is the caller's responsibility.
+    bool UpdateCamera(const std::uint8_t* bytes, std::size_t size) {
+        constexpr std::size_t camera_start = 24, camera_end = 164;
+        if (!bytes || original_packet_.size() < camera_end || size != original_packet_.size() ||
+            std::memcmp(bytes, original_packet_.data(), camera_start) ||
+            std::memcmp(bytes + camera_end, original_packet_.data() + camera_end, size - camera_end)) return false;
+        scene::Reader reader(bytes + camera_start, camera_end - camera_start);
+        float view[16], projection[16], camera[3];
+        for (float& value : view) if (!reader.f32(value, 10000)) return false;
+        for (float& value : projection) if (!reader.f32(value, 10000)) return false;
+        for (float& value : camera) if (!reader.f32(value)) return false;
+        if (!reader.end()) return false;
+        for (Frame* frame : {&original_, &replacement_}) {
+            std::memcpy(frame->view, view, sizeof(view));
+            std::memcpy(frame->projection, projection, sizeof(projection));
+            std::memcpy(frame->camera, camera, sizeof(camera));
+        }
+        return true;
+    }
 
     // Build one GPU input with shared textures and variant-tagged submissions.
     // Each filtered draw sequence remains in its original order.

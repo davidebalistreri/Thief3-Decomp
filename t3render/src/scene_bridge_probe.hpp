@@ -123,6 +123,9 @@ struct ProbeBsp {
 };
 
 struct ProbeTarget {
+    // Live fast path proves uniqueness only within the complete visible list;
+    // the full diagnostic path separately scans every UObject for the name.
+    bool visible_list_only = false;
     bool object_scan_complete = false;
     bool list_scan_complete = false;
     bool object_scan_truncated = false;
@@ -165,6 +168,9 @@ struct ProbeSnapshot {
 // End must copy the snapshot synchronously, before the callback returns.
 using BeginProbe = std::uint64_t (*)(std::uint32_t thread_id) noexcept;
 using EndProbe = void (*)(std::uint64_t ticket, const ProbeSnapshot&) noexcept;
+// Return true only for the lightweight live sample. Full trace captures keep
+// the complete diagnostic scan and its stronger uniqueness evidence.
+using SelectLiveProbe = bool (*)(std::uint64_t ticket) noexcept;
 // Called on a nested hook entry. Must be lock-free and must not call game code.
 using MarkProbeReentry = void (*)() noexcept;
 // Callbacks bracket the virtual draw call at the verified section callsite.
@@ -181,7 +187,8 @@ enum class ProbeStatus {
 
 // Explicit opt-in, called outside loader lock. Validates the executable hash,
 // mapped PE, image base, timestamp and entry bytes before modifying code.
-bool InstallProbe(BeginProbe begin, EndProbe end, MarkProbeReentry reentry, ProbeStatus* status) noexcept;
+bool InstallProbe(BeginProbe begin, EndProbe end, MarkProbeReentry reentry, ProbeStatus* status,
+                  SelectLiveProbe live_sample = nullptr) noexcept;
 
 // Restores the original entry but retains the trampoline/thunk until process
 // exit, because a thread may already be in flight when the hook is disabled.
@@ -192,7 +199,8 @@ bool DisableSubmissionProbe(ProbeStatus* status) noexcept;
 
 #if defined(T3RENDER_SCENE_BRIDGE_TEST_FIXTURE)
 // Available only in a separate fixture executable, never in the game proxy.
-bool InstallFixtureProbe(void* target, BeginProbe begin, EndProbe end, MarkProbeReentry reentry, ProbeStatus* status) noexcept;
+bool InstallFixtureProbe(void* target, BeginProbe begin, EndProbe end, MarkProbeReentry reentry, ProbeStatus* status,
+                         SelectLiveProbe live_sample = nullptr) noexcept;
 bool InstallFixtureSubmissionProbe(void* target, EnterSubmission enter, LeaveSubmission leave, ProbeStatus* status) noexcept;
 #endif
 

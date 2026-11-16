@@ -215,6 +215,20 @@ class CaptureBatchTests(unittest.TestCase):
                                           scene_bridge=True)
         self.assertEqual(enabled["T3RENDER_SCENE_BRIDGE"], "1")
         self.assertEqual(selected["T3RENDER_SCENE_BRIDGE"], "1")
+        catalog = self.root / "catalog.bin"
+        with self.assertRaises(batch.BatchError):
+            batch.env_for(self.root / "engine", self.root / "bottle", self.root / "output", 3,
+                          live_catalog=catalog)
+        live, selected = batch.env_for(self.root / "engine", self.root / "bottle", self.root / "output", 3,
+                                       scene_bridge=True, submission_scope=True, live_catalog=catalog)
+        self.assertEqual(live["T3RENDER_SCENE_LIVE_DX12"], "1")
+        self.assertEqual(selected["T3RENDER_LIVE_CATALOG"], batch.windows_path(catalog))
+        self.assertEqual(selected["T3RENDER_SCENE_LIVE_DIAGNOSTIC_DIR"], batch.windows_path(self.root / "output"))
+        live_only, selected = batch.env_for(self.root / "engine", self.root / "bottle", self.root / "output", 3,
+                                            scene_bridge=True, submission_scope=True, live_catalog=catalog, live_only=True)
+        self.assertNotIn("T3RENDER_CAPTURE_PATH", live_only)
+        self.assertNotIn("T3RENDER_EXPERIMENTAL_REPEATED_UNLOCK", live_only)
+        self.assertEqual(selected["T3RENDER_SCENE_LIVE_DX12"], "1")
 
     def test_simulated_run_captures_analyzes_and_removes_proxy(self):
         engine, bottle = self.root / "engine", self.root / "bottle"
@@ -243,6 +257,28 @@ class CaptureBatchTests(unittest.TestCase):
         self.assertEqual(result["scene_confirmation"], "unconfirmed")
         self.assertFalse((system / "d3d8.dll").exists())
         self.assertEqual(json.loads((output / "summary.json").read_text())["frames_captured"], 3)
+        terminate.assert_called_once()
+
+    def test_simulated_live_only_does_not_trigger_a_trace(self):
+        engine, bottle = self.root / "engine", self.root / "bottle"
+        system = bottle / "drive_c/Steam/Thief/System"
+        system.mkdir(parents=True)
+        proxy, catalog, output = self.root / "proxy.dll", self.root / "catalog.bin", self.root / "result"
+        proxy.write_bytes(b"fixture proxy"); catalog.write_bytes(b"fixture catalog")
+        resolved = tuple(p.resolve() for p in (engine, bottle, system, proxy, output))
+        with mock.patch.object(batch, "validate_paths", return_value=resolved), \
+             mock.patch.object(batch, "game_pids", side_effect=[[], [], [42], []]), \
+             mock.patch.object(batch, "wait_for_one_game"), \
+             mock.patch.object(batch, "process_start", return_value="same"), \
+             mock.patch.object(batch, "terminate_game") as terminate, \
+             mock.patch.object(batch, "loader_verified", return_value=True), \
+             mock.patch.object(batch.subprocess, "Popen"):
+            result = batch.execute(*map(str, resolved), delay=0, timeout=10, frames=3, terminate=True,
+                                   scene_bridge=True, submission_scope=True, live_catalog=str(catalog), live_only=True)
+        self.assertTrue(result["live_only"] and result["temporary_proxy_removed"])
+        self.assertEqual(result["frames_requested"], 0)
+        self.assertFalse((output / "bedroom.jsonl").exists())
+        self.assertFalse((output / "capture.ready").exists())
         terminate.assert_called_once()
 
     def test_failed_preflight_never_installs_proxy_or_launches_game(self):

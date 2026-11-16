@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 project(T3Render LANGUAGES C CXX)
 
 # API-neutral in-process scene state and flat diagnostic adapter. The opt-in
-# hook adapter is experimental; no live D3D12 consumer is connected yet.
+# hook adapter and live D3D12 viewer are experimental and not yet validated in TDS.
 add_library(t3render_scene_live STATIC ir/scene_live.cpp ir/scene_live_window.cpp src/scene_live_flat.cpp src/scene_live_binding.cpp src/scene_live_catalog.cpp src/scene_live_driver.cpp)
 target_compile_features(t3render_scene_live PUBLIC cxx_std_17)
 if(WIN32)
@@ -20,6 +20,29 @@ option(T3RENDER_D3D12_PROBE_ONLY "Build only the standalone D3D12 probe for Win3
 option(T3RENDER_BUILD_D3D12_REPLAY_UP "Build the limited synthetic replay and diagnostic quad preview" OFF)
 option(T3RENDER_BUILD_SCENE_D3D12 "Build the standalone textured SceneIR D3D12 renderer" OFF)
 option(T3RENDER_BUILD_SCENE_PBR_D3D12 "Build the independent PBR SceneIR D3D12 preview" OFF)
+option(T3RENDER_BUILD_LIVE_D3D12_FIXTURE "Build the synthetic persistent SceneIR D3D12 fixture" OFF)
+
+if(T3RENDER_BUILD_LIVE_D3D12_FIXTURE)
+  add_executable(t3render_live_dx12_fixture tests/scene_live_dx12_fixture.cpp src/scene_live_dx12.cpp src/scene_live_viewer.cpp)
+  target_compile_features(t3render_live_dx12_fixture PRIVATE cxx_std_17)
+  target_compile_definitions(t3render_live_dx12_fixture PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_link_libraries(t3render_live_dx12_fixture PRIVATE t3render_scene_live d3d12 dxgi dxguid user32)
+  add_executable(t3render_live_driver_dx12_fixture tests/scene_live_binding_fixture.cpp src/scene_live_dx12.cpp src/scene_live_viewer.cpp)
+  target_compile_features(t3render_live_driver_dx12_fixture PRIVATE cxx_std_17)
+  target_compile_definitions(t3render_live_driver_dx12_fixture PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX T3RENDER_TEST_LIVE_DX12_DRIVER)
+  target_link_libraries(t3render_live_driver_dx12_fixture PRIVATE t3render_scene_live dxguid user32)
+  if(MSVC)
+    target_compile_options(t3render_live_dx12_fixture PRIVATE /W4 /utf-8)
+    target_compile_options(t3render_live_driver_dx12_fixture PRIVATE /W4 /utf-8)
+    set_property(TARGET t3render_live_dx12_fixture PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    set_property(TARGET t3render_live_driver_dx12_fixture PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  else()
+    target_compile_options(t3render_live_dx12_fixture PRIVATE -Wall -Wextra)
+    target_compile_options(t3render_live_driver_dx12_fixture PRIVATE -Wall -Wextra)
+    target_link_options(t3render_live_dx12_fixture PRIVATE -municode -static -static-libgcc -static-libstdc++)
+    target_link_options(t3render_live_driver_dx12_fixture PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
+endif()
 
 function(t3render_add_scene_pbr_d3d12)
   add_executable(t3render_scene_pbr_d3d12 src/scene_pbr_d3d12.cpp)
@@ -154,14 +177,14 @@ if(T3RENDER_BUILD_EXPERIMENTAL_COMBINED_PROXY)
   set(t3render_minhook "${CMAKE_CURRENT_SOURCE_DIR}/../sdk/third_party/minhook")
   add_library(t3render_experimental_combined_proxy SHARED
     src/proxy.cpp src/buffer_proxy.cpp src/vtable_layout.c src/capture.cpp src/frame_image.cpp
-    src/scene_bridge_probe.cpp src/scene_live_runtime.cpp
+    src/scene_bridge_probe.cpp src/scene_live_runtime.cpp src/scene_live_dx12.cpp src/scene_live_viewer.cpp
     ${t3render_minhook}/src/buffer.c ${t3render_minhook}/src/hook.c
     ${t3render_minhook}/src/trampoline.c ${t3render_minhook}/src/hde/hde32.c ${t3render_exports})
   target_compile_features(t3render_experimental_combined_proxy PRIVATE cxx_std_17)
   target_include_directories(t3render_experimental_combined_proxy PRIVATE ${t3render_minhook}/include)
   target_compile_definitions(t3render_experimental_combined_proxy PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
     T3RENDER_EXPERIMENTAL_COMBINED_PROXY)
-  target_link_libraries(t3render_experimental_combined_proxy PRIVATE dxguid advapi32 t3render_ir t3render_scene_live)
+  target_link_libraries(t3render_experimental_combined_proxy PRIVATE dxguid advapi32 user32 t3render_ir t3render_scene_live)
   if(MSVC)
     target_compile_options(t3render_experimental_combined_proxy PRIVATE /W4 /utf-8)
     set_property(TARGET t3render_experimental_combined_proxy PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

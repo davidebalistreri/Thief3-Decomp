@@ -88,8 +88,10 @@ bool invalid_intervals_recover() {
     CHECK(probe(window));auto s=window.BeginMesh(thread,0,1,mesh());CHECK(s);auto d=window.BeginDraw(thread);CHECK(d);
     CHECK(!window.EndDraw(d,thread,false,true,true,true,true,viewport));CHECK(window.EndScope(s,thread,true));
     CHECK(end(window,2)==WindowResult::Rejected);CHECK(!scene.current());
+    CHECK(window.last_rejection() & WindowTainted);
     // The clean ending Present still primes a new interval.
     CHECK(probe(window));CHECK(submit_mesh(window));CHECK(end(window,3)==WindowResult::Published);
+    CHECK(window.last_rejection()==0);
     CHECK(probe(window));s=window.BeginMesh(thread,0,1,mesh());CHECK(s);d=window.BeginDraw(thread);CHECK(d);
     CHECK(!window.EndDraw(d,thread,true,true,true,true,false,viewport));CHECK(window.EndScope(s,thread,true));
     CHECK(end(window,4)==WindowResult::Rejected);CHECK(!scene.current());

@@ -122,7 +122,7 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
     }
     const auto bed_id=bed.id;
     if (!residency->AddResource(epoch.map,std::move(bed))) return false;
-    catalog.bed=residency->FindResource(epoch.map,bed_id);
+    catalog.bed=residency->FindSceneResource(epoch.map,bed_id);
     if (!catalog.bed) return false;
     std::unordered_set<std::string> ids;
     const auto prefix="bsp:"+map+":"+map_sha+":";
@@ -135,7 +135,7 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
             if (!section.material_id || !catalog.materials.count(*section.material_id)) return false;
         const auto id=block.id;
         if (!residency->AddResource(epoch.map,std::move(block))) return false;
-        auto resource=residency->FindResource(epoch.map,id);
+        auto resource=residency->FindSceneResource(epoch.map,id);
         if (!resource) return false;
         catalog.bsp.push_back(std::move(resource));
     }

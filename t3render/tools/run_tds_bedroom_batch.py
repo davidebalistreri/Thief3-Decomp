@@ -137,7 +137,8 @@ def validate_paths(engine, bottle, system, proxy, output):
     return engine, bottle, system, proxy, output
 
 
-def env_for(engine, bottle, output, frames, scene_bridge=False, submission_scope=False):
+def env_for(engine, bottle, output, frames, scene_bridge=False, submission_scope=False, live_catalog=None,
+            live_only=False):
     capture = {"T3RENDER_CAPTURE_PATH": windows_path(output / "bedroom.jsonl"),
                "T3RENDER_CAPTURE_TRIGGER_PATH": windows_path(output / "capture.ready"),
                "T3RENDER_CAPTURE_FRAMES": str(frames), "T3RENDER_CAPTURE_BUFFERS": "1",
@@ -146,12 +147,22 @@ def env_for(engine, bottle, output, frames, scene_bridge=False, submission_scope
                "T3RENDER_CAPTURE_VERTEX_PROGRAMS": "1", "T3RENDER_CAPTURE_VERTEX_CONSTANTS": "1",
                "T3RENDER_EXPERIMENTAL_COMBINED": "1", "T3RENDER_EXPERIMENTAL_REPEATED_UNLOCK": "1",
                "T3RENDER_EXPERIMENTAL_REPEAT_RECOVERY": "1"}
+    if live_only:
+        if live_catalog is None:
+            raise BatchError("live-only mode requires an offline catalog")
+        capture = {"T3RENDER_EXPERIMENTAL_COMBINED": "1"}
     if scene_bridge:
         capture["T3RENDER_SCENE_BRIDGE"] = "1"
     if submission_scope:
         if not scene_bridge:
             raise BatchError("submission scope requires the scene bridge probe")
         capture["T3RENDER_SCENE_BRIDGE_SUBMISSION"] = "1"
+    if live_catalog is not None:
+        if not scene_bridge or not submission_scope:
+            raise BatchError("live viewer requires the scene bridge and submission scope")
+        capture.update({"T3RENDER_SCENE_LIVE": "1", "T3RENDER_SCENE_LIVE_DX12": "1",
+                        "T3RENDER_LIVE_CATALOG": windows_path(live_catalog),
+                        "T3RENDER_SCENE_LIVE_DIAGNOSTIC_DIR": windows_path(output)})
     env = {k: v for k, v in os.environ.items() if not k.startswith("T3RENDER_") and
            k not in ("WINEDLLPATH", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH")}
     frameworks = engine / "frameworks"
@@ -203,14 +214,25 @@ def loader_verified(log, windows_dll):
 
 
 def execute(engine, bottle, system, proxy, output, delay, timeout, frames, terminate,
-            preflight=False, fixture=None, replay=None, scene_bridge=False, submission_scope=False):
+            preflight=False, fixture=None, replay=None, scene_bridge=False, submission_scope=False,
+            live_catalog=None, live_only=False):
     if submission_scope and not scene_bridge:
         raise BatchError("submission scope requires the scene bridge probe")
+    if live_only and (live_catalog is None or not terminate):
+        raise BatchError("live-only mode requires a catalog and termination after the timed test")
     engine, bottle, system, proxy, output = validate_paths(engine, bottle, system, proxy, output)
     if not math.isfinite(delay) or not math.isfinite(timeout) or delay < 0 or timeout <= delay or frames not in (1, 2, 3):
         raise BatchError("require nonnegative delay, a longer finite timeout and 1–3 frames")
     if (fixture is None) != (replay is None):
         raise BatchError("the synthetic fixture and DX12 replay must be supplied together")
+    if live_catalog is not None:
+        if not scene_bridge or not submission_scope:
+            raise BatchError("live viewer requires the scene bridge and submission scope")
+        live_catalog = Path(live_catalog).expanduser()
+        if (not live_catalog.is_absolute() or any(c in str(live_catalog) for c in (":", "\\", "\n", "\r"))
+                or not live_catalog.is_file()):
+            raise BatchError("live catalog must be an existing absolute local file")
+        live_catalog = live_catalog.resolve()
     if fixture is not None:
         fixture, replay = Path(fixture), Path(replay)
         if not fixture.is_absolute() or not replay.is_absolute():
@@ -228,7 +250,7 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
     output.mkdir()
     target = system / "d3d8.dll"
     env, capture = env_for(engine, bottle, output, frames, scene_bridge=scene_bridge,
-                           submission_scope=submission_scope)
+                           submission_scope=submission_scope, live_catalog=live_catalog, live_only=live_only)
     executable = "C:\\" + str((system / "T3Main.exe").relative_to((bottle / "drive_c").resolve())).replace("/", "\\")
     deployment = {"schema": 1, "proxy": str(target), "sha256": digest(proxy),
                   "capture_config": capture, "proxy_installed": False, "temporary_proxy_removed": None}
@@ -284,7 +306,9 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
         wait_for_one_game(deadline)
         game_seen = True
         trigger_time = time.monotonic() + delay
-        print(f"TDS avviato: cattura automatica tra {delay:g} secondi. Carica il salvataggio e resta nella bedroom.", flush=True)
+        message = (f"TDS avviato: prova live per {delay:g} secondi." if live_only else
+                   f"TDS avviato: cattura automatica tra {delay:g} secondi.")
+        print(f"{message} Carica il salvataggio e resta nella bedroom.", flush=True)
         while time.monotonic() < trigger_time:
             if time.monotonic() >= deadline:
                 raise BatchError("timeout before the scheduled capture")
@@ -296,21 +320,24 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
         trigger_start = process_start(trigger_pid)
         if not trigger_start:
             raise BatchError("cannot verify the TDS process start time")
-        (output / "capture.ready").touch(exist_ok=False)
-        trace = output / "bedroom.jsonl"
-        while time.monotonic() < deadline and not complete_trace(trace, frames):
-            if not game_pids():
-                raise BatchError("TDS exited before the complete capture")
-            time.sleep(0.5)
-        if not complete_trace(trace, frames):
-            raise BatchError("capture did not complete before the timeout")
+        if not live_only:
+            (output / "capture.ready").touch(exist_ok=False)
+            trace = output / "bedroom.jsonl"
+            while time.monotonic() < deadline and not complete_trace(trace, frames):
+                if not game_pids():
+                    raise BatchError("TDS exited before the complete capture")
+                time.sleep(0.5)
+            if not complete_trace(trace, frames):
+                raise BatchError("capture did not complete before the timeout")
         if not loader_verified(output / "wine.log", executable.rsplit("\\", 1)[0] + r"\d3d8.dll"):
             raise BatchError("Wine log does not establish that the expected proxy and builtin D3D8 were loaded")
-        summary = analyze_tds_capture.analyze(trace)
-        with (output / "summary.json").open("x", encoding="utf-8") as result_file:
-            result_file.write(json.dumps(summary, indent=2) + "\n")
+        if not live_only:
+            summary = analyze_tds_capture.analyze(trace)
+            with (output / "summary.json").open("x", encoding="utf-8") as result_file:
+                result_file.write(json.dumps(summary, indent=2) + "\n")
         status = "PARTIAL"
-        print(f"Cattura completata: {frames} frame. Analisi: {output / 'summary.json'}", flush=True)
+        print("Prova live terminata." if live_only else
+              f"Cattura completata: {frames} frame. Analisi: {output / 'summary.json'}", flush=True)
         if terminate:
             terminate_game(time.monotonic() + 10, trigger_pid, trigger_start)
             termination_done = True
@@ -340,13 +367,16 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
                 reason = (reason + "; " if reason else "") + str(exc)
             (output / "deployment.json").write_text(json.dumps(deployment, indent=2) + "\n", encoding="utf-8")
         result = {"schema": 1, "status": status, "error": reason or None,
-                  "scene_confirmation": "unconfirmed", "frames_requested": frames,
+                  "scene_confirmation": "unconfirmed", "frames_requested": 0 if live_only else frames,
                   "scene_bridge_requested": scene_bridge,
                   "submission_scope_requested": submission_scope,
+                  "live_viewer_requested": live_catalog is not None,
+                  "live_only": live_only,
                   "host_preflight": host_preflight, "highball_preflight": highball_preflight,
                   "proxy_installed": deployment["proxy_installed"],
                   "temporary_proxy_removed": deployment["temporary_proxy_removed"],
-                  "limitations": ["Three consecutive frames use one experimental configuration, not an A/B comparison.",
+                  "limitations": ["Live-only mode produces no D3D8 trace." if live_only else
+                                  "Three consecutive frames use one experimental configuration, not an A/B comparison.",
                                   "The trace does not prove the map or camera; confirm them separately.",
                                   "Images, if captured, are pre-Present backbuffers; presentation transformations and concurrent Present calls are not validated.",
                                   "No full room replay or pixel parity is produced."]}
@@ -384,6 +414,8 @@ def main(argv=None):
     run.add_argument("--frames", type=int, choices=(1, 2, 3), default=3)
     run.add_argument("--scene-bridge", action="store_true", help="enable the experimental read-only scene bridge probe")
     run.add_argument("--submission-scope", action="store_true", help="tag draws inside the verified section callsite; requires --scene-bridge")
+    run.add_argument("--live-catalog", help="enable the experimental D3D12 viewer with this offline catalog; requires bridge and submission scope")
+    run.add_argument("--live-only", action="store_true", help="timed viewer test without the heavy D3D8 trace; requires catalog and termination")
     run.add_argument("--terminate-after-capture", action="store_true", help="close the one TDS test process after capture")
     run.add_argument("--preflight", action="store_true", help="run the host test suite before launching TDS")
     run.add_argument("--fixture", help="synthetic x86 Highball fixture (requires --dx12-replay)")
@@ -398,7 +430,8 @@ def main(argv=None):
         else:
             execute(args.engine, args.bottle, args.system, args.proxy, args.output_dir,
                     args.delay, args.timeout, args.frames, args.terminate_after_capture,
-                    args.preflight, args.fixture, args.dx12_replay, args.scene_bridge, args.submission_scope)
+                    args.preflight, args.fixture, args.dx12_replay, args.scene_bridge, args.submission_scope,
+                    args.live_catalog, args.live_only)
     except (BatchError, OSError, ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

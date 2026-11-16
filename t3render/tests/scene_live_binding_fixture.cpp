@@ -1,5 +1,8 @@
 #include "../src/scene_live_binding.hpp"
 #include "../src/scene_live_driver.hpp"
+#ifdef T3RENDER_TEST_LIVE_DX12_DRIVER
+#include "../src/scene_live_viewer.hpp"
+#endif
 
 #include <cstring>
 #include <iostream>
@@ -92,6 +95,11 @@ bool matching() {
     MeshSelection mesh;BspSelection bsp;
     CHECK(ResolveBed(c,p,bed,0,1,mesh));
     CHECK(mesh.instance_id==actor && mesh.resource_id==bed_id && mesh.binding==BindingEvidence::Candidate);
+    CHECK(mesh.identity_scope==IdentityScope::FullObjectScan);
+    auto live_probe=p;live_probe.target.visible_list_only=true;
+    live_probe.target.object_scan_complete=false;live_probe.target.actors_named_target=0;
+    CHECK(ResolveBed(c,live_probe,bed,0,1,mesh) && mesh.identity_scope==IdentityScope::VisibleList);
+    live_probe.target.list_occurrences=2;CHECK(!ResolveBed(c,live_probe,bed,0,1,mesh));
     IndexedDraw draw{true,true,0,1,0,3};CHECK(ScopeDrawMatches(*c.bed,0,draw));
     auto mismatch=draw;mismatch.first_index=1;CHECK(!ScopeDrawMatches(*c.bed,0,mismatch));
     mismatch=draw;mismatch.vertex_count=2;CHECK(!ScopeDrawMatches(*c.bed,0,mismatch));
@@ -136,8 +144,8 @@ bool delivery() {
     invalid.provenance=provenance;invalid.conventions=conventions;invalid.synchronized=true;
     invalid.camera.view=identity;invalid.camera.projection=identity;invalid.camera.width=640;invalid.camera.height=480;
     invalid.meshes.push_back(foreign);CHECK(!state.Publish(invalid)); // a same-ID foreign resource is not the resident object
-    c.bed=state.FindResource(epoch.map,bed_id);c.bsp[0]=state.FindResource(epoch.map,bsp_id);
-    CHECK(c.bed && c.bsp[0] && !state.FindResource(epoch.map+1,bed_id));
+    c.bed=state.FindSceneResource(epoch.map,bed_id);c.bsp[0]=state.FindSceneResource(epoch.map,bsp_id);
+    CHECK(c.bed && c.bsp[0] && !state.FindSceneResource(epoch.map+1,bed_id));
     auto other_catalog=c;other_catalog.materials.at("mat:stone").name="Other";
     auto other_probe=p;text(other_probe.target.mesh_node.sections[0].material_name,"Other");
     CHECK(ResolveBed(other_catalog,other_probe,bed,0,1,foreign));invalid.meshes[0]=foreign;
@@ -170,7 +178,7 @@ bool driver_delivery() {
     auto c=catalog();auto memory=std::make_shared<SceneResidency>();CHECK(memory->BeginMap(0,c.map,c.map_sha256));
     const auto epoch=memory->epochs();CHECK(memory->AddMaterial(epoch.map,c.materials.at("mat:stone")));
     CHECK(memory->AddResource(epoch.map,*c.bed));CHECK(memory->AddResource(epoch.map,*c.bsp[0]));
-    c.bed=memory->FindResource(epoch.map,bed_id);c.bsp[0]=memory->FindResource(epoch.map,bsp_id);
+    c.bed=memory->FindSceneResource(epoch.map,bed_id);c.bsp[0]=memory->FindSceneResource(epoch.map,bsp_id);
     LoadedCatalog loaded;loaded.residency=memory;loaded.binding=c;
     loaded.conventions.length_unit=LengthUnit::T3Unit;loaded.conventions.axes=Axes::T3Xyz;loaded.conventions.up_axis=UpAxis::Z;
     FrameProvenance source;source.origin=FrameOrigin::Synthetic;source.session_id="driver-fixture";
@@ -185,9 +193,12 @@ bool driver_delivery() {
         auto draw=driver->BeginDraw(thread,scope,args);if (!draw.ticket || !draw.needs_state)return false;
         driver->EndDraw(draw.ticket,thread,true,state,endstate);driver->EndScope(scope,thread,before);return true;
     };
-    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bed,state));CHECK(submit(bsp,state));
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bed,state));CHECK(submit(bsp,state));CHECK(submit(bsp,state));
     CHECK(present()==WindowResult::Published);auto first=driver->current();
     CHECK(first && first->frame_id==1 && first->meshes.size()==1 && first->bsp.size()==1);
+    auto diagnostics=driver->stats();
+    CHECK(diagnostics.published==1 && diagnostics.selected_probes==1 && diagnostics.bed_scopes==1 &&
+          diagnostics.bsp_scopes==2 && diagnostics.bsp_cache_hits==1 && diagnostics.last_rejection==0);
     CHECK(first->meshes[0].selection.generation==1 && first->provenance.origin==FrameOrigin::Synthetic);
     CHECK(sample());CHECK(submit(bsp,state));CHECK(present()==WindowResult::Published);
     CHECK(driver->current()->meshes.empty());
@@ -195,6 +206,7 @@ bool driver_delivery() {
     CHECK(driver->current()->meshes[0].selection.generation==2); // gap could hide identity reuse
     CHECK(sample());auto moved=state;moved.world[12]=1;CHECK(submit(bed,moved));
     CHECK(present()==WindowResult::Rejected && !driver->current());
+    CHECK(driver->stats().last_rejection & WindowTainted);
     CHECK(sample());CHECK(submit(bed,state));CHECK(present()==WindowResult::Published);
     auto reset=driver->BeginReset(thread);CHECK(reset && !driver->current());driver->EndReset(reset,thread,false);
     CHECK(present()==WindowResult::Rejected && !driver->current());
@@ -218,7 +230,77 @@ bool driver_delivery() {
     CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bed,state));CHECK(present()==WindowResult::Published);
     driver->MarkLost();CHECK(!driver->current());
     CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bed,state));CHECK(present()==WindowResult::Published);
+    CHECK(sample());CHECK(submit(bsp,state));
+    auto replaced=bsp;replaced.bsp_source++;
+    scope=driver->BeginScope(thread,1,0);CHECK(scope && !driver->SetScopeSample(scope,thread,replaced));
+    driver->EndScope(scope,thread,replaced);CHECK(present()==WindowResult::Primed && !driver->current());
+    CHECK(sample());CHECK(submit(bsp,state));CHECK(present()==WindowResult::Published);
     return true;
 }
+#ifdef T3RENDER_TEST_LIVE_DX12_DRIVER
+struct PipelineFixture { std::unique_ptr<SceneDriver> driver; };
+std::shared_ptr<const Snapshot> pipeline_current(void* context) noexcept {
+    return static_cast<PipelineFixture*>(context)->driver->current();
+}
+bool pipeline_submit(void* context,const std::shared_ptr<const Snapshot>& expected,
+                     SubmitOperation submit,void* argument) noexcept {
+    return static_cast<PipelineFixture*>(context)->driver->SubmitIfCurrent(expected,submit,argument);
+}
+bool pipeline_wait(SceneViewer& viewer,std::uint64_t frames,std::uint64_t cleared=0) {
+    const auto deadline=GetTickCount64()+20000;
+    while (GetTickCount64()<deadline) {
+        const auto stats=viewer.stats();
+        if (stats.failed || stats.stopped) return false;
+        if (stats.initialized && stats.frames>=frames && stats.cleared>=cleared) return true;
+        Sleep(10);
+    }
+    return false;
+}
+bool driver_gpu_pipeline() {
+    auto c=catalog();auto memory=std::make_shared<SceneResidency>();CHECK(memory->BeginMap(0,c.map,c.map_sha256));
+    const auto epoch=memory->epochs();CHECK(memory->AddMaterial(epoch.map,c.materials.at("mat:stone")));
+    CHECK(memory->AddResource(epoch.map,*c.bed));CHECK(memory->AddResource(epoch.map,*c.bsp[0]));
+    c.bed=memory->FindSceneResource(epoch.map,bed_id);c.bsp[0]=memory->FindSceneResource(epoch.map,bsp_id);
+    LoadedCatalog loaded;loaded.residency=memory;loaded.binding=c;
+    loaded.conventions.length_unit=LengthUnit::T3Unit;loaded.conventions.axes=Axes::T3Xyz;loaded.conventions.up_axis=UpAxis::Z;
+    FrameProvenance source;source.origin=FrameOrigin::Synthetic;source.session_id="driver-gpu-fixture";
+    auto state=std::make_shared<PipelineFixture>();state->driver=SceneDriver::Create(std::move(loaded),source,0,1);
+    CHECK(state->driver);
+    ViewerProvider provider;provider.context=state;provider.current=pipeline_current;provider.submit_if_current=pipeline_submit;
+    auto viewer=SceneViewer::Start(std::move(provider),false);CHECK(viewer && pipeline_wait(*viewer,0));
+    auto& driver=*state->driver;const ThreadToken thread{17,123};auto p=probe();
+    const auto bed=bed_scope(),bsp=bsp_scope();const IndexedDraw args{true,true,0,1,0,3};
+    DrawObservation draw_state;draw_state.available=true;draw_state.view=draw_state.projection=draw_state.world=identity;
+    draw_state.viewport={0,0,64,64,0,0.5f};
+    auto present=[&] {const auto t=driver.BeginPresent(thread);return driver.EndPresent(t,thread,true);};
+    auto sample=[&] {const auto t=driver.BeginProbe(thread);if (!t)return false;driver.EndProbe(t,thread,p);return true;};
+    auto submit=[&](const SubmissionSample& value) {
+        const auto scope=driver.BeginScope(thread,1,0);if (!scope || !driver.SetScopeSample(scope,thread,value))return false;
+        const auto draw=driver.BeginDraw(thread,scope,args);if (!draw.ticket || !draw.needs_state)return false;
+        driver.EndDraw(draw.ticket,thread,true,draw_state,draw_state);driver.EndScope(scope,thread,value);return true;
+    };
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bed));CHECK(submit(bsp));
+    CHECK(present()==WindowResult::Published);viewer->Notify();CHECK(pipeline_wait(*viewer,1));
+    CHECK(viewer->stats().frame_id==1 && driver.current()->meshes.size()==1 && driver.current()->bsp.size()==1);
+    const auto reset=driver.BeginReset(thread);CHECK(reset);viewer->Notify();CHECK(pipeline_wait(*viewer,1,1));
+    driver.EndReset(reset,thread,true);CHECK(present()==WindowResult::Primed);
+    p.current_camera.derived_matrix_bits[12]=bits(0.25f);draw_state.view[12]=0.25f;
+    CHECK(sample());CHECK(submit(bed));CHECK(submit(bsp));CHECK(present()==WindowResult::Published);
+    viewer->Notify();CHECK(pipeline_wait(*viewer,2,1));
+    CHECK(viewer->stats().frame_id==3 && driver.current()->camera.view[12]==0.25f);
+    viewer->Stop();
+    const auto deadline=GetTickCount64()+20000;
+    while (!viewer->stats().stopped && GetTickCount64()<deadline) Sleep(10);
+    CHECK(viewer->stats().stopped && !viewer->stats().failed);
+    std::cout<<"scene_live_driver_dx12_fixture=ok source=synthetic frame_and_reset=ok\n";
+    return true;
+}
+#endif
 } // namespace
-int main() {if(!matching() || !delivery() || !driver_delivery())return 1;std::cout<<"scene_live_binding_fixture=ok\n";}
+int main() {
+    if(!matching() || !delivery() || !driver_delivery())return 1;
+#ifdef T3RENDER_TEST_LIVE_DX12_DRIVER
+    if (!driver_gpu_pipeline()) return 1;
+#endif
+    std::cout<<"scene_live_binding_fixture=ok\n";
+}

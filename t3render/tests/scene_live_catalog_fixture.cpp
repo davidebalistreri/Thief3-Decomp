@@ -34,8 +34,8 @@ int main(int argc,char** argv) {
     }
     const auto epoch=catalog.residency->epochs();
     const auto& bed=catalog.binding.bed;
-    if (!bed || catalog.residency->FindResource(epoch.map,bed->id)!=bed ||
-        catalog.binding.bsp.empty() || catalog.residency->FindResource(epoch.map,catalog.binding.bsp[0]->id)!=catalog.binding.bsp[0]) return 5;
+    if (!bed || catalog.residency->FindSceneResource(epoch.map,bed->id)!=bed ||
+        catalog.binding.bsp.empty() || catalog.residency->FindSceneResource(epoch.map,catalog.binding.bsp[0]->id)!=catalog.binding.bsp[0]) return 5;
     std::cout<<"accepted "<<catalog.binding.map<<" "<<catalog.binding.materials.size()<<" "
              <<catalog.binding.bsp.size()<<" "<<bed->geometry.positions.size()<<" "<<bed->geometry.indices.size()<<" "
              <<bed->geometry.normals.size()<<" "<<bed->geometry.uv0.size()<<" "<<bed->geometry.tangents.size()<<" "

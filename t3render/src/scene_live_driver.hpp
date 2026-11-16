@@ -17,6 +17,12 @@ struct DrawStart {
     std::uint64_t ticket = 0;
     bool needs_state = false;
 };
+struct DriverStats {
+    std::uint64_t probes = 0, selected_probes = 0, selected_probe_bad = 0, bed_scopes = 0, bsp_scopes = 0, bsp_cache_hits = 0;
+    std::uint64_t draw_geometry_bad = 0, draw_camera_bad = 0, draw_world_bad = 0, draw_viewport_bad = 0;
+    std::uint64_t scope_unstable = 0, scope_rejected = 0, losses = 0, primed = 0, published = 0, rejected = 0;
+    std::uint32_t last_rejection = 0;
+};
 
 // Connects the established probe/submission samples and device boundaries to
 // a semantic residency. Every begin must be paired with its end, including
@@ -48,6 +54,9 @@ public:
     // Call for hook loss, reentry, untracked operations or a replaced device.
     void MarkLost() noexcept;
     std::shared_ptr<const Snapshot> current() const noexcept;
+    DriverStats stats() const noexcept;
+    bool SubmitIfCurrent(const std::shared_ptr<const Snapshot>& expected,
+                         bool (*submit)(void*) noexcept, void* context) noexcept;
 
 private:
     struct Impl;

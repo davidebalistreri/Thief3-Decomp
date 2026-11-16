@@ -76,6 +76,7 @@ std::uint64_t SceneWindow::BeginPresent(ThreadToken thread, std::uint64_t frame_
 WindowResult SceneWindow::EndPresent(std::uint64_t ticket, ThreadToken thread, bool succeeded) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!ticket || ticket != present_ticket_ || !SameThread(thread, present_thread_)) {
+        last_rejection_ = WindowBadTicket;
         RequireRebind(); return WindowResult::Rejected;
     }
     const auto actual = residency_.epochs();
@@ -83,6 +84,11 @@ WindowResult SceneWindow::EndPresent(std::uint64_t ticket, ThreadToken thread, b
     if (!epoch_valid) RequireRebind();
     const bool no_pending = !probe_ticket_ && !scope_ticket_ && !draw_ticket_;
     const bool was_primed = primed_;
+    last_rejection_ = (!primed_ ? WindowNotPrimed : 0u) | (!succeeded ? WindowPresentFailed : 0u) |
+        (!epoch_valid ? WindowEpochInvalid : 0u) | (tainted_ ? WindowTainted : 0u) |
+        (boundary_ambiguous_ ? WindowBoundaryAmbiguous : 0u) | (!no_pending ? WindowPending : 0u) |
+        (!camera_ ? WindowNoCamera : 0u) | (!viewport_ ? WindowNoViewport : 0u) |
+        (rebind_required_ ? WindowNeedsRebind : 0u);
     bool published = false;
     if (primed_ && succeeded && epoch_valid && !tainted_ && !boundary_ambiguous_ && no_pending && camera_ && viewport_) {
         FrameInput frame;
@@ -95,6 +101,7 @@ WindowResult SceneWindow::EndPresent(std::uint64_t ticket, ThreadToken thread, b
         frame.camera.min_depth = viewport_->min_depth; frame.camera.max_depth = viewport_->max_depth;
         frame.meshes = meshes_; frame.bsp = blocks_;
         published = residency_.Publish(frame);
+        if (!published) last_rejection_ |= WindowPublishFailed;
     }
     if (!published) (void)residency_.DiscardFrame(epochs_.map, epochs_.device, present_frame_);
     // A complete successful boundary may prime a later interval even when the
@@ -106,6 +113,7 @@ WindowResult SceneWindow::EndPresent(std::uint64_t ticket, ThreadToken thread, b
     present_ticket_ = 0; present_thread_ = {};
     boundary_ambiguous_ = false;
     ClearInterval();
+    if (published) last_rejection_ = 0;
     return published ? WindowResult::Published : !was_primed && can_prime ? WindowResult::Primed : WindowResult::Rejected;
 }
 
@@ -210,7 +218,7 @@ bool SceneWindow::MergeScope() {
         auto& item = meshes_[found->second];
         if (item.resource_id != mesh_->resource_id || item.matched_resource != mesh_->matched_resource ||
             item.matched_material_names != mesh_->matched_material_names || item.generation != mesh_->generation ||
-            item.binding != mesh_->binding ||
+            item.binding != mesh_->binding || item.identity_scope != mesh_->identity_scope ||
             std::memcmp(item.transform.data(), mesh_->transform.data(), sizeof(float)*item.transform.size()) != 0 ||
             item.material_ids != mesh_->material_ids) return false;
         const auto section = mesh_->sections[0];
@@ -231,7 +239,7 @@ bool SceneWindow::MergeScope() {
         return true;
     }
     auto& item = blocks_[found->second];
-    if (item.binding != bsp_->binding || item.matched_resource != bsp_->matched_resource ||
+    if (item.binding != bsp_->binding || item.identity_scope != bsp_->identity_scope || item.matched_resource != bsp_->matched_resource ||
         item.matched_material_names != bsp_->matched_material_names) return false;
     const auto section = bsp_->sections[0];
     if (std::find(item.sections.begin(), item.sections.end(), section) == item.sections.end()) {
@@ -257,5 +265,9 @@ void SceneWindow::MarkLost() {
 bool SceneWindow::needs_rebind() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return rebind_required_;
+}
+std::uint32_t SceneWindow::last_rejection() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return last_rejection_;
 }
 } // namespace t3render::live

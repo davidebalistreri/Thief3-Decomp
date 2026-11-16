@@ -679,6 +679,81 @@ inline void ReadTargetProbe(const ProbeReader& reader, ProbeSnapshot& snapshot) 
     }
 }
 
+// Live path: identify the bed from the complete current visible list, then
+// verify its owner, class, outer, property and mesh node as before. Unlike the
+// full diagnostic path, this does not claim global uniqueness across every
+// UObject. No object pointer is reused from an earlier frame.
+inline void ReadLiveTargetProbe(const ProbeReader& reader, ProbeSnapshot& snapshot) noexcept {
+    auto& target=snapshot.target;target.visible_list_only=true;
+    if (!snapshot.count.available || !snapshot.array.available || !snapshot.array.value ||
+        snapshot.entries_truncated || snapshot.count.value!=snapshot.entries_attempted ||
+        snapshot.entries_attempted>kMaxProbeEntries) { target.list_scan_truncated=snapshot.entries_truncated;return; }
+    std::uint32_t selected=0, matches=0;
+    for (std::uint32_t i=0;i<snapshot.entries_attempted;++i) {
+        const auto& entry=snapshot.entries[i];
+        if (!entry.address.available) return;
+        if (!entry.address.value) continue;
+        if (!entry.vtable.available || !entry.type.available) return;
+        if (entry.vtable.value!=0x10e4e8c0 || entry.type.value!=4) continue;
+        const auto owner=ReadProbeOffset(reader,entry.address.value,0x54);
+        if (!owner.available || !owner.value) return;
+        const auto fname=ReadProbeOffset(reader,owner.value,0x20);
+        if (!fname.available) return;
+        if ((fname.value>>16)!=1521) continue;
+        char name[64]{};
+        if (!ReadProbeName(reader,fname.value,name)) return;
+        if (std::strcmp(name,"StaticMeshActor")==0) { selected=i;++matches; }
+    }
+    std::uint32_t slots[kMaxProbeEntries]{};
+    if (snapshot.entries_attempted && !ReadProbe(reader,snapshot.array.value,slots,snapshot.entries_attempted*4)) return;
+    for (std::uint32_t i=0;i<snapshot.entries_attempted;++i)
+        if (slots[i]!=snapshot.entries[i].address.value) return;
+    const auto count=ReadProbeOffset(reader,snapshot.self,0x50), array=ReadProbeOffset(reader,snapshot.self,0x58);
+    if (!count.available || count.value!=snapshot.count.value || !array.available || array.value!=snapshot.array.value) return;
+    target.list_scanned=snapshot.entries_attempted;target.list_scan_complete=true;target.list_occurrences=matches;
+    if (matches!=1) return;
+    ProbeSnapshot single;single.self=snapshot.self;single.count=snapshot.count;single.array=snapshot.array;
+    single.entries_attempted=1;single.entries[0]=snapshot.entries[selected];
+    ReadProbeOwners(reader,single);
+    const auto& item=single.entries[0];
+    if (!single.object_table_complete || !item.owner_stable || !item.owner_candidate.available ||
+        !item.owner_fname.available || (item.owner_fname.value>>16)!=1521 || !item.owner_name_available ||
+        std::strcmp(item.owner_name,"StaticMeshActor")!=0) return;
+    snapshot.object_table_complete=true;target.entry=item;target.entry_available=true;
+    ProbeArray32 table{};
+    if (!ReadProbe(reader,0x10f3e4a0,&table,sizeof(table)) ||
+        !ValidProbeArray(table,static_cast<std::uint32_t>(kMaxTargetObjects))) return;
+    target.owner_class=ReadNamedProbeObject(reader,table,item.owner_class);
+    auto outer=ReadProbeOffset(reader,item.owner_candidate.value,0x18);
+    while (outer.available && outer.value && target.outer_count<4) {
+        auto& named=target.outer[target.outer_count++];named=ReadNamedProbeObject(reader,table,outer);
+        if (!named.member || !named.stable) break;
+        outer=named.outer;
+    }
+    target.outer_truncated=outer.available && outer.value && target.outer_count==4;
+    if (!target.owner_class.member || !target.owner_class.stable || !target.owner_class.name_available ||
+        !target.owner_class.fname.available || (target.owner_class.fname.value>>16)!=0 ||
+        std::strcmp(target.owner_class.name,"StaticMeshActor")!=0) return;
+    const AssetReader asset_reader{reader.context,reader.read};
+    target.asset=InspectAssetCandidate(asset_reader,item.owner_candidate.value);
+    ReadProbeMeshNode(reader,item.address.value,target.mesh_node);
+    const ProbeEntry before=item;
+    single.entries[0]={};single.entries[0].list_index=selected;
+    single.entries[0].address=before.address;
+    single.entries[0].vtable=ReadProbeU32(reader,before.address.value);
+    single.entries[0].type=ReadProbeOffset(reader,before.address.value,0x44);
+    ReadProbeOwners(reader,single);
+    const auto& later=single.entries[0];
+    if (!later.owner_stable || !later.owner_candidate.available || later.owner_candidate.value!=before.owner_candidate.value ||
+        !later.owner_fname.available || later.owner_fname.value!=before.owner_fname.value ||
+        !later.owner_class.available || later.owner_class.value!=before.owner_class.value ||
+        std::memcmp(later.owner_location_bits,before.owner_location_bits,sizeof(before.owner_location_bits)) ||
+        std::memcmp(later.owner_rotation_bits,before.owner_rotation_bits,sizeof(before.owner_rotation_bits)) ||
+        std::memcmp(later.object_matrix_bits,before.object_matrix_bits,sizeof(before.object_matrix_bits))) {
+        target.asset={};target.mesh_node={};
+    }
+}
+
 inline ProbeSnapshot SampleProbe(const ProbeReader& reader, std::uint32_t thread_id,
                                  std::uint32_t self, std::uint32_t caller) noexcept {
     ProbeSnapshot snapshot;
@@ -722,6 +797,35 @@ inline ProbeSnapshot SampleProbe(const ProbeReader& reader, std::uint32_t thread
     RecheckProbeCamera(reader, 0x10f2c738, snapshot.configured_camera);
     RecheckProbeCamera(reader, 0x10f2c8c0, snapshot.current_camera);
     RecheckProbeCamera(reader, 0x10f2c8c4, snapshot.culling_camera);
+    return snapshot;
+}
+
+inline ProbeSnapshot SampleLiveProbe(const ProbeReader& reader, std::uint32_t thread_id,
+                                     std::uint32_t self, std::uint32_t caller) noexcept {
+    ProbeSnapshot snapshot;snapshot.thread_id=thread_id;snapshot.self=self;snapshot.caller=caller;
+    snapshot.known_caller=caller==0x109271ae;snapshot.pass=ReadProbeU32(reader,0x10efef54);
+    if (snapshot.pass.available && snapshot.pass.value!=0) {
+        const auto after=ReadProbeU32(reader,0x10efef54);
+        snapshot.pass_stable=after.available && after.value==snapshot.pass.value;
+        return snapshot;
+    }
+    ReadProbeCamera(reader,0x10f2c8c0,snapshot.current_camera);
+    snapshot.count=ReadProbeOffset(reader,self,0x50);snapshot.array=ReadProbeOffset(reader,self,0x58);
+    if (!snapshot.count.available || !snapshot.array.available || !snapshot.array.value || !snapshot.count.value) return snapshot;
+    snapshot.entries_attempted=static_cast<std::uint32_t>(std::min<std::size_t>(snapshot.count.value,kMaxProbeEntries));
+    snapshot.entries_truncated=snapshot.count.value>kMaxProbeEntries;
+    for (std::uint32_t i=0;i<snapshot.entries_attempted;++i) {
+        auto& entry=snapshot.entries[i];entry.list_index=i;
+        entry.address=ReadProbeOffset(reader,snapshot.array.value,i*4);
+        if (!entry.address.available || !entry.address.value) continue;
+        entry.vtable=ReadProbeU32(reader,entry.address.value);
+        entry.type=ReadProbeOffset(reader,entry.address.value,0x44);
+    }
+    ReadLiveTargetProbe(reader,snapshot);
+    ReadProbeBsp(reader,snapshot);
+    const auto final_pass=ReadProbeU32(reader,0x10efef54);
+    snapshot.pass_stable=snapshot.pass.available && final_pass.available && snapshot.pass.value==final_pass.value;
+    RecheckProbeCamera(reader,0x10f2c8c0,snapshot.current_camera);
     return snapshot;
 }
 

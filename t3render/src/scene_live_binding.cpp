@@ -39,8 +39,8 @@ bool ReadFloats(const std::uint32_t* bits, float* output, std::size_t count) {
 bool MapMatches(const BindingCatalog& catalog, const ProbeSnapshot& snapshot) {
     const auto& target = snapshot.target;
     if (catalog.map.empty() || catalog.map.size() > 128 || !Digest(catalog.map_sha256) || !target.entry_available ||
-        !target.object_scan_complete || target.object_scan_truncated || !target.list_scan_complete ||
-        target.list_scan_truncated || target.actors_named_target != 1 || target.list_occurrences != 1 ||
+        (!target.visible_list_only && (!target.object_scan_complete || target.object_scan_truncated || target.actors_named_target != 1)) ||
+        !target.list_scan_complete || target.list_scan_truncated || target.list_occurrences != 1 ||
         target.outer_count != 1 || target.outer_truncated) return false;
     const auto& entry=target.entry;
     const auto& cls=target.owner_class;
@@ -217,6 +217,7 @@ bool ResolveBed(const BindingCatalog& catalog, const scene_bridge::ProbeSnapshot
         !MeshMetadata(catalog,node) || section >= catalog.bed->geometry.sections.size()) return false;
     MeshSelection result; result.instance_id=catalog.bed_instance_id; result.resource_id=catalog.bed->id;
     result.generation=generation; result.binding=BindingEvidence::Candidate; result.material_ids=catalog.bed_materials;
+    result.identity_scope=target.visible_list_only ? IdentityScope::VisibleList : IdentityScope::FullObjectScan;
     result.matched_resource=catalog.bed;
     for (std::size_t i=0;i<catalog.bed->geometry.sections.size();++i) {
         const auto& id=catalog.bed_materials.empty() ? catalog.bed->geometry.sections[i].material_id : catalog.bed_materials[i];
@@ -285,6 +286,7 @@ bool ResolveBsp(const BindingCatalog& catalog, const scene_bridge::ProbeSnapshot
     for (std::uint32_t i=0;i<bsp.candidates_copied;++i)
         if (&bsp.candidates[i] != current && BspMetadata(catalog,*selected,bsp.candidates[i])) return false;
     BspSelection result; result.resource_id=selected->id;result.binding=BindingEvidence::Candidate;
+    result.identity_scope=snapshot.target.visible_list_only ? IdentityScope::VisibleList : IdentityScope::FullObjectScan;
     result.matched_resource=selected;
     for (const auto& part : selected->geometry.sections)
         result.matched_material_names.push_back(catalog.materials.at(*part.material_id).name);

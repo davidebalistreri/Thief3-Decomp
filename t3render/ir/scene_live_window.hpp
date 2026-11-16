@@ -20,6 +20,12 @@ struct ProbeCamera {
     Matrix view{}, projection{};
 };
 enum class WindowResult { Primed, Published, Rejected };
+enum WindowReject : std::uint32_t {
+    WindowNotPrimed = 1u << 0, WindowPresentFailed = 1u << 1, WindowEpochInvalid = 1u << 2,
+    WindowTainted = 1u << 3, WindowBoundaryAmbiguous = 1u << 4, WindowPending = 1u << 5,
+    WindowNoCamera = 1u << 6, WindowNoViewport = 1u << 7, WindowPublishFailed = 1u << 8,
+    WindowNeedsRebind = 1u << 9, WindowBadTicket = 1u << 10
+};
 
 // Collects one chosen pass/stage between actual Present boundaries. All
 // observations and semantic bindings are supplied by the hook adapter; this
@@ -59,6 +65,7 @@ public:
     // this window after a map or device epoch change.
     void MarkLost();
     bool needs_rebind() const;
+    std::uint32_t last_rejection() const;
 
 private:
     void RequireRebind(); // mutex held
@@ -77,6 +84,7 @@ private:
     std::uint64_t next_ticket_ = 1;
     bool primed_ = false, tainted_ = false, boundary_ambiguous_ = false, active_probe_matches_ = false;
     bool rebind_required_ = false, draw_scoped_ = false;
+    std::uint32_t last_rejection_ = 0;
     std::uint64_t draw_scope_ticket_ = 0;
     ThreadToken previous_thread_{}, present_thread_{}, probe_thread_{}, scope_thread_{}, draw_thread_{};
     std::uint64_t previous_frame_ = 0, present_frame_ = 0;

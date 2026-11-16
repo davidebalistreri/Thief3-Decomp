@@ -1,5 +1,6 @@
 #include "scene_live_runtime.hpp"
 #include "scene_live_catalog_win.hpp"
+#include "scene_live_viewer.hpp"
 
 #include <windows.h>
 #include <wincrypt.h>
@@ -16,6 +17,7 @@ static_assert(std::atomic<bool>::is_always_lock_free,"nested probe loss must be 
 struct RuntimeState {
     std::mutex device_mutex;
     std::unique_ptr<SceneDriver> owned;
+    std::unique_ptr<SceneViewer> viewer;
     std::atomic<SceneDriver*> driver{nullptr};
     std::atomic<IDirect3DDevice8*> device{nullptr};
     std::atomic<bool> terminal{false},deferred_loss{false};
@@ -54,6 +56,31 @@ SceneDriver* Driver(bool require_device) {
 }
 bool IsDevice(IDirect3DDevice8* device) {
     return device && State().device.load(std::memory_order_acquire)==device;
+}
+void NotifyViewer() noexcept {
+    try { if (State().viewer) State().viewer->Notify(); } catch (...) {}
+}
+std::shared_ptr<const Snapshot> ViewerCurrent(void*) noexcept { return RuntimeCurrent(); }
+DriverStats ViewerDriverStats(void*) noexcept {
+    try { auto* driver=State().driver.load(std::memory_order_acquire);return driver ? driver->stats() : DriverStats{}; }
+    catch (...) { return {}; }
+}
+struct GuardedSubmission { RuntimeState* state; SubmitOperation operation; void* argument; };
+bool SubmitIfSafe(void* context) noexcept {
+    auto& item=*static_cast<GuardedSubmission*>(context);
+    if (item.state->terminal.load(std::memory_order_acquire) ||
+        item.state->deferred_loss.load(std::memory_order_acquire) ||
+        !item.state->device.load(std::memory_order_acquire)) return false;
+    return item.operation(item.argument);
+}
+bool ViewerSubmit(void*,const std::shared_ptr<const Snapshot>& expected,
+                  SubmitOperation operation,void* argument) noexcept {
+    try {
+        auto& state=State();auto* driver=Driver(true);
+        if (!driver || !operation) return false;
+        GuardedSubmission guarded{&state,operation,argument};
+        return driver->SubmitIfCurrent(expected,SubmitIfSafe,&guarded);
+    } catch (...) { RuntimeAbandon();return false; }
 }
 bool ReadMemory(void*,std::uint32_t address,void* output,std::size_t size) noexcept {
     SIZE_T copied=0;
@@ -115,6 +142,14 @@ bool RuntimeInitialize() noexcept {
             auto driver=SceneDriver::Create(std::move(catalog),std::move(source),0,1);
             if (!driver) return;
             state.owned=std::move(driver);state.driver.store(state.owned.get(),std::memory_order_release);
+            if (Environment(L"T3RENDER_SCENE_LIVE_DX12")==L"1") {
+                ViewerProvider provider;provider.context=std::shared_ptr<void>(&state,[](void*){});
+                provider.current=ViewerCurrent;provider.submit_if_current=ViewerSubmit;
+                provider.driver_stats=ViewerDriverStats;
+                provider.diagnostic_directory=Environment(L"T3RENDER_SCENE_LIVE_DIAGNOSTIC_DIR");
+                state.viewer=SceneViewer::Start(std::move(provider),true);
+                if (!state.viewer) OutputDebugStringW(L"T3Render: live DX12 viewer failed to start\n");
+            }
         });
         return Enabled(State());
     } catch (...) { return false; }
@@ -129,6 +164,7 @@ void RuntimeAbandon() noexcept {
         auto& state=State();state.terminal.store(true,std::memory_order_release);
         state.deferred_loss.store(true,std::memory_order_release);
         if (auto* driver=state.driver.load(std::memory_order_acquire)) driver->MarkLost();
+        if (state.viewer) state.viewer->Stop();
     } catch (...) {}
 }
 void RuntimeDeviceCreated(IDirect3DDevice8* device) noexcept {
@@ -153,6 +189,7 @@ void RuntimeDeviceReleased(IDirect3DDevice8* device) noexcept {
             if (!ticket) {RuntimeAbandon();return;}
             driver->EndReset(ticket,CurrentThread(),true);
         }
+        NotifyViewer();
     } catch (...) {RuntimeAbandon();}
 }
 std::uint64_t RuntimeProbeBegin(std::uint32_t thread_id) noexcept {
@@ -240,12 +277,12 @@ std::uint64_t RuntimePresentBegin(IDirect3DDevice8* device) noexcept {
 }
 void RuntimePresentEnd(std::uint64_t ticket,HRESULT result) noexcept {
     LastError saved;
-    try {if (!ticket) return;auto* d=Driver(false);if (d) (void)d->EndPresent(ticket,CurrentThread(),SUCCEEDED(result));}
+    try {if (!ticket) return;auto* d=Driver(false);if (d) (void)d->EndPresent(ticket,CurrentThread(),SUCCEEDED(result));NotifyViewer();}
     catch (...) {RuntimeAbandon();}
 }
 std::uint64_t RuntimeResetBegin(IDirect3DDevice8* device) noexcept {
     LastError saved;
-    try {if (querying) {RuntimeAbandon();return 0;} auto* d=Driver(true);return d && IsDevice(device) ? d->BeginReset(CurrentThread()) : 0;}
+    try {if (querying) {RuntimeAbandon();return 0;} auto* d=Driver(true);const auto ticket=d && IsDevice(device) ? d->BeginReset(CurrentThread()) : 0;NotifyViewer();return ticket;}
     catch (...) {RuntimeAbandon();return 0;}
 }
 void RuntimeResetEnd(std::uint64_t ticket,HRESULT result) noexcept {

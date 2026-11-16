@@ -47,6 +47,7 @@ struct Camera {
 };
 // Producer's binding assessment; Candidate must not be promoted to Verified.
 enum class BindingEvidence { Unknown, Candidate, Verified };
+enum class IdentityScope { Unknown, VisibleList, FullObjectScan };
 struct MeshSelection {
     std::string instance_id, resource_id;
     // Optional in-memory attestation from a matcher; never serialized.
@@ -55,6 +56,7 @@ struct MeshSelection {
     // Assigned by the producer, never a process address. Changes on identity reuse.
     std::uint64_t generation = 0;
     BindingEvidence binding = BindingEvidence::Unknown;
+    IdentityScope identity_scope = IdentityScope::Unknown;
     Matrix transform{};
     // Empty means use section materials; null entries mean unknown, not defaults.
     std::vector<std::optional<std::string>> material_ids;
@@ -65,6 +67,7 @@ struct BspSelection {
     std::shared_ptr<const Resource> matched_resource; // in-memory only
     std::vector<std::optional<std::string>> matched_material_names;
     BindingEvidence binding = BindingEvidence::Unknown;
+    IdentityScope identity_scope = IdentityScope::Unknown;
     std::vector<std::uint32_t> sections;
 };
 enum class LengthUnit { Unknown, T3Unit, Meter };
@@ -116,6 +119,8 @@ struct ResidentBsp {
 struct Snapshot {
     std::string map, map_sha256;
     std::uint64_t map_epoch = 0, device_epoch = 0, frame_id = 0;
+    // Advances when a published frame is invalidated within the same epoch.
+    std::uint64_t continuity = 0;
     std::uint32_t render_pass = 0, stage = 0;
     FrameProvenance provenance;
     Conventions conventions;
@@ -128,6 +133,9 @@ struct Epochs {
     std::uint64_t map = 0, device = 0;
     bool ready = false;
 };
+// A newer ordinary frame can follow an already submitted one. An intervening
+// invalidation, map/device change or different session breaks continuity.
+bool DisplayContinuityMatches(const Snapshot& earlier, const Snapshot& latest) noexcept;
 
 // All operations are synchronized. A reader can retain a snapshot while the
 // producer publishes another one; immutable resource data is shared. Consumers
@@ -147,14 +155,20 @@ public:
     bool DiscardFrame(std::uint64_t map_epoch, std::uint64_t device_epoch, std::uint64_t through_frame_id);
     Epochs epochs() const;
     // Returns the immutable resident object only for the requested map epoch.
-    std::shared_ptr<const Resource> FindResource(std::uint64_t map_epoch, const std::string& id) const;
+    std::shared_ptr<const Resource> FindSceneResource(std::uint64_t map_epoch, const std::string& id) const;
     std::shared_ptr<const Snapshot> current() const;
+    // Calls submit only while the exact snapshot remains current and its epoch
+    // is ready. The callback must not call back into SceneResidency, block for
+    // GPU completion, or throw. It may enqueue GPU work and return promptly.
+    bool SubmitIfCurrent(const std::shared_ptr<const Snapshot>& expected,
+                         bool (*submit)(void*) noexcept, void* context) noexcept;
 
 private:
     struct Identity { std::uint64_t generation; std::string resource_id; };
     mutable std::mutex mutex_;
     std::string map_, map_sha256_;
     std::uint64_t map_epoch_ = 0, device_epoch_ = 0, last_frame_ = 0;
+    std::uint64_t continuity_ = 1;
     bool ready_ = true, resetting_ = false, has_frame_ = false;
     std::size_t geometry_bytes_ = 0;
     std::optional<FrameProvenance> provenance_;

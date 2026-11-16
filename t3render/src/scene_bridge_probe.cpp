@@ -34,6 +34,7 @@ struct ProbeState {
     std::atomic<BeginProbe> begin{nullptr};
     std::atomic<EndProbe> end{nullptr};
     std::atomic<MarkProbeReentry> reentry{nullptr};
+    std::atomic<SelectLiveProbe> live_sample{nullptr};
     std::atomic<bool> active{false};
     bool attempted = false;
     void* target = nullptr;
@@ -178,7 +179,10 @@ void __cdecl Dispatch(const std::uint32_t* registers) noexcept {
             const auto ticket = begin(thread);
             if (ticket) {
                 const ProbeReader reader{nullptr, SafeRead};
-                const ProbeSnapshot snapshot = SampleProbe(reader, thread, registers[6], registers[9]);
+                const auto select_live=state->live_sample.load(std::memory_order_acquire);
+                const ProbeSnapshot snapshot = select_live && select_live(ticket) ?
+                    SampleLiveProbe(reader, thread, registers[6], registers[9]) :
+                    SampleProbe(reader, thread, registers[6], registers[9]);
                 end(ticket, snapshot);
             }
         }
@@ -341,7 +345,7 @@ bool MakeThunk(ProbeState& state) noexcept {
 }
 
 bool InstallAt(ProbeState& state, void* target, BeginProbe begin, EndProbe end, MarkProbeReentry reentry, ProbeStatus* status,
-               bool verify_real_prologue) noexcept {
+               bool verify_real_prologue, SelectLiveProbe live_sample) noexcept {
     if (!IsProcessorFeaturePresent(PF_XMMI_INSTRUCTIONS_AVAILABLE))
         return SetStatus(status, ProbeStatus::UnsupportedProcessor);
     HMODULE pinned = nullptr;
@@ -366,6 +370,7 @@ bool InstallAt(ProbeState& state, void* target, BeginProbe begin, EndProbe end, 
     state.begin.store(begin, std::memory_order_release);
     state.end.store(end, std::memory_order_release);
     state.reentry.store(reentry, std::memory_order_release);
+    state.live_sample.store(live_sample, std::memory_order_release);
     state.active.store(true, std::memory_order_release);
     if (MH_EnableHook(target) != MH_OK) {
         state.active.store(false, std::memory_order_release);
@@ -377,7 +382,8 @@ bool InstallAt(ProbeState& state, void* target, BeginProbe begin, EndProbe end, 
 
 }  // namespace
 
-bool InstallProbe(BeginProbe begin, EndProbe end, MarkProbeReentry reentry, ProbeStatus* status) noexcept {
+bool InstallProbe(BeginProbe begin, EndProbe end, MarkProbeReentry reentry, ProbeStatus* status,
+                  SelectLiveProbe live_sample) noexcept {
     if (!begin || !end || !reentry) return SetStatus(status, ProbeStatus::InvalidArguments);
     auto* state = State();
     if (!state) return SetStatus(status, ProbeStatus::HookEngineFailed);
@@ -385,7 +391,7 @@ bool InstallProbe(BeginProbe begin, EndProbe end, MarkProbeReentry reentry, Prob
     if (state->attempted) return SetStatus(status, ProbeStatus::AlreadyAttempted);
     state->attempted = true;
     if (!VerifyExecutable(status) || !VerifyImage(status) || !VerifyPrologue(status)) return false;
-    return InstallAt(*state, reinterpret_cast<void*>(kTarget), begin, end, reentry, status, true);
+    return InstallAt(*state, reinterpret_cast<void*>(kTarget), begin, end, reentry, status, true, live_sample);
 }
 
 bool DisableProbe(ProbeStatus* status) noexcept {
@@ -427,14 +433,15 @@ bool DisableSubmissionProbe(ProbeStatus* status) noexcept {
 
 #if defined(T3RENDER_SCENE_BRIDGE_TEST_FIXTURE)
 // Compiled only into an isolated synthetic fixture, never the game proxy.
-bool InstallFixtureProbe(void* target, BeginProbe begin, EndProbe end, MarkProbeReentry reentry, ProbeStatus* status) noexcept {
+bool InstallFixtureProbe(void* target, BeginProbe begin, EndProbe end, MarkProbeReentry reentry, ProbeStatus* status,
+                         SelectLiveProbe live_sample) noexcept {
     if (!target || !begin || !end || !reentry) return SetStatus(status, ProbeStatus::InvalidArguments);
     auto* state = State();
     if (!state) return SetStatus(status, ProbeStatus::HookEngineFailed);
     std::lock_guard<std::mutex> lock(state->mutex);
     if (state->attempted) return SetStatus(status, ProbeStatus::AlreadyAttempted);
     state->attempted = true;
-    return InstallAt(*state, target, begin, end, reentry, status, false);
+    return InstallAt(*state, target, begin, end, reentry, status, false, live_sample);
 }
 
 bool InstallFixtureSubmissionProbe(void* target, EnterSubmission enter, LeaveSubmission leave, ProbeStatus* status) noexcept {

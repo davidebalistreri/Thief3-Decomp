@@ -57,6 +57,21 @@ identity require separate checks. Probe data includes transient addresses and
 stays in the local trace. Frame numbers are process-local: a new capture does
 not become golden frame 3377 simply because it uses the same room.
 
+For an experimental live flat viewer, first export a local offline catalog as
+described in [scene live](../ir/README_scene_live.md), then add
+`--scene-bridge --submission-scope --live-catalog /absolute/path/to/catalog.bin`.
+The runner supplies an output directory for the viewer's bounded local log and
+up to two images. The viewer is partial, asynchronous, may drop frames and
+does not by itself establish a match with the D3D8 capture. Compare frame IDs
+only after verifying a common device and Present sequence. These files can
+contain scene-derived data and remain local.
+
+Add `--live-only --terminate-after-capture` to run the viewer for the specified
+`--delay` without enabling the D3D8 trace. This is useful for checking viewer
+behavior and responsiveness without the full diagnostic scan; it produces no
+trace or synchronized D3D8 screenshot. `scene-live.jsonl` contains elapsed time
+only for performance diagnostics, never as evidence of frame synchronization.
+
 The runner refuses an already-running TDS or existing `System/d3d8.dll`. It
 installs the exact built DLL temporarily and removes it only after the game has
 exited and its hash and file identity still match. If interrupted or if cleanup cannot be

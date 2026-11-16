@@ -2,6 +2,7 @@
 #include "../src/scene_bridge_submission.hpp"
 
 #include <cassert>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -11,6 +12,7 @@ using namespace t3render::scene_bridge;
 struct Memory {
     std::map<std::uint32_t, std::uint8_t> bytes;
     unsigned owner_reads = 0;
+    unsigned read_calls = 0;
     void region(std::uint32_t address, std::size_t count) {
         for (std::size_t i = 0; i < count; ++i) bytes[address + static_cast<std::uint32_t>(i)] = 0;
     }
@@ -21,6 +23,7 @@ struct Memory {
     }
     static bool read(void* context, std::uint32_t address, void* output, std::size_t count) noexcept {
         auto& memory = *static_cast<Memory*>(context);
+        ++memory.read_calls;
         if (address >= 0x4000 && address < 0x4200) ++memory.owner_reads;
         auto* result = static_cast<std::uint8_t*>(output);
         for (std::size_t i = 0; i < count; ++i) {
@@ -202,6 +205,47 @@ int main() {
     assert(bsp.stable && bsp.source_index == 1 && bsp.list_index == 1 &&
            bsp.vertex_count == 60 && bsp.index_count == 114 && bsp.sections_available &&
            bsp.sections_copied == 2 && std::strcmp(bsp.sections[0].material_name, "wall") == 0);
+    // The live path checks only the visible actor's identity; it must not scan
+    // each unrelated UObject by name on every game frame.
+    auto large=complete;
+    constexpr std::uint32_t extra=1000, table_base=0x200000, object_base=0x300000;
+    large.region(table_base,(extra+4)*4);
+    for (std::uint32_t i=0;i<4;++i) {
+        std::uint32_t value=0;
+        assert(Memory::read(&large,0x8000+i*4,&value,sizeof(value)));
+        large.put<std::uint32_t>(table_base+i*4,value);
+    }
+    for (std::uint32_t i=0;i<extra;++i) {
+        const auto object=object_base+i*64;large.region(object,0x24);
+        large.put<std::uint32_t>(table_base+(i+4)*4,object);
+    }
+    large.put<std::uint32_t>(0x10f3e4a0,table_base);
+    large.put<std::uint32_t>(0x10f3e4a4,extra+4);large.put<std::uint32_t>(0x10f3e4a8,extra+4);
+    large.put<std::uint32_t>(0x10efef54,0);
+    reader.context=&large;large.read_calls=0;
+    auto full=SampleProbe(reader,42,0x1000,0x109271ae);const auto full_reads=large.read_calls;
+    large.read_calls=0;auto live=SampleLiveProbe(reader,42,0x1000,0x109271ae);const auto live_reads=large.read_calls;
+    assert(full.target.object_scan_complete && full.target.entry_available);
+    assert(live.target.visible_list_only && !live.target.object_scan_complete && live.target.list_scan_complete &&
+           live.target.list_occurrences==1 && live.target.entry_available && live.target.owner_class.stable &&
+           live.target.asset.status==AssetStatus::Candidate && live.target.mesh_node.stable && live.bsp.source_stable);
+    assert(live_reads*2<full_reads);
+    std::printf("probe_read_calls full=%u live=%u unrelated_objects=%u\n",full_reads,live_reads,extra);
+    // Another globally named actor outside the visible list is not ruled out
+    // by the fast path; its result must explicitly retain the weaker scope.
+    large.put<std::uint32_t>(object_base+0x20,(1521u<<16)|7);
+    full=SampleProbe(reader,42,0x1000,0x109271ae);
+    live=SampleLiveProbe(reader,42,0x1000,0x109271ae);
+    assert(full.target.actors_named_target==2 && !full.target.entry_available);
+    assert(live.target.visible_list_only && live.target.list_occurrences==1 && live.target.entry_available);
+    large.put<std::uint32_t>(object_base+0x20,0);
+    large.put<std::uint32_t>(0x1050,3);large.put<std::uint32_t>(0x2008,0x3000);
+    live=SampleLiveProbe(reader,42,0x1000,0x109271ae);
+    assert(live.target.list_occurrences==2 && !live.target.entry_available);
+    large.put<std::uint32_t>(0x10efef54,1);large.read_calls=0;
+    live=SampleLiveProbe(reader,42,0x1000,0x109271ae);
+    assert(live.pass_stable && live.pass.value==1 && large.read_calls==2 && !live.target.entry_available);
+    reader.context=&complete;
     complete.put<std::uint32_t>(0x10f2c734, 0x1000);
     auto mesh_submission = SampleSubmission(reader, 0x3000);
     assert(mesh_submission.valid && mesh_submission.owner == 0x4000 && mesh_submission.mesh_node == 0xf000 &&

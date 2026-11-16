@@ -1334,6 +1334,9 @@ void BridgeMuxEnd(std::uint64_t ticket,const t3render::scene_bridge::ProbeSnapsh
 void BridgeMuxReentry() noexcept {
     t3render::CaptureBridgeMarkReentered();t3render::live::RuntimeDeferredLoss();
 }
+bool BridgeMuxLiveSample(std::uint64_t ticket) noexcept {
+    return ticket && probe_pair.active && probe_pair.live && !probe_pair.capture;
+}
 void BridgeMuxEnter(std::uint32_t element,std::uint32_t stage,std::uint32_t section) noexcept {
     t3render::live::RuntimeSubmissionEnter(element,stage,section);
     t3render::CaptureSubmissionEnter(element,stage,section);
@@ -1395,7 +1398,8 @@ extern "C" IDirect3D8* WINAPI Proxy_Direct3DCreate8(UINT sdk_version) {
                         t3render::scene_bridge::ProbeStatus status = t3render::scene_bridge::ProbeStatus::InvalidArguments;
                         (void)t3render::scene_bridge::InstallProbe(live ? BridgeMuxBegin : t3render::CaptureBridgeBegin,
                                                                   live ? BridgeMuxEnd : t3render::CaptureBridgeEnd,
-                                                                  live ? BridgeMuxReentry : t3render::CaptureBridgeMarkReentered, &status);
+                                                                  live ? BridgeMuxReentry : t3render::CaptureBridgeMarkReentered, &status,
+                                                                  live ? BridgeMuxLiveSample : nullptr);
                         t3render::CaptureBridgeInstallResult(status);
                         wchar_t submission_option[2]{};
                         if (live || (GetEnvironmentVariableW(L"T3RENDER_SCENE_BRIDGE_SUBMISSION", submission_option, 2) == 1 &&

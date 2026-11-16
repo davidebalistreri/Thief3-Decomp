@@ -81,6 +81,9 @@ bool ValidCamera(const Camera& camera) {
 bool ValidEvidence(BindingEvidence evidence) {
     return evidence == BindingEvidence::Verified || evidence == BindingEvidence::Candidate;
 }
+bool ValidIdentityScope(IdentityScope scope) {
+    return scope==IdentityScope::Unknown || scope==IdentityScope::VisibleList || scope==IdentityScope::FullObjectScan;
+}
 bool ValidSections(const std::vector<std::uint32_t>& sections, std::size_t available) {
     if (sections.empty() || sections.size() > kMaxSections) return false;
     std::unordered_set<std::uint32_t> seen;
@@ -173,6 +176,7 @@ bool SceneResidency::Publish(const FrameInput& frame) {
     auto next = std::make_shared<Snapshot>();
     next->map = map_; next->map_sha256 = map_sha256_;
     next->map_epoch = map_epoch_; next->device_epoch = device_epoch_; next->frame_id = frame.frame_id;
+    next->continuity = continuity_;
     next->render_pass = frame.render_pass; next->stage = frame.stage; next->camera = frame.camera;
     next->provenance = frame.provenance; next->conventions = frame.conventions;
     next->materials = materials_;
@@ -181,7 +185,7 @@ bool SceneResidency::Publish(const FrameInput& frame) {
     std::unordered_set<std::string> mesh_ids, bsp_ids;
     for (const auto& mesh : frame.meshes) {
         const auto resource = resources_.find(mesh.resource_id);
-        if (!Id(mesh.instance_id) || !mesh.generation || !ValidEvidence(mesh.binding) || !Finite(mesh.transform) ||
+        if (!Id(mesh.instance_id) || !mesh.generation || !ValidEvidence(mesh.binding) || !ValidIdentityScope(mesh.identity_scope) || !Finite(mesh.transform) ||
             !mesh_ids.insert(mesh.instance_id).second || resource == resources_.end() ||
             resource->second->kind != ResourceKind::StaticMesh ||
             (mesh.matched_resource && mesh.matched_resource != resource->second) ||
@@ -208,7 +212,7 @@ bool SceneResidency::Publish(const FrameInput& frame) {
     }
     for (const auto& block : frame.bsp) {
         const auto resource = resources_.find(block.resource_id);
-        if (!ValidEvidence(block.binding) || !bsp_ids.insert(block.resource_id).second || resource == resources_.end() ||
+        if (!ValidEvidence(block.binding) || !ValidIdentityScope(block.identity_scope) || !bsp_ids.insert(block.resource_id).second || resource == resources_.end() ||
             resource->second->kind != ResourceKind::BspBlock ||
             (block.matched_resource && block.matched_resource != resource->second) ||
             (!block.matched_material_names.empty() && block.matched_material_names.size() != resource->second->geometry.sections.size()) ||
@@ -232,6 +236,10 @@ bool SceneResidency::DiscardFrame(std::uint64_t map_epoch, std::uint64_t device_
     std::lock_guard<std::mutex> lock(mutex_);
     if (!map_epoch_ || map_epoch != map_epoch_ || device_epoch != device_epoch_) return false;
     if (snapshot_ && snapshot_->frame_id > through_frame_id) return false;
+    if (snapshot_) {
+        if (continuity_==UINT64_MAX) { snapshot_.reset();ready_=false;return false; }
+        ++continuity_;
+    }
     snapshot_.reset();
     return true;
 }
@@ -240,7 +248,7 @@ Epochs SceneResidency::epochs() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return {map_epoch_, device_epoch_, ready_ && !resetting_};
 }
-std::shared_ptr<const Resource> SceneResidency::FindResource(std::uint64_t map_epoch, const std::string& id) const {
+std::shared_ptr<const Resource> SceneResidency::FindSceneResource(std::uint64_t map_epoch, const std::string& id) const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!map_epoch_ || map_epoch != map_epoch_) return {};
     const auto found=resources_.find(id);
@@ -249,6 +257,23 @@ std::shared_ptr<const Resource> SceneResidency::FindResource(std::uint64_t map_e
 std::shared_ptr<const Snapshot> SceneResidency::current() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return snapshot_;
+}
+bool DisplayContinuityMatches(const Snapshot& earlier, const Snapshot& latest) noexcept {
+    return earlier.map_epoch==latest.map_epoch && earlier.device_epoch==latest.device_epoch &&
+        earlier.continuity==latest.continuity && earlier.frame_id<=latest.frame_id &&
+        earlier.provenance.origin==latest.provenance.origin &&
+        earlier.provenance.session_id==latest.provenance.session_id &&
+        earlier.provenance.capture_sha256==latest.provenance.capture_sha256;
+}
+bool SceneResidency::SubmitIfCurrent(const std::shared_ptr<const Snapshot>& expected,
+                                     bool (*submit)(void*) noexcept, void* context) noexcept {
+    try {
+        if (!expected || !submit) return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!ready_ || resetting_ || snapshot_ != expected || expected->map_epoch != map_epoch_ ||
+            expected->device_epoch != device_epoch_) return false;
+        return submit(context);
+    } catch (...) { return false; }
 }
 
 } // namespace t3render::live

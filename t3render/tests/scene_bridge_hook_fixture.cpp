@@ -14,6 +14,7 @@ extern "C" unsigned char FixtureSubmissionSite;
 
 namespace {
 unsigned started = 0, ended = 0;
+unsigned live_samples = 0;
 unsigned reentries = 0;
 bool test_reentry = false, entered_recursively = false;
 ProbeSnapshot last;
@@ -48,6 +49,7 @@ unsigned __attribute__((thiscall, noinline)) FakeDraw(void* object, unsigned sta
 }
 
 void Reentry() noexcept { ++reentries; }
+bool SelectLive(std::uint64_t ticket) noexcept { ++live_samples; return ticket==1; }
 
 std::uint64_t Begin(std::uint32_t) noexcept {
     ++started;
@@ -163,7 +165,9 @@ int main(int argc, char** argv) {
         std::printf("identity_rejected=%s status=%u\n", valid ? "PASS" : "FAIL", static_cast<unsigned>(status));
         return valid ? 0 : 1;
     }
-    if (!InstallFixtureProbe(reinterpret_cast<void*>(&FixtureTarget), Begin, End, Reentry, &status)) {
+    const bool live_mode=argc==2 && std::strcmp(argv[1], "--live-sampling")==0;
+    if (!InstallFixtureProbe(reinterpret_cast<void*>(&FixtureTarget), Begin, End, Reentry, &status,
+                             live_mode ? SelectLive : nullptr)) {
         std::printf("install_failed=%u\n", static_cast<unsigned>(status)); return 1;
     }
     if (argc == 2 && std::strcmp(argv[1], "--reentry") == 0) {
@@ -212,7 +216,9 @@ int main(int argc, char** argv) {
     const bool gpr_ok = CheckGpr() && started == 2 && ended == 2;
     if (!DisableProbe(&status)) { std::printf("disable_failed=%u\n", static_cast<unsigned>(status)); return 1; }
     if (FixtureTarget() != 0x12345678 || started != 2 || ended != 2) return 1;
-    std::printf("state=%s flags=%s call=%s gpr=%s disable=PASS\n", state_ok ? "PASS" : "FAIL",
-                flags_ok ? "PASS" : "FAIL", call_ok ? "PASS" : "FAIL", gpr_ok ? "PASS" : "FAIL");
-    return state_ok && flags_ok && call_ok && gpr_ok ? 0 : 1;
+    const bool live_ok=!live_mode || live_samples==2;
+    std::printf("state=%s flags=%s call=%s gpr=%s disable=PASS live_sampling=%s\n", state_ok ? "PASS" : "FAIL",
+                flags_ok ? "PASS" : "FAIL", call_ok ? "PASS" : "FAIL", gpr_ok ? "PASS" : "FAIL",
+                live_ok ? "PASS" : "FAIL");
+    return state_ok && flags_ok && call_ok && gpr_ok && live_ok ? 0 : 1;
 }

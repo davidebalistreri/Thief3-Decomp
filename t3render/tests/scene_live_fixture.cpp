@@ -2,6 +2,7 @@
 #include "../src/scene_live_flat.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -171,10 +172,48 @@ bool concurrent_readers() {
     CHECK(good.load());
     return true;
 }
+
+struct Gate { std::atomic<bool> entered{false}, release{false}; unsigned calls=0; };
+bool gated_submit(void* context) noexcept {
+    auto& gate=*static_cast<Gate*>(context); ++gate.calls; gate.entered.store(true);
+    while (!gate.release.load()) std::this_thread::yield();
+    return true;
+}
+bool counted_submit(void* context) noexcept { ++*static_cast<unsigned*>(context); return true; }
+bool submission_epoch_gate() {
+    SceneResidency scene; CHECK(setup(scene)); CHECK(scene.Publish(frame(scene.epochs(),1)));
+    auto first=scene.current(); unsigned calls=0;
+    CHECK(scene.SubmitIfCurrent(first,counted_submit,&calls)); CHECK(calls==1);
+    CHECK(scene.Publish(frame(scene.epochs(),2)));
+    CHECK(!scene.SubmitIfCurrent(first,counted_submit,&calls) && calls==1);
+    auto current=scene.current(); Gate gate; std::atomic<bool> reset_started{false}, reset_done{false};
+    CHECK(DisplayContinuityMatches(*first,*current) && !DisplayContinuityMatches(*current,*first));
+    std::uint64_t reset_ticket=0; bool submitted=false;
+    std::thread consumer([&] { submitted=scene.SubmitIfCurrent(current,gated_submit,&gate); });
+    while (!gate.entered.load()) std::this_thread::yield();
+    std::thread reset([&] { reset_started.store(true); reset_ticket=scene.BeginReset(); reset_done.store(true); });
+    while (!reset_started.load()) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    const bool raced=reset_done.load(); gate.release.store(true); consumer.join(); reset.join();
+    CHECK(!raced && submitted && gate.calls==1 && reset_ticket && reset_done.load());
+    CHECK(!scene.SubmitIfCurrent(current,counted_submit,&calls) && calls==1);
+    CHECK(scene.EndReset(reset_ticket,true));
+    auto next=frame(scene.epochs(),3); CHECK(scene.Publish(next));
+    CHECK(!DisplayContinuityMatches(*current,*scene.current()));
+    CHECK(!scene.SubmitIfCurrent(current,counted_submit,&calls));
+    CHECK(scene.SubmitIfCurrent(scene.current(),counted_submit,&calls) && calls==2);
+    auto before_loss=scene.current();
+    CHECK(scene.DiscardFrame(before_loss->map_epoch,before_loss->device_epoch,before_loss->frame_id));
+    CHECK(scene.Publish(frame(scene.epochs(),4)));
+    CHECK(!DisplayContinuityMatches(*before_loss,*scene.current()));
+    const auto map=scene.epochs().map; CHECK(scene.BeginMap(map,"next",hash_b));
+    CHECK(!scene.SubmitIfCurrent(current,counted_submit,&calls) && calls==2);
+    return true;
+}
 } // namespace
 
 int main() {
     if (!updates_and_flat_adapter() || !atomic_validation_and_generations() ||
-        !reset_and_map_change() || !concurrent_readers()) return 1;
+        !reset_and_map_change() || !concurrent_readers() || !submission_epoch_gate()) return 1;
     std::cout << "scene_live_fixture=ok\n";
 }

@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "date": "2026-11-16",
+  "test": "in_process_flat_scene_viewer",
+  "status": "PARTIAL",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86",
+  "attempts": [
+    {
+      "trace_sha256": "0301998816ce4761f6320bc753225a317dcaeb9a194f217e27477a5a67054d8e",
+      "frames": [828, 829, 830],
+      "scene": "bedroom confirmed by user",
+      "frame_828": "same-window scope verified for bed sections 1/2 and 16 BSP section draws; lock shadows unverified",
+      "viewer_frame_events": 0,
+      "viewer_images": 0,
+      "temporary_proxy_removed": true
+    },
+    {
+      "trace_sha256": "2551ab6347aa831096eea707dde8eeaaa5d72719fb111d9059ac7473e156ae77",
+      "frames": [1243, 1244, 1245],
+      "scene": "bedroom confirmed by user",
+      "target_visible_at_capture": false,
+      "viewer_initialized": true,
+      "viewer_frame_events": 0,
+      "viewer_images": 0,
+      "temporary_proxy_removed": true
+    }
+  ],
+  "user_report": "Game lagged considerably in both attempts compared with earlier tests.",
+  "follow_up_without_tds": {
+    "build": "Release x86 MinGW",
+    "synthetic_read_counts": {"unrelated_objects": 1000, "full_probe": 1384, "live_probe": 322},
+    "read_count_limit": "Synthetic count, not a measured game frame rate.",
+    "viewer_gpu_fixture": "Highball x86 hidden swapchain: camera, visibility, empty selection, resize and reset passed.",
+    "viewer_worker_fixture": "Synthetic frames, stale submission rejection and reset clear passed.",
+    "present": "Moved outside the scene lock; invalidation can still race the final display check."
+  },
+  "limitations": [
+    "No recorded live D3D12 frame or proof that the viewer followed Garrett.",
+    "The source of the reported lag has not been isolated or measured in game.",
+    "Fast-path identity is unique only in the observed visible list, not across all runtime objects.",
+    "D3D8 lock shadows are application-memory observations, not GPU readback."
+  ]
+}

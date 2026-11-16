@@ -187,7 +187,14 @@ python3 -B t3render/tools/build_scoped_scene_snapshot.py \
 
 The producer revalidates the trace and proof, and selects only verified
 submissions with the anchor's camera matrices, draw viewport and thread. The
-result contains the runtime bed transform, nine BSP blocks and 18 scoped draws
+`--anchor-draw` option can be omitted: the producer then chooses the first
+verified bed draw only if every verified bed draw in that pass/stage has the
+same camera, viewport, thread and bed transform. Ambiguous scopes fail closed
+and require an explicit anchor. This does not remove the requirement for a
+complete bed and BSP proof in each frame: in particular, a frame without the
+bed cannot reuse the previous frame's map or object evidence.
+
+The result contains the runtime bed transform, nine BSP blocks and 18 scoped draws
 in pass 0/stage 1. It contains no runtime lights: their observation remains
 unimplemented. All geometry, material bindings and IDs are from the offline
 fixture, matched to runtime names and metadata; per-draw lock-shadow status is

@@ -35,11 +35,20 @@ super-resolution or a claim of recovered detail; distant or slanted surfaces
 can fall back toward nearest sampling. The default is no upscaling.
 
 For runtime inputs, supply the synchronized SceneIR and PBR packet manifest
-for **both** frames. The tool verifies each scene, packet hash, camera, frame
-ID and fingerprint; it requires increasing frame IDs and the same complete
-source fingerprints, including the trace, map and assets. Thus both frames
-must come from the same finalized trace; independent captures cannot be
-combined merely because their frame numbers increase. It also requires matching
+for **both** frames and the actual finalized capture with `--trace`. The tool
+requires consecutive frames in the same two- or three-frame capture, the same
+observed device and a continuous Present thread, no Reset anywhere in the
+capture, and matching complete source fingerprints. It rechecks each listed
+submission, map name, camera, viewport and mesh transform against its own
+synchronized Present interval, plus the bed/BSP metadata and candidate draw
+arguments.
+The trace and snapshots must remain unchanged while being read. The device
+address is used only for an in-memory comparison, never exported. These checks
+do not re-prove offline asset fingerprints, GPU payload bytes, or the unique
+BSP match against the complete offline fixture; those remain the producer's
+evidence and limitations. A frame with no independently verified bed and BSP
+cannot currently be built. Independent captures cannot be combined merely
+because their frame numbers increase. The tool also requires matching
 light calibration and positions, material and shadow settings, dimensions,
 units and effect flags. Enabled generated bed, candlestick, arch and bedroom
 detail geometry must have the same GLB hashes in both manifests; enabling,
@@ -58,11 +67,45 @@ resolve, run `scene_temporal_resolve.py <previous-history> <current-unresolved>
 --previous-packet <previous-packet> --current-packet <current-packet>
 --previous-scene <previous-scene> --current-scene <current-scene>
 --previous-manifest <previous-manifest> --current-manifest <current-manifest>
+--trace <finalized-capture.jsonl>
 --validate-only`. Then use the same current packet, effects and jitter for the
 GPU resolve. This validates provenance without writing a resolved artifact;
 the GPU parser independently checks pixel bounds. Direct GPU use prints that
 frame order is unverified and must not be presented as synchronized runtime
 history without this check.
+
+To prepare SceneIR inputs from a new finalized multi-frame trace, use:
+
+```sh
+python3 -B t3render/tools/build_scoped_scene_sequence.py <capture.jsonl> \
+  --scene build/t3render-offline/SouthQuarter1_int1.scene.json \
+  --pass 0 --stage 1 --output-dir build/t3render-offline/<new-sequence>
+```
+
+The output directory must be new. Each frame is built independently using an
+unambiguous verified bed anchor; if any frame lacks the required proof, changes
+device, contains Reset, or fails continuity checks, no sequence is written.
+`--include-asset-candidates`, `--allow-quantized-rotators` and
+`--offline-actors <export.json> --game-dir <game>` enable the same separately
+labeled offline candidate paths as the single-frame producer. The resulting
+snapshots still need PBR packets and temporal buffers for both frames. The
+local frame-1001 trace contains only one frame and cannot satisfy this command.
+
+On 2026-11-16 a [new capture](../benchmarks/runtime/2026-11-16-scene-sequence/result.json)
+produced synchronized frames 2863–2865 with no Reset and one device. The
+sequence producer independently selected the bed and nine BSP blocks in each
+frame. With offline mesh candidates enabled, each partial scene contains 57
+submissions and 32 mesh instances, of which 31 use candidate asset bindings.
+Standalone flat D3D12 renders of the bed and BSP succeeded for all three frames
+and visually resemble the corresponding pre-Present bedroom screenshots.
+The first two renders and cameras are identical; the third camera and image
+differ slightly. Textures, lights, other objects and HUD are absent, and pixel
+parity is not claimed. The raw trace, snapshots and images remain under `build/`.
+
+The same capture could not produce the existing light candidates: the direct
+candidate path requires unavailable pre-Reset shader evidence. Therefore the
+runtime PBR and temporal resolves have not been validated on these frames. This
+does not turn the flat sequence into a live game loop.
 
 Synthetic examples must use `--synthetic`; their manifest records
 `source = synthetic` and has no frame IDs. In particular, rerendering frame
@@ -97,6 +140,8 @@ camera translation produced one-pixel vectors, while a 0.2 m depth change
 rejected all 4,096 fixture pixels; the GPU matched both controls. On the
 synthetic frame-1001 pair, CPU and GPU differed in 9,886 pixels with mean
 absolute RGB difference 0.00424 and maximum channel difference 8 on a 0–255
-scale. These are synthetic checks; no two-frame runtime capture has been
-claimed. `test_scene_temporal_resolve.py` covers history rejection, clamping and
-runtime provenance; `test_scene_temporal_history.py` tests the GPU input parser.
+scale. These are synthetic checks; no two-frame runtime temporal resolve has
+been claimed. `test_scene_trace_session.py` exercises synthetic multi-frame
+continuity and the CLI; `test_scene_temporal_resolve.py` covers history
+rejection, clamping and runtime provenance; `test_scene_temporal_history.py`
+tests the GPU input parser.

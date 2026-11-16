@@ -96,6 +96,22 @@ class ScopedSceneSnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "anchor must be"):
             builder.build(scene, records, 3, 4, 1, 2, "b" * 64, "c" * 64)
 
+    def test_automatic_anchor_uses_only_one_unambiguous_verified_scope(self):
+        scene, records = fixture()
+        automatic, manifest = builder.build(scene, records, 3, 4, 1, None, "b" * 64, "c" * 64)
+        explicit, _ = self.build(scene, records)
+        self.assertEqual(manifest["anchor_draw"], 4)
+        self.assertEqual(automatic.to_dict(), explicit.to_dict())
+        ambiguous = copy.deepcopy(records)
+        next(row for row in ambiguous if row.get("event") == "draw" and row.get("op_id") == 5)["viewport"]["max_z"] = 0.5
+        with self.assertRaisesRegex(ValueError, "unambiguous"):
+            builder.build(scene, ambiguous, 3, 4, 1, None, "b" * 64, "c" * 64)
+        absent = copy.deepcopy(records)
+        target = next(row for row in absent if row.get("event") == "scene_bridge_observation")["target"]
+        target.update(list_occurrences=0, entry=None)
+        with self.assertRaisesRegex(ValueError, "lack validated"):
+            builder.build(scene, absent, 3, 4, 1, None, "b" * 64, "c" * 64)
+
     def test_viewport_differences_do_not_enter_same_camera_snapshot(self):
         scene, records = fixture()
         records[4]["viewport"]["max_z"] = 0.5  # first BSP draw only

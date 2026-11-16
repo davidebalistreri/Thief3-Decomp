@@ -139,15 +139,6 @@ def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, 
     if report["status"] != "validated" or stage not in report["validated_stages"]:
         raise ValueError("selected frame, pass and stage lack validated mesh and BSP submissions")
     verified = [item for item in report["scoped_verified_draws"] if item["stage"] == stage]
-    anchors = [item for item in verified if item["kind"] == "static_mesh" and item["draw"] == anchor_draw]
-    if len(anchors) != 1:
-        raise ValueError("anchor must be a verified mesh submission in the selected stage")
-    if include_asset_candidates:
-        verified.extend(candidate_mesh_draws(scene, records, render_pass, stage,
-                                             allow_quantized_rotators=allow_quantized_rotators,
-                                             self_attached_assets=self_attached_assets))
-        verified.sort(key=lambda item: item["draw"])
-
     def observation(draw_id):
         proof = bridge.submission_for_draw(records, draw_id, render_pass,
                                            allow_asset_candidates=include_asset_candidates)
@@ -158,6 +149,29 @@ def build(scene, records, frame, render_pass, stage, anchor_draw, trace_digest, 
         if len(found) != 1:
             raise ValueError("submission observation is missing or ambiguous")
         return found[0]
+
+    anchors = [item for item in verified if item["kind"] == "static_mesh"]
+    if anchor_draw is None:
+        # Do not silently choose between cameras, viewports, threads or
+        # transforms. Equivalent verified bed sections may share one anchor.
+        scopes = set()
+        for item in anchors:
+            draw = bridge.one(records, "draw", item["draw"])
+            observed = observation(item["draw"])
+            camera = observed["current_camera"]
+            scopes.add((tuple(camera["derived_matrix_bits"]), tuple(camera["projection_bits"]),
+                        tuple(observed["target"]["entry"]["object_matrix_bits"]),
+                        json.dumps(draw.get("viewport"), sort_keys=True, allow_nan=False), draw.get("thread_id")))
+        if not anchors or len(scopes) != 1:
+            raise ValueError("automatic anchor requires one unambiguous verified mesh scope; select --anchor-draw")
+        anchor_draw = min(item["draw"] for item in anchors)
+    elif len([item for item in anchors if item["draw"] == anchor_draw]) != 1:
+        raise ValueError("anchor must be a verified mesh submission in the selected stage")
+    if include_asset_candidates:
+        verified.extend(candidate_mesh_draws(scene, records, render_pass, stage,
+                                             allow_quantized_rotators=allow_quantized_rotators,
+                                             self_attached_assets=self_attached_assets))
+        verified.sort(key=lambda item: item["draw"])
 
     anchor = bridge.one(records, "draw", anchor_draw)
     observed = observation(anchor_draw)
@@ -320,7 +334,8 @@ def main(argv=None):
     parser.add_argument("--frame", required=True, type=int)
     parser.add_argument("--pass", dest="render_pass", required=True, type=int)
     parser.add_argument("--stage", required=True, type=int)
-    parser.add_argument("--anchor-draw", required=True, type=int)
+    parser.add_argument("--anchor-draw", type=int,
+                        help="verified bed draw; omit only when all verified bed draws share one scope")
     parser.add_argument("--include-asset-candidates", action="store_true",
                         help="include scoped actors with matching offline mesh candidates")
     parser.add_argument("--allow-quantized-rotators", action="store_true",
@@ -333,7 +348,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if (not bridge.uint(args.frame, 64) or not bridge.uint(args.render_pass) or not bridge.uint(args.stage) or
-                not bridge.uint(args.anchor_draw, 64, True)):
+                (args.anchor_draw is not None and not bridge.uint(args.anchor_draw, 64, True))):
             raise ValueError("invalid frame, pass, stage or draw")
         before = args.trace.stat()
         bridge.trace_summary.summarize(args.trace)

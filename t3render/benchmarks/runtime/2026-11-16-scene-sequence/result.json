@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "date": "2026-11-16",
+  "test": "tds_scoped_scene_sequence",
+  "status": "PARTIAL",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86 virtual desktop",
+  "scene": "Bedroom facing the bed, confirmed by user",
+  "trace_sha256": "838c7748a77a49ca6eb7a2565bb40a374e6b0934d9b87b27f7642c15d35b8286",
+  "offline_scene_sha256": "abcc169141d3d2e1071ddf751f996f1d56ee80bb3d29b98b5b612c20ea35b4eb",
+  "temporary_proxy_removed": true,
+  "capture": {
+    "frames": [2863, 2864, 2865],
+    "requested_frames": 3,
+    "same_device": true,
+    "consecutive_present_windows": true,
+    "reset_seen": false,
+    "synchronized_bridge_observations_per_frame": 2,
+    "completed_submission_scopes_per_frame": 371,
+    "screenshots": "captured_before_present_1024x768"
+  },
+  "scene_ir": {
+    "pass": 0,
+    "stage": 1,
+    "anchor_draws": [8, 533, 1058],
+    "submitted_sections_per_frame": 57,
+    "mesh_instances_per_frame": 32,
+    "offline_asset_candidate_mesh_instances_per_frame": 31,
+    "bsp_blocks_per_frame": 9,
+    "snapshot_sha256": [
+      "e166e677879df046395d3cabc69e496b37c8ea296c5cfb75e9fa0f4cfa8bad40",
+      "aeb807dd58c1ffd10f45d2d13a0c467c915adf0cf364b743791727c4f376bff7",
+      "f72bf83e2250e0d8cfef42778e9d38365ce80537f1436109b138c0ff3c7c845e"
+    ]
+  },
+  "dx12": {
+    "mode": "standalone_flat_bed_and_bsp",
+    "triangles_per_frame": 450,
+    "outputs": "three_images_created",
+    "frames_2863_and_2864": "identical_images_and_camera",
+    "frame_2865": "small_camera_change_and_different_image",
+    "image_sha256": [
+      "0ad722f4cf8cd335c932c16f6444cfca86f4de655235414badae118b744309dc",
+      "0ad722f4cf8cd335c932c16f6444cfca86f4de655235414badae118b744309dc",
+      "4573e60eb1586da5d7c7e3d21e3be354f5b4d1a8bc1da4b8370c8ab86d9c2d99"
+    ]
+  },
+  "limitations": [
+    "The scene is partial; geometry and resource fingerprints come from offline assets after runtime metadata matching.",
+    "The 31 additional mesh bindings are offline candidates, not observed runtime mesh bindings.",
+    "The flat DX12 images contain only the bed and selected BSP, without lights, textures, other objects or HUD.",
+    "No pixel parity or GPU payload identity is claimed.",
+    "The direct light candidate producer required unavailable pre-Reset shader evidence; runtime light properties remain unknown.",
+    "No runtime temporal accumulation was tested; this is not an integrated live game loop."
+  ]
+}

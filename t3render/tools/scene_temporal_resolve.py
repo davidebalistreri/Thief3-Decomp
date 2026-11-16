@@ -17,6 +17,7 @@ import struct
 import sys
 
 import scene_ir_to_d3d12_packet as preview
+import scene_trace_session
 from scene_ir import SceneSnapshot
 
 HEADER = struct.Struct("<8sII32s32f7fI")
@@ -105,7 +106,7 @@ def compatible(previous, current, previous_runtime=None, current_runtime=None):
     if current_runtime is not None:
         old, old_manifest = previous_runtime
         new, new_manifest = current_runtime
-        if (old.source.map != new.source.map or old.source.frame_id >= new.source.frame_id or
+        if (old.source.map != new.source.map or old.source.frame_id + 1 != new.source.frame_id or
                 old.source.fingerprints != new.source.fingerprints or
                 old_manifest.get("calibration_sha256") != new_manifest.get("calibration_sha256") or
                 (old_manifest["render_pass"], old_manifest["stage"]) != (new_manifest["render_pass"], new_manifest["stage"])):
@@ -287,6 +288,7 @@ def main(argv=None):
     parser.add_argument("--current-scene", type=Path)
     parser.add_argument("--previous-manifest", type=Path)
     parser.add_argument("--current-manifest", type=Path)
+    parser.add_argument("--trace", type=Path, help="finalized multi-frame diagnostic capture for runtime inputs")
     parser.add_argument("--synthetic", action="store_true")
     parser.add_argument("--validate-only", action="store_true", help="validate provenance without resolving or writing output")
     parser.add_argument("--weight", type=float, default=.8)
@@ -298,6 +300,8 @@ def main(argv=None):
         paths = (args.previous_scene, args.current_scene, args.previous_manifest, args.current_manifest)
         if (args.synthetic and any(p is not None for p in paths)) or (not args.synthetic and any(p is None for p in paths)):
             raise ValueError("supply both runtime scenes and manifests, or select --synthetic")
+        if (args.synthetic and args.trace is not None) or (not args.synthetic and args.trace is None):
+            raise ValueError("supply the finalized --trace for runtime inputs only")
         if (args.validate_only and args.output is not None) or (not args.validate_only and args.output is None):
             raise ValueError("supply --output for a resolve, or use --validate-only")
         if not math.isfinite(args.weight) or not 0 <= args.weight <= .95:
@@ -313,11 +317,14 @@ def main(argv=None):
             new_runtime = validate_runtime(current, preview.read_limited(args.current_scene, preview.MAX_INPUT),
                                            preview.read_limited(args.current_manifest, preview.MAX_INPUT))
         compatible(previous, current, old_runtime, new_runtime)
+        trace_session = None if args.synthetic else scene_trace_session.validate(
+            args.trace, old_runtime[0], new_runtime[0], new_runtime[1]["render_pass"], new_runtime[1]["stage"])
         if args.validate_only:
             print(json.dumps({"status": "valid", "source": "synthetic" if args.synthetic else "runtime",
                               "previous_frame": None if args.synthetic else old_runtime[0].source.frame_id,
                               "current_frame": None if args.synthetic else new_runtime[0].source.frame_id,
-                              "previous_packet_sha256": previous["digest"], "current_packet_sha256": current["digest"]}, indent=2))
+                              "previous_packet_sha256": previous["digest"], "current_packet_sha256": current["digest"],
+                              "trace_session": trace_session}, indent=2))
             return 0
         result, motion, stats = resolve(previous, current, args.weight)
         manifest = {"schema": "t3.scene.temporal-history", "version": 1,
@@ -326,6 +333,7 @@ def main(argv=None):
                     "current_frame": None if args.synthetic else new_runtime[0].source.frame_id,
                     "source_map": None if args.synthetic else new_runtime[0].source.map,
                     "source_fingerprints": {} if args.synthetic else new_runtime[0].source.fingerprints,
+                    "trace_session": trace_session,
                     "submission_scope": None if args.synthetic else {"render_pass": new_runtime[1]["render_pass"],
                                                                         "stage": new_runtime[1]["stage"]},
                     "previous_sha256": hashlib.sha256(previous_raw).hexdigest(),

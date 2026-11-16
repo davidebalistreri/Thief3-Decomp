@@ -44,10 +44,21 @@ bool run(HWND window) {
     CHECK(scene.AddResource(epoch.map,quad("mesh:bed",ResourceKind::StaticMesh,0.3f,0.2f,"mat:bed")));
     CHECK(scene.AddResource(epoch.map,quad("bsp:wall",ResourceKind::BspBlock,0.9f,0.8f,"mat:wall")));
     auto gpu=FlatD3D12::Create(window); CHECK(gpu);
+    auto resident_gpu=FlatD3D12::Create(nullptr);CHECK(resident_gpu);
+    auto render_resident=[&](std::vector<std::uint8_t>& pixels) {
+        ResidentFlatFrame resident;
+        return BuildResidentFlatFrame(*scene.current(),resident) && resident_gpu->PrepareResident(resident,true) &&
+               resident_gpu->Submit() && resident_gpu->Finish(&pixels) && resident_gpu->Present()!=FlatPresent::Failed;
+    };
     auto frame=input(epoch,1); CHECK(scene.Publish(frame));
     t3render::scene::Frame flat; CHECK(BuildFlatFrame(*scene.current(),flat));
     std::vector<std::uint8_t> first, moved, no_bed, empty, resized;
     CHECK(gpu->Render(flat,&first)); CHECK(first.size()==64*64*4);
+    std::vector<std::uint8_t> resident_image;
+    CHECK(render_resident(resident_image) && resident_image==first);
+    CHECK(resident_gpu->cache_stats().uploads==2 && resident_gpu->cache_stats().resources==2);
+    const auto one_resource_budget=resident_gpu->cache_stats().bytes/2;
+    CHECK(one_resource_budget>0 && one_resource_budget*2==resident_gpu->cache_stats().bytes);
     CHECK(pixel_is(first,64,32,32,flat.draws[0].ambient_color));
     CHECK(pixel_is(first,64,12,12,flat.draws[1].ambient_color));
     frame.frame_id=2; frame.camera.view[12]=0.5f; CHECK(scene.Publish(frame));
@@ -55,13 +66,16 @@ bool run(HWND window) {
     CHECK(gpu->Prepare(flat,true)); gpu->Cancel(); // a stale snapshot is never submitted
     CHECK(gpu->Prepare(flat,true)); CHECK(gpu->Submit()); CHECK(gpu->Finish(&moved));
     CHECK(gpu->Present()!=FlatPresent::Failed);
+    CHECK(render_resident(resident_image) && resident_image==moved && resident_gpu->cache_stats().uploads==2);
     CHECK(moved!=first); CHECK(pixel_is(moved,64,48,32,flat.draws[0].ambient_color));
     frame.frame_id=3; frame.camera.view=identity; frame.meshes.clear(); CHECK(scene.Publish(frame));
     CHECK(BuildFlatFrame(*scene.current(),flat)); CHECK(gpu->Render(flat,&no_bed));
+    CHECK(render_resident(resident_image) && resident_image==no_bed && resident_gpu->cache_stats().uploads==2);
     CHECK(pixel_is(no_bed,64,32,32,flat.draws[0].ambient_color));
     CHECK(no_bed!=first);
     frame.frame_id=4; frame.bsp.clear(); CHECK(scene.Publish(frame));
     CHECK(BuildFlatFrame(*scene.current(),flat)); CHECK(gpu->Render(flat,&empty));
+    CHECK(render_resident(resident_image) && resident_image==empty && resident_gpu->cache_stats().uploads==2);
     for (std::size_t i=0;i<empty.size();i+=4)
         CHECK(empty[i]==22 && empty[i+1]==24 && empty[i+2]==28 && empty[i+3]==255);
     frame.frame_id=5; frame.camera.width=80; frame.camera.height=40; CHECK(scene.Publish(frame));
@@ -69,14 +83,44 @@ bool run(HWND window) {
     const auto reset=scene.BeginReset(); CHECK(reset && !scene.current()); CHECK(scene.EndReset(reset,true));
     frame=input(scene.epochs(),6); CHECK(scene.Publish(frame)); CHECK(BuildFlatFrame(*scene.current(),flat));
     std::vector<std::uint8_t> after_reset; CHECK(gpu->Render(flat,&after_reset)); CHECK(after_reset==first);
+    CHECK(render_resident(resident_image) && resident_image==first && resident_gpu->cache_stats().uploads==4);
+    frame.frame_id=7;frame.meshes[0].transform[12]=0.2f;CHECK(scene.Publish(frame));
+    CHECK(BuildFlatFrame(*scene.current(),flat));std::vector<std::uint8_t> shifted;
+    CHECK(gpu->Render(flat,&shifted));CHECK(render_resident(resident_image) && resident_image==shifted && shifted!=first);
+    CHECK(resident_gpu->cache_stats().uploads==4);
+    // Even if no reader observes the empty interval, a loss in the same
+    // map/device epoch breaks continuity and retires the old GPU buffers.
+    CHECK(scene.DiscardFrame(frame.map_epoch,frame.device_epoch,frame.frame_id));
+    frame.frame_id=8;CHECK(scene.Publish(frame));CHECK(render_resident(resident_image) && resident_image==shifted);
+    CHECK(resident_gpu->cache_stats().uploads==6 && resident_gpu->cache_stats().resources==2);
+    // A one-resource allocation budget must evict unused geometry and reload
+    // it when it becomes visible again.
+    auto limited=FlatD3D12::Create(nullptr,one_resource_budget);CHECK(limited);
+    auto limited_render=[&] {
+        ResidentFlatFrame resident;
+        return BuildResidentFlatFrame(*scene.current(),resident) && limited->PrepareResident(resident) &&
+               limited->Submit() && limited->Finish() && limited->Present()!=FlatPresent::Failed;
+    };
+    frame=input(scene.epochs(),9);frame.bsp.clear();CHECK(scene.Publish(frame));CHECK(limited_render());
+    frame=input(scene.epochs(),10);frame.meshes.clear();CHECK(scene.Publish(frame));CHECK(limited_render());
+    frame=input(scene.epochs(),11);frame.bsp.clear();CHECK(scene.Publish(frame));CHECK(limited_render());
+    CHECK(limited->cache_stats().uploads==3 && limited->cache_stats().evictions==2 &&
+          limited->cache_stats().resources==1 && limited->cache_stats().bytes==one_resource_budget);
+    ResidentFlatFrame prepared;CHECK(BuildResidentFlatFrame(*scene.current(),prepared));
+    CHECK(limited->PrepareResident(prepared));CHECK(!limited->RetireResidents());limited->Cancel();
+    CHECK(limited->RetireResidents() && limited->cache_stats().resources==0 && limited->cache_stats().bytes==0);
+    frame=input(scene.epochs(),12);CHECK(scene.Publish(frame));CHECK(BuildResidentFlatFrame(*scene.current(),prepared));
+    CHECK(!limited->PrepareResident(prepared)); // both selected resources cannot fit; neither is evictable
     std::cout << "scene_live_dx12_fixture=ok mode=" << (window ? "swapchain" : "offscreen")
-              << " frames=6 camera=changed visibility=changed empty=cleared resize=ok reset=ok\n";
+              << " camera=changed visibility=changed empty=cleared resize=ok reset=ok resident_cache=ok\n";
     return true;
 }
 struct ViewerFixture {
     SceneResidency scene;
     std::atomic<bool> replace_before_submit{false};
     std::atomic<bool> replace_after_submit{false};
+    std::atomic<bool> discard_before_submit{false};
+    std::atomic<bool> discard_after_submit{false};
     FrameInput replacement;
 };
 std::shared_ptr<const Snapshot> viewer_current(void* context) noexcept {
@@ -86,8 +130,12 @@ bool viewer_submit(void* context, const std::shared_ptr<const Snapshot>& snapsho
                    SubmitOperation submit, void* argument) noexcept {
     try {
         auto& fixture=*static_cast<ViewerFixture*>(context);
+        if (fixture.discard_before_submit.exchange(false))
+            (void)fixture.scene.DiscardFrame(snapshot->map_epoch,snapshot->device_epoch,snapshot->frame_id);
         if (fixture.replace_before_submit.exchange(false)) (void)fixture.scene.Publish(fixture.replacement);
         const bool submitted=fixture.scene.SubmitIfCurrent(snapshot,submit,argument);
+        if (submitted && fixture.discard_after_submit.exchange(false))
+            (void)fixture.scene.DiscardFrame(snapshot->map_epoch,snapshot->device_epoch,snapshot->frame_id);
         if (submitted && fixture.replace_after_submit.exchange(false)) (void)fixture.scene.Publish(fixture.replacement);
         return submitted;
     } catch (...) { return false; }
@@ -102,6 +150,16 @@ bool await_viewer(SceneViewer& viewer, std::uint64_t frames, std::uint64_t clear
     }
     return false;
 }
+bool await_retirement(SceneViewer& viewer, std::uint64_t dropped, std::uint64_t retired) {
+    const auto end=GetTickCount64()+20000;
+    while (GetTickCount64()<end) {
+        const auto status=viewer.stats();
+        if (status.failed || status.stopped) return false;
+        if (status.dropped>=dropped && status.resident_retirements>=retired) return true;
+        Sleep(10);
+    }
+    return false;
+}
 bool viewer_pipeline(const std::wstring& diagnostic_directory) {
     auto fixture=std::make_shared<ViewerFixture>(); auto& scene=fixture->scene; CHECK(scene.BeginMap(0,"fixture",fingerprint));
     auto epoch=scene.epochs(); CHECK(scene.AddMaterial(epoch.map,{"mat:bed","bed"}));
@@ -111,23 +169,28 @@ bool viewer_pipeline(const std::wstring& diagnostic_directory) {
     ViewerProvider provider; provider.context=fixture; provider.current=viewer_current; provider.submit_if_current=viewer_submit;
     provider.diagnostic_directory=diagnostic_directory;
     auto viewer=SceneViewer::Start(std::move(provider),false); CHECK(viewer && await_viewer(*viewer,0));
-    auto frame=input(epoch,1); CHECK(scene.Publish(frame)); viewer->Notify(); CHECK(await_viewer(*viewer,1));
-    frame.frame_id=2; frame.camera.view[12]=0.5f; frame.meshes.clear();
-    fixture->replacement=frame; fixture->replacement.frame_id=3; fixture->replace_before_submit.store(true);
+    auto frame=input(epoch,1); fixture->discard_before_submit.store(true);
+    CHECK(scene.Publish(frame)); viewer->Notify(); CHECK(await_retirement(*viewer,1,1));
+    frame.frame_id=2; fixture->discard_after_submit.store(true);
+    CHECK(scene.Publish(frame)); viewer->Notify(); CHECK(await_retirement(*viewer,2,2));
+    CHECK(viewer->stats().frames==0); // neither invalidated frame was displayed
+    frame.frame_id=3; CHECK(scene.Publish(frame)); viewer->Notify(); CHECK(await_viewer(*viewer,1));
+    frame.frame_id=4; frame.camera.view[12]=0.5f; frame.meshes.clear();
+    fixture->replacement=frame; fixture->replacement.frame_id=5; fixture->replace_before_submit.store(true);
     CHECK(scene.Publish(frame)); viewer->Notify(); CHECK(await_viewer(*viewer,2));
-    auto status=viewer->stats(); CHECK(status.frame_id==3 && status.dropped==1 &&
+    auto status=viewer->stats(); CHECK(status.frame_id==5 && status.dropped==3 &&
                                       status.map_epoch==epoch.map && status.device_epoch==epoch.device);
     const auto reset=scene.BeginReset(); CHECK(reset); viewer->Notify(); CHECK(await_viewer(*viewer,2,1));
     CHECK(scene.EndReset(reset,true)); epoch=scene.epochs();
-    frame=input(epoch,4);fixture->replacement=frame;fixture->replacement.frame_id=5;
+    frame=input(epoch,6);fixture->replacement=frame;fixture->replacement.frame_id=7;
     fixture->replacement.camera.view[12]=0.25f;fixture->replace_after_submit.store(true);
     CHECK(scene.Publish(frame)); viewer->Notify(); CHECK(await_viewer(*viewer,4,1));
-    status=viewer->stats(); CHECK(status.frame_id==5 && status.device_epoch==epoch.device);
+    status=viewer->stats(); CHECK(status.frame_id==7 && status.device_epoch==epoch.device);
     viewer->Stop();
     const auto deadline=GetTickCount64()+20000;
     while (!viewer->stats().stopped && GetTickCount64()<deadline) Sleep(10);
     CHECK(viewer->stats().stopped && !viewer->stats().failed);
-    std::cout << "scene_live_viewer_fixture=ok source=synthetic frames=4 stale_drop=ok newer_frame=ok reset_clear=ok\n";
+    std::cout << "scene_live_viewer_fixture=ok source=synthetic frames=4 stale_drop=ok newer_frame=ok reset_clear=ok invalidated_first_frame_retirement=ok\n";
     return true;
 }
 } // namespace

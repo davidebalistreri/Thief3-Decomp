@@ -20,7 +20,7 @@ struct ViewerProvider {
 };
 struct ViewerStats {
     bool initialized = false, failed = false, stopped = false;
-    std::uint64_t frames = 0, dropped = 0, cleared = 0;
+    std::uint64_t frames = 0, dropped = 0, cleared = 0, resident_retirements = 0;
     std::uint64_t map_epoch = 0, device_epoch = 0, frame_id = 0;
 };
 

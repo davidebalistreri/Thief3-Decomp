@@ -58,6 +58,11 @@ bool updates_and_flat_adapter() {
     CHECK(old->materials.at("mat:red").name == "red");
     t3render::scene::Frame flat;
     CHECK(BuildFlatFrame(*old, flat));
+    ResidentFlatFrame resident;
+    CHECK(BuildResidentFlatFrame(*old,resident));
+    CHECK(resident.draws.size()==3 && resident.draws[0].resource==old->meshes[0].resource &&
+          resident.draws[0].transform[12]==10 && resident.camera.view[12]==8 &&
+          resident.draws[0].color[0]==flat.draws[0].ambient_color[0]);
     CHECK(flat.view[12] == 8 && flat.draws.size() == 3 && flat.vertices.size() == 9);
     CHECK(flat.vertices[0].x == 10 && flat.vertices[1].x == 11 && flat.vertices[6].x == 0);
     CHECK(flat.draws[0].ambient_color[0] != flat.draws[1].ambient_color[0] ||
@@ -69,6 +74,8 @@ bool updates_and_flat_adapter() {
     CHECK(scene.current()->meshes.empty() && scene.current()->bsp[0].selection.sections[0] == 1);
     CHECK(BuildFlatFrame(*scene.current(), flat));
     CHECK(flat.draws.size() == 1 && flat.vertices[0].x == 2 && flat.view[12] == 12);
+    CHECK(BuildResidentFlatFrame(*scene.current(),resident));
+    CHECK(resident.draws.size()==1 && resident.draws[0].section==1 && resident.camera.view[12]==12);
     auto third = frame(scene.epochs(), 3);
     third.meshes[0].transform[12]=20; third.meshes[0].sections={1};
     CHECK(scene.Publish(third));
@@ -80,6 +87,8 @@ bool updates_and_flat_adapter() {
     malformed.meshes[0].selection.transform[3]=0.5f;
     CHECK(!BuildFlatFrame(malformed, flat));
     CHECK(flat.vertices[0].x == 22); // failed conversion leaves output unchanged
+    CHECK(!BuildResidentFlatFrame(malformed,resident));
+    CHECK(resident.draws.size()==1); // failure leaves prior output intact
     malformed = *scene.current(); malformed.conventions.clip_depth=ClipDepth::MinusOneToOne;
     CHECK(!BuildFlatFrame(malformed, flat));
     third.camera.view[0] = std::numeric_limits<float>::quiet_NaN();

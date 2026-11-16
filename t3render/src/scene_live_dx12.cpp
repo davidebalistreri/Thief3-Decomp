@@ -4,12 +4,15 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace t3render::live {
 namespace {
 using namespace t3render::dx12;
 using scene::Frame;
 using scene::Vertex;
+static_assert(sizeof(Vec3)==sizeof(float)*3,"unexpected position layout");
 constexpr DXGI_FORMAT kDepth = DXGI_FORMAT_D32_FLOAT;
 constexpr DWORD kFenceTimeoutMs = 10000;
 
@@ -37,6 +40,13 @@ bool Valid(const Frame& f) {
 } // namespace
 
 struct FlatD3D12::Impl {
+    struct CachedGeometry {
+        std::shared_ptr<const Resource> source;
+        ComPtr<ID3D12Resource> vertices, indices;
+        std::size_t bytes=0;
+        std::uint64_t last_use=0;
+        Vec3 low{}, high{};
+    };
     HWND window = nullptr;
     // Loaded only when the explicitly requested consumer is created. Keep the
     // modules alive until after all COM objects have been released.
@@ -56,6 +66,9 @@ struct FlatD3D12::Impl {
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     UINT64 readback_bytes = 0, fence_value = 0;
     std::size_t vertex_capacity = 0;
+    std::size_t cache_budget=0, cache_bytes=0;
+    std::uint64_t cache_map=0, cache_device=0, cache_continuity=0, cache_serial=0, uploads=0, evictions=0;
+    std::unordered_map<std::string,std::unique_ptr<CachedGeometry>> cache;
     UINT width = 0, height = 0;
     bool failed = false, pending = false, prepared = false, prepared_readback = false;
 
@@ -99,7 +112,8 @@ struct FlatD3D12::Impl {
         if (!compile) return false;
         static const char vs_source[] =
             "cbuffer Camera:register(b0){row_major float4x4 view;row_major float4x4 proj;float2 size;}"
-            "float4 main(float3 p:POSITION):SV_Position{float4 v=mul(mul(float4(p,1),view),proj);"
+            "cbuffer Instance:register(b2){row_major float4x4 world;}"
+            "float4 main(float3 p:POSITION):SV_Position{float4 v=mul(mul(mul(float4(p,1),world),view),proj);"
             "v.x+=v.w/size.x;v.y-=v.w/size.y;return v;}";
         static const char ps_source[] =
             "cbuffer Material:register(b1){float4 color;}float4 main():SV_Target{return color;}";
@@ -112,14 +126,17 @@ struct FlatD3D12::Impl {
             !Check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.put())), "CreateFence")) return false;
         event.p = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!event.p) return false;
-        D3D12_ROOT_PARAMETER params[2]{};
+        D3D12_ROOT_PARAMETER params[3]{};
         params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         params[0].Constants.ShaderRegister = 0; params[0].Constants.Num32BitValues = 34;
         params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
         params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         params[1].Constants.ShaderRegister = 1; params[1].Constants.Num32BitValues = 4;
         params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-        D3D12_ROOT_SIGNATURE_DESC desc{}; desc.NumParameters = 2; desc.pParameters = params;
+        params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        params[2].Constants.ShaderRegister = 2; params[2].Constants.Num32BitValues = 16;
+        params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        D3D12_ROOT_SIGNATURE_DESC desc{}; desc.NumParameters = 3; desc.pParameters = params;
         desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
         ComPtr<ID3DBlob> blob, errors;
         if (!Check(serialize_root(&desc, D3D_ROOT_SIGNATURE_VERSION_1, blob.put(), errors.put()), "SerializeRoot") ||
@@ -205,20 +222,13 @@ struct FlatD3D12::Impl {
             D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(readback.put())), "CreateReadback");
     }
 
-    bool Prepare(const Frame& f, bool wants_readback) {
-        if (failed || pending || prepared || !Valid(f) || !Resize(f.width, f.height)) return false;
-        const auto bytes = f.vertices.size()*sizeof(Vertex);
-        if (!EnsureVertices(bytes) || (wants_readback && !EnsureReadback())) return false;
-        if (bytes) {
-            void* mapped = nullptr; const D3D12_RANGE no_read{0,0};
-            if (!Check(vertices->Map(0, &no_read, &mapped), "MapVertices") || !mapped) return false;
-            std::memcpy(mapped, f.vertices.data(), bytes);
-            const D3D12_RANGE written{0, bytes}; vertices->Unmap(0, &written);
-        }
+    bool BeginCommands(const Frame& f) {
         if (!Check(allocator->Reset(), "ResetAllocator") || !Check(list->Reset(allocator.p, pipeline.p), "ResetList")) return false;
         list->SetGraphicsRootSignature(root.p);
         list->SetGraphicsRoot32BitConstants(0, 16, f.view, 0);
         list->SetGraphicsRoot32BitConstants(0, 16, f.projection, 16);
+        const Matrix identity{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+        list->SetGraphicsRoot32BitConstants(2, 16, identity.data(), 0);
         const float size[]{static_cast<float>(width), static_cast<float>(height)};
         list->SetGraphicsRoot32BitConstants(0, 2, size, 32);
         const D3D12_VIEWPORT viewport{0,0,size[0],size[1],f.min_depth,f.max_depth};
@@ -230,14 +240,10 @@ struct FlatD3D12::Impl {
         const float clear[]{22.0f/255,24.0f/255,28.0f/255,1};
         list->ClearRenderTargetView(rtv, clear, 0, nullptr);
         list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1, 0, 0, nullptr);
-        if (bytes) {
-            const D3D12_VERTEX_BUFFER_VIEW vb{vertices->GetGPUVirtualAddress(),static_cast<UINT>(bytes),sizeof(Vertex)};
-            list->IASetVertexBuffers(0, 1, &vb); list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            for (const auto& draw : f.draws) {
-                list->SetGraphicsRoot32BitConstants(1, 4, draw.ambient_color, 0);
-                list->DrawInstanced(draw.vertex_count, 1, draw.first_vertex, 0);
-            }
-        }
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        return true;
+    }
+    bool EndCommands(bool wants_readback) {
         if (swapchain.p || wants_readback) Transition(list.p, target.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
         if (swapchain.p) {
             if (!Check(swapchain->GetBuffer(swapchain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(backbuffer.put())), "GetBackBuffer")) return false;
@@ -254,6 +260,128 @@ struct FlatD3D12::Impl {
         if (swapchain.p || wants_readback) Transition(list.p, target.p, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
         if (!Check(list->Close(), "CloseList") || fence_value == UINT64_MAX) return false;
         prepared = true; prepared_readback = wants_readback; return true;
+    }
+    bool Prepare(const Frame& f, bool wants_readback) {
+        if (failed || pending || prepared || !Valid(f) || !Resize(f.width, f.height)) return false;
+        const auto bytes = f.vertices.size()*sizeof(Vertex);
+        if (!EnsureVertices(bytes) || (wants_readback && !EnsureReadback())) return false;
+        if (bytes) {
+            void* mapped = nullptr; const D3D12_RANGE no_read{0,0};
+            if (!Check(vertices->Map(0, &no_read, &mapped), "MapVertices") || !mapped) return false;
+            std::memcpy(mapped, f.vertices.data(), bytes);
+            const D3D12_RANGE written{0, bytes}; vertices->Unmap(0, &written);
+        }
+        if (!BeginCommands(f)) return false;
+        if (bytes) {
+            const D3D12_VERTEX_BUFFER_VIEW vb{vertices->GetGPUVirtualAddress(),static_cast<UINT>(bytes),sizeof(Vertex)};
+            list->IASetVertexBuffers(0, 1, &vb);
+            for (const auto& draw : f.draws) {
+                list->SetGraphicsRoot32BitConstants(1, 4, draw.ambient_color, 0);
+                list->DrawInstanced(draw.vertex_count, 1, draw.first_vertex, 0);
+            }
+        }
+        return EndCommands(wants_readback);
+    }
+    bool UploadBuffer(const void* data, std::size_t bytes, ComPtr<ID3D12Resource>& output) {
+        if (!data || !bytes || bytes>UINT_MAX) return false;
+        const auto heap=Heap(D3D12_HEAP_TYPE_UPLOAD);const auto desc=Buffer(bytes);
+        if (!Check(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_GENERIC_READ,
+                nullptr,IID_PPV_ARGS(output.put())),"CreateResidentBuffer")) return false;
+        const D3D12_RANGE no_read{0,0};void* mapped=nullptr;
+        if (!Check(output->Map(0,&no_read,&mapped),"MapResidentBuffer") || !mapped) return false;
+        std::memcpy(mapped,data,bytes);const D3D12_RANGE written{0,bytes};output->Unmap(0,&written);return true;
+    }
+    bool EnsureCached(const std::shared_ptr<const Resource>& resource,
+                      const std::unordered_set<std::string>& required) {
+        if (!resource || resource->id.empty()) return false;
+        const auto found=cache.find(resource->id);
+        if (found!=cache.end()) {
+            if (found->second->source!=resource) return false;
+            found->second->last_use=cache_serial;return true;
+        }
+        const auto& geometry=resource->geometry;
+        if (geometry.positions.empty() || geometry.positions.size()>1000000 || geometry.indices.empty() ||
+            geometry.indices.size()>3000000 || geometry.positions.size()>UINT_MAX/sizeof(Vec3) ||
+            geometry.indices.size()>UINT_MAX/sizeof(std::uint32_t)) return false;
+        const auto vertex_bytes=geometry.positions.size()*sizeof(Vec3);
+        const auto index_bytes=geometry.indices.size()*sizeof(std::uint32_t);
+        const auto vertex_desc=Buffer(vertex_bytes), index_desc=Buffer(index_bytes);
+        const auto vertex_allocation=device->GetResourceAllocationInfo(0,1,&vertex_desc);
+        const auto index_allocation=device->GetResourceAllocationInfo(0,1,&index_desc);
+        if (!vertex_allocation.SizeInBytes || !index_allocation.SizeInBytes ||
+            vertex_allocation.SizeInBytes==UINT64_MAX || index_allocation.SizeInBytes==UINT64_MAX ||
+            vertex_allocation.SizeInBytes>SIZE_MAX || index_allocation.SizeInBytes>SIZE_MAX-vertex_allocation.SizeInBytes) return false;
+        const auto bytes=static_cast<std::size_t>(vertex_allocation.SizeInBytes+index_allocation.SizeInBytes);
+        if (bytes>cache_budget) return false;
+        while (bytes>cache_budget-cache_bytes || cache.size()>=4096) {
+            auto victim=cache.end();
+            for (auto it=cache.begin();it!=cache.end();++it)
+                if (!required.count(it->first) && (victim==cache.end() || it->second->last_use<victim->second->last_use)) victim=it;
+            if (victim==cache.end()) return false;
+            cache_bytes-=victim->second->bytes;cache.erase(victim);++evictions;
+        }
+        auto gpu=std::make_unique<CachedGeometry>();gpu->source=resource;gpu->bytes=bytes;gpu->last_use=cache_serial;
+        gpu->low=gpu->high=geometry.positions[0];
+        for (const auto& p:geometry.positions) for (unsigned i=0;i<3;++i) {
+            if (!std::isfinite(p[i])) return false;
+            gpu->low[i]=std::min(gpu->low[i],p[i]);gpu->high[i]=std::max(gpu->high[i],p[i]);
+        }
+        for (auto index:geometry.indices) if (index>=geometry.positions.size()) return false;
+        if (!UploadBuffer(geometry.positions.data(),vertex_bytes,gpu->vertices) ||
+            !UploadBuffer(geometry.indices.data(),index_bytes,gpu->indices)) return false;
+        cache_bytes+=bytes;cache.emplace(resource->id,std::move(gpu));++uploads;return true;
+    }
+    bool ValidWorldBounds(const CachedGeometry& geometry,const Matrix& world) const {
+        for (unsigned corner=0;corner<8;++corner) {
+            double input[3]{};
+            for (unsigned i=0;i<3;++i) input[i]=(corner&(1u<<i)) ? geometry.high[i] : geometry.low[i];
+            for (unsigned axis=0;axis<3;++axis) {
+                const double value=input[0]*world[axis]+input[1]*world[4+axis]+input[2]*world[8+axis]+world[12+axis];
+                if (!std::isfinite(value) || std::fabs(value)>1000000) return false;
+            }
+        }
+        return true;
+    }
+    bool PrepareResident(const ResidentFlatFrame& f,bool wants_readback) {
+        if (failed || pending || prepared || !f.map_epoch || !f.device_epoch || !f.continuity || !Valid(f.camera) ||
+            !f.camera.vertices.empty() || !f.camera.draws.empty() || f.draws.size()>scene::kMaxDraws ||
+            !Resize(f.camera.width,f.camera.height) || (wants_readback && !EnsureReadback())) return false;
+        if (cache_map!=f.map_epoch || cache_device!=f.device_epoch || cache_continuity!=f.continuity) {
+            cache.clear();cache_bytes=0;cache_map=f.map_epoch;cache_device=f.device_epoch;cache_continuity=f.continuity;
+        }
+        if (cache_serial==UINT64_MAX) return false;
+        ++cache_serial;
+        std::unordered_set<std::string> required;
+        std::size_t total_indices=0;
+        for (const auto& draw:f.draws) {
+            if (!draw.resource || draw.resource->id.empty() || draw.section>=draw.resource->geometry.sections.size()) return false;
+            const auto& section=draw.resource->geometry.sections[draw.section];
+            if (!section.index_count || section.index_count%3 ||
+                std::uint64_t{section.first_index}+section.index_count>draw.resource->geometry.indices.size() ||
+                section.index_count>scene::kMaxTriangles*3-total_indices ||
+                !std::all_of(draw.transform.begin(),draw.transform.end(),[](float v){return std::isfinite(v);}) ||
+                std::fabs(draw.transform[3])>1e-6f || std::fabs(draw.transform[7])>1e-6f ||
+                std::fabs(draw.transform[11])>1e-6f || std::fabs(draw.transform[15]-1)>1e-6f ||
+                !std::all_of(draw.color.begin(),draw.color.end(),[](float v){return std::isfinite(v) && v>=0 && v<=1;})) return false;
+            required.insert(draw.resource->id);
+            total_indices+=section.index_count;
+        }
+        for (const auto& draw:f.draws) if (!EnsureCached(draw.resource,required)) return false;
+        if (!BeginCommands(f.camera)) return false;
+        for (const auto& draw:f.draws) {
+            const auto& gpu=*cache.at(draw.resource->id);
+            if (!ValidWorldBounds(gpu,draw.transform)) return false;
+            const auto& geometry=gpu.source->geometry;const auto& section=geometry.sections[draw.section];
+            const D3D12_VERTEX_BUFFER_VIEW vb{gpu.vertices->GetGPUVirtualAddress(),
+                static_cast<UINT>(geometry.positions.size()*sizeof(Vec3)),sizeof(Vec3)};
+            const D3D12_INDEX_BUFFER_VIEW ib{gpu.indices->GetGPUVirtualAddress(),
+                static_cast<UINT>(geometry.indices.size()*sizeof(std::uint32_t)),DXGI_FORMAT_R32_UINT};
+            list->IASetVertexBuffers(0,1,&vb);list->IASetIndexBuffer(&ib);
+            list->SetGraphicsRoot32BitConstants(2,16,draw.transform.data(),0);
+            list->SetGraphicsRoot32BitConstants(1,4,draw.color.data(),0);
+            list->DrawIndexedInstanced(section.index_count,1,section.first_index,0,0);
+        }
+        return EndCommands(wants_readback);
     }
     bool Submit() {
         if (failed || pending || !prepared) return false;
@@ -286,6 +414,10 @@ struct FlatD3D12::Impl {
         return true;
     }
     void Cancel() noexcept { if (prepared && !pending) { prepared = false; prepared_readback = false; Release(backbuffer); } }
+    bool RetireResidents() noexcept {
+        if (pending || prepared) return false;
+        cache.clear();cache_bytes=0;cache_map=cache_device=cache_continuity=0;return true;
+    }
     FlatPresent Present() {
         if (failed || pending || prepared) return FlatPresent::Failed;
         if (!swapchain.p) return FlatPresent::Presented;
@@ -299,12 +431,24 @@ FlatD3D12::~FlatD3D12() {
     // Never terminate the host process or release resources still in flight.
     if (impl_ && impl_->pending) (void)impl_.release();
 }
-std::unique_ptr<FlatD3D12> FlatD3D12::Create(HWND window) noexcept {
+std::unique_ptr<FlatD3D12> FlatD3D12::Create(HWND window, std::size_t cache_budget) noexcept {
     try {
-        auto impl = std::make_unique<Impl>(); impl->window = window;
+        if (!cache_budget || cache_budget>512u*1024u*1024u) return {};
+        auto impl = std::make_unique<Impl>(); impl->window = window;impl->cache_budget=cache_budget;
         if (!impl->Initialize()) return {};
         return std::unique_ptr<FlatD3D12>(new FlatD3D12(std::move(impl)));
     } catch (...) { return {}; }
+}
+bool FlatD3D12::PrepareResident(const ResidentFlatFrame& frame, bool readback) noexcept {
+    try {
+        if (!impl_ || impl_->failed) return false;
+        if (impl_->PrepareResident(frame,readback)) return true;
+        impl_->failed=true;return false;
+    } catch (...) { if (impl_) impl_->failed=true;return false; }
+}
+FlatCacheStats FlatD3D12::cache_stats() const noexcept {
+    if (!impl_) return {};
+    return {impl_->uploads,impl_->evictions,impl_->cache.size(),impl_->cache_bytes};
 }
 bool FlatD3D12::Prepare(const scene::Frame& frame, bool readback) noexcept {
     try {
@@ -328,6 +472,7 @@ bool FlatD3D12::Finish(std::vector<std::uint8_t>* pixels) noexcept {
     } catch (...) { if (impl_) impl_->failed = true; return false; }
 }
 void FlatD3D12::Cancel() noexcept { if (impl_) impl_->Cancel(); }
+bool FlatD3D12::RetireResidents() noexcept { return impl_ && !impl_->failed && impl_->RetireResidents(); }
 FlatPresent FlatD3D12::Present() noexcept {
     try {
         if (!impl_ || impl_->failed) return FlatPresent::Failed;

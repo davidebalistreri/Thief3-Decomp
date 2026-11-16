@@ -113,7 +113,7 @@ struct Diagnostics {
         if (ok) { if (!images) first_view=snapshot.camera.view; ++images; }
         return ok;
     }
-    void Frame(const Snapshot& snapshot, const scene::Frame& frame, bool image) {
+    void Frame(const Snapshot& snapshot, const ResidentFlatFrame& frame, const FlatCacheStats& cache, bool image) {
         if (log==INVALID_HANDLE_VALUE || entries>=4096) return;
         std::ostringstream out;out.imbue(std::locale::classic());out<<std::setprecision(9);
         const char* source=snapshot.provenance.origin==FrameOrigin::LiveProcess ? "live_process" :
@@ -126,9 +126,11 @@ struct Diagnostics {
            <<",\"identity_scope\":\""<<identity_scope<<"\""
            <<",\"map_epoch\":"<<snapshot.map_epoch<<",\"device_epoch\":"<<snapshot.device_epoch
            <<",\"continuity\":"<<snapshot.continuity
-           <<",\"width\":"<<frame.width<<",\"height\":"<<frame.height
+           <<",\"width\":"<<frame.camera.width<<",\"height\":"<<frame.camera.height
            <<",\"mesh_instances\":"<<snapshot.meshes.size()<<",\"bsp_blocks\":"<<snapshot.bsp.size()
-           <<",\"draws\":"<<frame.draws.size()<<",\"image\":"<<(image?"true":"false")<<",\"view\":[";
+           <<",\"draws\":"<<frame.draws.size()<<",\"resident_resources\":"<<cache.resources
+           <<",\"resident_bytes\":"<<cache.bytes<<",\"resource_uploads\":"<<cache.uploads
+           <<",\"resource_evictions\":"<<cache.evictions<<",\"image\":"<<(image?"true":"false")<<",\"view\":[";
         for (unsigned i=0;i<16;++i) { if (i) out<<',';out<<snapshot.camera.view[i]; }
         out<<"],\"projection\":[";
         for (unsigned i=0;i<16;++i) { if (i) out<<',';out<<snapshot.camera.projection[i]; }
@@ -212,6 +214,13 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
             }
             const auto current = state->provider.current(state->provider.context.get());
             if (!current) {
+                // A rejected first frame can populate the cache without ever
+                // becoming `last`. Retire it even when nothing was displayed.
+                const bool had_residents = gpu->cache_stats().resources != 0;
+                if (!gpu->RetireResidents()) { failed = true; break; }
+                if (had_residents) {
+                    std::lock_guard<std::mutex> lock(state->mutex); ++state->stats.resident_retirements;
+                }
                 if (last) {
                     last_frame.vertices.clear(); last_frame.draws.clear();
                     if (!gpu->Render(last_frame)) { failed = true; break; }
@@ -222,9 +231,9 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
                 continue;
             }
             if (current == last) continue;
-            scene::Frame frame;
+            ResidentFlatFrame frame;
             const bool wants_image=diagnostics.WantsImage(*current);
-            if (!BuildFlatFrame(*current, frame) || !gpu->Prepare(frame,wants_image)) { failed = true; break; }
+            if (!BuildResidentFlatFrame(*current, frame) || !gpu->PrepareResident(frame,wants_image)) { failed = true; break; }
             Submission submission{gpu.get()};
             const bool submitted = state->provider.submit_if_current(state->provider.context.get(), current,
                                                                       SubmitPrepared, &submission);
@@ -250,9 +259,9 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
                 std::lock_guard<std::mutex> lock(state->mutex); ++state->stats.dropped;
                 continue;
             }
-            const bool wrote_image=wants_image && diagnostics.Image(*current,frame,pixels);
-            diagnostics.Frame(*current,frame,wrote_image);
-            last = current; last_frame = std::move(frame);
+            const bool wrote_image=wants_image && diagnostics.Image(*current,frame.camera,pixels);
+            diagnostics.Frame(*current,frame,gpu->cache_stats(),wrote_image);
+            last = current; last_frame = std::move(frame.camera);
             if (window) {
                 wchar_t title[128]{};
                 std::swprintf(title, std::size(title), L"T3Render — frame %llu (parziale)",

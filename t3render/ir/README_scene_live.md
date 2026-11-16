@@ -179,8 +179,9 @@ produced in TDS.
 
 With the previous flags and `T3RENDER_SCENE_LIVE_DX12=1`, the experimental
 combined proxy starts a separate worker and a non-activating D3D12 window.
-Its device, queue, pipeline and swapchain persist across frames; geometry is
-still CPU-expanded and uploaded every frame. The window displays a flat
+Its device, queue, pipeline and swapchain persist across frames. Immutable
+mesh/BSP position and index buffers are cached by semantic resource identity;
+draws supply per-instance transforms and material-ID colors. The window displays a flat
 material-ID view of the **partial candidate selection**, not a full bedroom or
 a production renderer. The worker takes the latest available snapshot and may
 drop superseded frames; no real-time performance or every-frame coverage is
@@ -214,7 +215,18 @@ read-count comparison, not a measured frame-rate improvement. The expensive
 probe and DXGI presentation inside the scene lock are plausible sources of the
 lag reported in the two TDS attempts; their individual costs remain unmeasured.
 
+The default geometry cache budget is 128 MiB, accounted using D3D12 buffer
+allocation sizes. When it fills, least-recently-used resources outside the
+current selection are evicted after prior GPU work completes; if the current
+selection itself exceeds the budget, the viewer fails closed. Resources are
+retired on loss, including a missed empty interval, and recreated for a new
+map/device epoch or continuity. No engine or D3D8
+pointer is used as a cache key. This is a flat diagnostic backend: texture,
+material and GPU upload residency for the PBR renderer remain separate work.
+
 The x86 Highball fixture exercised an offscreen target and a hidden swapchain:
-camera movement, depth ordering, visibility, empty selection, resize and Reset
-passed. A worker fixture also checked stale-snapshot rejection and reset clear.
-Those fixtures are synthetic and do not establish TDS behavior.
+the resident path matched the expanded path pixel-for-pixel for synthetic camera,
+transform and visibility changes. Reset, continuity breaks, budget exhaustion
+and eviction also passed. A worker fixture checked stale-snapshot rejection,
+reset clear and retirement when the first snapshot is invalidated before or
+after submission. Those fixtures are synthetic and do not establish TDS behavior.

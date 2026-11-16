@@ -199,13 +199,33 @@ retains potentially in-flight resources instead of terminating the game.
 The DXGI and D3D12 libraries are loaded only when the viewer is requested.
 
 An optional `T3RENDER_SCENE_LIVE_DIAGNOSTIC_DIR` names an existing local
-directory. The worker creates `scene-live.jsonl` with frame IDs, epochs,
-camera matrices and selection counts; it writes at most two PPM images, the
-first frame and the first with a changed view. These files contain scene-derived
-information and must remain local. Frame IDs originate from the worker's
-Present-delimited producer; equality with a capture trace must be established
-for the same device and session, not inferred from time. The diagnostic reads
-back the viewer's D3D12 output, not the original game's GPU buffers.
+directory. Each process generates a random live session ID and uses it in the
+`scene-live-<session>.jsonl` filename, so separate TDS processes cannot silently
+share the first process's log. The log records frame IDs, pass/stage, epochs,
+camera matrices and selection counts; at most two PPM images use the same
+session-qualified prefix. These files contain scene-derived information and
+must remain local. The diagnostic reads back the viewer's D3D12 output, not
+the original game's GPU buffers.
+
+When capture and live output run together, the trace header records the same
+session ID. The combined observer adds `scene_live_frame` to a successfully
+tracked trace frame from the actual shared native `Present` call. Frame numbers
+alone and elapsed time are not synchronization evidence. The following command
+checks the session, explicit Present link, synchronized trace window, pass/stage,
+camera matrices (with signed zero normalized) and viewport against a successful
+same-thread draw in that frame. It does not establish complete callback coverage,
+semantic bindings or pixel parity:
+
+```sh
+python3 -B t3render/tools/compare_live_present.py /path/to/trace.jsonl /path/to/scene-live-session.jsonl
+```
+
+Earlier logs have neither the session identity nor the direct Present link.
+In the second local TDS attempt, the Wine log records multiple T3Main launches
+and the single old viewer log reports zero probes while the trace reports six;
+the files cannot establish whether they came from the same process. The new
+isolation and comparison have synthetic coverage but have not yet been tested
+in TDS.
 
 For non-capture frames, the live probe avoids scanning every UObject by name;
 other passes use a minimal sample. The stronger full probe is still used when

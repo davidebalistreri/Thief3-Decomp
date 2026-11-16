@@ -81,6 +81,17 @@ class CaptureHostTests(unittest.TestCase):
         self.assertEqual((frame["started"], frame["completed"], frame["pending"]), (1, 1, 0))
         self.assertEqual(trace_summary.summarize(self.path)["frame_count"], 1)
 
+    def test_live_frame_link_requires_a_tracked_present(self):
+        self.run_capture("bridge_present_link", frame="1", extra={"T3RENDER_SCENE_BRIDGE": "1"})
+        records = self.records()
+        self.assertEqual(next(r for r in records if r["event"] == "frame_end")["scene_live_frame"], 987)
+        self.assertEqual(trace_summary.summarize(self.path)["frames"][0]["scene_live_frame"], 987)
+        for scenario in ("bridge_untracked_link", "bridge_failed_link"):
+            with self.subTest(scenario=scenario):
+                self.path.unlink()
+                self.run_capture(scenario, frame="1", extra={"T3RENDER_SCENE_BRIDGE": "1"})
+                self.assertNotIn("scene_live_frame", next(r for r in self.records() if r["event"] == "frame_end"))
+
     def test_bridge_asset_audit_records_and_validates_the_property_chain(self):
         self.run_capture("bridge_asset_audit", frame="1", extra={"T3RENDER_SCENE_BRIDGE": "1"})
         records = self.records()

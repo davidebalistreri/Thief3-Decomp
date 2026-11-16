@@ -363,10 +363,17 @@ int main(int argc, char** argv) {
         using t3render::scene_bridge::ProbeStatus;
         const bool install_failure = scenario == "bridge_install_failure";
         t3render::CaptureBridgeInstallResult(install_failure ? ProbeStatus::PrologueMismatch : ProbeStatus::Installed);
+        unsigned present_calls=0;
         auto present = [&](IDirect3DDevice8* target = nullptr) {
             if (!target) target = &device;
             const auto token = t3render::CapturePresentBegin(target, fake_thread_id);
-            t3render::CapturePresentEnd(target, token, S_OK);
+            const std::uint64_t live_frame=987;
+            const bool link=scenario=="bridge_present_link" || scenario=="bridge_untracked_link" || scenario=="bridge_failed_link";
+            ++present_calls;
+            const auto captured_token=scenario=="bridge_untracked_link" && present_calls>1 ? 0 : token;
+            const auto result=scenario=="bridge_failed_link" && present_calls>1 ? E_FAIL : S_OK;
+            t3render::CapturePresentEnd(target, captured_token, result,
+                                       link ? &live_frame : nullptr);
         };
         if (scenario == "bridge_prior_reentry") t3render::CaptureBridgeMarkReentered();
         if (scenario != "bridge_missing_pre") present();

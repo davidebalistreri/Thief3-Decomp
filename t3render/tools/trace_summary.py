@@ -287,6 +287,7 @@ def summarize(path):
     submission_tickets = set()
     clear_rect_limit = None
     requested_frames = None
+    live_session_id = None
     lines = 0
 
     try:
@@ -313,6 +314,12 @@ def summarize(path):
                         raise TraceError(f"line {lines}: unsupported trace format")
                     if not _is_int(item.get("version")) or item["version"] != 1:
                         raise TraceError(f"line {lines}: unsupported trace version")
+                    if "live_session_id" in item:
+                        live_session_id = item["live_session_id"]
+                        if (not isinstance(live_session_id, str) or len(live_session_id) != 37 or
+                                not live_session_id.startswith("live:") or
+                                any(c not in "0123456789abcdef" for c in live_session_id[5:])):
+                            raise TraceError(f"line {lines}: invalid live session ID")
                     if "requested_frames" in item:
                         requested_frames = item["requested_frames"]
                         if not _is_int(requested_frames) or not 1 <= requested_frames <= 3:
@@ -657,6 +664,13 @@ def summarize(path):
                         if bridge_capability is not None and not current["bridge_finished"]:
                             raise TraceError(f"line {lines}: scene bridge frame result is missing")
                         bridge_frame = current["bridge_frame"]
+                        if "scene_live_frame" in item:
+                            linked = item["scene_live_frame"]
+                            if (not _uint(linked, 64) or linked == (1 << 64)-1 or
+                                    not bridge_frame or bridge_frame.get("present_tracked") is not True or
+                                    not -(1 << 31) <= hr < (1 << 32) or (hr & 0x80000000) != 0):
+                                raise TraceError(f"line {lines}: invalid live Present link")
+                            current["scene_live_frame"] = linked
                         if bridge_frame and bridge_frame["status"] == "synchronized" and (
                                 not -(1 << 31) <= hr < (1 << 32) or (hr & 0x80000000) != 0 or
                                 item.get("had_reset") is not False or item.get("concurrent_operations") is not False):
@@ -695,7 +709,7 @@ def summarize(path):
     if not calls and not events["clear"]:
         raise TraceError("trace has no draw events or clear events")
 
-    return {
+    result = {
         "format": "t3render-d3d8-diagnostic",
         "version": 1,
         "lines": lines,
@@ -705,6 +719,9 @@ def summarize(path):
         "events": dict(sorted(events.items())),
         "frames": frames,
     }
+    if live_session_id is not None:
+        result["live_session_id"] = live_session_id
+    return result
 
 
 def main(argv=None):

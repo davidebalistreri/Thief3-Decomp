@@ -17,6 +17,9 @@ struct ViewerProvider {
     // Optional existing local directory; copied matrices and at most two flat
     // images are diagnostic output, not a serialized engine-object trace.
     std::wstring diagnostic_directory;
+    // Process-session identity shared with the trace, never an engine pointer.
+    // Required when diagnostics are requested.
+    std::string diagnostic_session_id;
 };
 struct ViewerStats {
     bool initialized = false, failed = false, stopped = false;

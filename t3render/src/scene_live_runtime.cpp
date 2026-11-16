@@ -18,6 +18,7 @@ struct RuntimeState {
     std::mutex device_mutex;
     std::unique_ptr<SceneDriver> owned;
     std::unique_ptr<SceneViewer> viewer;
+    std::string session_id; // initialized before publishing driver; never changed afterwards
     std::atomic<SceneDriver*> driver{nullptr};
     std::atomic<IDirect3DDevice8*> device{nullptr};
     std::atomic<bool> terminal{false},deferred_loss{false};
@@ -138,15 +139,17 @@ bool RuntimeInitialize() noexcept {
             const auto path=Environment(L"T3RENDER_LIVE_CATALOG");
             LoadedCatalog catalog;std::string session;
             if (path.empty() || !LoadCatalogFile(path.c_str(),catalog) || !SessionId(session)) return;
-            FrameProvenance source;source.origin=FrameOrigin::LiveProcess;source.session_id=std::move(session);
+            FrameProvenance source;source.origin=FrameOrigin::LiveProcess;source.session_id=session;
             auto driver=SceneDriver::Create(std::move(catalog),std::move(source),0,1);
             if (!driver) return;
+            state.session_id=std::move(session);
             state.owned=std::move(driver);state.driver.store(state.owned.get(),std::memory_order_release);
             if (Environment(L"T3RENDER_SCENE_LIVE_DX12")==L"1") {
                 ViewerProvider provider;provider.context=std::shared_ptr<void>(&state,[](void*){});
                 provider.current=ViewerCurrent;provider.submit_if_current=ViewerSubmit;
                 provider.driver_stats=ViewerDriverStats;
                 provider.diagnostic_directory=Environment(L"T3RENDER_SCENE_LIVE_DIAGNOSTIC_DIR");
+                provider.diagnostic_session_id=state.session_id;
                 state.viewer=SceneViewer::Start(std::move(provider),true);
                 if (!state.viewer) OutputDebugStringW(L"T3Render: live DX12 viewer failed to start\n");
             }
@@ -155,6 +158,10 @@ bool RuntimeInitialize() noexcept {
     } catch (...) { return false; }
 }
 bool RuntimeEnabled() noexcept { try {return Enabled(State());} catch (...) {return false;} }
+const char* RuntimeSessionId() noexcept {
+    try { auto& state=State();return state.driver.load(std::memory_order_acquire) ? state.session_id.c_str() : nullptr; }
+    catch (...) { return nullptr; }
+}
 void RuntimeDeferredLoss() noexcept {
     // State is initialized before installing the hook; never lock or call game code here.
     try {State().deferred_loss.store(true,std::memory_order_release);} catch (...) {}
@@ -270,14 +277,18 @@ void RuntimeDrawEnd(IDirect3DDevice8* device,const RuntimeDraw& draw,HRESULT res
         auto* driver=Driver(false);if (driver) driver->EndDraw(draw.ticket,CurrentThread(),SUCCEEDED(result),draw.before,after);
     } catch (...) {RuntimeAbandon();}
 }
-std::uint64_t RuntimePresentBegin(IDirect3DDevice8* device) noexcept {
+RuntimePresent RuntimePresentBegin(IDirect3DDevice8* device) noexcept {
     LastError saved;
-    try {if (querying) {RuntimeDeferredLoss();return 0;} auto* d=Driver(true);return d && IsDevice(device) ? d->BeginPresent(CurrentThread()) : 0;}
-    catch (...) {RuntimeAbandon();return 0;}
+    try {
+        if (querying) {RuntimeDeferredLoss();return {};}
+        auto* d=Driver(true);RuntimePresent present;
+        if (d && IsDevice(device)) present.ticket=d->BeginPresent(CurrentThread(),&present.frame_id);
+        return present;
+    } catch (...) {RuntimeAbandon();return {};}
 }
-void RuntimePresentEnd(std::uint64_t ticket,HRESULT result) noexcept {
+void RuntimePresentEnd(RuntimePresent present,HRESULT result) noexcept {
     LastError saved;
-    try {if (!ticket) return;auto* d=Driver(false);if (d) (void)d->EndPresent(ticket,CurrentThread(),SUCCEEDED(result));NotifyViewer();}
+    try {if (!present.ticket) return;auto* d=Driver(false);if (d) (void)d->EndPresent(present.ticket,CurrentThread(),SUCCEEDED(result));NotifyViewer();}
     catch (...) {RuntimeAbandon();}
 }
 std::uint64_t RuntimeResetBegin(IDirect3DDevice8* device) noexcept {

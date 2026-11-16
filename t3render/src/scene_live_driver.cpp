@@ -271,7 +271,8 @@ void SceneDriver::EndDraw(std::uint64_t ticket,ThreadToken thread,bool succeeded
     } catch (...) { impl_->Disable(); }
 }
 
-std::uint64_t SceneDriver::BeginPresent(ThreadToken thread) noexcept {
+std::uint64_t SceneDriver::BeginPresent(ThreadToken thread,std::uint64_t* frame_id) noexcept {
+    if (frame_id) *frame_id=UINT64_MAX;
     try {
         auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
         if (s.disabled.load()) return 0;
@@ -282,7 +283,9 @@ std::uint64_t SceneDriver::BeginPresent(ThreadToken thread) noexcept {
         const auto id=s.Ticket();if (!id) { s.Disable();return 0; }
         const auto frame=s.next_frame++;
         const auto ticket=s.window ? s.window->BeginPresent(thread,frame,quiescent) : 0;
-        s.presents.emplace(id,Impl::Present{thread,ticket});return id;
+        s.presents.emplace(id,Impl::Present{thread,ticket});
+        if (ticket && frame_id) *frame_id=frame;
+        return id;
     } catch (...) { impl_->Disable();return 0; }
 }
 WindowResult SceneDriver::EndPresent(std::uint64_t ticket,ThreadToken thread,bool succeeded) noexcept {

@@ -47,7 +47,9 @@ public:
     DrawStart BeginDraw(ThreadToken thread, std::uint64_t enclosing_scope, const IndexedDraw& draw) noexcept;
     void EndDraw(std::uint64_t ticket, ThreadToken thread, bool succeeded,
                  const DrawObservation& before, const DrawObservation& after) noexcept;
-    std::uint64_t BeginPresent(ThreadToken thread) noexcept;
+    // When supplied, frame_id receives the window's ID for this very Present,
+    // or UINT64_MAX if it could not be attached to a window.
+    std::uint64_t BeginPresent(ThreadToken thread, std::uint64_t* frame_id = nullptr) noexcept;
     WindowResult EndPresent(std::uint64_t ticket, ThreadToken thread, bool succeeded) noexcept;
     std::uint64_t BeginReset(ThreadToken thread) noexcept;
     void EndReset(std::uint64_t ticket, ThreadToken thread, bool succeeded) noexcept;

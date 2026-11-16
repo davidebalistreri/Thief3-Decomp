@@ -237,7 +237,15 @@ public:
         SetLastError(before);
         const HRESULT hr = native_->Present(source, dest, window, dirty);
         const DWORD after = GetLastError();
-        { WriterScope scope; CapturePresentEnd(native_, present_ticket, hr); }
+        {
+            WriterScope scope;
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+            const auto* live_frame=live_ticket.ticket && live_ticket.frame_id!=UINT64_MAX ? &live_ticket.frame_id : nullptr;
+            CapturePresentEnd(native_, present_ticket, hr, live_frame);
+#else
+            CapturePresentEnd(native_, present_ticket, hr);
+#endif
+        }
 #ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
         live::RuntimePresentEnd(live_ticket,hr);
         // The hook leaves its pinned thunk/trampoline alive for in-flight

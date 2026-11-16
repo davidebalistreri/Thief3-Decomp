@@ -96,6 +96,12 @@ class TraceSummaryTests(unittest.TestCase):
             with self.subTest(events=events):
                 self.assert_invalid(events, message)
 
+    def test_live_provenance_rejects_malformed_session_and_untracked_link(self):
+        for session in (None, "live:xyz", "live:" + "A" * 32, 12):
+            with self.subTest(session=session):
+                self.assert_invalid([dict(HEADER, live_session_id=session)], "invalid live session ID")
+        self.assert_invalid([HEADER, BEGIN, DRAW, dict(END, scene_live_frame=7)], "invalid live Present link")
+
     def test_frame_order_and_ids(self):
         cases = [
             ([HEADER, DRAW], "draw outside a frame"),

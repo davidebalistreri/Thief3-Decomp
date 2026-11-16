@@ -8,6 +8,8 @@ namespace t3render::live {
 // the local catalog. Hook failures or unsafe device ambiguity disable output.
 bool RuntimeInitialize() noexcept;
 bool RuntimeEnabled() noexcept;
+// Immutable, process-local random session ID; null when live setup failed.
+const char* RuntimeSessionId() noexcept;
 void RuntimeAbandon() noexcept;
 void RuntimeDeferredLoss() noexcept; // lock-free, safe from nested probe callbacks
 
@@ -25,8 +27,9 @@ struct RuntimeDraw {
 };
 RuntimeDraw RuntimeDrawBegin(IDirect3DDevice8* device, const DrawCall& call) noexcept;
 void RuntimeDrawEnd(IDirect3DDevice8* device, const RuntimeDraw& draw, HRESULT result) noexcept;
-std::uint64_t RuntimePresentBegin(IDirect3DDevice8* device) noexcept;
-void RuntimePresentEnd(std::uint64_t ticket, HRESULT result) noexcept;
+struct RuntimePresent { std::uint64_t ticket=0, frame_id=UINT64_MAX; };
+RuntimePresent RuntimePresentBegin(IDirect3DDevice8* device) noexcept;
+void RuntimePresentEnd(RuntimePresent present, HRESULT result) noexcept;
 std::uint64_t RuntimeResetBegin(IDirect3DDevice8* device) noexcept;
 void RuntimeResetEnd(std::uint64_t ticket, HRESULT result) noexcept;
 std::shared_ptr<const Snapshot> RuntimeCurrent() noexcept;

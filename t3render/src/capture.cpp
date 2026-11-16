@@ -2,6 +2,9 @@
 // replay: resource contents and calls that do not have getters are unavailable.
 #include "capture.hpp"
 #include "scene_bridge_submission.hpp"
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+#include "scene_live_runtime.hpp"
+#endif
 
 #include <windows.h>
 
@@ -586,6 +589,9 @@ bool Open(CaptureState& s) {
         if (s.experimental_repeat_recovery) out << ",\"repeated_unlock_post_write_recovery\":true";
         out << '}';
     }
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+    if (const auto* session = live::RuntimeSessionId()) out << ",\"live_session_id\":\"" << session << '"';
+#endif
     out << ",\"limitations\":["
         << "\"texture bytes and T3 asset names are not captured\","
         << "\"optional buffer shadows are bounded observations, not proof of driver input\","
@@ -2147,7 +2153,7 @@ void CaptureFrameImage(IDirect3DDevice8* device, FrameImageCallback callback, bo
     } catch (...) { Fail(); }
 }
 
-void CapturePresentEnd(IDirect3DDevice8* device, uint64_t ticket, HRESULT result) {
+void CapturePresentEnd(IDirect3DDevice8* device, uint64_t ticket, HRESULT result, const std::uint64_t* live_frame_id) {
     try {
         auto& s = State();
         std::lock_guard<std::mutex> lock(s.mutex);
@@ -2228,8 +2234,9 @@ void CapturePresentEnd(IDirect3DDevice8* device, uint64_t ticket, HRESULT result
             out << "{\"event\":\"frame_end\",\"frame\":" << s.frame
                 << ",\"present_hr\":" << static_cast<int32_t>(result) << ",\"draws\":" << s.draws
                 << ",\"had_reset\":" << (s.had_reset ? "true" : "false")
-                << ",\"concurrent_operations\":" << (s.concurrent_operations ? "true" : "false")
-                << ",\"replayable\":false}\n";
+                << ",\"concurrent_operations\":" << (s.concurrent_operations ? "true" : "false");
+            if (live_frame_id && present_tracked && SUCCEEDED(result)) out << ",\"scene_live_frame\":" << *live_frame_id;
+            out << ",\"replayable\":false}\n";
             if (!Write(s, out.str())) return;
             ++s.frames_written;
             if (s.frames_written == s.frames_requested) {

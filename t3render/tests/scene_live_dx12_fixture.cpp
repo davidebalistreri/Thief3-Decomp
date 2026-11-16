@@ -168,6 +168,7 @@ bool viewer_pipeline(const std::wstring& diagnostic_directory) {
     CHECK(scene.AddResource(epoch.map,quad("bsp:wall",ResourceKind::BspBlock,0.9f,0.8f,"mat:wall")));
     ViewerProvider provider; provider.context=fixture; provider.current=viewer_current; provider.submit_if_current=viewer_submit;
     provider.diagnostic_directory=diagnostic_directory;
+    provider.diagnostic_session_id="synthetic:"+std::to_string(GetCurrentProcessId());
     auto viewer=SceneViewer::Start(std::move(provider),false); CHECK(viewer && await_viewer(*viewer,0));
     auto frame=input(epoch,1); fixture->discard_before_submit.store(true);
     CHECK(scene.Publish(frame)); viewer->Notify(); CHECK(await_retirement(*viewer,1,1));

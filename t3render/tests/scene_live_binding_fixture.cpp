@@ -193,8 +193,13 @@ bool driver_delivery() {
         auto draw=driver->BeginDraw(thread,scope,args);if (!draw.ticket || !draw.needs_state)return false;
         driver->EndDraw(draw.ticket,thread,true,state,endstate);driver->EndScope(scope,thread,before);return true;
     };
-    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bed,state));CHECK(submit(bsp,state));CHECK(submit(bsp,state));
-    CHECK(present()==WindowResult::Published);auto first=driver->current();
+    std::uint64_t live_frame=UINT64_MAX;
+    auto live_ticket=driver->BeginPresent(thread,&live_frame);
+    CHECK(live_ticket && live_frame==0 && driver->EndPresent(live_ticket,thread,true)==WindowResult::Primed);
+    CHECK(sample());CHECK(submit(bed,state));CHECK(submit(bsp,state));CHECK(submit(bsp,state));
+    live_ticket=driver->BeginPresent(thread,&live_frame);
+    CHECK(live_ticket && live_frame==1 && driver->EndPresent(live_ticket,thread,true)==WindowResult::Published);
+    auto first=driver->current();
     CHECK(first && first->frame_id==1 && first->meshes.size()==1 && first->bsp.size()==1);
     auto diagnostics=driver->stats();
     CHECK(diagnostics.published==1 && diagnostics.selected_probes==1 && diagnostics.bed_scopes==1 &&

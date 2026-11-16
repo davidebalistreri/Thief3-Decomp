@@ -49,23 +49,34 @@ bool WriteBytes(HANDLE file, const void* data, std::size_t size) noexcept {
     return true;
 }
 struct Diagnostics {
-    std::wstring directory;
+    std::wstring directory, prefix;
+    std::string session_id;
     HANDLE log=INVALID_HANDLE_VALUE;
     unsigned images=0, entries=0;
     ULONGLONG started=0;
     Matrix first_view{};
     ~Diagnostics() { if (log!=INVALID_HANDLE_VALUE) CloseHandle(log); }
-    void Open(const std::wstring& path) {
+    void Open(const std::wstring& path, const std::string& session) {
         if (path.empty()) return;
+        // The same output directory can be inherited by multiple TDS
+        // processes. Distinct session names keep their logs and images apart.
+        if (session.empty() || session.size()>96) return;
+        std::wstring tag;
+        for (const unsigned char c:session) {
+            if ((c>='a' && c<='z') || (c>='0' && c<='9'))
+                tag.push_back(static_cast<wchar_t>(c));
+            else if (c==':') tag.push_back(L'-');
+            else return;
+        }
         started=GetTickCount64();
-        directory=path;
-        log=CreateFileW((directory+L"\\scene-live.jsonl").c_str(),GENERIC_WRITE,FILE_SHARE_READ,
+        directory=path;session_id=session;prefix=L"scene-live-"+tag;
+        log=CreateFileW((directory+L"\\"+prefix+L".jsonl").c_str(),GENERIC_WRITE,FILE_SHARE_READ,
                         nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
         if (log==INVALID_HANDLE_VALUE) OutputDebugStringW(L"T3Render: cannot create live diagnostics\n");
     }
     void Event(const char* event) {
         if (log==INVALID_HANDLE_VALUE || entries>=4096) return;
-        const std::string line=std::string("{\"event\":\"")+event+"\"}\n";
+        const std::string line=std::string("{\"event\":\"")+event+"\",\"session_id\":\""+session_id+"\"}\n";
         if (WriteBytes(log,line.data(),line.size())) ++entries;
         else { CloseHandle(log);log=INVALID_HANDLE_VALUE; }
     }
@@ -96,10 +107,10 @@ struct Diagnostics {
     bool Image(const Snapshot& snapshot, const scene::Frame& frame, const std::vector<std::uint8_t>& rgba) {
         if (rgba.size()!=std::size_t(frame.width)*frame.height*4) return false;
         wchar_t filename[80]{};
-        std::swprintf(filename,std::size(filename),L"\\scene-live-frame-%llu.ppm",
+        std::swprintf(filename,std::size(filename),L"-frame-%llu.ppm",
                       static_cast<unsigned long long>(snapshot.frame_id));
         std::vector<std::uint8_t> row(std::size_t(frame.width)*3);
-        HANDLE file=CreateFileW((directory+filename).c_str(),GENERIC_WRITE,FILE_SHARE_READ,
+        HANDLE file=CreateFileW((directory+L"\\"+prefix+filename).c_str(),GENERIC_WRITE,FILE_SHARE_READ,
                                 nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
         if (file==INVALID_HANDLE_VALUE) return false;
         char header[64];const int count=std::snprintf(header,sizeof(header),"P6\n%u %u\n255\n",frame.width,frame.height);
@@ -115,6 +126,7 @@ struct Diagnostics {
     }
     void Frame(const Snapshot& snapshot, const ResidentFlatFrame& frame, const FlatCacheStats& cache, bool image) {
         if (log==INVALID_HANDLE_VALUE || entries>=4096) return;
+        if (snapshot.provenance.origin==FrameOrigin::LiveProcess && snapshot.provenance.session_id!=session_id) return;
         std::ostringstream out;out.imbue(std::locale::classic());out<<std::setprecision(9);
         const char* source=snapshot.provenance.origin==FrameOrigin::LiveProcess ? "live_process" :
                            snapshot.provenance.origin==FrameOrigin::CapturedReplay ? "captured_replay" : "synthetic";
@@ -124,9 +136,13 @@ struct Diagnostics {
                                    scope==IdentityScope::FullObjectScan ? "full_object_scan" : "unknown";
         out<<"{\"event\":\"frame\",\"source\":\""<<source<<"\",\"frame\":"<<snapshot.frame_id
            <<",\"identity_scope\":\""<<identity_scope<<"\""
+           <<",\"render_pass\":"<<snapshot.render_pass<<",\"stage\":"<<snapshot.stage
            <<",\"map_epoch\":"<<snapshot.map_epoch<<",\"device_epoch\":"<<snapshot.device_epoch
            <<",\"continuity\":"<<snapshot.continuity
            <<",\"width\":"<<frame.camera.width<<",\"height\":"<<frame.camera.height
+           <<",\"viewport\":{\"x\":"<<snapshot.camera.x<<",\"y\":"<<snapshot.camera.y
+           <<",\"width\":"<<snapshot.camera.width<<",\"height\":"<<snapshot.camera.height
+           <<",\"min_depth\":"<<snapshot.camera.min_depth<<",\"max_depth\":"<<snapshot.camera.max_depth<<'}'
            <<",\"mesh_instances\":"<<snapshot.meshes.size()<<",\"bsp_blocks\":"<<snapshot.bsp.size()
            <<",\"draws\":"<<frame.draws.size()<<",\"resident_resources\":"<<cache.resources
            <<",\"resident_bytes\":"<<cache.bytes<<",\"resource_uploads\":"<<cache.uploads
@@ -187,7 +203,8 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
     bool failed = false;
     Diagnostics diagnostics;
     try {
-        diagnostics.Open(state->provider.diagnostic_directory); diagnostics.Event("viewer_started");
+        diagnostics.Open(state->provider.diagnostic_directory,state->provider.diagnostic_session_id);
+        diagnostics.Event("viewer_started");
         if (state->window) { window = CreateViewerWindow(); if (!window) failed = true; }
         auto gpu = failed || state->stop.load() ? nullptr : FlatD3D12::Create(window);
         if (!gpu && !state->stop.load()) failed = true;

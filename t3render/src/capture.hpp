@@ -133,7 +133,9 @@ bool CaptureBridgeShouldDisable() noexcept;
 // A Present window must begin before readback/native Present and end only
 // after native Present returns. A zero ticket means synchronization is unknown.
 std::uint64_t CapturePresentBegin(IDirect3DDevice8*, std::uint32_t thread_id) noexcept;
-void CapturePresentEnd(IDirect3DDevice8*, std::uint64_t ticket, HRESULT);
+// live_frame_id, when supplied by the combined observer, names the live
+// collector's window for this same native Present; it is not inferred by time.
+void CapturePresentEnd(IDirect3DDevice8*, std::uint64_t ticket, HRESULT, const std::uint64_t* live_frame_id = nullptr);
 void CapturePresent(IDirect3DDevice8*, HRESULT);
 std::uint64_t CaptureResetBegin(IDirect3DDevice8*, std::uint32_t thread_id) noexcept;
 void CaptureResetEnd(IDirect3DDevice8*, std::uint64_t ticket, const D3DPRESENT_PARAMETERS*, HRESULT);

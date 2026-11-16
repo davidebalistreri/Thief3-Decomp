@@ -1,5 +1,6 @@
 """Semantic variant bundles switch in memory without changing unrelated draws."""
 import copy
+from dataclasses import replace
 import json
 from pathlib import Path
 import shutil
@@ -20,6 +21,7 @@ import test_scene_pbr_offline_casters as caster_tests
 import test_scene_pbr_packet as packet_tests
 from test_scene_material_overrides import FakeRemaster
 from test_scene_textured_packet import Resolver
+from gltf import GLTFBuilder
 
 HARNESS = r'''
 #include "scene_pbr_variants.hpp"
@@ -85,6 +87,46 @@ int main(int argc, char** argv) {
 }
 '''
 
+UPDATE_HARNESS = r'''
+#include "scene_pbr_variants.hpp"
+#include <iostream>
+#include <iterator>
+int main(int argc, char** argv) {
+    if (argc != 2) return 3;
+    std::string raw((std::istreambuf_iterator<char>(std::cin)), {});
+    t3render::scene::Reader reader(reinterpret_cast<const std::uint8_t*>(raw.data()), raw.size());
+    std::uint32_t a = 0, b = 0;
+    if (!reader.u32(a) || !reader.u32(b) || a > reader.remaining() || b != reader.remaining()-a) return 3;
+    std::vector<std::uint8_t> first(a), second(b);
+    if (!reader.bytes(first.data(), a) || !reader.bytes(second.data(), b) || !reader.end()) return 3;
+    t3render::pbr::Variants resident, incoming;
+    if (!resident.Parse(first.data(), first.size()) || !incoming.Parse(second.data(), second.size()) ||
+        !resident.Select(argv[1], true)) return 3;
+    std::vector<std::uint32_t> draws[2], casters[2];
+    if (!resident.UpdateScene(second.data(), second.size(), draws, casters)) return 4;
+    if (!resident.ReplacementSelected()) return 5;
+    t3render::pbr::Frame combined; std::vector<std::uint8_t> draw_tags, caster_tags;
+    if (!resident.BuildCombined(combined, draw_tags, caster_tags)) return 5;
+    for (unsigned v=0; v<2; ++v) {
+        if (!incoming.Select(argv[1], v != 0) || draws[v].size() != incoming.Current().draws.size() ||
+            casters[v].size() != incoming.Current().offline_casters.size()) return 5;
+        for (std::size_t i=0; i<draws[v].size(); ++i)
+            if (draws[v][i] >= combined.draws.size() || draw_tags[draws[v][i]] != v+1 ||
+                !t3render::pbr::SameDraw(combined, combined.draws[draws[v][i]], incoming.Current(), incoming.Current().draws[i])) return 5;
+        for (std::size_t i=0; i<casters[v].size(); ++i)
+            if (casters[v][i] >= combined.offline_casters.size() || caster_tags[casters[v][i]] != v+1 ||
+                !t3render::pbr::SameCaster(combined, combined.offline_casters[casters[v][i]],
+                                           incoming.Current(), incoming.Current().offline_casters[i])) return 5;
+    }
+    const auto before = draws[0];
+    second.back() ^= 1;
+    if (resident.UpdateScene(second.data(), second.size(), draws, casters) || draws[0] != before ||
+        !resident.ReplacementSelected()) return 5;
+    if (!resident.UpdateScene(first.data(), first.size(), draws, casters)) return 5;
+    std::cout << before.size() << " " << draws[0].size() << "\n";
+}
+'''
+
 
 def inputs():
     scene, lights, config = packet_tests.inputs()
@@ -92,6 +134,23 @@ def inputs():
     original, old = pbr.create_packet(*args)
     replacement, new = pbr.create_packet(*args, bed_glb=bed_tests.glb(scene))
     return scene, original, old, replacement, new
+
+
+def distinct_bed(scene):
+    geometry, scale = scene.static_mesh_resources[0].geometry, scene.conventions.meters_per_unit
+    builder = GLTFBuilder()
+    positions = [(x*scale, z*scale, y*scale) for x, y, z in geometry.positions]
+    normals = [(x, z, y) for x, y, z in geometry.normals]
+    attrs = {"POSITION": builder.add_floats(positions, "VEC3"),
+             "NORMAL": builder.add_floats(normals, "VEC3"),
+             "TEXCOORD_0": builder.add_floats(geometry.uv0, "VEC2")}
+    indices = (1, 3, 4, 5, 6, 7)
+    primitives = [{"attributes": attrs, "indices": builder.add_indices((0, 2, index)),
+                   "material": builder.material(name)} for index, name in zip(indices, pbr.bed.MATERIALS)]
+    builder.node("bed", builder.mesh("bed", primitives), root=True)
+    with tempfile.TemporaryDirectory(prefix="t3render-distinct-bed-") as directory:
+        path = Path(directory)/"bed.glb"; builder.write_glb(path)
+        return path.read_bytes()
 
 
 class VariantTests(unittest.TestCase):
@@ -104,6 +163,10 @@ class VariantTests(unittest.TestCase):
         cls.binary = Path(cls.temp.name)/"parser"
         subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-I", str(HERE.parent/"src"),
                         "-x", "c++", "-o", str(cls.binary), "-"], input=HARNESS, text=True,
+                       check=True, capture_output=True, timeout=60)
+        cls.updater = Path(cls.temp.name)/"updater"
+        subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-I", str(HERE.parent/"src"),
+                        "-x", "c++", "-o", str(cls.updater), "-"], input=UPDATE_HARNESS, text=True,
                        check=True, capture_output=True, timeout=60)
 
     @classmethod
@@ -200,6 +263,56 @@ class VariantTests(unittest.TestCase):
 
     def test_synthetic_gpu_bundle_is_accepted(self):
         self.assertEqual(self.parse(gpu_fixture.bundle(), gpu_fixture.KEY).returncode, 0)
+
+    def test_synthetic_gpu_subset_uses_resident_draws(self):
+        first, second = gpu_fixture.bundle(), gpu_fixture.subset_bundle()
+        raw = struct.pack("<II", len(first), len(second)) + first + second
+        result = subprocess.run([str(self.updater), gpu_fixture.KEY], input=raw, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), [b"3", b"4"])
+
+    def test_resident_scene_accepts_verified_subsets_and_rejects_new_geometry(self):
+        scene, lights, config = packet_tests.inputs()
+        data = scene.to_dict(); geometry = data["static_mesh_resources"][0]["geometry"]
+        for k in range(1, 6):
+            geometry["positions"].append([k/8, 0, 0]); geometry["uv0"].append([k/8, 0])
+            geometry["normals"].append([0, 0, 1]); geometry["tangents"].append([1, 0, 0])
+        geometry["indices"][6:9] = [0, 3, 2]
+        scene = pbr.SceneSnapshot.from_dict(data)
+        lights = replace(lights, static_mesh_resources=scene.static_mesh_resources)
+        args = (scene, lights, json.dumps(config), Resolver(), FakeRemaster(scene))
+        original, old = pbr.create_packet(*args)
+        replacement, new = pbr.create_packet(*args, bed_glb=distinct_bed(scene))
+        base, report = variants.build(scene, original, old, replacement, new)
+        data = scene.to_dict()
+        removed = next(s for s in data["submissions"] if s["target_kind"] == "bsp_block")
+        data["submissions"].remove(removed)
+        data["submissions"].reverse()
+        subset = pbr.SceneSnapshot.from_dict(data)
+        light = packet_tests.inputs()[1].lights[0]
+        lights = replace(subset, lights=(light,))
+        config = packet_tests.inputs()[2]
+        args = (subset, lights, json.dumps(config), Resolver(), FakeRemaster(subset))
+        partial_original, partial_old = pbr.create_packet(*args)
+        partial_replacement, partial_new = pbr.create_packet(*args, bed_glb=distinct_bed(subset))
+        partial, _ = variants.build(subset, partial_original, partial_old, partial_replacement, partial_new)
+        def update(first, second):
+            raw = struct.pack("<II", len(first), len(second))+first+second
+            return subprocess.run([str(self.updater), report["resource_key"]], input=raw, capture_output=True, timeout=10)
+        result = update(base, partial)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        reduced, full = map(int, result.stdout.split())
+        self.assertLess(reduced, full)
+        changed = bytearray(partial)
+        _, key_size, original_size, _ = struct.unpack_from("<8sIII", changed)
+        replacement_offset = 20+key_size+original_size
+        vertex = variants.packet_signatures(bytes(changed[replacement_offset:]))[0][-1][1]
+        value = struct.unpack_from("<f", changed, replacement_offset+vertex)[0]
+        struct.pack_into("<f", changed, replacement_offset+vertex, value+.125)
+        self.assertEqual(update(base, bytes(changed)).returncode, 4)
+        ambiguous_scene, original, old, replacement, new = inputs()
+        ambiguous, _ = variants.build(ambiguous_scene, original, old, replacement, new)
+        self.assertEqual(update(ambiguous, ambiguous).returncode, 4)
 
 
 if __name__ == "__main__":

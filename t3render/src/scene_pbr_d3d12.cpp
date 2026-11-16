@@ -68,6 +68,22 @@ bool ReadCameraUpdate(const wchar_t* path, Variants& variants) {
     return true;
 }
 
+bool ReadSceneUpdate(const wchar_t* path, Variants& variants,
+                     std::vector<std::uint32_t> (&draws)[2], std::vector<std::uint32_t> (&casters)[2]) {
+    FILE* file = _wfopen(path, L"rb");
+    if (!file) { std::fprintf(stderr, "cannot open scene update bundle\n"); return false; }
+    bool ok = !_fseeki64(file, 0, SEEK_END);
+    const auto length = ok ? _ftelli64(file) : -1;
+    ok = ok && length > 0 && static_cast<std::uint64_t>(length) <= kMaxVariantBytes && !_fseeki64(file, 0, SEEK_SET);
+    std::vector<std::uint8_t> bytes(ok ? static_cast<std::size_t>(length) : 0);
+    ok = ok && std::fread(bytes.data(), 1, bytes.size(), file) == bytes.size() && std::fgetc(file) == EOF && !std::ferror(file);
+    const bool close_error = std::fclose(file) != 0;
+    if (!ok || close_error || !variants.UpdateScene(bytes.data(), bytes.size(), draws, casters)) {
+        std::fprintf(stderr, "scene update requires uniquely matched resident resources\n"); return false;
+    }
+    return true;
+}
+
 struct Constants {
     float view[16], projection[16];
     float size_scale_count[4], camera_exposure[4], ambient[4];
@@ -136,6 +152,14 @@ struct VariantRun {
     const wchar_t* restored_output = nullptr;
     bool stream = false;
     std::vector<std::uint8_t> draws, casters;
+    std::vector<std::uint32_t> active_draws[2], active_casters[2];
+
+    void ResetSelection() {
+        for (auto& list : active_draws) list.clear();
+        for (auto& list : active_casters) list.clear();
+        for (std::size_t i = 0; i < draws.size(); ++i) active_draws[draws[i]-1].push_back(static_cast<std::uint32_t>(i));
+        for (std::size_t i = 0; i < casters.size(); ++i) active_casters[casters[i]-1].push_back(static_cast<std::uint32_t>(i));
+    }
 };
 
 int Render(const Frame& frame, const wchar_t* output, bool indirect, bool gtao, bool volumetric, bool reflections, bool filmic,
@@ -1023,15 +1047,20 @@ Output main(float4 position:SV_Position) {
                 shadow_constants[3] = frame.meters_per_unit;
                 shadow_constants[16] = frame.shadow_near_m; shadow_constants[17] = frame.shadow_far_m;
                 list->SetGraphicsRoot32BitConstants(7, 20, shadow_constants, 0);
-                for (std::size_t i = 0; i < frame.draws.size(); ++i) {
+                const auto draw_shadow = [&](std::size_t i) {
                     const auto& draw = frame.draws[i];
-                    if ((!variant || variant->draws[i] == selected) && (draw.shadow_mask & (1u << light)))
-                        list->DrawInstanced(draw.vertex_count, 1, draw.first_vertex, 0);
-                }
-                for (std::size_t i = 0; i < frame.offline_casters.size(); ++i) {
+                    if (draw.shadow_mask & (1u << light)) list->DrawInstanced(draw.vertex_count, 1, draw.first_vertex, 0);
+                };
+                const auto draw_caster = [&](std::size_t i) {
                     const auto& caster = frame.offline_casters[i];
-                    if ((!variant || variant->casters[i] == selected) && (caster.shadow_mask & (1u << light)))
-                        list->DrawInstanced(caster.vertex_count, 1, caster.first_vertex, 0);
+                    if (caster.shadow_mask & (1u << light)) list->DrawInstanced(caster.vertex_count, 1, caster.first_vertex, 0);
+                };
+                if (variant) {
+                    for (auto i : variant->active_draws[selected-1]) draw_shadow(i);
+                    for (auto i : variant->active_casters[selected-1]) draw_caster(i);
+                } else {
+                    for (std::size_t i = 0; i < frame.draws.size(); ++i) draw_shadow(i);
+                    for (std::size_t i = 0; i < frame.offline_casters.size(); ++i) draw_caster(i);
                 }
             }
             Transition(list.p, shadow_map.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -1045,8 +1074,7 @@ Output main(float4 position:SV_Position) {
         list->OMSetRenderTargets(use_gbuffer ? 5 : 1, geometry_rtvs, FALSE, &dsv);
         for (UINT i = 0; i < (use_gbuffer ? 5u : 1u); ++i) list->ClearRenderTargetView(geometry_rtvs[i], clear.Color, 0, nullptr);
         list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1, 0, 0, nullptr);
-        for (std::size_t draw_index = 0; draw_index < frame.draws.size(); ++draw_index) {
-            if (variant && variant->draws[draw_index] != selected) continue;
+        const auto draw_color = [&](std::size_t draw_index) {
             const auto& draw = frame.draws[draw_index];
             if (frame.has_metallic) {
                 const float material[4] = {draw.emission[0], draw.emission[1], draw.emission[2], draw.metallic};
@@ -1057,7 +1085,9 @@ Output main(float4 position:SV_Position) {
                 list->SetGraphicsRootDescriptorTable(i+1, handle);
             }
             list->DrawInstanced(draw.vertex_count, 1, draw.first_vertex, 0);
-        }
+        };
+        if (variant) for (auto i : variant->active_draws[selected-1]) draw_color(i);
+        else for (std::size_t i = 0; i < frame.draws.size(); ++i) draw_color(i);
         Transition(list.p, hdr.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         if (use_gbuffer) {
             auto handle = gpu_base; handle.ptr += UINT64(frame.textures.size()*2+1+(frame.shadow_size ? 1 : 0))*srv_step;
@@ -1139,11 +1169,13 @@ Output main(float4 position:SV_Position) {
             if (!saved) { std::fprintf(stderr, "temporal buffer write failed; partial file may remain\n"); return 1; }
         }
         std::size_t visible_vertices = 0, visible_draws = 0, caster_vertices = 0;
-        for (std::size_t i = 0; i < frame.draws.size(); ++i) if (!variant || variant->draws[i] == selected) {
-            visible_vertices += frame.draws[i].vertex_count; ++visible_draws;
+        if (variant) {
+            for (auto i : variant->active_draws[selected-1]) { visible_vertices += frame.draws[i].vertex_count; ++visible_draws; }
+            for (auto i : variant->active_casters[selected-1]) caster_vertices += frame.offline_casters[i].vertex_count;
+        } else {
+            for (const auto& draw : frame.draws) { visible_vertices += draw.vertex_count; ++visible_draws; }
+            for (const auto& caster : frame.offline_casters) caster_vertices += caster.vertex_count;
         }
-        for (std::size_t i = 0; i < frame.offline_casters.size(); ++i)
-            if (!variant || variant->casters[i] == selected) caster_vertices += frame.offline_casters[i].vertex_count;
         std::printf("sceneir_pbr_dx12=ok textures=%zu draws=%zu triangles=%zu offline_caster_triangles=%zu lights=%zu changed_pixels=%zu\n",
                     frame.textures.size(), visible_draws, visible_vertices/3, caster_vertices/3, frame.lights.size(), changed);
         if (!variant) return 0;
@@ -1158,12 +1190,16 @@ Output main(float4 position:SV_Position) {
             const auto split = line.find(L' ');
             if (split == std::wstring::npos || split + 1 == line.size()) return 2;
             const auto command = line.substr(0, split);
-            if (command == L"frame") {
+            if (command == L"frame" || command == L"scene") {
                 const auto tab = line.find(L'\t', split+1);
                 if (tab == std::wstring::npos || tab == split+1 || tab+1 == line.size() ||
                     line.find(L'\t', tab+1) != std::wstring::npos) return 2;
                 const auto path = line.substr(split+1, tab-split-1);
-                if (!ReadCameraUpdate(path.c_str(), *variant->variants)) return 2;
+                if (command == L"frame") {
+                    if (!ReadCameraUpdate(path.c_str(), *variant->variants)) return 2;
+                    variant->ResetSelection();
+                } else if (!ReadSceneUpdate(path.c_str(), *variant->variants, variant->active_draws,
+                                            variant->active_casters)) return 2;
                 const auto& camera_frame = variant->variants->Current();
                 std::memcpy(cb.view, camera_frame.view, sizeof(cb.view));
                 std::memcpy(cb.projection, camera_frame.projection, sizeof(cb.projection));
@@ -1173,7 +1209,8 @@ Output main(float4 position:SV_Position) {
                 std::memcpy(mapped, &cb, sizeof(cb));
                 const D3D12_RANGE written{0, sizeof(cb)}; constants->Unmap(0, &written);
                 current_output = line.substr(tab+1);
-                std::printf("variant_camera=updated temporal_history=reset\n");
+                std::printf(command == L"frame" ? "variant_camera=updated temporal_history=reset\n" :
+                                                   "variant_scene=updated temporal_history=reset\n");
                 std::fflush(stdout);
             } else {
                 if ((command != L"original" && command != L"replacement") ||
@@ -1264,6 +1301,7 @@ int wmain(int argc, wchar_t** argv) {
         if (!variants.BuildCombined(combined, run.draws, run.casters)) {
             std::fprintf(stderr, "cannot build bounded combined variants\n"); return 2;
         }
+        run.ResetSelection();
         return Render(combined, argv[3], indirect, gtao, volumetric, reflections, filmic,
                       nullptr, 0, 0, nullptr, nullptr, 0, &run);
     }

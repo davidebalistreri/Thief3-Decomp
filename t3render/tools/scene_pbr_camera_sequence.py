@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Render a verified captured camera sequence with one resident bed switch.
 
-This consumes finalized captures, not a live TDS connection. Frames whose
-geometry, materials, lights or viewport differ are rejected before launch.
+This consumes finalized captures, not a live TDS connection. An optional
+per-frame variant bundle may select only unchanged, already-resident resources.
 """
 import argparse
 import hashlib
@@ -45,26 +45,7 @@ def _frame(scene_path, packet_path, manifest_path):
             "hashes": (_digest(scene_raw), _digest(packet), _digest(manifest_raw))}
 
 
-def prepare(trace, bundle_path, bundle_manifest_path, paths):
-    if len(paths) not in (2, 3):
-        raise ValueError("camera sequence requires two or three captured frames")
-    frames = [_frame(*map(Path, item)) for item in paths]
-    first = frames[0]
-    base = first["packet"]
-    scope = (first["manifest"]["render_pass"], first["manifest"]["stage"])
-    for previous, current in zip(frames, frames[1:]):
-        if (len(current["packet"]) != len(base) or current["packet"][:24] != base[:24] or
-                current["packet"][164:] != base[164:]):
-            raise ValueError("camera sequence changes resident geometry, materials, lights or viewport")
-        if (current["manifest"]["render_pass"], current["manifest"]["stage"]) != scope:
-            raise ValueError("camera sequence changes submission scope")
-        if (current["scene"].source.fingerprints != first["scene"].source.fingerprints or
-                temporal._light_source(current["scene"], current["manifest"]) !=
-                temporal._light_source(first["scene"], first["manifest"])):
-            raise ValueError("camera sequence changes capture or light provenance")
-        temporal.compatible(previous["metadata"], current["metadata"],
-                            (previous["scene"], previous["manifest"]), (current["scene"], current["manifest"]))
-        session.validate(trace, previous["scene"], current["scene"], *scope)
+def _bundle(frame, bundle_path, bundle_manifest_path):
     bundle_path, bundle_manifest_path = Path(bundle_path), Path(bundle_manifest_path)
     raw = preview.read_limited(bundle_path, MAX_BUNDLE)
     manifest_raw = preview.read_limited(bundle_manifest_path, preview.MAX_INPUT)
@@ -79,25 +60,90 @@ def prepare(trace, bundle_path, bundle_manifest_path, paths):
     key = raw[20:20+key_len].decode("ascii")
     original = raw[20+key_len:20+key_len+original_len]
     replacement = raw[20+key_len+original_len:]
-    if (original != base or manifest.get("schema") != "t3.scene.pbr-variants" or
+    if (original != frame["packet"] or manifest.get("schema") != "t3.scene.pbr-variants" or
             type(manifest.get("version")) is not int or manifest["version"] != 1 or
             manifest.get("packet_sha256") != _digest(raw) or
-            manifest.get("scene_sha256") != first["hashes"][0] or
-            manifest.get("source_frame") != first["scene"].source.frame_id or
-            manifest.get("source_fingerprints") != first["scene"].source.fingerprints or
-            manifest.get("calibration_sha256") != first["manifest"].get("calibration_sha256") or
-            manifest.get("light_scene_sha256") != first["manifest"].get("light_scene_sha256") or
-            temporal._light_source(first["scene"], manifest) != temporal._light_source(first["scene"], first["manifest"])):
-        raise ValueError("variant bundle does not match the first captured frame")
+            manifest.get("scene_sha256") != frame["hashes"][0] or
+            manifest.get("source_frame") != frame["scene"].source.frame_id or
+            manifest.get("source_fingerprints") != frame["scene"].source.fingerprints or
+            manifest.get("calibration_sha256") != frame["manifest"].get("calibration_sha256") or
+            manifest.get("light_scene_sha256") != frame["manifest"].get("light_scene_sha256") or
+            temporal._light_source(frame["scene"], manifest) != temporal._light_source(frame["scene"], frame["manifest"])):
+        raise ValueError("variant bundle does not match its captured frame")
     if not isinstance(manifest.get("original"), dict):
         raise ValueError("variant bundle lacks original draw evidence")
-    rebuilt, report = variants.build(first["scene"], original, manifest["original"], replacement, manifest)
+    rebuilt, report = variants.build(frame["scene"], original, manifest["original"], replacement, manifest)
     if rebuilt != raw or report != manifest.get("variant") or key != report["resource_key"]:
         raise ValueError("semantic bed variant evidence does not match its bundle")
-    return {"frames": frames, "key": key, "trace": Path(trace),
-            "trace_sha256": first["scene"].source.fingerprints["trace"], "scope": scope,
+    return {"key": key, "report": report, "original": original, "replacement": replacement, "manifest": manifest,
             "bundle": bundle_path, "bundle_manifest": bundle_manifest_path,
             "bundle_sha256": _digest(raw), "bundle_manifest_sha256": _digest(manifest_raw)}
+
+
+def _resident_items(resident_packet, resident_stats, next_packet, next_stats):
+    old_draws, old_casters, old_context = variants.packet_signatures(resident_packet)
+    new_draws, new_casters, new_context = variants.packet_signatures(next_packet)
+    if old_context[:24] != new_context[:24] or old_context[164:] != new_context[164:]:
+        raise ValueError("scene update changes resident lighting, viewport or renderer settings")
+    def match(old, old_records, new, new_records):
+        if len(old) != len(old_records) or len(new) != len(new_records):
+            raise ValueError("scene update metadata does not match its packet")
+        index = {}
+        for i, signature in enumerate(old): index.setdefault(signature, []).append(i)
+        used = set()
+        for signature, record in zip(new, new_records):
+            candidates = index.get(signature, [])
+            if len(candidates) != 1 or candidates[0] in used or old_records[candidates[0]] != record:
+                raise ValueError("scene update has new, ambiguous or semantically different resources")
+            used.add(candidates[0])
+    match([item[0] for item in old_draws], resident_stats["draws"],
+          [item[0] for item in new_draws], next_stats["draws"])
+    def casters(stats):
+        shadow = stats.get("shadow_maps")
+        return [] if shadow is None else shadow.get("offline_candidates", {}).get("sections", [])
+    match(old_casters, casters(resident_stats), new_casters, casters(next_stats))
+
+
+def prepare(trace, bundle_path, bundle_manifest_path, paths, updates=None):
+    if len(paths) not in (2, 3):
+        raise ValueError("scene sequence requires two or three captured frames")
+    if updates is not None and len(updates) != len(paths)-1:
+        raise ValueError("one update bundle is required for each later frame")
+    frames = [_frame(*map(Path, item)) for item in paths]
+    first = frames[0]
+    baseline = _bundle(first, bundle_path, bundle_manifest_path)
+    base = first["packet"]
+    scope = (first["manifest"]["render_pass"], first["manifest"]["stage"])
+    for index, (previous, current) in enumerate(zip(frames, frames[1:])):
+        if (current["manifest"]["render_pass"], current["manifest"]["stage"]) != scope:
+            raise ValueError("scene sequence changes submission scope")
+        if (current["scene"].source.fingerprints != first["scene"].source.fingerprints or
+                temporal._light_source(current["scene"], current["manifest"]) !=
+                temporal._light_source(first["scene"], first["manifest"])):
+            raise ValueError("scene sequence changes capture or light provenance")
+        if updates is None:
+            if (len(current["packet"]) != len(base) or current["packet"][:24] != base[:24] or
+                    current["packet"][164:] != base[164:]):
+                raise ValueError("camera sequence changes resident geometry, materials, lights or viewport")
+            temporal.compatible(previous["metadata"], current["metadata"],
+                                (previous["scene"], previous["manifest"]), (current["scene"], current["manifest"]))
+        else:
+            if (current["manifest"].get("calibration_sha256") != first["manifest"].get("calibration_sha256") or
+                    current["manifest"].get("lights") != first["manifest"].get("lights")):
+                raise ValueError("scene sequence changes light calibration")
+            update = _bundle(current, *updates[index])
+            if (update["key"] != baseline["key"] or update["report"]["replacement_asset_sha256"] !=
+                    baseline["report"]["replacement_asset_sha256"]):
+                raise ValueError("scene sequence changes the semantic bed replacement")
+            _resident_items(baseline["original"], baseline["manifest"]["original"],
+                            update["original"], update["manifest"]["original"])
+            _resident_items(baseline["replacement"], baseline["manifest"], update["replacement"], update["manifest"])
+            current["update"] = update
+        session.validate(trace, previous["scene"], current["scene"], *scope)
+    return {"frames": frames, "key": baseline["key"], "trace": Path(trace),
+            "trace_sha256": first["scene"].source.fingerprints["trace"], "scope": scope,
+            "bundle": baseline["bundle"], "bundle_manifest": baseline["bundle_manifest"],
+            "bundle_sha256": baseline["bundle_sha256"], "bundle_manifest_sha256": baseline["bundle_manifest_sha256"]}
 
 
 def _path(path, wine):
@@ -138,7 +184,9 @@ def run(plan, output_dir, renderer, *, wine=None, effects=(), timeout=300, envir
     for index, frame in enumerate(frames[1:], 1):
         number = frame["scene"].source.frame_id
         names.extend(((number, "replacement"), (number, "original")))
-        commands.append("frame " + _path(frame["paths"][1], wine) + "\t" +
+        command = "scene" if "update" in frame else "frame"
+        source = frame["update"]["bundle"] if "update" in frame else frame["paths"][1]
+        commands.append(command + " " + _path(source, wine) + "\t" +
                         _path(output_dir/f"frame-{number}.replacement.ppm", wine))
         commands.append("original " + _path(output_dir/f"frame-{number}.original.ppm", wine))
         if index+1 < len(frames):
@@ -155,7 +203,10 @@ def run(plan, output_dir, renderer, *, wine=None, effects=(), timeout=300, envir
     if result.returncode:
         raise ValueError(f"renderer failed ({result.returncode}); inspect {output_dir / 'renderer.log'}")
     log = preview.read_limited(output_dir/"renderer.log", 16*1024*1024).decode("utf-8", errors="replace")
-    if (log.count("sceneir_pbr_dx12=ok") != len(names) or log.count("variant_camera=updated") != len(frames)-1 or
+    scene_updates = sum("update" in frame for frame in frames[1:])
+    if (log.count("sceneir_pbr_dx12=ok") != len(names) or
+            log.count("variant_camera=updated") != len(frames)-1-scene_updates or
+            log.count("variant_scene=updated") != scene_updates or
             log.count("variant_gpu_resources=shared") != 1):
         raise ValueError("renderer did not confirm all requested camera updates and selections")
     images = []
@@ -171,6 +222,12 @@ def run(plan, output_dir, renderer, *, wine=None, effects=(), timeout=300, envir
         for path, digest in zip(frame["paths"], frame["hashes"]):
             if _digest(preview.read_limited(path, preview.MAX_INPUT)) != digest:
                 raise ValueError("frame input changed during rendering")
+        if "update" in frame:
+            update = frame["update"]
+            for path, digest, limit in ((update["bundle"], update["bundle_sha256"], MAX_BUNDLE),
+                                        (update["bundle_manifest"], update["bundle_manifest_sha256"], preview.MAX_INPUT)):
+                if _digest(preview.read_limited(path, limit)) != digest:
+                    raise ValueError("scene update input changed during rendering")
     for path, digest, limit in ((plan["bundle"], plan["bundle_sha256"], MAX_BUNDLE),
                                 (plan["bundle_manifest"], plan["bundle_manifest_sha256"], preview.MAX_INPUT)):
         if _digest(preview.read_limited(path, limit)) != digest:
@@ -184,14 +241,26 @@ def run(plan, output_dir, renderer, *, wine=None, effects=(), timeout=300, envir
         raise ValueError("trace changed during rendering")
     if _digest(preview.read_limited(renderer, preview.MAX_INPUT)) != renderer_digest:
         raise ValueError("renderer changed during execution")
+    frame_reports = []
+    for index, frame in enumerate(frames):
+        record = {"frame": frame["scene"].source.frame_id, "scene_sha256": frame["hashes"][0],
+                  "packet_sha256": frame["hashes"][1], "packet_manifest_sha256": frame["hashes"][2]}
+        update = frame.get("update")
+        if index == 0:
+            record.update(variant_bundle_sha256=plan["bundle_sha256"],
+                          variant_manifest_sha256=plan["bundle_manifest_sha256"])
+        elif update is not None:
+            record.update(variant_bundle_sha256=update["bundle_sha256"],
+                          variant_manifest_sha256=update["bundle_manifest_sha256"])
+        frame_reports.append(record)
     report = {"schema": "t3.scene.pbr-camera-sequence", "version": 1, "trace_sha256": plan["trace_sha256"],
               "bundle_sha256": plan["bundle_sha256"], "renderer_sha256": renderer_digest, "effects": list(effects),
+              "update_mode": "resident_subsets" if scene_updates else "camera_only",
               "resource_key": plan["key"], "render_pass": plan["scope"][0], "stage": plan["scope"][1],
               "light_source": temporal._light_source(frames[0]["scene"], frames[0]["manifest"]),
-              "frames": [{"frame": f["scene"].source.frame_id, "scene_sha256": f["hashes"][0],
-                          "packet_sha256": f["hashes"][1]} for f in frames], "images": images,
+              "frames": frame_reports, "images": images,
               "limitations": ["Finalized capture processing; not a live TDS connection.",
-                              "Only camera updates are supported; other scene changes are rejected.",
+                              "Scene updates can only select unchanged, uniquely matched resident geometry; new or changed resources are rejected.",
                               "Temporal history is reset; per-object motion vectors are unavailable.",
                               "Repeated reads cannot exclude ABA or unobserved writes."]}
     with (output_dir/"sequence.manifest.json").open("x", encoding="utf-8") as stream:
@@ -206,6 +275,8 @@ def main(argv=None):
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--bundle-manifest", type=Path, required=True)
     parser.add_argument("--frame", nargs=3, metavar=("SCENE", "PACKET", "MANIFEST"), action="append", required=True)
+    parser.add_argument("--frame-bundle", nargs=2, metavar=("BUNDLE", "MANIFEST"), action="append",
+                        help="variant bundle for each later frame; allows resident subset updates")
     parser.add_argument("--renderer", type=Path, required=True)
     parser.add_argument("--wine", type=Path, help="Wine executable with Z: mapped to the host root")
     parser.add_argument("--highball-engine", type=Path, help="Highball engine root")
@@ -222,7 +293,7 @@ def main(argv=None):
             raise ValueError("supply both Highball paths or a separate Wine executable")
         wine, environment = ((args.wine, None) if args.highball_engine is None else
                              highball_environment(args.highball_engine, args.highball_bottle))
-        plan = prepare(args.trace, args.bundle, args.bundle_manifest, args.frame)
+        plan = prepare(args.trace, args.bundle, args.bundle_manifest, args.frame, updates=args.frame_bundle)
         result = run(plan, args.output_dir, args.renderer, wine=wine, effects=args.effect, timeout=args.timeout,
                      environment=environment)
         print(json.dumps(result, indent=2, allow_nan=False))

@@ -81,12 +81,37 @@
     "temporal_history": "reset",
     "runtime_game_integration": false
   },
+  "resident_visibility_subsets": {
+    "frames": [2864, 2865],
+    "mode": "finalized_capture_processing_not_live",
+    "renderer_sha256": "1ae39310941000c078fdef46cfa95afb43e7e630983ea050265d3663ea3a524f",
+    "light_source": "offline_fixture",
+    "gpu_device_instances": 1,
+    "resident_textures": 36,
+    "frame_bundle_sha256": [
+      "d29ee09b0a39b0837247ba4256daebd5c487b94323ec3f69a912a9320b0e78cd",
+      "12f6a5f840c9ce1194aac702c46611305cdc8da78505c72ee51abf8471e02c8a"
+    ],
+    "real_frames_have_same_visible_submissions": true,
+    "original_and_replacement_match_prior_renders_at_both_cameras": true,
+    "synthetic_control": {
+      "initial_draws": 4,
+      "subset_draws": 3,
+      "changed_pixels": 1024,
+      "changed_area": "removed_quadrant_only",
+      "both_variants_match_standalone_subset_renders": true,
+      "subset_original_sha256": "7d6000e9d5a9744f6681be1dee38e88e29b02148bfbe9f1e3d8657a1b68a966f",
+      "subset_replacement_sha256": "4ed8b93a29b9db8aa31b2832d908bf88fba38f3e99a4b06a9205e2289d580834"
+    },
+    "restrictions": "unchanged uniquely matched resident draws and casters; no new resources or transformed geometry"
+  },
   "limitations": [
     "The scene is partial; geometry and resource fingerprints come from offline assets after runtime metadata matching.",
     "The 31 additional mesh bindings are offline candidates, not observed runtime mesh bindings.",
     "The flat DX12 images contain only the bed and selected BSP, without lights, textures, other objects or HUD.",
     "No pixel parity or GPU payload identity is claimed.",
     "The direct light candidate producer required unavailable pre-Reset shader evidence; runtime light properties remain unknown.",
-    "The temporal experiment uses runtime geometry and camera with offline lights; it is not an integrated live game loop."
+    "The temporal experiment uses runtime geometry and camera with offline lights; it is not an integrated live game loop.",
+    "A real visibility change was not observed: the subset visibility control is synthetic."
   ]
 }

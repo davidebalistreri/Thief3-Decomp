@@ -175,13 +175,21 @@ The packet may change only view, projection and camera position: the renderer
 checks every other byte against the bundle's original packet before updating
 the GPU constant buffer. The current bed selection stays active. Changes to
 viewport, geometry, transforms, materials, lights or other packet data are
-rejected. This is a bounded camera-only update, not general dynamic scenes.
+rejected.
+
+`scene <variant-bundle-path><TAB><new-output-path>` additionally accepts a
+subset of the already resident draws and shadow casters, in the new order. It
+checks full resource contents and rejects new, changed or ambiguous matches;
+lighting and renderer settings must remain unchanged. The bed selection stays
+active and both variants are updated together. A later `frame` command restores
+the complete initial selection. This does not load new assets or update object
+transforms; semantic IDs and frame provenance must be checked by the caller.
 
 For captured frames, `scene_pbr_camera_sequence.py` checks the complete trace,
 each SceneIR and PBR manifest, consecutive synchronized Present windows and
 the semantic bed bundle before streaming the original and replacement renders.
-It also checks that the original packet bytes differ only in camera fields and
-rehashes inputs after rendering. For example, after creating an original PBR
+By default it also checks that the original packet bytes differ only in camera
+fields, and rehashes inputs after rendering. For example, after creating an original PBR
 packet for each frame and a `--bed-variants` bundle for the first:
 
 ```sh
@@ -194,6 +202,13 @@ python3 -B t3render/tools/scene_pbr_camera_sequence.py \
   --effect indirect --effect gtao --effect filmic --output-dir "$NEW_OUTPUT_DIR"
 ```
 
+To allow a resident subset on the second frame, also supply
+`--frame-bundle "$BUNDLE_B" "$BUNDLE_B.manifest.json"`; a three-frame
+sequence needs one such pair for each later frame. The runner validates each
+bundle against its frame, checks draw and caster semantic metadata and the
+same-frame trace, and rejects changed calibration or resource identity. The
+renderer independently checks content and preserves draw order.
+
 The output directory must be new. Highball's child environment is constructed
 inside the process; no bottle settings are changed. For other Wine installs,
 use `--wine` with a Z: drive mapped to the host root and configure its
@@ -202,9 +217,19 @@ environment externally. The stream validates finalized captures, not live TDS.
 The [frames 2864→2865 test](../benchmarks/runtime/2026-11-16-scene-sequence/result.json)
 used a single device and 36 resident textures, with calibrated offline fixture
 lights. Original and remaster images at both camera positions were byte-identical
-to their respective standalone renders. A packet with changed geometry was
-rejected before its next image. Temporal history is reset for these updates;
-dynamic visibility, object transforms and live frame delivery remain unimplemented.
+to their respective standalone renders, including with `--frame-bundle`. These
+real frames had the same visible submissions. A separate synthetic GPU fixture
+removed one of four draws: both variant images matched standalone subset renders,
+and only the removed quadrant changed. This is not evidence of a real runtime
+visibility change. Temporal history is reset; new resources, object transforms
+and live frame delivery remain unimplemented.
+
+`scene_pbr_variants_fixture.py` provides `create-subset`,
+`create-subset-original`, `create-subset-replacement` and `verify-subset` for
+the synthetic GPU control. Render the base bundle and subset bundle through the
+variant stream, render both subset packets separately, and pass those six images
+using the arguments shown by `verify-subset --help`. The fixture is synthetic
+and does not contain or claim runtime scene evidence.
 
 The resident geometry and both variants remain in memory while the process runs.
 The renderer builds a combined vertex buffer, deduplicates identical textures

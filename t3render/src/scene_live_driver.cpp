@@ -30,11 +30,14 @@ bool SameIdentity(const Identity& a,const Identity& b) {
         a.proxy==b.proxy && a.resource==b.resource;
 }
 bool ValidCatalog(const LoadedCatalog& catalog,Epochs& epoch) {
-    if (!catalog.residency || !catalog.binding.bed || catalog.binding.bsp.empty() ||
-        !catalog.binding.bsp_catalog_complete) return false;
+    if (!catalog.residency || !catalog.binding.bsp_catalog_complete ||
+        (!catalog.binding.bed && catalog.binding.bsp.empty() && catalog.binding.static_mesh_actors.empty())) return false;
     epoch=catalog.residency->epochs();
-    if (!epoch.map || !catalog.residency->MatchesMap(epoch,catalog.binding.map,catalog.binding.map_sha256) ||
-        catalog.residency->FindSceneResource(epoch.map,catalog.binding.bed->id)!=catalog.binding.bed) return false;
+    if (!epoch.map || !catalog.residency->MatchesMap(epoch,catalog.binding.map,catalog.binding.map_sha256)) return false;
+    if (catalog.binding.bed) {
+        if (catalog.binding.bed_instance_id.empty() ||
+            catalog.residency->FindSceneResource(epoch.map,catalog.binding.bed->id)!=catalog.binding.bed) return false;
+    } else if (!catalog.binding.bed_instance_id.empty() || !catalog.binding.bed_materials.empty() || catalog.bed_override) return false;
     for (const auto& bsp:catalog.binding.bsp)
         if (!bsp || catalog.residency->FindSceneResource(epoch.map,bsp->id)!=bsp) return false;
     if (catalog.binding.static_mesh_actors.size()>8192) return false;

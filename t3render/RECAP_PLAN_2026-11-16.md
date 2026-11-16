@@ -471,7 +471,26 @@ libreria senza TDS.
 Il punto di notifica del cambio mappa nel gioco non è stato identificato né
 collegato a questa API; anche il contesto mappa del probe luci deve essere
 aggiornato prima dell'integrazione. Il witness candidato non è trattato come
-un evento di lifecycle. Il formato del catalogo richiede ancora il letto
-ricercato e un catalogo BSP; la mappa diversa del test è sintetica. Non
+un evento di lifecycle. A quel checkpoint il catalogo richiedeva il letto
+ricercato e un catalogo BSP; la mappa diversa del test era sintetica. Non
 abbiamo quindi verificato il cambio mappa live o il caricamento di livelli
 privi di quel letto.
+
+## Aggiornamento: catalogo senza letto
+
+L'opzione `--general-map` esporta un catalogo offline v5 con BSP e candidati
+static mesh generici, senza richiedere `StaticMeshActor__1520 / INNbed1A1`.
+Sono supportate anche scene con solo BSP o solo mesh, purché almeno una
+collezione contenga geometria. L'eventuale attore numero 1520 resta un
+candidato generico; il formato non include l'override del letto o i materiali
+specifici della bedroom. I cataloghi v1–v4 restano compatibili.
+Un catalogo solo BSP non fornisce di per sé il witness runtime: senza un attore
+statico visibile idoneo le selezioni BSP possono ancora essere rifiutate.
+
+I test host coprono import, identificativi, materiali, corruzione, passaggio
+dal catalogo letto e scene senza BSP. Il loader Windows ha accettato due
+sottoinsiemi modificati della fixture offline `SouthQuarter1_int1`: 45 BSP e
+324 candidati, poi zero BSP e gli stessi candidati; ha rifiutato le copie
+corrotte. Sono fixture offline modificate, non frame TDS o prove di altre
+mappe. Il segnale runtime di cambio mappa, la copertura della visibilità e le
+prestazioni rimangono da verificare nel gioco.

@@ -1,4 +1,5 @@
 #include "../src/scene_live_catalog.hpp"
+#include "../src/scene_live_driver.hpp"
 
 #include <cstdint>
 #include <cstring>
@@ -35,11 +36,13 @@ int main(int argc,char** argv) {
     }
     const auto epoch=catalog.residency->epochs();
     const auto& bed=catalog.binding.bed;
-    if (!bed || catalog.residency->FindSceneResource(epoch.map,bed->id)!=bed ||
-        catalog.binding.bsp.empty() || catalog.residency->FindSceneResource(epoch.map,catalog.binding.bsp[0]->id)!=catalog.binding.bsp[0]) return 5;
+    if ((bed && catalog.residency->FindSceneResource(epoch.map,bed->id)!=bed) ||
+        (!bed && (!catalog.binding.bed_instance_id.empty() || !catalog.binding.bed_materials.empty() || catalog.bed_override)) ||
+        (!catalog.binding.bsp.empty() && catalog.residency->FindSceneResource(epoch.map,catalog.binding.bsp[0]->id)!=catalog.binding.bsp[0]) ||
+        (!bed && catalog.binding.bsp.empty() && catalog.binding.static_mesh_actors.empty())) return 5;
     std::cout<<"accepted "<<catalog.binding.map<<" "<<catalog.binding.materials.size()<<" "
-             <<catalog.binding.bsp.size()<<" "<<bed->geometry.positions.size()<<" "<<bed->geometry.indices.size()<<" "
-             <<bed->geometry.normals.size()<<" "<<bed->geometry.uv0.size()<<" "<<bed->geometry.tangents.size()<<" "
+             <<catalog.binding.bsp.size()<<" "<<(bed ? bed->geometry.positions.size() : 0)<<" "<<(bed ? bed->geometry.indices.size() : 0)<<" "
+             <<(bed ? bed->geometry.normals.size() : 0)<<" "<<(bed ? bed->geometry.uv0.size() : 0)<<" "<<(bed ? bed->geometry.tangents.size() : 0)<<" "
              <<catalog.binding.bed_materials.size()<<" "<<catalog.offline_scene_sha256;
     if (catalog.bed_override) {
         const auto& rule=*catalog.bed_override;
@@ -68,6 +71,11 @@ int main(int argc,char** argv) {
             resources.insert(candidate.resource->id);
         }
         std::cout<<" static_mesh_candidates "<<catalog.binding.static_mesh_actors.size()<<" "<<resources.size();
+    }
+    if (!bed) {
+        FrameProvenance source;source.origin=FrameOrigin::Synthetic;source.session_id="general-catalog-fixture";
+        if (!SceneDriver::Create(std::move(catalog),std::move(source),0,1)) return 9;
+        std::cout<<" bedless_driver_ok";
     }
     std::cout<<"\n";
 }

@@ -276,29 +276,33 @@ class CaptureBatchTests(unittest.TestCase):
         engine, bottle = self.root / "engine", self.root / "bottle"
         system = bottle / "drive_c/Steam/Thief/System"
         system.mkdir(parents=True)
-        proxy, catalog, output = self.root / "proxy.dll", self.root / "catalog.bin", self.root / "result"
-        proxy.write_bytes(b"fixture proxy"); catalog.write_bytes(b"T3LCAT04fixture catalog")
-        resolved = tuple(p.resolve() for p in (engine, bottle, system, proxy, output))
-        with mock.patch.object(batch, "validate_paths", return_value=resolved), \
-             mock.patch.object(batch, "game_pids", side_effect=[[], [], [42], []]), \
-             mock.patch.object(batch, "wait_for_one_game"), \
-             mock.patch.object(batch, "process_start", return_value="same"), \
-             mock.patch.object(batch, "terminate_game") as terminate, \
-             mock.patch.object(batch, "loader_verified", return_value=True), \
-             mock.patch.object(batch.subprocess, "Popen"):
-            result = batch.execute(*map(str, resolved), delay=0, timeout=10, frames=3, terminate=True,
-                                   scene_bridge=True, submission_scope=True, live_catalog=str(catalog), live_only=True,
-                                   live_static_meshes=True, live_lights=True)
-        self.assertTrue(result["live_only"] and result["temporary_proxy_removed"])
-        self.assertTrue(result["live_static_meshes_requested"])
-        self.assertTrue(result["live_light_candidates_requested"])
-        deployment = json.loads((output / "deployment.json").read_text())
-        self.assertEqual(deployment["capture_config"]["T3RENDER_SCENE_LIVE_STATIC_MESHES"], "1")
-        self.assertEqual(deployment["capture_config"]["T3RENDER_SCENE_LIVE_LIGHTS"], "1")
-        self.assertEqual(result["frames_requested"], 0)
-        self.assertFalse((output / "bedroom.jsonl").exists())
-        self.assertFalse((output / "capture.ready").exists())
-        terminate.assert_called_once()
+        proxy, catalog = self.root / "proxy.dll", self.root / "catalog.bin"
+        proxy.write_bytes(b"fixture proxy")
+        for version in (b"04", b"05"):
+            with self.subTest(version=version):
+                output = self.root / ("result-" + version.decode())
+                catalog.write_bytes(b"T3LCAT" + version + b"fixture catalog")
+                resolved = tuple(p.resolve() for p in (engine, bottle, system, proxy, output))
+                with mock.patch.object(batch, "validate_paths", return_value=resolved), \
+                     mock.patch.object(batch, "game_pids", side_effect=[[], [], [42], []]), \
+                     mock.patch.object(batch, "wait_for_one_game"), \
+                     mock.patch.object(batch, "process_start", return_value="same"), \
+                     mock.patch.object(batch, "terminate_game") as terminate, \
+                     mock.patch.object(batch, "loader_verified", return_value=True), \
+                     mock.patch.object(batch.subprocess, "Popen"):
+                    result = batch.execute(*map(str, resolved), delay=0, timeout=10, frames=3, terminate=True,
+                                           scene_bridge=True, submission_scope=True, live_catalog=str(catalog), live_only=True,
+                                           live_static_meshes=True, live_lights=True)
+                self.assertTrue(result["live_only"] and result["temporary_proxy_removed"])
+                self.assertTrue(result["live_static_meshes_requested"])
+                self.assertTrue(result["live_light_candidates_requested"])
+                deployment = json.loads((output / "deployment.json").read_text())
+                self.assertEqual(deployment["capture_config"]["T3RENDER_SCENE_LIVE_STATIC_MESHES"], "1")
+                self.assertEqual(deployment["capture_config"]["T3RENDER_SCENE_LIVE_LIGHTS"], "1")
+                self.assertEqual(result["frames_requested"], 0)
+                self.assertFalse((output / "bedroom.jsonl").exists())
+                self.assertFalse((output / "capture.ready").exists())
+                terminate.assert_called_once()
 
     def test_static_mesh_sampling_rejects_old_catalog_before_launch(self):
         engine, bottle = self.root / "engine", self.root / "bottle"

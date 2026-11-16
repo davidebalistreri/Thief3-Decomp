@@ -144,6 +144,91 @@ bool ValidBedOverride(const Resource& original, const Resource& replacement, con
     }
     return true;
 }
+
+bool LoadGeneralMap(Reader& reader,LoadedCatalog& output) {
+    LoadedCatalog loaded;std::string map,map_sha;
+    if (!Text(reader,map) || map.size()>128 || map.find(':')!=std::string::npos ||
+        !Text(reader,map_sha) || !Digest(map_sha) || !Text(reader,loaded.offline_scene_sha256) ||
+        !Digest(loaded.offline_scene_sha256)) return false;
+    std::uint32_t handed=0,winding=0,uv=0,clip=0,has_scale=0;
+    if (!reader.u32(handed) || handed>2 || !reader.u32(winding) || winding>2 ||
+        !reader.u32(uv) || uv>2 || !reader.u32(clip) || clip>1 || !reader.u32(has_scale) || has_scale>1) return false;
+    loaded.conventions.length_unit=LengthUnit::T3Unit;loaded.conventions.axes=Axes::T3Xyz;loaded.conventions.up_axis=UpAxis::Z;
+    loaded.conventions.handedness=static_cast<Handedness>(handed);loaded.conventions.winding=static_cast<Winding>(winding);
+    loaded.conventions.uv_origin=static_cast<UvOrigin>(uv);loaded.conventions.clip_depth=static_cast<ClipDepth>(clip);
+    if (has_scale) {float value=0;if (!reader.f32(value) || value<=0) return false;loaded.conventions.meters_per_unit=value;}
+    std::uint32_t material_count=0,bsp_count=0;
+    if (!reader.u32(material_count) || !material_count || material_count>kMaxMaterials ||
+        !reader.u32(bsp_count) || bsp_count>kMaxBsp) return false;
+    auto residency=std::make_shared<SceneResidency>();
+    if (!residency->BeginMap(0,map,map_sha)) return false;
+    const auto epoch=residency->epochs();BindingCatalog catalog;catalog.map=map;catalog.map_sha256=map_sha;
+    for (std::uint32_t i=0;i<material_count;++i) {
+        Material material;
+        if (!Text(reader,material.id) || !Text(reader,material.name) || catalog.materials.count(material.id) ||
+            !residency->AddMaterial(epoch.map,material)) return false;
+        const auto id=material.id;catalog.materials.emplace(id,std::move(material));
+    }
+    const auto bsp_prefix="bsp:"+map+":"+map_sha+":";
+    std::unordered_set<std::string> bsp_ids;catalog.bsp.reserve(bsp_count);
+    for (std::uint32_t i=0;i<bsp_count;++i) {
+        Resource block;
+        if (!ResourceData(reader,ResourceKind::BspBlock,block) || block.source_sha256!=map_sha ||
+            !BspKey(block.id,bsp_prefix) || !bsp_ids.insert(block.id).second) return false;
+        for (const auto& section:block.geometry.sections)
+            if (!section.material_id || !catalog.materials.count(*section.material_id)) return false;
+        const auto id=block.id;if (!residency->AddResource(epoch.map,std::move(block))) return false;
+        auto resource=residency->FindSceneResource(epoch.map,id);if (!resource) return false;
+        catalog.bsp.push_back(std::move(resource));
+    }
+    std::uint32_t fingerprint_count=0;
+    if (!reader.u32(fingerprint_count) || fingerprint_count>2) return false;
+    std::unordered_set<std::string> fingerprints;
+    for (std::uint32_t i=0;i<fingerprint_count;++i) {
+        std::string value;if (!Text(reader,value) || !Digest(value) || !fingerprints.insert(value).second) return false;
+    }
+    std::uint32_t mesh_count=0;
+    if (!reader.u32(mesh_count) || mesh_count>4096u-bsp_count) return false;
+    std::unordered_map<std::string,std::shared_ptr<const Resource>> resources;
+    std::unordered_set<std::string> names;const auto mesh_prefix="mesh:"+map+":"+map_sha+":";
+    for (std::uint32_t i=0;i<mesh_count;++i) {
+        Resource mesh;
+        if (!ResourceData(reader,ResourceKind::StaticMesh,mesh) || !fingerprints.count(mesh.source_sha256) ||
+            mesh.geometry.positions.size()>65536 || mesh.geometry.indices.size()>65536 ||
+            mesh.geometry.sections.size()>scene_bridge::kMaxMeshNodeSections || !StaticMeshKey(mesh,mesh_prefix) ||
+            resources.count(mesh.id)) return false;
+        std::string name=mesh.name;
+        for (char& c:name) if (c>='A' && c<='Z') c=static_cast<char>(c+('a'-'A'));
+        if (!names.insert(name).second) return false;
+        for (const auto& part:mesh.geometry.sections)
+            if (part.material_id && !catalog.materials.count(*part.material_id)) return false;
+        const auto id=mesh.id;if (!residency->AddResource(epoch.map,std::move(mesh))) return false;
+        auto resource=residency->FindSceneResource(epoch.map,id);
+        if (!resource || !resources.emplace(id,std::move(resource)).second) return false;
+    }
+    std::uint32_t actor_count=0;
+    if (!reader.u32(actor_count) || actor_count>8192) return false;
+    const auto actor_prefix="actor:"+map+":"+map_sha+":StaticMeshActor__";
+    std::unordered_set<std::string> used_resources;
+    for (std::uint32_t i=0;i<actor_count;++i) {
+        StaticMeshCandidate candidate;std::string resource_id;std::uint32_t count=0;
+        if (!Text(reader,candidate.instance_id) || !StaticActorKey(candidate.instance_id,actor_prefix) ||
+            !Text(reader,resource_id) || !reader.u32(count) || !count || count>kMaxSections) return false;
+        const auto found=resources.find(resource_id);
+        if (found==resources.end() || count!=found->second->geometry.sections.size()) return false;
+        candidate.resource=found->second;candidate.material_ids.reserve(count);
+        for (std::uint32_t section=0;section<count;++section) {
+            std::string material;if (!Text(reader,material) || !catalog.materials.count(material)) return false;
+            candidate.material_ids.push_back(std::move(material));
+        }
+        used_resources.insert(resource_id);const auto key=candidate.instance_id;
+        if (!catalog.static_mesh_actors.emplace(key,std::move(candidate)).second) return false;
+    }
+    if ((!bsp_count && !actor_count) || used_resources.size()!=resources.size() || !reader.end()) return false;
+    catalog.bsp_catalog_complete=true; // completeness comes from the offline importer
+    loaded.residency=std::move(residency);loaded.binding=std::move(catalog);output=std::move(loaded);
+    return true;
+}
 } // namespace
 
 bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest digest,
@@ -154,6 +239,7 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
     Reader reader(bytes,size-32);char magic[8];
     LoadedCatalog loaded;std::string map, map_sha, actor;
     if (!reader.bytes(magic,sizeof(magic))) return false;
+    if (std::memcmp(magic,"T3LCAT05",8)==0) return LoadGeneralMap(reader,output);
     const bool version_two=std::memcmp(magic,"T3LCAT02",8)==0;
     const bool version_three=std::memcmp(magic,"T3LCAT03",8)==0;
     const bool version_four=std::memcmp(magic,"T3LCAT04",8)==0;

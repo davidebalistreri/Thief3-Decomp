@@ -325,9 +325,9 @@ Reset, asset handles and old-snapshot rejection. A synthetic Highball fixture
 checks the worker's same-map reload and material-library replacement. The
 runtime adapter does **not** yet detect or forward a TDS map lifecycle event,
 load a replacement catalog, or update its optional light sampler's map context.
-The current catalog format also requires the researched bed and a BSP catalog;
-the different-map fixture uses synthetic equivalents, so maps without that
-bed still need a more general catalog and binding path.
+Versions 1–4 require the researched bed and a BSP catalog; version 5 below
+supports scenes without either, but the different-map runtime fixture remains
+synthetic and does not demonstrate a TDS map transition.
 Consequently this API is not a live map-change implementation or proof of a
 same-map reload in the game.
 
@@ -351,10 +351,38 @@ unqualified identities are also excluded and listed in the manifest. Versions
 candidates and 46 extra resources (plus the bed); five actors with unresolved
 materials are excluded. Other actor classes and attachments are not covered.
 
-With a v4 catalog, explicitly set `T3RENDER_SCENE_LIVE_STATIC_MESHES=1` to
+For maps without the researched bed, `--general-map` exports a v5 catalog
+containing BSP blocks and eligible generic static mesh candidates. Either
+collection may be empty, but at least one must contain geometry. The format
+does not carry a special bed binding, high-poly bed override or bedroom
+material library: actor number 1520 is an ordinary generic candidate. It
+includes candidates without requiring `--static-meshes`, while runtime sampling
+remains opt-in. Unqualified actors and missing materials are excluded and
+reported, not guessed. The v1–v4 bytes and readers remain supported.
+
+For example, from the SDK root:
+
+```sh
+python3 -B t3render/tools/export_live_catalog.py /path/to/offline.scene.json \
+  --general-map --output /path/to/new/catalog.bin
+```
+
+The exporter still requires `source=offline`; neither v5 nor its asset keys
+are runtime visibility, transforms or package fingerprints. Host tests cover
+empty collections, candidate identity, malformed data and transitions into a
+bedless catalog. A BSP-only catalog does not solve the runtime map-witness
+requirement: without a suitable visible static actor the bridge may still
+reject its BSP selections. The Windows loader accepted two deliberately modified offline
+`SouthQuarter1_int1` subsets: one retained 45 BSP blocks and 324 eligible actors,
+the other removed BSP and retained the same 324 candidates. It rejected a
+corrupted copy of each. These are synthetic subsets of an offline fixture, not
+observations of another TDS level. The generic matcher and lifecycle signal
+still need real-game validation.
+
+With a v4 or v5 catalog, explicitly set `T3RENDER_SCENE_LIVE_STATIC_MESHES=1` to
 enable the new path. The bedroom batch runner clears inherited `T3RENDER_`
 variables, so its equivalent is `--live-static-meshes` together with
-`--live-catalog`; it rejects non-v4 catalog headers before starting a game.
+`--live-catalog`; it rejects catalog headers other than v4/v5 before starting a game.
 It samples one candidate inside its existing submission
 scope and requires a unique visible-list name, owner/table/class/map checks,
 local asset-property audit, mesh-node counts/bounds/sections and material

@@ -165,7 +165,7 @@ def env_for(engine, bottle, output, frames, scene_bridge=False, submission_scope
                         "T3RENDER_SCENE_LIVE_DIAGNOSTIC_DIR": windows_path(output)})
     if live_static_meshes:
         if live_catalog is None:
-            raise BatchError("static mesh sampling requires an offline v4 live catalog")
+                raise BatchError("static mesh sampling requires an offline v4 or v5 live catalog")
         capture["T3RENDER_SCENE_LIVE_STATIC_MESHES"] = "1"
     if live_lights:
         if live_catalog is None:
@@ -229,7 +229,7 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
     if live_only and (live_catalog is None or not terminate):
         raise BatchError("live-only mode requires a catalog and termination after the timed test")
     if live_static_meshes and live_catalog is None:
-        raise BatchError("static mesh sampling requires an offline v4 live catalog")
+        raise BatchError("static mesh sampling requires an offline v4 or v5 live catalog")
     if live_lights and live_catalog is None:
         raise BatchError("light candidate sampling requires a live catalog")
     engine, bottle, system, proxy, output = validate_paths(engine, bottle, system, proxy, output)
@@ -247,8 +247,8 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
         live_catalog = live_catalog.resolve()
         if live_static_meshes:
             with live_catalog.open("rb") as stream:
-                if stream.read(8) != b"T3LCAT04":
-                    raise BatchError("static mesh sampling requires a v4 live catalog")
+                if stream.read(8) not in (b"T3LCAT04", b"T3LCAT05"):
+                    raise BatchError("static mesh sampling requires a v4 or v5 live catalog")
     if fixture is not None:
         fixture, replay = Path(fixture), Path(replay)
         if not fixture.is_absolute() or not replay.is_absolute():
@@ -435,7 +435,7 @@ def main(argv=None):
     run.add_argument("--submission-scope", action="store_true", help="tag draws inside the verified section callsite; requires --scene-bridge")
     run.add_argument("--live-catalog", help="enable the experimental D3D12 viewer with this offline catalog; requires bridge and submission scope")
     run.add_argument("--live-only", action="store_true", help="timed viewer test without the heavy D3D8 trace; requires catalog and termination")
-    run.add_argument("--live-static-meshes", action="store_true", help="enable expensive experimental static mesh sampling; requires a v4 catalog")
+    run.add_argument("--live-static-meshes", action="store_true", help="enable expensive experimental static mesh sampling; requires a v4 or v5 catalog")
     run.add_argument("--live-lights", action="store_true", help="sample candidate visible lights; requires a live catalog")
     run.add_argument("--terminate-after-capture", action="store_true", help="close the one TDS test process after capture")
     run.add_argument("--preflight", action="store_true", help="run the host test suite before launching TDS")

@@ -172,17 +172,87 @@ def _static_mesh_candidates(scene, bed, materials):
                 any(item is not None and item not in materials for item in section_materials)):
             excluded.append(instance.id); continue
         actors.append((instance.id, resource.id, tuple(ids)))
-        if resource.id != bed.id:
+        if bed is None or resource.id != bed.id:
             resources[resource.id] = (resource, fingerprint)
     target = actor_prefix + '1520'
-    if target not in {actor for actor, _, _ in actors}:
+    if bed is not None and target not in {actor for actor, _, _ in actors}:
         raise ValueError('target bed is not a qualified static mesh candidate')
-    if len(actors) > 8192 or len(resources) > 4094:
+    if len(actors) > 8192 or len(resources) > 4096:
         raise ValueError('catalog static mesh candidates are empty or exceed bounds')
     return sorted(actors), [resources[key] for key in sorted(resources)], sorted(excluded)
 
 
-def export(raw, bed_high=None, bedroom_materials=None, static_meshes=False):
+def _generic_map_catalog(scene, raw):
+    """Export BSP and generic candidates without claiming a bedroom or frame."""
+    source, c = scene.source, scene.conventions
+    map_name, map_sha = source.map, source.fingerprints['map']
+    if len(map_name.encode('utf-8')) > 128:
+        raise ValueError('catalog map name exceeds 128 bytes')
+    if len(scene.bsp_blocks) > 4096:
+        raise ValueError('catalog BSP collection exceeds bounds')
+    for block in scene.bsp_blocks:
+        if block.source_offset is None or block.id != f'bsp:{map_name}:{map_sha}:{block.source_index}:{block.source_offset}':
+            raise ValueError('BSP ID must retain offline index and offset')
+    material_by_id = {item.id: item for item in scene.materials}
+    actors, resources, excluded = _static_mesh_candidates(scene, None, material_by_id)
+    if not scene.bsp_blocks and not actors:
+        raise ValueError('catalog requires BSP or an eligible static mesh actor')
+    if len(resources) + len(scene.bsp_blocks) > 4096:
+        raise ValueError('catalog resource count exceeds residency bounds')
+    required = {section.material_id for block in scene.bsp_blocks for section in block.geometry.sections}
+    for _, _, material_ids in actors:
+        required.update(material_ids)
+    for resource, _ in resources:
+        required.update(section.material_id for section in resource.geometry.sections if section.material_id is not None)
+    if not required or None in required or any(item not in material_by_id for item in required):
+        raise ValueError('catalog requires known BSP and candidate materials')
+    materials = [item for item in scene.materials if item.id in required]
+    if len(materials) > 8192:
+        raise ValueError('catalog material count exceeds bounds')
+    fingerprints = sorted(value for value in {source.fingerprints.get('bundle'), source.fingerprints.get('kernel')} if value)
+    values = (("unknown", "left", "right").index(c.handedness),
+              ("unknown", "normal_aligned", "normal_opposed").index(c.winding),
+              ("unknown", "top_left", "bottom_left").index(c.uv_origin),
+              ("unknown", "zero_to_one").index(c.clip_depth))
+    body = bytearray(b'T3LCAT05')
+    for value in (map_name, map_sha, hashlib.sha256(raw).hexdigest()):
+        body += _text(value)
+    body += struct.pack('<4I', *values) + _u32(int(c.meters_per_unit is not None))
+    if c.meters_per_unit is not None:
+        body += _float(c.meters_per_unit)
+    body += _u32(len(materials)) + _u32(len(scene.bsp_blocks))
+    for material in materials:
+        body += _text(material.id) + _text(material.name)
+    for block in scene.bsp_blocks:
+        body += _resource(block.id, f'BSP {block.source_index}', map_sha, block.geometry)
+    body += _u32(len(fingerprints))
+    for fingerprint in fingerprints:
+        body += _text(fingerprint)
+    body += _u32(len(resources))
+    for resource, fingerprint in resources:
+        body += _resource(resource.id, resource.name, fingerprint, resource.geometry)
+    body += _u32(len(actors))
+    for actor, resource_id, ids in actors:
+        body += _text(actor) + _text(resource_id) + _u32(len(ids))
+        for material_id in ids:
+            body += _text(material_id)
+    if len(body) + 32 > MAX_BYTES:
+        raise ValueError('catalog exceeds 64 MiB')
+    data = bytes(body) + hashlib.sha256(body).digest()
+    manifest = {'schema': 't3.scene.live-catalog', 'version': 5, 'source': 'offline',
+                'offline_scene_sha256': hashlib.sha256(raw).hexdigest(), 'catalog_sha256': hashlib.sha256(data).hexdigest(),
+                'map': map_name, 'map_sha256': map_sha, 'bed_resource_id': None, 'bed_actor_id': None,
+                'bsp_blocks': len(scene.bsp_blocks), 'materials': len(materials),
+                'static_mesh_candidates': {'actors': len(actors), 'extra_resources': len(resources),
+                                           'excluded_actors': excluded,
+                                           'scope': 'offline_candidates_without_transforms_or_visibility'},
+                'limitations': ['Offline assets only; no frame, visibility, transform or live binding is claimed.',
+                                'BSP catalog completeness is inherited from the heuristic offline importer.',
+                                'No bedroom-specific bed, mesh override or material library is included.']}
+    return data, manifest
+
+
+def export(raw, bed_high=None, bedroom_materials=None, static_meshes=False, general_map=False):
     if not isinstance(raw, bytes) or not raw or len(raw) > preview.MAX_INPUT:
         raise ValueError("offline SceneIR input is empty or too large")
     scene = SceneSnapshot.from_json(raw)
@@ -196,6 +266,10 @@ def export(raw, bed_high=None, bedroom_materials=None, static_meshes=False):
     map_name, map_sha = source.map, source.fingerprints.get("map")
     if ":" in map_name or not map_sha:
         raise ValueError("catalog requires a qualified map fingerprint")
+    if general_map:
+        if bed_high is not None or bedroom_materials is not None:
+            raise ValueError('general-map catalogs cannot include bedroom-specific overrides')
+        return _generic_map_catalog(scene, raw)
     if bedroom_materials is not None and (map_name != material_overrides.MAP or
             conventions.meters_per_unit is None or
             not math.isclose(conventions.meters_per_unit, material_overrides.SCALE, rel_tol=0, abs_tol=1e-9)):
@@ -328,13 +402,14 @@ def main(argv=None):
     parser.add_argument("--bedroom-materials", type=Path, help="optional generated Godot material directory")
     parser.add_argument("--bedroom-texture-size", type=int, default=512, help="power-of-two material texture size, up to 1024")
     parser.add_argument("--static-meshes", action="store_true", help="include bounded offline static mesh actor candidates")
+    parser.add_argument("--general-map", action="store_true", help="export BSP and static mesh candidates without a bedroom bed")
     args = parser.parse_args(argv)
     try:
         raw = preview.read_limited(args.offline_scene, preview.MAX_INPUT)
         high = preview.read_limited(args.bed_high, generated_bed.generated.MAX_GLB_BYTES) if args.bed_high else None
         textures = (material_overrides.GodotTextures(args.bedroom_materials, args.bedroom_texture_size, True)
                     if args.bedroom_materials else None)
-        body, manifest = export(raw, high, textures, args.static_meshes)
+        body, manifest = export(raw, high, textures, args.static_meshes, args.general_map)
         packet.write_pair(args.output, body, manifest)
     except (OSError, ValueError, UnicodeError) as exc:
         parser.exit(2, f"{exc}\n")

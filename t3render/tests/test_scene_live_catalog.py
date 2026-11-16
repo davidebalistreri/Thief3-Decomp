@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import struct
@@ -61,6 +62,14 @@ def static_fixture():
     return data
 
 
+def general_fixture():
+    data = static_fixture()
+    bed_id = data['static_mesh_resources'][0]['id']
+    data['static_mesh_resources'] = [item for item in data['static_mesh_resources'] if item['id'] != bed_id]
+    data['mesh_instances'] = [item for item in data['mesh_instances'] if item['resource_id'] != bed_id]
+    return data
+
+
 class LiveCatalogTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -71,7 +80,9 @@ class LiveCatalogTests(unittest.TestCase):
         cls.binary = Path(cls.temp.name) / "fixture"
         subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pthread",
                         str(ROOT / "tests/scene_live_catalog_fixture.cpp"), str(ROOT / "ir/scene_live.cpp"),
-                        str(ROOT / "src/scene_live_catalog.cpp"), "-o", str(cls.binary)],
+                        str(ROOT / "ir/scene_live_window.cpp"), str(ROOT / "src/scene_live_catalog.cpp"),
+                        str(ROOT / "src/scene_live_binding.cpp"), str(ROOT / "src/scene_live_driver.cpp"),
+                        "-o", str(cls.binary)],
                        check=True, capture_output=True, timeout=60)
 
     @classmethod
@@ -249,6 +260,83 @@ class LiveCatalogTests(unittest.TestCase):
         data['static_mesh_resources'].append(collision)
         with self.assertRaisesRegex(ValueError, 'target bed'):
             catalog.export(json.dumps(data).encode(), static_meshes=True)
+
+    def test_general_map_round_trip_without_bed_and_with_number_1520(self):
+        data = general_fixture()
+        data['mesh_instances'][0]['id'] = data['mesh_instances'][0]['id'].replace('__5', '__1520')
+        raw, manifest = catalog.export(json.dumps(data).encode(), general_map=True)
+        self.assertEqual(raw[:8], b'T3LCAT05')
+        self.assertEqual(manifest['source'], 'offline')
+        self.assertIsNone(manifest['bed_actor_id'])
+        self.assertEqual(manifest['static_mesh_candidates']['actors'], 2)
+        self.assertEqual(manifest['static_mesh_candidates']['extra_resources'], 1)
+        self.assertEqual(len(manifest['static_mesh_candidates']['excluded_actors']), 1)
+        result = self.load(raw).split()
+        self.assertEqual(result[:10], ['accepted', 'SouthQuarter1_int1', '1', '1', '0', '0', '0', '0', '0', '0'])
+        self.assertEqual(result[-4:], ['static_mesh_candidates', '2', '1', 'bedless_driver_ok'])
+
+    def test_general_map_cli_writes_offline_catalog_and_manifest(self):
+        with tempfile.TemporaryDirectory(prefix='t3-general-catalog-') as directory:
+            root = Path(directory);source = root / 'offline.json';output = root / 'catalog.bin'
+            source.write_text(json.dumps(general_fixture()))
+            subprocess.run([sys.executable, '-B', str(ROOT / 'tools/export_live_catalog.py'), str(source),
+                            '--general-map', '--output', str(output)], check=True, capture_output=True, timeout=30)
+            self.assertEqual(output.read_bytes()[:8], b'T3LCAT05')
+            self.assertEqual(json.loads(Path(str(output)+'.manifest.json').read_text())['source'], 'offline')
+            self.assertEqual(self.load(output.read_bytes()).split()[-1], 'bedless_driver_ok')
+
+    def test_general_map_allows_bsp_only_without_bundle_fingerprints(self):
+        data = general_fixture();data['mesh_instances'] = [];data['static_mesh_resources'] = []
+        data['source']['fingerprints'].pop('bundle', None);data['source']['fingerprints'].pop('kernel', None)
+        raw, manifest = catalog.export(json.dumps(data).encode(), general_map=True)
+        self.assertEqual(manifest['static_mesh_candidates']['actors'], 0)
+        self.assertEqual(manifest['static_mesh_candidates']['extra_resources'], 0)
+        self.assertEqual(self.load(raw).split()[-1], 'bedless_driver_ok')
+        with self.assertRaisesRegex(ValueError, 'bedroom-specific'):
+            catalog.export(json.dumps(data).encode(), bed_high=b'not a GLB', general_map=True)
+        with self.assertRaisesRegex(ValueError, 'bedroom-specific'):
+            catalog.export(json.dumps(data).encode(), bedroom_materials=TinyTextures(), general_map=True)
+
+    def test_general_map_allows_mesh_only_but_rejects_empty_geometry(self):
+        data = general_fixture();data['bsp_blocks'] = []
+        raw, manifest = catalog.export(json.dumps(data).encode(), general_map=True)
+        self.assertEqual(manifest['bsp_blocks'], 0)
+        self.assertEqual(manifest['static_mesh_candidates']['actors'], 2)
+        self.assertEqual(self.load(raw).split()[-4:], ['static_mesh_candidates', '2', '1', 'bedless_driver_ok'])
+        data['mesh_instances'] = [];data['static_mesh_resources'] = []
+        with self.assertRaisesRegex(ValueError, 'BSP or an eligible'):
+            catalog.export(json.dumps(data).encode(), general_map=True)
+        empty = (b'T3LCAT05' + catalog._text('empty') + catalog._text('a'*64) + catalog._text('b'*64) +
+                 struct.pack('<5I', 0, 0, 0, 0, 0) + struct.pack('<2I', 1, 0) +
+                 catalog._text('mat:one') + catalog._text('one') + struct.pack('<3I', 0, 0, 0))
+        self.assertEqual(self.load(empty + hashlib.sha256(empty).digest()), 'rejected')
+
+    def test_general_map_rejects_corrupt_identity_fingerprint_and_unused_resources(self):
+        raw, _ = catalog.export(json.dumps(general_fixture()).encode(), general_map=True)
+        body = bytearray(raw[:-32])
+        def reject(changed):
+            self.assertEqual(self.load(bytes(changed) + hashlib.sha256(changed).digest()), 'rejected')
+        actor = body.find(b'StaticMeshActor__6');self.assertGreater(actor, 0)
+        bad = body.copy();bad[actor + len(b'StaticMeshActor__')] = ord('5');reject(bad)
+        fingerprint = body.find(b'b'*64);self.assertGreater(fingerprint, 0)
+        bad = body.copy();bad[fingerprint] = ord('c');reject(bad)
+        skin = body.rfind(b'material:wood');self.assertGreater(skin, 0)
+        bad = body.copy();bad[skin + len(b'material:')] = ord('x');reject(bad)
+        first_actor = body.find(b'actor:SouthQuarter1_int1:');self.assertGreater(first_actor, 8)
+        count_offset = first_actor-8
+        self.assertEqual(struct.unpack_from('<I', body, count_offset)[0], 2)
+        bad = body[:count_offset+4];struct.pack_into('<I', bad, count_offset, 0);reject(bad)
+
+    @unittest.skipUnless(os.environ.get('T3RENDER_OFFLINE_SCENE'), 'local offline SceneIR not supplied')
+    def test_general_catalog_from_offline_bedroom_subset(self):
+        data = json.loads(Path(os.environ['T3RENDER_OFFLINE_SCENE']).read_text())
+        data['mesh_instances'] = [item for item in data['mesh_instances'] if not item['id'].endswith(':StaticMeshActor__1520')]
+        body, manifest = catalog.export(json.dumps(data).encode(), general_map=True)
+        self.assertEqual(manifest['source'], 'offline')
+        self.assertEqual(manifest['bsp_blocks'], 45)
+        self.assertGreater(manifest['static_mesh_candidates']['actors'], 0)
+        self.assertIsNone(manifest['bed_actor_id'])
+        self.assertEqual(self.load(body).split()[-1], 'bedless_driver_ok')
 
     def test_runtime_source_or_unqualified_assets_are_refused(self):
         data = fixture()

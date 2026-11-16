@@ -431,6 +431,70 @@ bool driver_map_transition() {
     return true;
 }
 
+bool driver_without_bed() {
+    LoadedCatalog initial;CHECK(prepared_catalog(initial));
+    FrameProvenance source;source.origin=FrameOrigin::Synthetic;source.session_id="bedless-fixture";
+    auto driver=SceneDriver::Create(std::move(initial),source,0,1);CHECK(driver);
+    const ThreadToken thread{17,123};auto p=probe();const auto bed=bed_scope(),bsp=bsp_scope();
+    const IndexedDraw args{true,true,0,1,0,3};
+    DrawObservation state;state.available=true;state.view=state.projection=state.world=identity;state.viewport={0,0,640,480,0,.5f};
+    auto present=[&]() {auto t=driver->BeginPresent(thread);return driver->EndPresent(t,thread,true);};
+    auto sample=[&]() {auto t=driver->BeginProbe(thread);if (!t)return false;driver->EndProbe(t,thread,p);return true;};
+    auto scoped=[&](const SubmissionSample& value,const ProbeStaticMesh* generic) {
+        const auto scope=driver->BeginScope(thread,1,0);if (!scope)return false;
+        if (generic && !driver->GenericProbe(scope,thread,value))return false;
+        if (!driver->SetScopeSample(scope,thread,value,generic))return false;
+        const auto draw=driver->BeginDraw(thread,scope,args);if (!draw.ticket || !draw.needs_state || !draw.needs_world)return false;
+        driver->EndDraw(draw.ticket,thread,true,state,state);driver->EndScope(scope,thread,value);return true;
+    };
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(scoped(bed,nullptr));CHECK(present()==WindowResult::Published);
+    auto old=driver->current();CHECK(old && old->meshes.size()==1);
+
+    auto c=catalog();c.bed.reset();c.bed_instance_id.clear();c.bed_materials.clear();
+    auto residency=std::make_shared<SceneResidency>();CHECK(residency->BeginMap(0,c.map,c.map_sha256));
+    auto epoch=residency->epochs();CHECK(residency->AddMaterial(epoch.map,c.materials.at("mat:stone")));
+    CHECK(residency->AddResource(epoch.map,*c.bsp[0]));c.bsp[0]=residency->FindSceneResource(epoch.map,bsp_id);
+    const auto mesh_id="mesh:bedroom:"+map_hash+":"+bundle_hash+":inncrate1";
+    auto mesh=resource(mesh_id,ResourceKind::StaticMesh);mesh.name="INNcrate1";
+    CHECK(residency->AddResource(epoch.map,mesh));auto resident=residency->FindSceneResource(epoch.map,mesh_id);
+    c.static_mesh_actors.emplace(actor,StaticMeshCandidate{actor,resident,{"mat:stone"}});
+    LoadedCatalog next;next.residency=residency;next.binding=c;
+    next.conventions.length_unit=LengthUnit::T3Unit;next.conventions.axes=Axes::T3Xyz;next.conventions.up_axis=UpAxis::Z;
+    auto malformed=next;malformed.binding.bed_instance_id=actor;
+    CHECK(!SceneDriver::Create(std::move(malformed),source,0,1));
+    malformed=next;malformed.binding.bed_materials={"mat:stone"};
+    CHECK(!SceneDriver::Create(std::move(malformed),source,0,1));
+    CHECK(driver->BeginMapTransition() && driver->CommitMapTransition(next));
+    CHECK(present()==WindowResult::Primed);
+
+    auto generic=bed; text(generic.asset_name,"inncrate1");
+    p.entries[1]=p.target.entry;p.entries[1].list_index=1;p.target.entry.list_index=1;
+    p.entries_attempted=2;p.count.value=2;
+    text(p.target.asset.name,"inncrate1");text(p.target.mesh_node.name,"inncrate1");
+    ProbeStaticMesh observed;observed.list_stable=observed.object_table_complete=true;observed.name_occurrences=1;
+    observed.entry=p.target.entry;observed.owner_class=p.target.owner_class;observed.owner_outer={0xa000,true};
+    observed.outer=p.target.outer[0];observed.outer.address={0xa000,true};observed.outer.fname={8,true};observed.outer.outer={0,true};
+    observed.asset=p.target.asset;observed.mesh_node=p.target.mesh_node;
+    MeshSelection output;CHECK(!ResolveBed(c,p,generic,0,1,output));
+    CHECK(ResolveStaticMesh(c,p,generic,observed,0,1,output) && output.resource_id==mesh_id &&
+          output.binding==BindingEvidence::Candidate);
+    CHECK(sample());CHECK(scoped(generic,&observed));CHECK(scoped(bsp,nullptr));CHECK(present()==WindowResult::Published);
+    auto current=driver->current();CHECK(current && current->meshes.size()==1 && current->bsp.size()==1 &&
+        current->meshes[0].resource==resident && current->meshes[0].selection.instance_id==actor &&
+        !DisplayContinuityMatches(*old,*current));
+    auto mesh_only=std::make_shared<SceneResidency>();CHECK(mesh_only->BeginMap(0,c.map,c.map_sha256));
+    epoch=mesh_only->epochs();CHECK(mesh_only->AddMaterial(epoch.map,c.materials.at("mat:stone")));
+    CHECK(mesh_only->AddResource(epoch.map,mesh));auto new_resource=mesh_only->FindSceneResource(epoch.map,mesh_id);
+    auto mesh_catalog=c;mesh_catalog.bsp.clear();mesh_catalog.static_mesh_actors.at(actor).resource=new_resource;
+    LoadedCatalog replacement;replacement.residency=mesh_only;replacement.binding=mesh_catalog;
+    replacement.conventions.length_unit=LengthUnit::T3Unit;replacement.conventions.axes=Axes::T3Xyz;replacement.conventions.up_axis=UpAxis::Z;
+    CHECK(driver->BeginMapTransition() && driver->CommitMapTransition(replacement));
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(scoped(generic,&observed));CHECK(present()==WindowResult::Published);
+    CHECK(driver->current()->meshes.size()==1 && driver->current()->bsp.empty() &&
+          driver->current()->meshes[0].resource==new_resource);
+    return true;
+}
+
 bool driver_camera_only() {
     auto c=catalog();auto memory=std::make_shared<SceneResidency>();CHECK(memory->BeginMap(0,c.map,c.map_sha256));
     const auto epoch=memory->epochs();CHECK(memory->AddMaterial(epoch.map,c.materials.at("mat:stone")));
@@ -766,7 +830,7 @@ bool driver_gpu_pipeline() {
 #endif
 } // namespace
 int main() {
-    if(!matching() || !static_mesh_matching() || !static_mesh_driver_lifecycle() || !delivery() || !driver_map_transition() || !driver_camera_only() || !driver_delivery())return 1;
+    if(!matching() || !static_mesh_matching() || !static_mesh_driver_lifecycle() || !delivery() || !driver_map_transition() || !driver_without_bed() || !driver_camera_only() || !driver_delivery())return 1;
 #ifdef T3RENDER_TEST_LIVE_DX12_DRIVER
     if (!driver_gpu_pipeline()) return 1;
 #endif

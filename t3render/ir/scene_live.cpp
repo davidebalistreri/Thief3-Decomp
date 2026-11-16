@@ -212,6 +212,14 @@ bool SceneResidency::Publish(const FrameInput& frame) {
     return true;
 }
 
+bool SceneResidency::DiscardFrame(std::uint64_t map_epoch, std::uint64_t device_epoch, std::uint64_t through_frame_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!map_epoch_ || map_epoch != map_epoch_ || device_epoch != device_epoch_) return false;
+    if (snapshot_ && snapshot_->frame_id > through_frame_id) return false;
+    snapshot_.reset();
+    return true;
+}
+
 Epochs SceneResidency::epochs() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return {map_epoch_, device_epoch_, ready_ && !resetting_};

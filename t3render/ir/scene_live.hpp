@@ -137,6 +137,9 @@ public:
     bool AddMaterial(std::uint64_t map_epoch, Material material);
     bool AddResource(std::uint64_t map_epoch, Resource resource);
     bool Publish(const FrameInput& frame);
+    // Invalidate the last displayable frame after a rejected Present interval.
+    // Epoch and frame arguments prevent a late event from erasing a newer frame.
+    bool DiscardFrame(std::uint64_t map_epoch, std::uint64_t device_epoch, std::uint64_t through_frame_id);
     Epochs epochs() const;
     std::shared_ptr<const Snapshot> current() const;
 

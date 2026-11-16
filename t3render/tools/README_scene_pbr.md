@@ -158,14 +158,21 @@ repeated `replacement <new-output-path>`, `original <new-output-path>` and
 the bundle's exact `variant.resource_key`; no draw number is used.
 
 The fixed snapshot and both variants remain in memory while the process runs.
-Each render currently recreates the D3D12 resources; this is not a real-time
-performance claim or a live TDS bridge. Temporal options cannot be combined
-with either switch mode, so history is reset on every switch. Gameplay,
+The renderer builds a combined vertex buffer, deduplicates identical textures
+and reuses one D3D12 device, pipeline and GPU resource set across selections.
+Each render clears depth and shadow maps before drawing the selected variant.
+The frame-1001 test uses 51 shared textures instead of uploading 44 and 52
+separately. This is not a real-time performance claim or a live TDS bridge.
+Temporal options cannot be combined with either switch mode, so history is
+reset on every switch. Gameplay,
 collision and the original renderer are untouched. In the local frame-1001
 D3D12 cycle, the restored original is byte-identical to the initial original,
 and the replacement is byte-identical to the earlier high-poly render. The
 variants differ at 259,095 pixels, with mean absolute RGB difference 2.714 on
-a 0–255 scale. Repeated stdin switching produced the same outputs. This does
+a 0–255 scale. Five consecutive stdin switches on one device produced the
+same outputs as the separate-frame render. `scene_pbr_variants_fixture.py`
+also verifies byte-identical standalone and resident variants with and without
+the optional G-buffer effects and without shadow maps. This does
 not establish dynamic-scene or game-loop integration.
 
 ## Semantic high-poly candlesticks

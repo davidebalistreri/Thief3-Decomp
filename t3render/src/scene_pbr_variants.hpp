@@ -62,5 +62,47 @@ public:
         return true;
     }
     const Frame& Current() const { return replacement_selected_ ? replacement_ : original_; }
+    bool ReplacementSelected() const { return replacement_selected_; }
+
+    // Build one GPU input with shared textures and variant-tagged submissions.
+    // Each filtered draw sequence remains in its original order.
+    bool BuildCombined(Frame& output, std::vector<std::uint8_t>& draw_variants,
+                       std::vector<std::uint8_t>& caster_variants) const {
+        if (resource_key_.empty() || !SameVariantContext(original_, replacement_)) return false;
+        Frame frame = original_;
+        std::vector<std::uint8_t> draws(original_.draws.size(), 1), casters(original_.offline_casters.size(), 1);
+        std::vector<std::uint32_t> texture_map;
+        const auto same_texture = [](const Texture& a, const Texture& b) {
+            if (a.mips.size() != b.mips.size()) return false;
+            for (std::size_t i = 0; i < a.mips.size(); ++i)
+                if (a.mips[i].width != b.mips[i].width || a.mips[i].height != b.mips[i].height ||
+                    a.mips[i].rgba != b.mips[i].rgba) return false;
+            return true;
+        };
+        for (const auto& texture : replacement_.textures) {
+            std::size_t index = 0;
+            for (; index < frame.textures.size(); ++index) if (same_texture(frame.textures[index], texture)) break;
+            if (index == frame.textures.size()) {
+                if (frame.textures.size() >= scene::kMaxTextures) return false;
+                frame.textures.push_back(texture);
+            }
+            texture_map.push_back(static_cast<std::uint32_t>(index));
+        }
+        const auto base = frame.vertices.size();
+        const auto total_vertices = std::uint64_t{base} + replacement_.vertices.size();
+        if (total_vertices > UINT32_MAX || total_vertices * sizeof(scene::Vertex) > UINT32_MAX) return false;
+        frame.vertices.insert(frame.vertices.end(), replacement_.vertices.begin(), replacement_.vertices.end());
+        for (auto draw : replacement_.draws) {
+            draw.first_vertex += static_cast<std::uint32_t>(base);
+            for (auto& texture : draw.textures) texture = texture_map[texture];
+            frame.draws.push_back(draw); draws.push_back(2);
+        }
+        for (auto caster : replacement_.offline_casters) {
+            caster.first_vertex += static_cast<std::uint32_t>(base);
+            frame.offline_casters.push_back(caster); casters.push_back(2);
+        }
+        output = std::move(frame); draw_variants = std::move(draws); caster_variants = std::move(casters);
+        return true;
+    }
 };
 } // namespace t3render::pbr

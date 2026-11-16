@@ -116,9 +116,20 @@ bool UploadHistoryImage(ID3D12Device* device, ID3D12GraphicsCommandList* list, U
     return true;
 }
 
+struct VariantRun {
+    Variants* variants = nullptr;
+    std::string key;
+    const wchar_t* replacement_output = nullptr;
+    const wchar_t* restored_output = nullptr;
+    bool stream = false;
+    std::vector<std::uint8_t> draws, casters;
+};
+
 int Render(const Frame& frame, const wchar_t* output, bool indirect, bool gtao, bool volumetric, bool reflections, bool filmic,
            const wchar_t* temporal_output, float jitter_x, float jitter_y, const std::uint8_t* digest,
-           const t3render::temporal::History* history, float history_weight) {
+           const t3render::temporal::History* history, float history_weight, VariantRun* variant = nullptr) {
+    if (variant && (!variant->variants || temporal_output || history || variant->draws.size() != frame.draws.size() ||
+                    variant->casters.size() != frame.offline_casters.size())) return 2;
     const bool use_gbuffer = indirect || gtao || volumetric || reflections || temporal_output;
     ComPtr<ID3D12Device> device;
     if (!SelectDevice(device)) return 1;
@@ -941,149 +952,201 @@ Output main(float4 position:SV_Position) {
         std::memcpy(mapped, &previous, sizeof(previous));
         const D3D12_RANGE written{0, sizeof(previous)}; previous_constants->Unmap(0, &written);
     }
-    list->SetGraphicsRootSignature(root.p);
-    ID3D12DescriptorHeap* heaps[] = {srv_heap.p}; list->SetDescriptorHeaps(1, heaps);
-    list->SetGraphicsRootConstantBufferView(0, constants->GetGPUVirtualAddress());
-    const D3D12_VERTEX_BUFFER_VIEW vb{vertices->GetGPUVirtualAddress(), static_cast<UINT>(vertex_bytes), sizeof(Vertex)};
-    list->IASetVertexBuffers(0, 1, &vb); list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    const auto gpu_base = srv_heap->GetGPUDescriptorHandleForHeapStart();
-    if (frame.shadow_size) {
-        // Direct3D cubemap order and per-face right/up axes, in world coordinates.
-        static const float axes[6][3][3] = {
-            {{0,0,-1}, {0,1,0}, {1,0,0}}, {{0,0,1}, {0,1,0}, {-1,0,0}},
-            {{1,0,0}, {0,0,-1}, {0,1,0}}, {{1,0,0}, {0,0,1}, {0,-1,0}},
-            {{1,0,0}, {0,1,0}, {0,0,1}}, {{-1,0,0}, {0,1,0}, {0,0,-1}}};
-        const D3D12_VIEWPORT shadow_viewport{0, 0, static_cast<float>(frame.shadow_size),
-                                              static_cast<float>(frame.shadow_size), 0, 1};
-        const D3D12_RECT shadow_scissor{0, 0, static_cast<LONG>(frame.shadow_size), static_cast<LONG>(frame.shadow_size)};
-        const float shadow_clear[4] = {1, 0, 0, 0};
-        list->SetPipelineState(shadow_pipeline.p);
-        list->RSSetViewports(1, &shadow_viewport); list->RSSetScissorRects(1, &shadow_scissor);
-        for (std::size_t light = 0; light < frame.lights.size(); ++light) for (UINT face = 0; face < 6; ++face) {
-            auto rtv = output_rtv; rtv.ptr += UINT64(1+light*6+face)*rtv_step;
-            list->OMSetRenderTargets(1, &rtv, FALSE, &shadow_dsv);
-            list->ClearRenderTargetView(rtv, shadow_clear, 0, nullptr);
-            list->ClearDepthStencilView(shadow_dsv, D3D12_CLEAR_FLAG_DEPTH, 1, 0, 0, nullptr);
-            float shadow_constants[20]{};
-            for (UINT k = 0; k < 3; ++k) {
-                shadow_constants[k] = frame.lights[light].position[k];
-                for (UINT axis = 0; axis < 3; ++axis) shadow_constants[4+axis*4+k] = axes[face][axis][k];
+    std::wstring current_output(output);
+    std::uint64_t render_index = 0;
+    if (variant) std::printf("variant_gpu_resources=shared textures=%zu\n", frame.textures.size());
+    for (;;) {
+        if (render_index) {
+            if (!Check(allocator->Reset(), "ResetAllocator") || !Check(list->Reset(allocator.p, pipeline.p), "ResetList")) return 1;
+            Transition(list.p, target.p, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            Transition(list.p, hdr.p, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            if (frame.shadow_size)
+                Transition(list.p, shadow_map.p, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            if (use_gbuffer) for (auto& image : gbuffer)
+                Transition(list.p, image.p, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        }
+        const std::uint8_t selected = variant && variant->variants->ReplacementSelected() ? 2 : 1;
+        list->SetGraphicsRootSignature(root.p);
+        ID3D12DescriptorHeap* heaps[] = {srv_heap.p}; list->SetDescriptorHeaps(1, heaps);
+        list->SetGraphicsRootConstantBufferView(0, constants->GetGPUVirtualAddress());
+        const D3D12_VERTEX_BUFFER_VIEW vb{vertices->GetGPUVirtualAddress(), static_cast<UINT>(vertex_bytes), sizeof(Vertex)};
+        list->IASetVertexBuffers(0, 1, &vb); list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        const auto gpu_base = srv_heap->GetGPUDescriptorHandleForHeapStart();
+        if (frame.shadow_size) {
+            // Direct3D cubemap order and per-face right/up axes, in world coordinates.
+            static const float axes[6][3][3] = {
+                {{0,0,-1}, {0,1,0}, {1,0,0}}, {{0,0,1}, {0,1,0}, {-1,0,0}},
+                {{1,0,0}, {0,0,-1}, {0,1,0}}, {{1,0,0}, {0,0,1}, {0,-1,0}},
+                {{1,0,0}, {0,1,0}, {0,0,1}}, {{-1,0,0}, {0,1,0}, {0,0,-1}}};
+            const D3D12_VIEWPORT shadow_viewport{0, 0, static_cast<float>(frame.shadow_size),
+                                                  static_cast<float>(frame.shadow_size), 0, 1};
+            const D3D12_RECT shadow_scissor{0, 0, static_cast<LONG>(frame.shadow_size), static_cast<LONG>(frame.shadow_size)};
+            const float shadow_clear[4] = {1, 0, 0, 0};
+            list->SetPipelineState(shadow_pipeline.p);
+            list->RSSetViewports(1, &shadow_viewport); list->RSSetScissorRects(1, &shadow_scissor);
+            for (std::size_t light = 0; light < frame.lights.size(); ++light) for (UINT face = 0; face < 6; ++face) {
+                auto rtv = output_rtv; rtv.ptr += UINT64(1+light*6+face)*rtv_step;
+                list->OMSetRenderTargets(1, &rtv, FALSE, &shadow_dsv);
+                list->ClearRenderTargetView(rtv, shadow_clear, 0, nullptr);
+                list->ClearDepthStencilView(shadow_dsv, D3D12_CLEAR_FLAG_DEPTH, 1, 0, 0, nullptr);
+                float shadow_constants[20]{};
+                for (UINT k = 0; k < 3; ++k) {
+                    shadow_constants[k] = frame.lights[light].position[k];
+                    for (UINT axis = 0; axis < 3; ++axis) shadow_constants[4+axis*4+k] = axes[face][axis][k];
+                }
+                shadow_constants[3] = frame.meters_per_unit;
+                shadow_constants[16] = frame.shadow_near_m; shadow_constants[17] = frame.shadow_far_m;
+                list->SetGraphicsRoot32BitConstants(7, 20, shadow_constants, 0);
+                for (std::size_t i = 0; i < frame.draws.size(); ++i) {
+                    const auto& draw = frame.draws[i];
+                    if ((!variant || variant->draws[i] == selected) && (draw.shadow_mask & (1u << light)))
+                        list->DrawInstanced(draw.vertex_count, 1, draw.first_vertex, 0);
+                }
+                for (std::size_t i = 0; i < frame.offline_casters.size(); ++i) {
+                    const auto& caster = frame.offline_casters[i];
+                    if ((!variant || variant->casters[i] == selected) && (caster.shadow_mask & (1u << light)))
+                        list->DrawInstanced(caster.vertex_count, 1, caster.first_vertex, 0);
+                }
             }
-            shadow_constants[3] = frame.meters_per_unit;
-            shadow_constants[16] = frame.shadow_near_m; shadow_constants[17] = frame.shadow_far_m;
-            list->SetGraphicsRoot32BitConstants(7, 20, shadow_constants, 0);
-            for (const auto& draw : frame.draws)
-                if (draw.shadow_mask & (1u << light)) list->DrawInstanced(draw.vertex_count, 1, draw.first_vertex, 0);
-            for (const auto& caster : frame.offline_casters)
-                if (caster.shadow_mask & (1u << light)) list->DrawInstanced(caster.vertex_count, 1, caster.first_vertex, 0);
+            Transition(list.p, shadow_map.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            auto shadow_handle = gpu_base; shadow_handle.ptr += UINT64(frame.textures.size()*2+1)*srv_step;
+            list->SetGraphicsRootDescriptorTable(6, shadow_handle);
+            list->SetPipelineState(pipeline.p);
         }
-        Transition(list.p, shadow_map.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        auto shadow_handle = gpu_base; shadow_handle.ptr += UINT64(frame.textures.size()*2+1)*srv_step;
-        list->SetGraphicsRootDescriptorTable(6, shadow_handle);
-        list->SetPipelineState(pipeline.p);
-    }
-    const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(frame.width), static_cast<float>(frame.height), frame.min_depth, frame.max_depth};
-    const D3D12_RECT scissor{0, 0, static_cast<LONG>(frame.width), static_cast<LONG>(frame.height)};
-    list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &scissor);
-    list->OMSetRenderTargets(use_gbuffer ? 5 : 1, geometry_rtvs, FALSE, &dsv);
-    for (UINT i = 0; i < (use_gbuffer ? 5u : 1u); ++i) list->ClearRenderTargetView(geometry_rtvs[i], clear.Color, 0, nullptr);
-    list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1, 0, 0, nullptr);
-    for (const auto& draw : frame.draws) {
-        if (frame.has_metallic) {
-            const float material[4] = {draw.emission[0], draw.emission[1], draw.emission[2], draw.metallic};
-            list->SetGraphicsRoot32BitConstants(12, 4, material, 0);
-        } else if (frame.has_emission) list->SetGraphicsRoot32BitConstants(12, 3, draw.emission, 0);
-        for (UINT i = 0; i < 4; ++i) {
-            auto handle = gpu_base; handle.ptr += (UINT64(draw.textures[i])*2+(i == 0 ? 1 : 0))*srv_step;
-            list->SetGraphicsRootDescriptorTable(i+1, handle);
+        const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(frame.width), static_cast<float>(frame.height), frame.min_depth, frame.max_depth};
+        const D3D12_RECT scissor{0, 0, static_cast<LONG>(frame.width), static_cast<LONG>(frame.height)};
+        list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &scissor);
+        list->OMSetRenderTargets(use_gbuffer ? 5 : 1, geometry_rtvs, FALSE, &dsv);
+        for (UINT i = 0; i < (use_gbuffer ? 5u : 1u); ++i) list->ClearRenderTargetView(geometry_rtvs[i], clear.Color, 0, nullptr);
+        list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1, 0, 0, nullptr);
+        for (std::size_t draw_index = 0; draw_index < frame.draws.size(); ++draw_index) {
+            if (variant && variant->draws[draw_index] != selected) continue;
+            const auto& draw = frame.draws[draw_index];
+            if (frame.has_metallic) {
+                const float material[4] = {draw.emission[0], draw.emission[1], draw.emission[2], draw.metallic};
+                list->SetGraphicsRoot32BitConstants(12, 4, material, 0);
+            } else if (frame.has_emission) list->SetGraphicsRoot32BitConstants(12, 3, draw.emission, 0);
+            for (UINT i = 0; i < 4; ++i) {
+                auto handle = gpu_base; handle.ptr += (UINT64(draw.textures[i])*2+(i == 0 ? 1 : 0))*srv_step;
+                list->SetGraphicsRootDescriptorTable(i+1, handle);
+            }
+            list->DrawInstanced(draw.vertex_count, 1, draw.first_vertex, 0);
         }
-        list->DrawInstanced(draw.vertex_count, 1, draw.first_vertex, 0);
-    }
-    Transition(list.p, hdr.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    if (use_gbuffer) {
-        auto handle = gpu_base; handle.ptr += UINT64(frame.textures.size()*2+1+(frame.shadow_size ? 1 : 0))*srv_step;
-        for (UINT i = 0; i < 4; ++i) {
-            Transition(list.p, gbuffer[i].p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            list->SetGraphicsRootDescriptorTable(i+8, handle); handle.ptr += srv_step;
+        Transition(list.p, hdr.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        if (use_gbuffer) {
+            auto handle = gpu_base; handle.ptr += UINT64(frame.textures.size()*2+1+(frame.shadow_size ? 1 : 0))*srv_step;
+            for (UINT i = 0; i < 4; ++i) {
+                Transition(list.p, gbuffer[i].p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                list->SetGraphicsRootDescriptorTable(i+8, handle); handle.ptr += srv_step;
+            }
         }
-    }
-    D3D12_CPU_DESCRIPTOR_HANDLE tone_rtvs[] = {output_rtv, temporal_rtv};
-    list->OMSetRenderTargets(temporal_output ? 2 : 1, tone_rtvs, FALSE, nullptr);
-    list->SetPipelineState(tone_pipeline.p);
-    auto hdr_handle = gpu_base; hdr_handle.ptr += UINT64(frame.textures.size()*2)*srv_step;
-    list->SetGraphicsRootDescriptorTable(5, hdr_handle);
-    list->DrawInstanced(3, 1, 0, 0);
-    if (history) {
-        Transition(list.p, temporal_linear.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        D3D12_CPU_DESCRIPTOR_HANDLE resolved_rtvs[] = {output_rtv, resolved_rtv};
-        list->OMSetRenderTargets(2, resolved_rtvs, FALSE, nullptr);
-        list->SetPipelineState(temporal_pipeline.p);
-        list->SetGraphicsRootConstantBufferView(13, previous_constants->GetGPUVirtualAddress());
-        auto handle = gpu_base;
-        handle.ptr += UINT64(frame.textures.size()*2+1+(frame.shadow_size ? 1 : 0)+4)*srv_step;
-        for (UINT i = 0; i < 3; ++i) {
-            list->SetGraphicsRootDescriptorTable(i+14, handle); handle.ptr += srv_step;
-        }
+        D3D12_CPU_DESCRIPTOR_HANDLE tone_rtvs[] = {output_rtv, temporal_rtv};
+        list->OMSetRenderTargets(temporal_output ? 2 : 1, tone_rtvs, FALSE, nullptr);
+        list->SetPipelineState(tone_pipeline.p);
+        auto hdr_handle = gpu_base; hdr_handle.ptr += UINT64(frame.textures.size()*2)*srv_step;
+        list->SetGraphicsRootDescriptorTable(5, hdr_handle);
         list->DrawInstanced(3, 1, 0, 0);
-    }
-    if (temporal_output) {
-        if (history) Transition(list.p, temporal_resolved.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        else Transition(list.p, temporal_linear.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        Transition(list.p, gbuffer[0].p, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        D3D12_TEXTURE_COPY_LOCATION destination{}; destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        destination.PlacedFootprint = temporal_fp;
-        D3D12_TEXTURE_COPY_LOCATION source{}; source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        destination.pResource = temporal_color_readback.p; source.pResource = history ? temporal_resolved.p : temporal_linear.p;
-        list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
-        destination.pResource = temporal_position_readback.p; source.pResource = gbuffer[0].p;
-        list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
-    }
-    Transition(list.p, target.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = readback.p; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint = fp;
-    D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = target.p; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-    if (!Check(list->Close(), "CloseList")) return 1;
-    ID3D12CommandList* lists[] = {list.p}; queue->ExecuteCommandLists(1, lists);
-    if (FAILED(queue->Signal(fence.p, 1))) AbortInFlight("Queue signal failed");
-    UINT64 completed = fence->GetCompletedValue();
-    if (completed == UINT64_MAX) AbortInFlight("Device removed");
-    if (completed < 1 && (FAILED(fence->SetEventOnCompletion(1, event.p)) || WaitForSingleObject(event.p, 10000) != WAIT_OBJECT_0))
-        AbortInFlight("Fence wait failed");
-    completed = fence->GetCompletedValue();
-    if (completed == UINT64_MAX || completed < 1) AbortInFlight("Fence did not complete");
-    if (!Check(device->GetDeviceRemovedReason(), "Device status")) return 1;
-    const D3D12_RANGE read{0, static_cast<SIZE_T>(total)}; mapped = nullptr;
-    if (!Check(readback->Map(0, &read, &mapped), "MapReadback") || !mapped) return 1;
-    const auto* pixels = static_cast<const std::uint8_t*>(mapped);
-    std::size_t changed = 0;
-    for (UINT y = 0; y < frame.height; ++y) for (UINT x = 0; x < frame.width; ++x) {
-        const auto* pixel = pixels+fp.Offset+y*fp.Footprint.RowPitch+x*4;
-        if (pixel[0] || pixel[1] || pixel[2]) ++changed;
-    }
-    const bool ok = changed && WriteImage(output, pixels, fp, frame.width, frame.height);
-    const D3D12_RANGE no_write{0, 0}; readback->Unmap(0, &no_write);
-    if (!changed) { std::fprintf(stderr, "PBR preview produced no visible pixels\n"); return 1; }
-    if (!ok) { std::fprintf(stderr, "image write failed; partial file may remain\n"); return 1; }
-    if (temporal_output) {
-        void* color = nullptr; void* position = nullptr;
-        const D3D12_RANGE temporal_read{0, static_cast<SIZE_T>(temporal_total)};
-        if (!Check(temporal_color_readback->Map(0, &temporal_read, &color), "MapTemporalColor") || !color) return 1;
-        if (!Check(temporal_position_readback->Map(0, &temporal_read, &position), "MapTemporalPosition") || !position) {
-            temporal_color_readback->Unmap(0, &no_write); return 1;
+        if (history) {
+            Transition(list.p, temporal_linear.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            D3D12_CPU_DESCRIPTOR_HANDLE resolved_rtvs[] = {output_rtv, resolved_rtv};
+            list->OMSetRenderTargets(2, resolved_rtvs, FALSE, nullptr);
+            list->SetPipelineState(temporal_pipeline.p);
+            list->SetGraphicsRootConstantBufferView(13, previous_constants->GetGPUVirtualAddress());
+            auto handle = gpu_base;
+            handle.ptr += UINT64(frame.textures.size()*2+1+(frame.shadow_size ? 1 : 0)+4)*srv_step;
+            for (UINT i = 0; i < 3; ++i) {
+                list->SetGraphicsRootDescriptorTable(i+14, handle); handle.ptr += srv_step;
+            }
+            list->DrawInstanced(3, 1, 0, 0);
         }
-        const std::uint32_t flags = (indirect ? 1u : 0u) | (gtao ? 2u : 0u) |
-                                    (volumetric ? 4u : 0u) | (reflections ? 8u : 0u) | (filmic ? 16u : 0u);
-        const bool saved = WriteTemporal(temporal_output, frame, digest, jitter_x, jitter_y, flags,
-                                         static_cast<const std::uint8_t*>(color), static_cast<const std::uint8_t*>(position), temporal_fp);
-        temporal_position_readback->Unmap(0, &no_write); temporal_color_readback->Unmap(0, &no_write);
-        if (!saved) { std::fprintf(stderr, "temporal buffer write failed; partial file may remain\n"); return 1; }
+        if (temporal_output) {
+            if (history) Transition(list.p, temporal_resolved.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            else Transition(list.p, temporal_linear.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            Transition(list.p, gbuffer[0].p, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            D3D12_TEXTURE_COPY_LOCATION destination{}; destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            destination.PlacedFootprint = temporal_fp;
+            D3D12_TEXTURE_COPY_LOCATION source{}; source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            destination.pResource = temporal_color_readback.p; source.pResource = history ? temporal_resolved.p : temporal_linear.p;
+            list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+            destination.pResource = temporal_position_readback.p; source.pResource = gbuffer[0].p;
+            list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        }
+        Transition(list.p, target.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = readback.p; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint = fp;
+        D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = target.p; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        if (render_index == UINT64_MAX || !Check(list->Close(), "CloseList")) return 1;
+        ID3D12CommandList* lists[] = {list.p}; queue->ExecuteCommandLists(1, lists);
+        const UINT64 fence_target = render_index + 1;
+        if (FAILED(queue->Signal(fence.p, fence_target))) AbortInFlight("Queue signal failed");
+        UINT64 completed = fence->GetCompletedValue();
+        if (completed == UINT64_MAX) AbortInFlight("Device removed");
+        if (completed < fence_target && (FAILED(fence->SetEventOnCompletion(fence_target, event.p)) || WaitForSingleObject(event.p, 10000) != WAIT_OBJECT_0))
+            AbortInFlight("Fence wait failed");
+        completed = fence->GetCompletedValue();
+        if (completed == UINT64_MAX || completed < fence_target) AbortInFlight("Fence did not complete");
+        if (!Check(device->GetDeviceRemovedReason(), "Device status")) return 1;
+        const D3D12_RANGE read{0, static_cast<SIZE_T>(total)}; mapped = nullptr;
+        if (!Check(readback->Map(0, &read, &mapped), "MapReadback") || !mapped) return 1;
+        const auto* pixels = static_cast<const std::uint8_t*>(mapped);
+        std::size_t changed = 0;
+        for (UINT y = 0; y < frame.height; ++y) for (UINT x = 0; x < frame.width; ++x) {
+            const auto* pixel = pixels+fp.Offset+y*fp.Footprint.RowPitch+x*4;
+            if (pixel[0] || pixel[1] || pixel[2]) ++changed;
+        }
+        const bool ok = changed && WriteImage(current_output.c_str(), pixels, fp, frame.width, frame.height);
+        const D3D12_RANGE no_write{0, 0}; readback->Unmap(0, &no_write);
+        if (!changed) { std::fprintf(stderr, "PBR preview produced no visible pixels\n"); return 1; }
+        if (!ok) { std::fprintf(stderr, "image write failed; partial file may remain\n"); return 1; }
+        if (temporal_output) {
+            void* color = nullptr; void* position = nullptr;
+            const D3D12_RANGE temporal_read{0, static_cast<SIZE_T>(temporal_total)};
+            if (!Check(temporal_color_readback->Map(0, &temporal_read, &color), "MapTemporalColor") || !color) return 1;
+            if (!Check(temporal_position_readback->Map(0, &temporal_read, &position), "MapTemporalPosition") || !position) {
+                temporal_color_readback->Unmap(0, &no_write); return 1;
+            }
+            const std::uint32_t flags = (indirect ? 1u : 0u) | (gtao ? 2u : 0u) |
+                                        (volumetric ? 4u : 0u) | (reflections ? 8u : 0u) | (filmic ? 16u : 0u);
+            const bool saved = WriteTemporal(temporal_output, frame, digest, jitter_x, jitter_y, flags,
+                                             static_cast<const std::uint8_t*>(color), static_cast<const std::uint8_t*>(position), temporal_fp);
+            temporal_position_readback->Unmap(0, &no_write); temporal_color_readback->Unmap(0, &no_write);
+            if (!saved) { std::fprintf(stderr, "temporal buffer write failed; partial file may remain\n"); return 1; }
+        }
+        std::size_t visible_vertices = 0, visible_draws = 0, caster_vertices = 0;
+        for (std::size_t i = 0; i < frame.draws.size(); ++i) if (!variant || variant->draws[i] == selected) {
+            visible_vertices += frame.draws[i].vertex_count; ++visible_draws;
+        }
+        for (std::size_t i = 0; i < frame.offline_casters.size(); ++i)
+            if (!variant || variant->casters[i] == selected) caster_vertices += frame.offline_casters[i].vertex_count;
+        std::printf("sceneir_pbr_dx12=ok textures=%zu draws=%zu triangles=%zu offline_caster_triangles=%zu lights=%zu changed_pixels=%zu\n",
+                    frame.textures.size(), visible_draws, visible_vertices/3, caster_vertices/3, frame.lights.size(), changed);
+        if (!variant) return 0;
+        if (variant->stream) {
+            if (!render_index) std::printf("variant_stream=ready temporal_history=reset\n");
+            else std::printf("variant_selected=%s temporal_history=reset\n", selected == 2 ? "replacement" : "original");
+            std::fflush(stdout);
+            std::wstring line;
+            if (!std::getline(std::wcin, line)) return std::wcin.eof() ? 0 : 2;
+            if (line.size() > 32767) return 2;
+            if (line == L"quit") return 0;
+            const auto split = line.find(L' ');
+            if (split == std::wstring::npos || split + 1 == line.size()) return 2;
+            const auto command = line.substr(0, split);
+            if ((command != L"original" && command != L"replacement") ||
+                !variant->variants->Select(variant->key, command == L"replacement")) return 2;
+            current_output = line.substr(split+1);
+        } else if (render_index == 0) {
+            if (!variant->variants->Select(variant->key, true)) return 2;
+            current_output = variant->replacement_output;
+        } else if (render_index == 1) {
+            if (!variant->variants->Select(variant->key, false)) return 2;
+            current_output = variant->restored_output;
+        } else {
+            std::printf("variant_cycle=original,replacement,original temporal_history=reset\n");
+            return 0;
+        }
+        ++render_index;
     }
-    std::size_t visible_vertices = 0;
-    for (const auto& draw : frame.draws) visible_vertices += draw.vertex_count;
-    std::printf("sceneir_pbr_dx12=ok textures=%zu draws=%zu triangles=%zu offline_caster_triangles=%zu lights=%zu changed_pixels=%zu\n",
-                frame.textures.size(), frame.draws.size(), visible_vertices/3,
-                (frame.vertices.size()-visible_vertices)/3, frame.lights.size(), changed);
-    return 0;
 }
 } // namespace
 
@@ -1149,35 +1212,15 @@ int wmain(int argc, wchar_t** argv) {
         if (!ReadVariants(argv[1], variants) || !variants.Select(key, false)) {
             std::fprintf(stderr, "variant resource key does not match\n"); return 2;
         }
-        const auto render = [&](const wchar_t* path) {
-            return Render(variants.Current(), path, indirect, gtao, volumetric, reflections, filmic,
-                          nullptr, 0, 0, nullptr, nullptr, 0);
-        };
-        if (const int result = render(argv[3])) return result;
-        if (variant_stream) {
-            std::printf("variant_stream=ready temporal_history=reset\n");
-            std::fflush(stdout);
-            std::wstring line;
-            while (std::getline(std::wcin, line)) {
-                if (line.size() > 32767) return usage();
-                if (line == L"quit") return 0;
-                const auto split = line.find(L' ');
-                if (split == std::wstring::npos || split + 1 == line.size()) return usage();
-                const auto command = line.substr(0, split);
-                if ((command != L"original" && command != L"replacement") ||
-                    !variants.Select(key, command == L"replacement")) return usage();
-                if (const int result = render(line.c_str()+split+1)) return result;
-                std::printf("variant_selected=%s temporal_history=reset\n", command == L"original" ? "original" : "replacement");
-                std::fflush(stdout);
-            }
-            return std::wcin.eof() ? 0 : 2;
+        Frame combined;
+        VariantRun run;
+        run.variants = &variants; run.key = key; run.stream = variant_stream;
+        run.replacement_output = variant_output; run.restored_output = restored_output;
+        if (!variants.BuildCombined(combined, run.draws, run.casters)) {
+            std::fprintf(stderr, "cannot build bounded combined variants\n"); return 2;
         }
-        if (!variants.Select(key, true)) return 2;
-        if (const int result = render(variant_output)) return result;
-        if (!variants.Select(key, false)) return 2;
-        if (const int result = render(restored_output)) return result;
-        std::printf("variant_cycle=original,replacement,original temporal_history=reset\n");
-        return 0;
+        return Render(combined, argv[3], indirect, gtao, volumetric, reflections, filmic,
+                      nullptr, 0, 0, nullptr, nullptr, 0, &run);
     }
     Frame frame;
     std::uint8_t digest[32]{};

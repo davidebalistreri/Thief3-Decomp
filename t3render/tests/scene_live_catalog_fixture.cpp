@@ -4,6 +4,7 @@
 #include <cstring>
 #include <iostream>
 #include <iterator>
+#include <unordered_set>
 #include <vector>
 
 using namespace t3render::live;
@@ -57,6 +58,16 @@ int main(int argc,char** argv) {
         const auto& wall=catalog.bedroom_materials->materials[0];
         std::cout<<" bedroom_materials "<<catalog.bedroom_materials->materials.size()<<" "
                  <<wall.channels[0].mips[0].width<<" "<<wall.channels[0].mips.size();
+    }
+    if (!catalog.binding.static_mesh_actors.empty()) {
+        std::unordered_set<std::string> resources;
+        for (const auto& [id,candidate]:catalog.binding.static_mesh_actors) {
+            if (id!=candidate.instance_id || !candidate.resource ||
+                catalog.residency->FindSceneResource(epoch.map,candidate.resource->id)!=candidate.resource ||
+                candidate.material_ids.size()!=candidate.resource->geometry.sections.size()) return 8;
+            resources.insert(candidate.resource->id);
+        }
+        std::cout<<" static_mesh_candidates "<<catalog.binding.static_mesh_actors.size()<<" "<<resources.size();
     }
     std::cout<<"\n";
 }

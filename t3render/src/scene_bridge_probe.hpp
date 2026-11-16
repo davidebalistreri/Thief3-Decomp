@@ -155,6 +155,18 @@ struct ProbeMapWitness {
     ProbeNamedObject owner_class, outer;
 };
 
+// Transient evidence for one selected visible static mesh. It is sampled
+// inside its submission scope and never becomes a serialized engine pointer.
+struct ProbeStaticMesh {
+    bool list_stable = false, object_table_complete = false;
+    std::uint32_t name_occurrences = 0;
+    ProbeEntry entry;
+    ProbeValue owner_outer;
+    ProbeNamedObject owner_class, outer;
+    AssetCandidate asset;
+    ProbeMeshNode mesh_node;
+};
+
 struct ProbeSnapshot {
     std::uint32_t thread_id = 0;
     std::uint32_t self = 0;  // saved ECX at 0x10926800

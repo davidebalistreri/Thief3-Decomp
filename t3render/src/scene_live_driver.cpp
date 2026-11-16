@@ -46,6 +46,7 @@ struct SceneDriver::Impl {
     struct Present { ThreadToken thread;std::uint64_t window=0; };
     struct Reset { ThreadToken thread;std::uint64_t residency=0; };
     struct CachedBsp { scene_bridge::SubmissionSample sample;BspSelection selection; };
+    struct ActorTrack { Identity identity{};std::uint64_t generation=0,last_seen=0;bool known=false; };
     mutable std::mutex mutex;
     LoadedCatalog catalog;
     FrameProvenance provenance;
@@ -58,6 +59,7 @@ struct SceneDriver::Impl {
     std::unordered_map<std::uint64_t,Present> presents;
     std::unordered_map<std::uint64_t,Reset> resets;
     std::unordered_map<std::uint32_t,CachedBsp> bsp_matches;
+    std::unordered_map<std::string,ActorTrack> actor_tracks;
     std::shared_ptr<const scene_bridge::ProbeSnapshot> latest;
     ProbeCamera latest_camera;
     ThreadToken latest_thread{};
@@ -77,6 +79,7 @@ struct SceneDriver::Impl {
     void Lost() {
         ++diagnostics.losses;
         latest.reset();latest_thread={};bsp_matches.clear();
+        for (auto& item:actor_tracks) item.second.known=false;
         if (window) window->MarkLost();
     }
     void Disable() noexcept {
@@ -91,6 +94,7 @@ struct SceneDriver::Impl {
         const auto epoch=catalog.residency->epochs();
         window=std::make_unique<SceneWindow>(*catalog.residency,epoch,provenance,catalog.conventions,pass,stage);
         latest.reset();latest_thread={};bsp_matches.clear();identity_known=false;
+        for (auto& item:actor_tracks) item.second.known=false;
         return true;
     }
 };
@@ -106,6 +110,14 @@ std::unique_ptr<SceneDriver> SceneDriver::Create(LoadedCatalog catalog,FrameProv
         if (!epoch.map || !epoch.ready || catalog.residency->FindSceneResource(epoch.map,catalog.binding.bed->id)!=catalog.binding.bed) return {};
         for (const auto& bsp:catalog.binding.bsp)
             if (!bsp || catalog.residency->FindSceneResource(epoch.map,bsp->id)!=bsp) return {};
+        if (catalog.binding.static_mesh_actors.size()>8192) return {};
+        for (const auto& [id,candidate]:catalog.binding.static_mesh_actors) {
+            if (candidate.instance_id!=id || !candidate.resource ||
+                catalog.residency->FindSceneResource(epoch.map,candidate.resource->id)!=candidate.resource ||
+                candidate.material_ids.size()!=candidate.resource->geometry.sections.size()) return {};
+            for (const auto& material:candidate.material_ids)
+                if (!material || !catalog.binding.materials.count(*material)) return {};
+        }
         auto impl=std::make_unique<Impl>(std::move(catalog),std::move(provenance),pass,stage);
         if (!impl->Rebind()) return {};
         return std::unique_ptr<SceneDriver>(new SceneDriver(std::move(impl)));
@@ -179,8 +191,24 @@ std::uint64_t SceneDriver::BeginScope(ThreadToken thread,std::uint32_t stage,std
         s.scopes.emplace(id,std::move(scope));return id;
     } catch (...) { impl_->Disable();return 0; }
 }
+std::shared_ptr<const scene_bridge::ProbeSnapshot> SceneDriver::GenericProbe(
+        std::uint64_t ticket,ThreadToken thread,const scene_bridge::SubmissionSample& before) noexcept {
+    try {
+        auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
+        const auto scope=s.scopes.find(ticket);
+        if (s.disabled.load() || !ticket || scope==s.scopes.end() || scope->second.sampled ||
+            !SameThread(thread,scope->second.thread) || !s.latest || !SameThread(thread,s.latest_thread) ||
+            scope->second.stage!=s.stage || !before.valid || before.pass!=s.pass || before.type!=4 ||
+            before.vtable!=0x10e4e8c0 || !(before.owner_fname>>16)) return {};
+        const auto id="actor:"+s.catalog.binding.map+":"+s.catalog.binding.map_sha256+
+                      ":StaticMeshActor__"+std::to_string((before.owner_fname>>16)-1);
+        if (id==s.catalog.binding.bed_instance_id || !s.catalog.binding.static_mesh_actors.count(id)) return {};
+        return s.latest;
+    } catch (...) {impl_->Disable();return {};}
+}
 bool SceneDriver::SetScopeSample(std::uint64_t ticket,ThreadToken thread,
-                                 const scene_bridge::SubmissionSample& before) noexcept {
+                                 const scene_bridge::SubmissionSample& before,
+                                 const scene_bridge::ProbeStaticMesh* generic) noexcept {
     try {
         auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
         if (s.disabled.load()) return false;
@@ -215,6 +243,28 @@ bool SceneDriver::SetScopeSample(std::uint64_t ticket,ThreadToken thread,
                 }
             } else {
                 bool matched=false;
+                if (generic) ++s.diagnostics.static_mesh_samples;
+                if (generic && (before.owner_fname>>16)) {
+                    const auto id="actor:"+s.catalog.binding.map+":"+s.catalog.binding.map_sha256+
+                                  ":StaticMeshActor__"+std::to_string((before.owner_fname>>16)-1);
+                    if (s.catalog.binding.static_mesh_actors.count(id) && id!=s.catalog.binding.bed_instance_id) {
+                        auto& track=s.actor_tracks[id];auto generation=track.generation;
+                        const bool changed=!track.known || !SameIdentity(track.identity,identity) ||
+                            (track.last_seen<s.next_frame && s.next_frame-track.last_seen>1);
+                        if (changed) {if (generation==UINT64_MAX) {s.Disable();return false;}++generation;}
+                        MeshSelection selected;
+                        if (ResolveStaticMesh(s.catalog.binding,*s.latest,before,*generic,scope.section,generation,selected)) {
+                            scope.window=s.window->BeginMesh(thread,s.pass,scope.stage,selected);
+                            if (scope.window) {
+                                matched=true;++s.diagnostics.static_mesh_scopes;
+                                scope.resource=selected.matched_resource;scope.camera=s.latest_camera;
+                                track.identity=identity;track.generation=generation;track.last_seen=s.next_frame;track.known=true;
+                            }
+                        }
+                    }
+                }
+                if (generic && !matched) ++s.diagnostics.static_mesh_rejected;
+                if (matched) return true;
                 if (cached!=s.bsp_matches.end()) {
                     if (cached->second.selection.matched_resource &&
                         scope.section<cached->second.selection.matched_resource->geometry.sections.size()) {
@@ -326,7 +376,13 @@ WindowResult SceneDriver::EndPresent(std::uint64_t ticket,ThreadToken thread,boo
         const auto result=record.window && s.window ? s.window->EndPresent(record.window,thread,succeeded) : WindowResult::Rejected;
         if (result==WindowResult::Published) ++s.diagnostics.published;
         else if (result==WindowResult::Primed) ++s.diagnostics.primed;
-        else ++s.diagnostics.rejected;
+        else {
+            ++s.diagnostics.rejected;
+            // A rejected interval may hide an identity change even when the
+            // next visible sample reuses the same address and frame sequence.
+            s.identity_known=false;
+            for (auto& actor:s.actor_tracks) actor.second.known=false;
+        }
         s.diagnostics.last_rejection=record.window && s.window ? s.window->last_rejection() : WindowNeedsRebind;
         return result;
     } catch (...) { impl_->Disable();return WindowResult::Rejected; }

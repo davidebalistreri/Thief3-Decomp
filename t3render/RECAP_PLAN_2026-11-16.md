@@ -286,3 +286,23 @@ oltre 16.384 draw per le shadow map il frame torna interamente senza ombre.
 Questi limiti e i contatori diagnostici non dimostrano prestazioni realtime.
 Il probe TDS non fornisce ancora luci complete: l'effetto e il lag restano da
 verificare nel gioco, senza anticipare che la trave sia stata corretta.
+
+## Aggiornamento: candidati static mesh e lifecycle
+
+Il catalogo offline v4 può includere gli attori `StaticMeshActor__N`, la mesh
+e i materiali candidati, senza copiare trasformazioni o visibilità offline come
+dati runtime. L'export locale contiene 325 attori e 46 risorse aggiuntive;
+cinque attori con materiali irrisolti sono esclusi e riportati nel manifest.
+
+Un percorso read-only esplicitamente opt-in campiona la mesh nello scope di
+submission e verifica owner, lista visibile, mappa, proprietà asset, nodo mesh,
+sezioni e materiali. Usa la trasformazione osservata e mantiene il binding
+`Candidate`; gestisce generazioni dopo assenza, cambio identità e Reset. Le
+fixture hanno verificato movimento e visibilità con `GENrafters1` offline e
+camera sintetica, oltre a rifiuto delle corrispondenze incoerenti. Non è ancora
+una prova di alcun attore aggiuntivo nel gioco.
+
+La lettura completa è costosa: una fixture con 1.000 oggetti non pertinenti ha
+misurato 428 letture per uno scope generico. Il percorso rimane disattivato per
+default; prestazioni, callback reali e cambio mappa attendono una verifica TDS
+successiva. I cinque materiali ignoti e le classi attore diverse restano aperti.

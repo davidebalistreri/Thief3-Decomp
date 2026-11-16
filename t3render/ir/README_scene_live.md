@@ -257,9 +257,10 @@ verified-build hook installation happen outside `DllMain`; failed setup yields
 no live output. `SceneDriver` connects probe, submission scopes, draw samples,
 Present boundaries and Reset events to `SceneResidency`. It rejects unsafe
 overlap or reentry and publishes at most a candidate partial snapshot through
-`RuntimeCurrent()`. The adapter
-uses pass 0/stage 1 and supports the researched bed and offline-matched BSP
-only. Map changes and general resource lifetimes are not yet observed. The
+`RuntimeCurrent()`. The default adapter uses pass 0/stage 1 and supports the
+researched bed and offline-matched BSP. The optional v4 static mesh path below
+adds bounded candidates but has not been exercised in TDS. Map changes and
+general resource lifetimes are not yet observed. The
 separate visible-actor map witness is a candidate, not a map lifecycle hook.
 It must not be presented as a general scene bridge or enabled in a game session
 as a verified feature.
@@ -270,6 +271,49 @@ fixtures passed on Highball without TDS; the loader read a local catalog with
 45 BSP blocks and a 257-vertex bed, and rejected a corrupted copy. These tests
 do not exercise the real hook callbacks or prove that a runtime frame is
 produced in TDS.
+
+## Optional static mesh candidates
+
+Add `--static-meshes` to `export_live_catalog.py` to create a v4 catalog. It
+includes eligible `StaticMeshActor__N` identities, referenced mesh geometry and
+per-section material bindings. It never exports actor transforms or asserts
+visibility. Resource IDs are qualified by map and offline bundle/kernel
+fingerprints; matching names from different offline sources are excluded as
+ambiguous. Missing material bindings, unsupported section/geometry sizes and
+unqualified identities are also excluded and listed in the manifest. Versions
+1–3 remain readable. The local `SouthQuarter1_int1` export contains 325 actor
+candidates and 46 extra resources (plus the bed); five actors with unresolved
+materials are excluded. Other actor classes and attachments are not covered.
+
+With a v4 catalog, explicitly set `T3RENDER_SCENE_LIVE_STATIC_MESHES=1` to
+enable the new path. The bedroom batch runner clears inherited `T3RENDER_`
+variables, so its equivalent is `--live-static-meshes` together with
+`--live-catalog`; it rejects non-v4 catalog headers before starting a game.
+It samples one candidate inside its existing submission
+scope and requires a unique visible-list name, owner/table/class/map checks,
+local asset-property audit, mesh-node counts/bounds/sections and material
+agreement with the offline candidate. The scope's current matrix supplies the
+transform; pre/post submission identity and asset checks plus the selected draw
+and `Present` window gate publication. The result is still `Candidate` with
+`VisibleList` identity scope: resource-manager fingerprints, GPU payloads,
+global uniqueness, full lifetime coverage and ABA freedom are not proven.
+Names and fingerprints are semantic values; transient pointers stay in-process.
+
+Identity generations advance after a visibility gap, identity change, loss or
+Reset; ordinary transform changes retain the generation. A missing mesh means
+only no accepted submission in this selected scope, not actor destruction.
+`static_mesh_samples`, `static_mesh_scopes` and `static_mesh_rejected` in the
+viewer telemetry show attempted/accepted/rejected scope samples.
+
+This path performs expensive bounded table, asset and mesh-pool reads per
+candidate scope. An in-memory fixture with 1,000 unrelated objects used 428
+reads for one complete generic scope; this is a read-count measurement, not a
+frame-rate result. It stays off by default and needs optimization and a later
+coordinated TDS test before evaluating live coverage or the reported lag.
+Host fixtures reject ambiguous identity/materials and exercise transform,
+visibility, reappearance and Reset. A Highball GPU fixture used offline
+`StaticMeshActor__258 / GENrafters1` geometry with a synthetic camera and
+selection; it is not proof that the runtime actor was observed.
 
 ## Opt-in D3D12 live viewer
 

@@ -19,6 +19,7 @@ struct DrawStart {
 };
 struct DriverStats {
     std::uint64_t probes = 0, selected_probes = 0, selected_probe_bad = 0, bed_scopes = 0, bsp_scopes = 0, bsp_cache_hits = 0;
+    std::uint64_t static_mesh_samples = 0, static_mesh_scopes = 0, static_mesh_rejected = 0;
     std::uint64_t draw_geometry_bad = 0, draw_camera_bad = 0, draw_world_bad = 0, draw_viewport_bad = 0;
     std::uint64_t scope_unstable = 0, scope_rejected = 0, losses = 0, primed = 0, published = 0, rejected = 0;
     std::uint32_t last_rejection = 0;
@@ -46,8 +47,13 @@ public:
     // Begin the scope before sampling process memory, so Present cannot pass
     // an in-flight sample unnoticed. SetScopeSample must follow exactly once.
     std::uint64_t BeginScope(ThreadToken thread, std::uint32_t stage, std::uint32_t section) noexcept;
-    bool SetScopeSample(std::uint64_t ticket, ThreadToken thread,
+    // Returns the current immutable probe only for a catalogued non-bed actor
+    // inside this scope. An adapter may then take the expensive bounded sample.
+    std::shared_ptr<const scene_bridge::ProbeSnapshot> GenericProbe(std::uint64_t ticket,ThreadToken thread,
                         const scene_bridge::SubmissionSample& before) noexcept;
+    bool SetScopeSample(std::uint64_t ticket, ThreadToken thread,
+                        const scene_bridge::SubmissionSample& before,
+                        const scene_bridge::ProbeStaticMesh* generic = nullptr) noexcept;
     void EndScope(std::uint64_t ticket, ThreadToken thread, const scene_bridge::SubmissionSample& after) noexcept;
     DrawStart BeginDraw(ThreadToken thread, std::uint64_t enclosing_scope, const IndexedDraw& draw) noexcept;
     void EndDraw(std::uint64_t ticket, ThreadToken thread, bool succeeded,

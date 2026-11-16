@@ -59,7 +59,8 @@ ProbeSnapshot probe() {
     asset.proxy_vtable_match=asset.resource_vtable_match=true;asset.audit.available=true;
     asset.audit.proxy=0x5000;asset.audit.resource=0x6000;text(asset.name,"innbed1a1");
     auto& node=t.mesh_node;node.pool_scan_complete=node.stable=node.name_available=true;node.occurrences=1;
-    node.address={0x8000,true};node.counts_available=node.bounds_available=node.sections_available=true;
+    node.address={0x8000,true};node.vtable={0x10e49d14,true};node.name_address={0x8100,true};
+    node.counts_available=node.bounds_available=node.sections_available=true;
     node.vertex_count=3;node.triangle_count=1;node.index_count=3;node.section_count=node.sections_copied=1;
     text(node.name,"innbed1a1");bounds(node.bounds_bits);
     auto& ms=node.sections[0];ms.name_available=ms.material_name_available=true;text(ms.name,"Default");
@@ -153,6 +154,112 @@ bool matching() {
     auto missing_skin=c;missing_skin.bed_materials.clear();CHECK(!ResolveBed(missing_skin,p,bed,0,1,mesh));
     auto wrong_actor=c;wrong_actor.bed_instance_id="actor:other";CHECK(!ResolveBed(wrong_actor,p,bed,0,1,mesh));
     CHECK(mesh.instance_id==actor && bsp.resource_id==bsp_id); // failure did not mutate outputs
+    return true;
+}
+
+bool static_mesh_matching() {
+    auto c=catalog();auto p=without_bed();auto before=bed_scope();
+    const auto actor_id="actor:bedroom:"+map_hash+":StaticMeshActor__1";
+    const auto mesh_id="mesh:bedroom:"+map_hash+":"+bundle_hash+":inncrate1";
+    auto geometry=resource(mesh_id,ResourceKind::StaticMesh);geometry.name="INNcrate1";
+    auto mesh=std::make_shared<const Resource>(std::move(geometry));
+    c.static_mesh_actors.emplace(actor_id,StaticMeshCandidate{actor_id,mesh,{"mat:stone"}});
+    before.owner_fname=(2u<<16)|7;before.matrix[12]=bits(3.25f);text(before.asset_name,"inncrate1");
+    ProbeStaticMesh observed;observed.list_stable=observed.object_table_complete=true;observed.name_occurrences=1;
+    observed.entry=p.map_witness.entry;observed.entry.object_matrix_bits[12]=bits(3.25f);
+    observed.owner_outer=p.map_witness.owner_outer;observed.owner_class=p.map_witness.owner_class;
+    observed.outer=p.map_witness.outer;observed.asset=probe().target.asset;observed.mesh_node=probe().target.mesh_node;
+    text(observed.asset.name,"inncrate1");text(observed.mesh_node.name,"inncrate1");
+    MeshSelection result;CHECK(ResolveStaticMesh(c,p,before,observed,0,1,result));
+    CHECK(result.instance_id==actor_id && result.resource_id==mesh_id && result.transform[12]==3.25f &&
+          result.binding==BindingEvidence::Candidate && result.identity_scope==IdentityScope::VisibleList &&
+          result.matched_resource==mesh && result.material_ids==std::vector<std::optional<std::string>>{"mat:stone"});
+    auto bad=observed;bad.name_occurrences=2;CHECK(!ResolveStaticMesh(c,p,before,bad,0,1,result));
+    bad=observed;bad.object_table_complete=false;CHECK(!ResolveStaticMesh(c,p,before,bad,0,1,result));
+    bad=observed;bad.entry.owner_backlink.value++;CHECK(!ResolveStaticMesh(c,p,before,bad,0,1,result));
+    bad=observed;bad.owner_outer.value++;CHECK(!ResolveStaticMesh(c,p,before,bad,0,1,result));
+    bad=observed;text(bad.outer.name,"another");CHECK(!ResolveStaticMesh(c,p,before,bad,0,1,result));
+    bad=observed;text(bad.asset.name,"another");CHECK(!ResolveStaticMesh(c,p,before,bad,0,1,result));
+    bad=observed;bad.asset.audit.proxy++;CHECK(!ResolveStaticMesh(c,p,before,bad,0,1,result));
+    bad=observed;bad.mesh_node.bounds_bits[0]=bits(-1);CHECK(!ResolveStaticMesh(c,p,before,bad,0,1,result));
+    bad=observed;bad.mesh_node.vtable.value++;CHECK(!ResolveStaticMesh(c,p,before,bad,0,1,result));
+    bad=observed;text(bad.mesh_node.sections[0].material_name,"Other");CHECK(!ResolveStaticMesh(c,p,before,bad,0,1,result));
+    auto duplicate=p;duplicate.entries[2]=duplicate.entries[1];duplicate.entries[2].list_index=2;
+    duplicate.entries_attempted=duplicate.count.value=3;CHECK(!ResolveStaticMesh(c,duplicate,before,observed,0,1,result));
+    auto changed=before;changed.owner_fname=(3u<<16)|7;CHECK(!ResolveStaticMesh(c,p,changed,observed,0,1,result));
+    CHECK(!ResolveStaticMesh(c,p,before,observed,1,1,result));CHECK(!ResolveStaticMesh(c,p,before,observed,0,0,result));
+    CHECK(result.instance_id==actor_id && result.transform[12]==3.25f); // rejections leave output untouched
+    return true;
+}
+
+bool static_mesh_driver_lifecycle() {
+    auto c=catalog();auto memory=std::make_shared<SceneResidency>();CHECK(memory->BeginMap(0,c.map,c.map_sha256));
+    const auto epoch=memory->epochs();CHECK(memory->AddMaterial(epoch.map,c.materials.at("mat:stone")));
+    CHECK(memory->AddResource(epoch.map,*c.bed));CHECK(memory->AddResource(epoch.map,*c.bsp[0]));
+    const auto actor_id="actor:bedroom:"+map_hash+":StaticMeshActor__1";
+    const auto mesh_id="mesh:bedroom:"+map_hash+":"+bundle_hash+":inncrate1";
+    auto mesh=resource(mesh_id,ResourceKind::StaticMesh);mesh.name="INNcrate1";CHECK(memory->AddResource(epoch.map,std::move(mesh)));
+    c.bed=memory->FindSceneResource(epoch.map,bed_id);c.bsp[0]=memory->FindSceneResource(epoch.map,bsp_id);
+    auto resident=memory->FindSceneResource(epoch.map,mesh_id);CHECK(resident);
+    c.static_mesh_actors.emplace(actor_id,StaticMeshCandidate{actor_id,resident,{"mat:stone"}});
+    LoadedCatalog loaded;loaded.residency=memory;loaded.binding=c;
+    loaded.conventions.length_unit=LengthUnit::T3Unit;loaded.conventions.axes=Axes::T3Xyz;loaded.conventions.up_axis=UpAxis::Z;
+    FrameProvenance source;source.origin=FrameOrigin::Synthetic;source.session_id="static-driver-fixture";
+    auto driver=SceneDriver::Create(std::move(loaded),source,0,1);CHECK(driver);
+    const ThreadToken thread{17,123};auto p=without_bed();auto before=bed_scope();before.owner_fname=(2u<<16)|7;
+    text(before.asset_name,"inncrate1");ProbeStaticMesh observed;observed.list_stable=observed.object_table_complete=true;
+    observed.name_occurrences=1;observed.entry=p.map_witness.entry;observed.owner_outer=p.map_witness.owner_outer;
+    observed.owner_class=p.map_witness.owner_class;observed.outer=p.map_witness.outer;
+    observed.asset=probe().target.asset;observed.mesh_node=probe().target.mesh_node;
+    text(observed.asset.name,"inncrate1");text(observed.mesh_node.name,"inncrate1");
+    const IndexedDraw args{true,true,0,1,0,3};
+    DrawObservation state;state.available=true;state.view=state.projection=state.world=identity;
+    state.viewport={0,0,64,64,0,.5f};
+    auto present=[&] {const auto t=driver->BeginPresent(thread);return driver->EndPresent(t,thread,true);};
+    auto sample=[&] {const auto t=driver->BeginProbe(thread);if(!t)return false;driver->EndProbe(t,thread,p);return true;};
+    auto submit=[&](const SubmissionSample& value,const ProbeStaticMesh* evidence,bool expected) {
+        const auto scope=driver->BeginScope(thread,1,0);if (!scope)return false;
+        auto cheap=value;cheap.asset_available=false;cheap.asset_proxy=cheap.asset_resource=0;std::memset(cheap.asset_name,0,sizeof(cheap.asset_name));
+        const auto available=driver->GenericProbe(scope,thread,cheap);
+        if (bool(available)!=bool(evidence)) return false;
+        if (!driver->SetScopeSample(scope,thread,value,evidence))return false;
+        const auto draw=driver->BeginDraw(thread,scope,args);
+        if (!draw.ticket || draw.needs_state!=expected)return false;
+        driver->EndDraw(draw.ticket,thread,true,state,state);driver->EndScope(scope,thread,value);return true;
+    };
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(before,&observed,true));
+    CHECK(present()==WindowResult::Published);auto current=driver->current();
+    CHECK(current && current->meshes.size()==1 && current->meshes[0].selection.instance_id==actor_id &&
+          current->meshes[0].selection.generation==1 && current->meshes[0].selection.binding==BindingEvidence::Candidate);
+    before.matrix[12]=bits(2.5f);observed.entry.object_matrix_bits[12]=bits(2.5f);state.world[12]=2.5f;
+    CHECK(sample());CHECK(submit(before,&observed,true));CHECK(present()==WindowResult::Published);
+    CHECK(driver->current()->meshes[0].selection.transform[12]==2.5f && driver->current()->meshes[0].selection.generation==1);
+    state.world=identity;CHECK(sample());CHECK(submit(bsp_scope(),nullptr,true));CHECK(present()==WindowResult::Published);
+    CHECK(driver->current()->meshes.empty());state.world[12]=2.5f;
+    CHECK(sample());CHECK(submit(before,&observed,true));CHECK(present()==WindowResult::Published);
+    CHECK(driver->current()->meshes[0].selection.generation==2); // an absent interval may hide identity reuse
+    auto bad=observed;text(bad.mesh_node.sections[0].material_name,"Other");
+    CHECK(sample());CHECK(submit(before,&bad,false));state.world=identity;CHECK(submit(bsp_scope(),nullptr,true));
+    CHECK(present()==WindowResult::Published && driver->current()->meshes.empty());
+    const auto reset=driver->BeginReset(thread);CHECK(reset);driver->EndReset(reset,thread,true);
+    CHECK(present()==WindowResult::Primed);state.world[12]=2.5f;
+    CHECK(sample());CHECK(submit(before,&observed,true));CHECK(present()==WindowResult::Published);
+    CHECK(driver->current()->meshes[0].selection.generation==3);
+    CHECK(driver->stats().static_mesh_samples==5 && driver->stats().static_mesh_scopes==4 &&
+          driver->stats().static_mesh_rejected==1);
+    CHECK(sample());const auto scope=driver->BeginScope(thread,1,0);CHECK(scope);
+    CHECK(driver->SetScopeSample(scope,thread,before,&observed));const auto draw=driver->BeginDraw(thread,scope,args);
+    CHECK(draw.ticket && draw.needs_state);auto changed=state;changed.world[12]+=1;
+    driver->EndDraw(draw.ticket,thread,true,state,changed);driver->EndScope(scope,thread,before);
+    CHECK(present()==WindowResult::Rejected && !driver->current());
+    CHECK(sample());CHECK(submit(before,&observed,true));CHECK(present()==WindowResult::Published);
+    CHECK(driver->current()->meshes[0].selection.generation==4); // rejected interval can hide reuse
+    CHECK(sample());const auto overlapping=driver->BeginScope(thread,1,0);CHECK(overlapping);
+    const auto stale=driver->GenericProbe(overlapping,thread,before);CHECK(stale);
+    CHECK(present()==WindowResult::Rejected && !driver->current());
+    CHECK(driver->SetScopeSample(overlapping,thread,before,&observed));driver->EndScope(overlapping,thread,before);
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(before,&observed,true));
+    CHECK(present()==WindowResult::Published && driver->current()->meshes[0].selection.generation==5);
     return true;
 }
 bool delivery() {
@@ -356,7 +463,7 @@ bool driver_gpu_pipeline() {
 #endif
 } // namespace
 int main() {
-    if(!matching() || !delivery() || !driver_delivery())return 1;
+    if(!matching() || !static_mesh_matching() || !static_mesh_driver_lifecycle() || !delivery() || !driver_delivery())return 1;
 #ifdef T3RENDER_TEST_LIVE_DX12_DRIVER
     if (!driver_gpu_pipeline()) return 1;
 #endif

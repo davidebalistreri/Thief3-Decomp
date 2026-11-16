@@ -138,7 +138,7 @@ def validate_paths(engine, bottle, system, proxy, output):
 
 
 def env_for(engine, bottle, output, frames, scene_bridge=False, submission_scope=False, live_catalog=None,
-            live_only=False):
+            live_only=False, live_static_meshes=False):
     capture = {"T3RENDER_CAPTURE_PATH": windows_path(output / "bedroom.jsonl"),
                "T3RENDER_CAPTURE_TRIGGER_PATH": windows_path(output / "capture.ready"),
                "T3RENDER_CAPTURE_FRAMES": str(frames), "T3RENDER_CAPTURE_BUFFERS": "1",
@@ -163,6 +163,10 @@ def env_for(engine, bottle, output, frames, scene_bridge=False, submission_scope
         capture.update({"T3RENDER_SCENE_LIVE": "1", "T3RENDER_SCENE_LIVE_DX12": "1",
                         "T3RENDER_LIVE_CATALOG": windows_path(live_catalog),
                         "T3RENDER_SCENE_LIVE_DIAGNOSTIC_DIR": windows_path(output)})
+    if live_static_meshes:
+        if live_catalog is None:
+            raise BatchError("static mesh sampling requires an offline v4 live catalog")
+        capture["T3RENDER_SCENE_LIVE_STATIC_MESHES"] = "1"
     env = {k: v for k, v in os.environ.items() if not k.startswith("T3RENDER_") and
            k not in ("WINEDLLPATH", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH")}
     frameworks = engine / "frameworks"
@@ -215,11 +219,13 @@ def loader_verified(log, windows_dll):
 
 def execute(engine, bottle, system, proxy, output, delay, timeout, frames, terminate,
             preflight=False, fixture=None, replay=None, scene_bridge=False, submission_scope=False,
-            live_catalog=None, live_only=False):
+            live_catalog=None, live_only=False, live_static_meshes=False):
     if submission_scope and not scene_bridge:
         raise BatchError("submission scope requires the scene bridge probe")
     if live_only and (live_catalog is None or not terminate):
         raise BatchError("live-only mode requires a catalog and termination after the timed test")
+    if live_static_meshes and live_catalog is None:
+        raise BatchError("static mesh sampling requires an offline v4 live catalog")
     engine, bottle, system, proxy, output = validate_paths(engine, bottle, system, proxy, output)
     if not math.isfinite(delay) or not math.isfinite(timeout) or delay < 0 or timeout <= delay or frames not in (1, 2, 3):
         raise BatchError("require nonnegative delay, a longer finite timeout and 1–3 frames")
@@ -233,6 +239,10 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
                 or not live_catalog.is_file()):
             raise BatchError("live catalog must be an existing absolute local file")
         live_catalog = live_catalog.resolve()
+        if live_static_meshes:
+            with live_catalog.open("rb") as stream:
+                if stream.read(8) != b"T3LCAT04":
+                    raise BatchError("static mesh sampling requires a v4 live catalog")
     if fixture is not None:
         fixture, replay = Path(fixture), Path(replay)
         if not fixture.is_absolute() or not replay.is_absolute():
@@ -250,7 +260,8 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
     output.mkdir()
     target = system / "d3d8.dll"
     env, capture = env_for(engine, bottle, output, frames, scene_bridge=scene_bridge,
-                           submission_scope=submission_scope, live_catalog=live_catalog, live_only=live_only)
+                           submission_scope=submission_scope, live_catalog=live_catalog, live_only=live_only,
+                           live_static_meshes=live_static_meshes)
     executable = "C:\\" + str((system / "T3Main.exe").relative_to((bottle / "drive_c").resolve())).replace("/", "\\")
     deployment = {"schema": 1, "proxy": str(target), "sha256": digest(proxy),
                   "capture_config": capture, "proxy_installed": False, "temporary_proxy_removed": None}
@@ -371,6 +382,7 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
                   "scene_bridge_requested": scene_bridge,
                   "submission_scope_requested": submission_scope,
                   "live_viewer_requested": live_catalog is not None,
+                  "live_static_meshes_requested": live_static_meshes,
                   "live_only": live_only,
                   "host_preflight": host_preflight, "highball_preflight": highball_preflight,
                   "proxy_installed": deployment["proxy_installed"],
@@ -416,6 +428,7 @@ def main(argv=None):
     run.add_argument("--submission-scope", action="store_true", help="tag draws inside the verified section callsite; requires --scene-bridge")
     run.add_argument("--live-catalog", help="enable the experimental D3D12 viewer with this offline catalog; requires bridge and submission scope")
     run.add_argument("--live-only", action="store_true", help="timed viewer test without the heavy D3D8 trace; requires catalog and termination")
+    run.add_argument("--live-static-meshes", action="store_true", help="enable expensive experimental static mesh sampling; requires a v4 catalog")
     run.add_argument("--terminate-after-capture", action="store_true", help="close the one TDS test process after capture")
     run.add_argument("--preflight", action="store_true", help="run the host test suite before launching TDS")
     run.add_argument("--fixture", help="synthetic x86 Highball fixture (requires --dx12-replay)")
@@ -431,7 +444,7 @@ def main(argv=None):
             execute(args.engine, args.bottle, args.system, args.proxy, args.output_dir,
                     args.delay, args.timeout, args.frames, args.terminate_after_capture,
                     args.preflight, args.fixture, args.dx12_replay, args.scene_bridge, args.submission_scope,
-                    args.live_catalog, args.live_only)
+                    args.live_catalog, args.live_only, args.live_static_meshes)
     except (BatchError, OSError, ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

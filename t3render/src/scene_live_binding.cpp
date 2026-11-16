@@ -26,6 +26,14 @@ bool Digest(const std::string& value) {
         return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
     });
 }
+bool MeshKey(const BindingCatalog& catalog,const Resource& resource) {
+    std::string lower;lower.reserve(resource.name.size());
+    for (unsigned char c:resource.name) {
+        if (c<33 || c>126 || c==':') return false;
+        lower.push_back(static_cast<char>(c>='A' && c<='Z' ? c+('a'-'A') : c));
+    }
+    return !lower.empty() && resource.id=="mesh:"+catalog.map+":"+catalog.map_sha256+":"+resource.source_sha256+":"+lower;
+}
 bool Value(const ProbeValue& value, std::uint32_t expected) {
     return value.available && value.value == expected;
 }
@@ -158,20 +166,22 @@ bool ObservedBspComplete(const ProbeBspBlock& block) {
     }
     return true;
 }
-bool MeshMetadata(const BindingCatalog& catalog, const ProbeMeshNode& node) {
-    if (!catalog.bed || catalog.bed->kind != ResourceKind::StaticMesh || !node.stable || !node.pool_scan_complete ||
+bool MeshMetadata(const BindingCatalog& catalog,const Resource& resource,
+                  const std::vector<std::optional<std::string>>& materials,const ProbeMeshNode& node) {
+    if (resource.kind != ResourceKind::StaticMesh || !node.stable || !node.pool_scan_complete ||
+        !Value(node.vtable,0x10e49d14) || !node.name_address.available || !node.name_address.value ||
         node.pool_scan_truncated || node.occurrences != 1 || !node.name_available ||
-        !EqualAscii(catalog.bed->name,node.name,sizeof(node.name)) || !node.counts_available || !node.bounds_available ||
+        !EqualAscii(resource.name,node.name,sizeof(node.name)) || !node.counts_available || !node.bounds_available ||
         !node.sections_available || node.sections_truncated) return false;
-    const auto& geometry=catalog.bed->geometry;
+    const auto& geometry=resource.geometry;
     if (node.vertex_count != geometry.positions.size() || node.index_count != geometry.indices.size() ||
         node.triangle_count != geometry.indices.size()/3 || node.section_count != geometry.sections.size() ||
         node.sections_copied != geometry.sections.size() || node.sections_copied > kMaxMeshNodeSections ||
-        (!catalog.bed_materials.empty() && catalog.bed_materials.size() != geometry.sections.size()) ||
+        (!materials.empty() && materials.size() != geometry.sections.size()) ||
         !BoundsMatch(geometry,node.bounds_bits)) return false;
     for (std::size_t i=0;i<geometry.sections.size();++i) {
         const auto& section=geometry.sections[i]; const auto& observed=node.sections[i];
-        const auto& mat=catalog.bed_materials.empty() ? section.material_id : catalog.bed_materials[i];
+        const auto& mat=materials.empty() ? section.material_id : materials[i];
         if (!observed.name_available || !EqualAscii(section.name,observed.name,sizeof(observed.name)) ||
             !MaterialMatches(catalog,mat,observed.material_name,sizeof(observed.material_name),observed.material_name_available) ||
             !SectionMatches(geometry,section,observed)) return false;
@@ -240,7 +250,7 @@ bool ResolveBed(const BindingCatalog& catalog, const scene_bridge::ProbeSnapshot
         catalog.bed->id != "mesh:"+catalog.map+":"+catalog.map_sha256+":"+catalog.bed->source_sha256+":innbed1a1" ||
         !EqualAscii(catalog.bed->name,asset.name,sizeof(asset.name)) ||
         !EqualAscii(catalog.bed->name,before.asset_name,sizeof(before.asset_name)) ||
-        !MeshMetadata(catalog,node) || section >= catalog.bed->geometry.sections.size()) return false;
+        !MeshMetadata(catalog,*catalog.bed,catalog.bed_materials,node) || section >= catalog.bed->geometry.sections.size()) return false;
     MeshSelection result; result.instance_id=catalog.bed_instance_id; result.resource_id=catalog.bed->id;
     result.generation=generation; result.binding=BindingEvidence::Candidate; result.material_ids=catalog.bed_materials;
     result.identity_scope=target.visible_list_only ? IdentityScope::VisibleList : IdentityScope::FullObjectScan;
@@ -251,6 +261,58 @@ bool ResolveBed(const BindingCatalog& catalog, const scene_bridge::ProbeSnapshot
     }
     if (!ReadFloats(before.matrix,result.transform.data(),16)) return false;
     result.sections.push_back(section); output=std::move(result); return true;
+}
+
+bool ResolveStaticMesh(const BindingCatalog& catalog,const scene_bridge::ProbeSnapshot& snapshot,
+                       const scene_bridge::SubmissionSample& before,const scene_bridge::ProbeStaticMesh& observed,
+                       std::uint32_t section,std::uint64_t generation,MeshSelection& output) {
+    const auto number=before.owner_fname>>16;
+    if (!generation || !number || !observed.list_stable || !observed.object_table_complete || observed.name_occurrences!=1 ||
+        !General(snapshot,before,OuterMatches(catalog,observed.outer)) ||
+        (snapshot.target.entry_available && !TargetMapMatches(catalog,snapshot)) ||
+        before.type!=4 || before.vtable!=kMeshVtable || snapshot.entries_truncated ||
+        !snapshot.count.available || !snapshot.array.available || !snapshot.array.value ||
+        snapshot.count.value!=snapshot.entries_attempted || snapshot.entries_attempted>kMaxProbeEntries) return false;
+    std::uint32_t occurrences=0;
+    for (std::uint32_t i=0;i<snapshot.entries_attempted;++i)
+        if (Value(snapshot.entries[i].address,before.element)) ++occurrences;
+    if (occurrences!=1) return false;
+    const auto id="actor:"+catalog.map+":"+catalog.map_sha256+":StaticMeshActor__"+std::to_string(number-1);
+    const auto candidate=catalog.static_mesh_actors.find(id);
+    if (candidate==catalog.static_mesh_actors.end() || candidate->second.instance_id!=id || !candidate->second.resource) return false;
+    const auto& entry=observed.entry;const auto& cls=observed.owner_class;
+    const auto& node=observed.mesh_node;const auto& asset=observed.asset;const auto& resource=*candidate->second.resource;
+    if (entry.list_index>=snapshot.entries_attempted ||
+        !Value(snapshot.entries[entry.list_index].address,before.element) ||
+        !Value(snapshot.entries[entry.list_index].vtable,before.vtable) ||
+        !Value(snapshot.entries[entry.list_index].type,before.type) ||
+        !entry.owner_table_member || !entry.owner_stable || !entry.owner_name_available ||
+        !EqualAscii("StaticMeshActor",entry.owner_name,sizeof(entry.owner_name)) || !entry.object_matrix_available ||
+        !Value(entry.address,before.element) || !Value(entry.vtable,before.vtable) || !Value(entry.type,before.type) ||
+        !Value(entry.owner_candidate,before.owner) || !Value(entry.owner_object_index,before.owner_index) ||
+        !Value(entry.owner_fname,before.owner_fname) || !Value(entry.owner_backlink,before.backlink) ||
+        before.backlink!=before.element || std::memcmp(entry.object_matrix_bits,before.matrix,sizeof(before.matrix)) ||
+        !cls.member || !cls.stable || !cls.name_available || !cls.fname.available || (cls.fname.value>>16)!=0 ||
+        !EqualAscii("StaticMeshActor",cls.name,sizeof(cls.name)) || !entry.owner_class.available ||
+        !Value(cls.address,entry.owner_class.value) || !observed.owner_outer.available || !observed.owner_outer.value ||
+        !Value(observed.outer.address,observed.owner_outer.value) || !observed.outer.fname.available ||
+        (observed.outer.fname.value>>16)!=0 || !observed.outer.outer.available || observed.outer.outer.value ||
+        !Value(node.address,before.mesh_node) || asset.status!=AssetStatus::Candidate || !asset.stable ||
+        !asset.name_available || !asset.audit.available || !asset.descriptor_match || !asset.local_property_found ||
+        !asset.proxy_live_member || !asset.proxy_vtable_match || !asset.resource_vtable_match ||
+        asset.audit.chain_count>kMaxAssetAuditSlots || !before.owner || !before.mesh_node || !before.asset_available ||
+        !before.asset_proxy || !before.asset_resource || before.asset_proxy!=asset.audit.proxy ||
+        before.asset_resource!=asset.audit.resource || !Digest(resource.source_sha256) || !MeshKey(catalog,resource) ||
+        candidate->second.material_ids.size()!=resource.geometry.sections.size() ||
+        !GeometryComplete(catalog,resource,&candidate->second.material_ids) ||
+        !EqualAscii(resource.name,asset.name,sizeof(asset.name)) || !EqualAscii(resource.name,before.asset_name,sizeof(before.asset_name)) ||
+        !MeshMetadata(catalog,resource,candidate->second.material_ids,node) || section>=resource.geometry.sections.size()) return false;
+    MeshSelection result;result.instance_id=id;result.resource_id=resource.id;result.generation=generation;
+    result.binding=BindingEvidence::Candidate;result.identity_scope=IdentityScope::VisibleList;
+    result.material_ids=candidate->second.material_ids;result.matched_resource=candidate->second.resource;
+    for (const auto& material:result.material_ids) result.matched_material_names.push_back(catalog.materials.at(*material).name);
+    if (!ReadFloats(before.matrix,result.transform.data(),16)) return false;
+    result.sections.push_back(section);output=std::move(result);return true;
 }
 
 bool ResolveBsp(const BindingCatalog& catalog, const scene_bridge::ProbeSnapshot& snapshot,

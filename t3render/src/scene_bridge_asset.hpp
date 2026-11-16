@@ -276,4 +276,55 @@ inline AssetCandidate InspectAssetCandidate(const AssetReader& r, std::uint32_t 
     result.status = AssetStatus::Candidate;
     return result;
 }
+
+// Recheck the exact previously audited chain without rescanning the entire
+// UObject table. The initial InspectAssetCandidate established unique proxy
+// membership; this checks its saved slot/header and all fields before/after
+// the read. As with the full audit, ABA and unseen concurrent writes remain.
+inline bool MatchesAssetCandidate(const AssetReader& r,std::uint32_t owner,const AssetCandidate& expected) noexcept {
+    using namespace asset_detail;
+    const auto& a=expected.audit;
+    if (!r.read || !owner || expected.status!=AssetStatus::Candidate || !expected.stable || !expected.name_available ||
+        !expected.descriptor_match || !expected.local_property_found || !expected.proxy_live_member ||
+        !expected.proxy_vtable_match || !expected.resource_vtable_match ||
+        !a.available || !a.proxy || !a.resource || !a.objects_data || a.objects_count>65536 ||
+        a.objects_capacity>262144 || a.objects_count>a.objects_capacity ||
+        a.proxy_vtable!=0x10e4dfa8 || a.resource_vtable!=0x10ec0e20 ||
+        a.object_index>=a.objects_count || a.chain_count>kMaxAssetAuditSlots || !a.name_length ||
+        a.name_length>=sizeof(expected.name) || expected.name[a.name_length]!='\0') return false;
+    Descriptor d{},d_after{};LocalProperty p{},p_after{};Array objects{},objects_after{};
+    if (!descriptor(r,d) || !supported(d) || d.table!=a.descriptor_table || d.array!=a.descriptor_array ||
+        d.property!=a.descriptor || d.vtable!=a.descriptor_vtable || d.copy!=a.descriptor_copy ||
+        d.count!=a.descriptor_count || d.size!=a.descriptor_size || d.flags!=a.descriptor_flags ||
+        local_property(r,owner,p)!=LocalStatus::Good || p.owner_flags!=a.owner_flags || p.hash!=a.property_hash ||
+        p.head!=a.bucket_head || p.proxy!=a.proxy || p.count!=a.chain_count ||
+        !read(r,kObjects,&objects,sizeof(objects)) || objects.data!=a.objects_data ||
+        objects.count!=a.objects_count || objects.capacity!=a.objects_capacity) return false;
+    bool target_slot=false;
+    for (std::size_t i=0;i<p.count;++i) {
+        if (p.indices[i]!=a.chain[i].index || p.slots[i].next!=a.chain[i].next ||
+            p.slots[i].id_flags!=a.chain[i].id_flags || p.slots[i].value!=a.chain[i].value) return false;
+        if ((p.slots[i].id_flags&0x7fffu)==kPropertyId) {
+            if (target_slot || p.indices[i]!=a.slot_index || p.slots[i].next!=a.slot_next ||
+                p.slots[i].id_flags!=a.slot_id_flags || p.slots[i].value!=a.slot_value) return false;
+            target_slot=true;
+        }
+    }
+    if (!target_slot) return false;
+    std::uint32_t slot=0,vtable=0,index=0,resource=0,resource_vtable=0,name=0,length=0;
+    char text[sizeof(expected.name)]{};
+    auto check_objects=[&]() noexcept {
+        return get(r,objects.data,a.object_index*4,slot) && slot==a.proxy &&
+            get(r,a.proxy,0,vtable) && vtable==a.proxy_vtable && get(r,a.proxy,4,index) && index==a.proxy_index &&
+            index==a.object_index && get(r,a.proxy,0x58,resource) && resource==a.resource &&
+            get(r,a.resource,0,resource_vtable) && resource_vtable==a.resource_vtable &&
+            get(r,a.resource,8,name) && name==a.name_address && name>=4 && read(r,name-4,&length,4) &&
+            length==a.name_length && read(r,name,text,static_cast<std::size_t>(length)+1) &&
+            std::memcmp(text,expected.name,static_cast<std::size_t>(length)+1)==0;
+    };
+    if (!check_objects() || !descriptor(r,d_after) || std::memcmp(&d,&d_after,sizeof(d)) ||
+        local_property(r,owner,p_after)!=LocalStatus::Good || !same_property(p,p_after) ||
+        !read(r,kObjects,&objects_after,sizeof(objects_after)) || !same_array(objects,objects_after) || !check_objects()) return false;
+    return true;
+}
 }  // namespace t3render::scene_bridge

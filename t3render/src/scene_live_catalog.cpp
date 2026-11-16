@@ -26,6 +26,26 @@ bool Digest(const std::string& value) {
         return (c>='0' && c<='9') || (c>='a' && c<='f');
     });
 }
+bool StaticActorKey(const std::string& id,const std::string& prefix) {
+    if (id.compare(0,prefix.size(),prefix)!=0) return false;
+    const auto suffix=id.substr(prefix.size());
+    if (suffix.empty() || (suffix.size()>1 && suffix[0]=='0')) return false;
+    std::uint32_t number=0;
+    for (unsigned char c:suffix) {
+        if (c<'0' || c>'9' || number>(65534u-(c-'0'))/10u) return false;
+        number=number*10u+(c-'0');
+    }
+    return true;
+}
+bool StaticMeshKey(const Resource& resource,const std::string& prefix) {
+    if (resource.name.empty()) return false;
+    std::string lower;lower.reserve(resource.name.size());
+    for (unsigned char c:resource.name) {
+        if (c<33 || c>126 || c==':') return false;
+        lower.push_back(static_cast<char>(c>='A' && c<='Z' ? c+('a'-'A') : c));
+    }
+    return resource.id==prefix+resource.source_sha256+":"+lower;
+}
 bool GeometryData(Reader& reader, Geometry& output) {
     std::uint32_t vertices=0, indices=0, sections=0, flags=0;
     if (!reader.u32(vertices) || !reader.u32(indices) || !reader.u32(sections) || !reader.u32(flags) ||
@@ -136,7 +156,8 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
     if (!reader.bytes(magic,sizeof(magic))) return false;
     const bool version_two=std::memcmp(magic,"T3LCAT02",8)==0;
     const bool version_three=std::memcmp(magic,"T3LCAT03",8)==0;
-    if ((!version_two && !version_three && std::memcmp(magic,"T3LCAT01",8)) || !Text(reader,map) || map.size()>128 || map.find(':')!=std::string::npos ||
+    const bool version_four=std::memcmp(magic,"T3LCAT04",8)==0;
+    if ((!version_two && !version_three && !version_four && std::memcmp(magic,"T3LCAT01",8)) || !Text(reader,map) || map.size()>128 || map.find(':')!=std::string::npos ||
         !Text(reader,map_sha) || !Digest(map_sha) || !Text(reader,loaded.offline_scene_sha256) ||
         !Digest(loaded.offline_scene_sha256) || !Text(reader,actor) ||
         actor!="actor:"+map+":"+map_sha+":StaticMeshActor__1520") return false;
@@ -163,8 +184,8 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
         if (!Text(reader,material.id) || !Text(reader,material.name) || catalog.materials.count(material.id) ||
             override_materials.count(material.id)) return false;
         const auto id=material.id;
-        if (version_three && (id=="remaster:material:stone_wall_v2" || id=="remaster:material:wood_floor_v2")) return false;
-        if ((version_two || version_three) && id.compare(0,override_prefix.size(),override_prefix)==0)
+        if ((version_three || version_four) && (id=="remaster:material:stone_wall_v2" || id=="remaster:material:wood_floor_v2")) return false;
+        if ((version_two || version_three || version_four) && id.compare(0,override_prefix.size(),override_prefix)==0)
             override_materials.emplace(id,std::move(material));
         else {
             if (!residency->AddMaterial(epoch.map,material)) return false;
@@ -209,7 +230,11 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
         catalog.bsp.push_back(std::move(resource));
     }
     std::uint32_t has_override=version_two ? 1u : 0u;
-    if (version_three && (!reader.u32(has_override) || has_override>1)) return false;
+    if ((version_three || version_four) && (!reader.u32(has_override) || has_override>1)) return false;
+    std::uint32_t has_materials=version_three ? 1u : 0u;
+    if (version_four && (!reader.u32(has_materials) || has_materials>1)) return false;
+    if (has_materials && (map!="SouthQuarter1_int1" || !loaded.conventions.meters_per_unit ||
+                          std::fabs(*loaded.conventions.meters_per_unit-0.01905f)>1e-9f)) return false;
     if (has_override) {
         Resource replacement;
         if (!ResourceData(reader,ResourceKind::StaticMesh,replacement) ||
@@ -219,7 +244,7 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
         rule->source=catalog.bed;rule->replacement=std::make_shared<const Resource>(std::move(replacement));
         loaded.bed_override=std::move(rule);
     } else if (!override_materials.empty()) return false;
-    if (version_three) {
+    if (has_materials) {
         std::uint32_t count=0;
         if (!reader.u32(count) || count!=2) return false;
         auto library=std::make_shared<BedroomMaterialLibrary>();
@@ -236,6 +261,70 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
             }
         }
         loaded.bedroom_materials=std::move(library);
+    }
+    if (version_four) {
+        if (catalog.bed->geometry.positions.size()>65536 || catalog.bed->geometry.indices.size()>65536 ||
+            catalog.bed->geometry.sections.size()>scene_bridge::kMaxMeshNodeSections) return false;
+        std::uint32_t fingerprint_count=0;
+        if (!reader.u32(fingerprint_count) || !fingerprint_count || fingerprint_count>2) return false;
+        std::unordered_set<std::string> fingerprints;
+        for (std::uint32_t i=0;i<fingerprint_count;++i) {
+            std::string value;
+            if (!Text(reader,value) || !Digest(value) || !fingerprints.insert(value).second) return false;
+        }
+        if (!fingerprints.count(catalog.bed->source_sha256)) return false;
+        std::uint32_t mesh_count=0;
+        if (bsp_count>=4096 || !reader.u32(mesh_count) || mesh_count>4095u-bsp_count) return false;
+        std::unordered_map<std::string,std::shared_ptr<const Resource>> resources;
+        resources.emplace(catalog.bed->id,catalog.bed);
+        std::unordered_set<std::string> mesh_names;
+        const auto mesh_prefix="mesh:"+map+":"+map_sha+":";
+        auto name_key=[](const std::string& name) {
+            std::string value=name;
+            for (char& c:value) if (c>='A' && c<='Z') c=static_cast<char>(c+('a'-'A'));
+            return value;
+        };
+        mesh_names.insert(name_key(catalog.bed->name));
+        for (std::uint32_t i=0;i<mesh_count;++i) {
+            Resource mesh;
+            if (!ResourceData(reader,ResourceKind::StaticMesh,mesh) || !fingerprints.count(mesh.source_sha256) ||
+                mesh.geometry.positions.size()>65536 || mesh.geometry.indices.size()>65536 ||
+                mesh.geometry.sections.size()>scene_bridge::kMaxMeshNodeSections || !StaticMeshKey(mesh,mesh_prefix) ||
+                resources.count(mesh.id) || !mesh_names.insert(name_key(mesh.name)).second) return false;
+            for (const auto& part:mesh.geometry.sections)
+                if (part.material_id && !catalog.materials.count(*part.material_id)) return false;
+            const auto id=mesh.id;
+            if (!residency->AddResource(epoch.map,std::move(mesh))) return false;
+            auto resource=residency->FindSceneResource(epoch.map,id);
+            if (!resource || !resources.emplace(id,std::move(resource)).second) return false;
+        }
+        std::uint32_t actor_count=0;
+        if (!reader.u32(actor_count) || !actor_count || actor_count>8192) return false;
+        const auto actor_prefix="actor:"+map+":"+map_sha+":StaticMeshActor__";
+        std::unordered_set<std::string> used_resources;
+        for (std::uint32_t i=0;i<actor_count;++i) {
+            StaticMeshCandidate candidate;std::string resource_id;std::uint32_t count=0;
+            if (!Text(reader,candidate.instance_id) || !StaticActorKey(candidate.instance_id,actor_prefix) ||
+                !Text(reader,resource_id) || !reader.u32(count) || !count || count>kMaxSections) return false;
+            const auto found=resources.find(resource_id);
+            if (found==resources.end() || count!=found->second->geometry.sections.size()) return false;
+            candidate.resource=found->second;candidate.material_ids.reserve(count);
+            for (std::uint32_t section=0;section<count;++section) {
+                std::string material;
+                if (!Text(reader,material) || !catalog.materials.count(material)) return false;
+                candidate.material_ids.push_back(std::move(material));
+            }
+            used_resources.insert(resource_id);
+            const auto key=candidate.instance_id;
+            if (!catalog.static_mesh_actors.emplace(key,std::move(candidate)).second) return false;
+        }
+        const auto target=catalog.static_mesh_actors.find(actor);
+        if (target==catalog.static_mesh_actors.end() || target->second.resource!=catalog.bed) return false;
+        for (std::size_t i=0;i<catalog.bed->geometry.sections.size();++i) {
+            const auto& expected=catalog.bed_materials.empty() ? catalog.bed->geometry.sections[i].material_id : catalog.bed_materials[i];
+            if (target->second.material_ids[i]!=expected) return false;
+        }
+        if (used_resources.size()!=resources.size()) return false;
     }
     if (!reader.end()) return false;
     catalog.bsp_catalog_complete=true; // complete only relative to the offline exporter

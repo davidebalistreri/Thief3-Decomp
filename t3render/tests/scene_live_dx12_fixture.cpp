@@ -634,6 +634,45 @@ bool catalog_override(const wchar_t* path) {
         CHECK(viewer->stats().stopped && !viewer->stats().failed);
         std::cout<<"scene_live_material_viewer_fixture=ok source=offline visibility=changed reset=ok\n";
     }
+    if (!catalog.binding.static_mesh_actors.empty()) {
+        const auto actor_id="actor:"+catalog.binding.map+":"+catalog.binding.map_sha256+":StaticMeshActor__258";
+        const auto found=catalog.binding.static_mesh_actors.find(actor_id);
+        CHECK(found!=catalog.binding.static_mesh_actors.end() && found->second.resource->name=="GENrafters1");
+        const auto& candidate=found->second;const auto& geometry=candidate.resource->geometry;
+        Vec3 minimum=geometry.positions[0],maximum=minimum;
+        for (const auto& position:geometry.positions) for (unsigned axis=0;axis<3;++axis) {
+            minimum[axis]=std::min(minimum[axis],position[axis]);maximum[axis]=std::max(maximum[axis],position[axis]);
+        }
+        const float sx=maximum[0]-minimum[0],sy=maximum[1]-minimum[1],sz=maximum[2]-minimum[2];
+        CHECK(sx>0 && sy>0 && sz>0);
+        FrameInput generic;generic.map_epoch=epoch.map;generic.device_epoch=scene.epochs().device;generic.frame_id=8;
+        generic.provenance=frame.provenance;generic.synchronized=true;generic.conventions=catalog.conventions;
+        generic.camera.width=128;generic.camera.height=128;generic.camera.view=identity;
+        generic.camera.projection={1.0f/sx,0,0,0, 0,0,.8f/sy,0, 0,1.0f/sz,0,0,
+                                   -(minimum[0]+maximum[0])/(2*sx),-(minimum[2]+maximum[2])/(2*sz),
+                                   .1f-.8f*minimum[1]/sy,1};
+        MeshSelection selection;selection.instance_id=actor_id;selection.resource_id=candidate.resource->id;
+        selection.matched_resource=candidate.resource;selection.generation=1;selection.binding=BindingEvidence::Candidate;
+        selection.identity_scope=IdentityScope::VisibleList;selection.material_ids=candidate.material_ids;selection.transform=identity;
+        for (std::uint32_t i=0;i<geometry.sections.size();++i) selection.sections.push_back(i);
+        generic.meshes.push_back(selection);CHECK(scene.Publish(generic));
+        auto render_generic=[&](std::vector<std::uint8_t>& image) {
+            ResidentFlatFrame draw;
+            return BuildResidentFlatFrame(*scene.current(),draw) && gpu->PrepareResident(draw,true) && gpu->Submit() && gpu->Finish(&image);
+        };
+        std::vector<std::uint8_t> original_generic,moved_generic,hidden_generic,reset_generic;
+        CHECK(render_generic(original_generic));
+        generic.frame_id=9;generic.meshes[0].transform[12]=sx*.3f;CHECK(scene.Publish(generic));
+        CHECK(render_generic(moved_generic) && moved_generic!=original_generic);
+        generic.frame_id=10;generic.meshes.clear();CHECK(scene.Publish(generic));
+        CHECK(render_generic(hidden_generic) && hidden_generic!=original_generic);
+        const auto ticket=scene.BeginReset();CHECK(ticket && scene.EndReset(ticket,true));
+        generic.frame_id=11;generic.device_epoch=scene.epochs().device;generic.meshes.push_back(selection);CHECK(scene.Publish(generic));
+        CHECK(render_generic(reset_generic) && reset_generic==original_generic);
+        std::cout<<"scene_live_static_catalog_fixture=ok source=offline actor=StaticMeshActor__258"
+                 <<" mesh=GENrafters1 camera=synthetic movement=ok visibility=ok reset=ok candidates="
+                 <<catalog.binding.static_mesh_actors.size()<<"\n";
+    }
     std::cout << "scene_live_catalog_dx12_fixture=ok source=offline camera=synthetic original_override_restore=ok"
               << " movement=ok visibility=ok reset=ok vertices=" << catalog.bed_override->replacement->geometry.positions.size()
               << " indices=" << catalog.bed_override->replacement->geometry.indices.size()

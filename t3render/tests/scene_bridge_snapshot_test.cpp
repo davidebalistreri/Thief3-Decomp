@@ -286,6 +286,19 @@ int main() {
     auto witness_live=SampleLiveProbe(reader,42,0x1000,0x109271ae);const auto witness_reads=large.read_calls;
     assert(!witness_live.target.entry_available && witness_live.map_witness.available && witness_reads<full_reads);
     std::printf("probe_read_calls full=%u live=%u no_bed=%u unrelated_objects=%u\n",full_reads,live_reads,witness_reads,extra);
+    large.put<std::uint32_t>(0x10f2c734,0x1000);large.read_calls=0;
+    auto first_generic=SampleSubmission(reader,0x3000);
+    const auto generic_observation=SampleVisibleStaticMesh(reader,witness_live,first_generic);
+    assert(AttachAssetCandidate(first_generic,generic_observation.asset));
+    auto last_generic=SampleSubmission(reader,0x3000);
+    const AssetReader generic_reader{&large,Memory::read};
+    assert(MatchesAssetCandidate(generic_reader,last_generic.owner,generic_observation.asset));
+    assert(AttachAssetCandidate(last_generic,generic_observation.asset));
+    const auto generic_reads=large.read_calls;
+    assert(generic_observation.list_stable && generic_observation.asset.status==AssetStatus::Candidate &&
+           generic_observation.mesh_node.stable && SameSubmission(first_generic,last_generic));
+    std::printf("generic_scope_read_calls=%u unrelated_objects=%u\n",generic_reads,extra);
+    std::printf("probe_snapshot_bytes=%zu generic_sample_bytes=%zu\n",sizeof(ProbeSnapshot),sizeof(ProbeStaticMesh));
     large.put<std::uint32_t>(0x4020,(1521u<<16)|7);
     // Another globally named actor outside the visible list is not ruled out
     // by the fast path; its result must explicitly retain the weaker scope.
@@ -303,6 +316,45 @@ int main() {
     assert(live.pass_stable && live.pass.value==1 && large.read_calls==2 && !live.target.entry_available);
     reader.context=&complete;
     complete.put<std::uint32_t>(0x10f2c734, 0x1000);
+    auto general=complete;general.put<std::uint32_t>(0x4020,(2u<<16)|7);
+    general.put<std::uint32_t>(0x10efef54,0);reader.context=&general;
+    const auto generic_probe=SampleLiveProbe(reader,42,0x1000,0x109271ae);
+    const auto cheap=SampleSubmission(reader,0x3000);
+    assert(cheap.valid && !cheap.asset_available);
+    const auto generic_submission=SampleSubmission(reader,0x3000,true);
+    assert(generic_submission.valid && generic_submission.asset_available &&
+           std::strcmp(generic_submission.asset_name,mesh_name)==0);
+    auto generic=SampleVisibleStaticMesh(reader,generic_probe,generic_submission);
+    assert(generic.list_stable && generic.object_table_complete && generic.name_occurrences==1 &&
+           generic.entry.owner_stable && generic.entry.list_index==0 && generic.owner_class.stable &&
+           generic.outer.stable && generic.owner_outer.value==0x1a000 &&
+           generic.asset.status==AssetStatus::Candidate && generic.mesh_node.stable && generic.mesh_node.sections_available);
+    const AssetReader audit_reader{&general,Memory::read};
+    assert(MatchesAssetCandidate(audit_reader,0x4000,generic.asset));
+    auto bad_audit=generic.asset;bad_audit.audit.slot_value++;
+    assert(!MatchesAssetCandidate(audit_reader,0x4000,bad_audit));
+    for (const auto address:{0xc058u,0x6238u,0x800cu,0xd008u}) {
+        auto changed=general;changed.put<std::uint32_t>(address,0);
+        const AssetReader changed_reader{&changed,Memory::read};
+        assert(!MatchesAssetCandidate(changed_reader,0x4000,generic.asset));
+    }
+    auto duplicated_probe=generic_probe;duplicated_probe.entries[2]=duplicated_probe.entries[0];
+    duplicated_probe.entries[2].list_index=2;duplicated_probe.count.value=duplicated_probe.entries_attempted=3;
+    assert(!SampleVisibleStaticMesh(reader,duplicated_probe,generic_submission).list_stable);
+    auto duplicate_name=general;duplicate_name.region(0x3300,0x100);duplicate_name.region(0x4200,0x100);
+    duplicate_name.put<std::uint32_t>(0x1050,3);duplicate_name.put<std::uint32_t>(0x2008,0x3300);
+    duplicate_name.put<std::uint32_t>(0x3300,0x10e4e8c0);duplicate_name.put<std::uint32_t>(0x3344,4);
+    duplicate_name.put<std::uint32_t>(0x3354,0x4200);duplicate_name.put<std::uint32_t>(0x4220,(2u<<16)|7);
+    auto duplicate_list=generic_probe;duplicate_list.count.value=duplicate_list.entries_attempted=3;
+    duplicate_list.entries[2].list_index=2;duplicate_list.entries[2].address={0x3300,true};
+    duplicate_list.entries[2].vtable={0x10e4e8c0,true};duplicate_list.entries[2].type={4,true};
+    ProbeReader duplicate_reader{&duplicate_name,Memory::read};
+    assert(!SampleVisibleStaticMesh(duplicate_reader,duplicate_list,generic_submission).list_stable);
+    for (auto kind:{ChangeDuringWitness::Kind::Outer,ChangeDuringWitness::Kind::List,ChangeDuringWitness::Kind::DuplicateObject}) {
+        auto changing=general;ChangeDuringWitness state{&changing,kind,false};ProbeReader unstable{&state,ChangeDuringWitness::read};
+        assert(!SampleVisibleStaticMesh(unstable,generic_probe,generic_submission).list_stable && state.changed);
+    }
+    reader.context=&complete;
     auto mesh_submission = SampleSubmission(reader, 0x3000);
     assert(mesh_submission.valid && mesh_submission.owner == 0x4000 && mesh_submission.mesh_node == 0xf000 &&
            mesh_submission.asset_available && mesh_submission.asset_proxy == 0xc000 &&

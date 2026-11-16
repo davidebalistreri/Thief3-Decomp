@@ -42,6 +42,25 @@ def fixture():
     return data
 
 
+def static_fixture():
+    data = fixture()
+    source = data['source']
+    map_name, map_hash, bundle_hash = source['map'], source['fingerprints']['map'], source['fingerprints']['bundle']
+    original = data['static_mesh_resources'][0]
+    mesh = copy.deepcopy(original)
+    mesh['id'] = f'mesh:{map_name}:{map_hash}:{bundle_hash}:inncrate1'
+    mesh['name'] = 'INNcrate1'
+    data['static_mesh_resources'].append(mesh)
+    for number in (5, 6, 7):
+        actor = copy.deepcopy(data['mesh_instances'][0])
+        actor['id'] = f'actor:{map_name}:{map_hash}:StaticMeshActor__{number}'
+        actor['resource_id'] = mesh['id']
+        if number == 7:
+            actor['material_ids'] = [None]  # retained as excluded, never guessed
+        data['mesh_instances'].append(actor)
+    return data
+
+
 class LiveCatalogTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -189,6 +208,47 @@ class LiveCatalogTests(unittest.TestCase):
         for offset, value in ((0, b"BAD!"), (8, struct.pack("<I", 0xffffffff))):
             body = bytearray(data[:-32]); body[offset:offset+4] = value
             self.assertEqual(self.load(bytes(body) + hashlib.sha256(body).digest()), "rejected")
+
+    def test_static_mesh_candidates_round_trip_and_keep_source_offline(self):
+        data = static_fixture();data['conventions']['meters_per_unit'] = .01905
+        scene = scene_ir.SceneSnapshot.from_dict(data)
+        for replacement, textures in ((None, None), (bed_tests.glb(scene), None),
+                                      (None, TinyTextures()), (bed_tests.glb(scene), TinyTextures())):
+            raw, manifest = catalog.export(json.dumps(data).encode(), replacement, textures, True)
+            with self.subTest(bed=bool(replacement), textures=bool(textures)):
+                self.assertEqual(raw[:8], b'T3LCAT04')
+                self.assertEqual(self.load(raw).split()[-3:], ['static_mesh_candidates', '3', '2'])
+                candidates = manifest['static_mesh_candidates']
+                self.assertEqual((candidates['actors'], candidates['extra_resources']), (3, 1))
+                self.assertEqual(len(candidates['excluded_actors']), 1)
+                self.assertTrue(candidates['excluded_actors'][0].endswith('StaticMeshActor__7'))
+                self.assertEqual(candidates['scope'], 'offline_candidates_without_transforms_or_visibility')
+                self.assertEqual(manifest['source'], 'offline')
+
+    def test_static_mesh_candidates_reject_bad_identity_and_materials(self):
+        data = static_fixture()
+        packed, _ = catalog.export(json.dumps(data).encode(), static_meshes=True)
+        body = bytearray(packed[:-32])
+        def reject(changed):
+            self.assertEqual(self.load(bytes(changed) + hashlib.sha256(changed).digest()), 'rejected')
+        # Rewrite a second actor ID to duplicate the first without changing length.
+        second = body.rfind(b'StaticMeshActor__6')
+        self.assertGreater(second, 0)
+        bad = body.copy();bad[second + len(b'StaticMeshActor__')] = ord('5');reject(bad)
+        # A candidate skin must reference a material in this catalog.
+        skin = body.rfind(b'material:wood')
+        self.assertGreater(skin, 0)
+        bad = body.copy();bad[skin + len(b'material:')] = ord('x');reject(bad)
+        # Remove the target's candidate record while leaving the bed header intact.
+        target = body.rfind(b'StaticMeshActor__1520')
+        self.assertGreater(target, 0)
+        bad = body.copy();bad[target + len(b'StaticMeshActor__152')] = ord('9');reject(bad)
+        # A same-name mesh from another source makes resource naming ambiguous.
+        collision = copy.deepcopy(data['static_mesh_resources'][0])
+        collision['id'] = collision['id'].replace('b'*64, 'c'*64)
+        data['static_mesh_resources'].append(collision)
+        with self.assertRaisesRegex(ValueError, 'target bed'):
+            catalog.export(json.dumps(data).encode(), static_meshes=True)
 
     def test_runtime_source_or_unqualified_assets_are_refused(self):
         data = fixture()

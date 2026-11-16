@@ -7,6 +7,11 @@
 #include "scene_bridge_submission.hpp"
 
 namespace t3render::live {
+struct StaticMeshCandidate {
+    std::string instance_id;
+    std::shared_ptr<const Resource> resource;
+    std::vector<std::optional<std::string>> material_ids;
+};
 struct BindingCatalog {
     std::string map, map_sha256, bed_instance_id;
     std::shared_ptr<const Resource> bed;
@@ -16,6 +21,9 @@ struct BindingCatalog {
     // asserted by its producer; the legacy importer itself remains heuristic.
     bool bsp_catalog_complete = false;
     std::vector<std::shared_ptr<const Resource>> bsp;
+    // Offline candidates only: neither the actor, resource nor materials are
+    // considered observed until a same-frame runtime matcher corroborates them.
+    std::unordered_map<std::string,StaticMeshCandidate> static_mesh_actors;
 };
 
 // Accept only the verified caller, pass and stable camera observation. It does
@@ -31,6 +39,11 @@ bool ReadProbeCamera(const scene_bridge::ProbeSnapshot& snapshot, std::uint32_t 
 bool ResolveBed(const BindingCatalog& catalog, const scene_bridge::ProbeSnapshot& snapshot,
                 const scene_bridge::SubmissionSample& before, std::uint32_t section,
                 std::uint64_t instance_generation, MeshSelection& output);
+// Requires a bounded same-scope sample plus the offline actor/resource/skin
+// candidate. Success is Candidate evidence, not proof of the GPU payload.
+bool ResolveStaticMesh(const BindingCatalog& catalog,const scene_bridge::ProbeSnapshot& snapshot,
+                       const scene_bridge::SubmissionSample& before,const scene_bridge::ProbeStaticMesh& observed,
+                       std::uint32_t section,std::uint64_t instance_generation,MeshSelection& output);
 bool ResolveBsp(const BindingCatalog& catalog, const scene_bridge::ProbeSnapshot& snapshot,
                 const scene_bridge::SubmissionSample& before, std::uint32_t section, BspSelection& output);
 struct IndexedDraw {

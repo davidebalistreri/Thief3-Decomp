@@ -7,6 +7,7 @@ frame, visibility observation, or proof of which assets the game loaded.
 import argparse
 import hashlib
 import math
+import re
 from pathlib import Path
 import struct
 import sys
@@ -137,7 +138,51 @@ def _material_library(textures):
     return body, manifest
 
 
-def export(raw, bed_high=None, bedroom_materials=None):
+def _static_mesh_candidates(scene, bed, materials):
+    """Collect eligible offline actors without copying their transforms."""
+    map_name = scene.source.map
+    map_sha = scene.source.fingerprints['map']
+    fingerprints = {scene.source.fingerprints.get('bundle'), scene.source.fingerprints.get('kernel')}
+    by_id = {item.id: item for item in scene.static_mesh_resources}
+    names = {}
+    for resource in scene.static_mesh_resources:
+        names.setdefault(resource.name.lower(), set()).add(resource.id)
+    actor_prefix = f'actor:{map_name}:{map_sha}:StaticMeshActor__'
+    resource_prefix = f'mesh:{map_name}:{map_sha}:'
+    actors, resources, excluded = [], {}, []
+    for instance in scene.mesh_instances:
+        if not instance.id.startswith(actor_prefix):
+            continue
+        suffix = instance.id[len(actor_prefix):]
+        resource = by_id.get(instance.resource_id)
+        if not re.fullmatch(r'0|[1-9][0-9]*', suffix) or int(suffix) > 65534 or resource is None:
+            excluded.append(instance.id); continue
+        name = resource.name
+        name_ok = bool(name) and name.isascii() and all(33 <= ord(c) <= 126 and c != ':' for c in name)
+        fingerprint = resource.id[len(resource_prefix):].split(':', 1)[0] if resource.id.startswith(resource_prefix) else ''
+        expected = resource_prefix + fingerprint + ':' + name.lower()
+        ids = instance.material_ids or tuple(section.material_id for section in resource.geometry.sections)
+        section_materials = (section.material_id for section in resource.geometry.sections)
+        geometry = resource.geometry
+        if (not name_ok or fingerprint not in fingerprints or resource.id != expected or
+                len(names.get(name.lower(), ())) != 1 or len(ids) != len(resource.geometry.sections) or
+                not 1 <= len(geometry.positions) <= 65536 or not 1 <= len(geometry.indices) <= 65536 or
+                not 1 <= len(geometry.sections) <= 16 or
+                not ids or any(item is None or item not in materials for item in ids) or
+                any(item is not None and item not in materials for item in section_materials)):
+            excluded.append(instance.id); continue
+        actors.append((instance.id, resource.id, tuple(ids)))
+        if resource.id != bed.id:
+            resources[resource.id] = (resource, fingerprint)
+    target = actor_prefix + '1520'
+    if target not in {actor for actor, _, _ in actors}:
+        raise ValueError('target bed is not a qualified static mesh candidate')
+    if len(actors) > 8192 or len(resources) > 4094:
+        raise ValueError('catalog static mesh candidates are empty or exceed bounds')
+    return sorted(actors), [resources[key] for key in sorted(resources)], sorted(excluded)
+
+
+def export(raw, bed_high=None, bedroom_materials=None, static_meshes=False):
     if not isinstance(raw, bytes) or not raw or len(raw) > preview.MAX_INPUT:
         raise ValueError("offline SceneIR input is empty or too large")
     scene = SceneSnapshot.from_json(raw)
@@ -176,8 +221,15 @@ def export(raw, bed_high=None, bedroom_materials=None):
         if block.source_offset is None or block.id != f"bsp:{map_name}:{map_sha}:{block.source_index}:{block.source_offset}":
             raise ValueError("BSP ID must retain offline index and offset")
     material_by_id = {m.id: m for m in scene.materials}
+    mesh_actors, mesh_resources, excluded = _static_mesh_candidates(scene, bed, material_by_id) if static_meshes else ([], [], [])
+    if static_meshes and len(mesh_resources) + len(scene.bsp_blocks) + 1 > 4096:
+        raise ValueError('catalog resource count exceeds residency bounds')
     required = {s.material_id for r in [bed, *scene.bsp_blocks] for s in r.geometry.sections if s.material_id is not None}
     required.update(x for x in instance.material_ids if x is not None)
+    for _, _, ids in mesh_actors:
+        required.update(ids)
+    for resource, _ in mesh_resources:
+        required.update(s.material_id for s in resource.geometry.sections if s.material_id is not None)
     bed_materials = instance.material_ids or tuple(s.material_id for s in bed.geometry.sections)
     if (not bed_materials or any(x is None or x not in material_by_id for x in bed_materials) or
             any(s.material_id is None for b in scene.bsp_blocks for s in b.geometry.sections) or
@@ -188,8 +240,8 @@ def export(raw, bed_high=None, bedroom_materials=None):
     extra_materials = [("remaster:material:bed_high:"+name, name) for name in generated_bed.MATERIALS] if replacement else []
     if any(identifier in material_by_id for identifier, _ in extra_materials):
         raise ValueError("generated bed material IDs collide with the offline scene")
-    if bedroom_materials is not None and any("remaster:material:"+name in material_by_id
-                                             for name in ("stone_wall_v2", "wood_floor_v2")):
+    if (static_meshes or bedroom_materials is not None) and any("remaster:material:"+name in material_by_id
+                                                                for name in ("stone_wall_v2", "wood_floor_v2")):
         raise ValueError("bedroom material IDs collide with the offline scene")
     if len(materials) + len(extra_materials) > 8192:
         raise ValueError("catalog material count exceeds bounds")
@@ -199,7 +251,7 @@ def export(raw, bed_high=None, bedroom_materials=None):
               enum(c.winding, ("unknown", "normal_aligned", "normal_opposed")),
               enum(c.uv_origin, ("unknown", "top_left", "bottom_left")),
               enum(c.clip_depth, ("unknown", "zero_to_one")))
-    body = bytearray(b"T3LCAT03" if bedroom_materials is not None else b"T3LCAT02" if replacement else b"T3LCAT01")
+    body = bytearray(b"T3LCAT04" if static_meshes else b"T3LCAT03" if bedroom_materials is not None else b"T3LCAT02" if replacement else b"T3LCAT01")
     for value in (map_name, map_sha, hashlib.sha256(raw).hexdigest(), actor_id):
         body += _text(value)
     body += struct.pack("<4I", *values)
@@ -217,8 +269,10 @@ def export(raw, bed_high=None, bedroom_materials=None):
         body += _text(item, optional=True)
     for block in scene.bsp_blocks:
         body += _resource(block.id, f"BSP {block.source_index}", map_sha, block.geometry)
-    if bedroom_materials is not None:
+    if static_meshes or bedroom_materials is not None:
         body += _u32(int(replacement is not None))
+    if static_meshes:
+        body += _u32(int(bedroom_materials is not None))
     if replacement:
         identifier, digest, geometry = replacement
         body += _resource(identifier, "bed_high", digest, geometry)
@@ -226,10 +280,23 @@ def export(raw, bed_high=None, bedroom_materials=None):
     if bedroom_materials is not None:
         packed, material_sources = _material_library(bedroom_materials)
         body += packed
+    if static_meshes:
+        fingerprints = sorted(value for value in {source.fingerprints.get('bundle'), source.fingerprints.get('kernel')} if value)
+        body += _u32(len(fingerprints))
+        for fingerprint in fingerprints:
+            body += _text(fingerprint)
+        body += _u32(len(mesh_resources))
+        for resource, fingerprint in mesh_resources:
+            body += _resource(resource.id, resource.name, fingerprint, resource.geometry)
+        body += _u32(len(mesh_actors))
+        for actor, resource_id, ids in mesh_actors:
+            body += _text(actor) + _text(resource_id) + _u32(len(ids))
+            for material_id in ids:
+                body += _text(material_id)
     if len(body) + 32 > MAX_BYTES:
         raise ValueError("catalog exceeds 64 MiB")
     data = bytes(body) + hashlib.sha256(body).digest()
-    manifest = {"schema": "t3.scene.live-catalog", "version": 3 if bedroom_materials is not None else 2 if replacement else 1, "source": "offline",
+    manifest = {"schema": "t3.scene.live-catalog", "version": 4 if static_meshes else 3 if bedroom_materials is not None else 2 if replacement else 1, "source": "offline",
                 "offline_scene_sha256": hashlib.sha256(raw).hexdigest(), "catalog_sha256": hashlib.sha256(data).hexdigest(),
                 "map": map_name, "map_sha256": map_sha, "bed_resource_id": bed.id, "bed_actor_id": actor_id,
                 "bsp_blocks": len(scene.bsp_blocks), "materials": len(materials) + len(extra_materials),
@@ -245,6 +312,11 @@ def export(raw, bed_high=None, bedroom_materials=None):
         manifest["bedroom_materials"] = {"sources_sha256": material_sources,
                                          "scope": "viewer_only_when_same_frame_bed_anchor_is_selected"}
         manifest["limitations"].append("Materials are offline visual assets; the flat viewer does not infer runtime lighting.")
+    if static_meshes:
+        manifest["static_mesh_candidates"] = {"actors": len(mesh_actors), "extra_resources": len(mesh_resources),
+                                              "excluded_actors": excluded,
+                                              "scope": "offline_candidates_without_transforms_or_visibility"}
+        manifest["limitations"].append("Static mesh actor/resource/skin candidates are offline; none establishes a runtime binding.")
     return data, manifest
 
 
@@ -255,13 +327,14 @@ def main(argv=None):
     parser.add_argument("--bed-high", type=Path, help="optional generated Godot bed GLB for the live viewer")
     parser.add_argument("--bedroom-materials", type=Path, help="optional generated Godot material directory")
     parser.add_argument("--bedroom-texture-size", type=int, default=512, help="power-of-two material texture size, up to 1024")
+    parser.add_argument("--static-meshes", action="store_true", help="include bounded offline static mesh actor candidates")
     args = parser.parse_args(argv)
     try:
         raw = preview.read_limited(args.offline_scene, preview.MAX_INPUT)
         high = preview.read_limited(args.bed_high, generated_bed.generated.MAX_GLB_BYTES) if args.bed_high else None
         textures = (material_overrides.GodotTextures(args.bedroom_materials, args.bedroom_texture_size, True)
                     if args.bedroom_materials else None)
-        body, manifest = export(raw, high, textures)
+        body, manifest = export(raw, high, textures, args.static_meshes)
         packet.write_pair(args.output, body, manifest)
     except (OSError, ValueError, UnicodeError) as exc:
         parser.exit(2, f"{exc}\n")

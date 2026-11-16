@@ -9,6 +9,7 @@
 #include <limits>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace t3render::live {
@@ -19,6 +20,7 @@ struct RuntimeState {
     std::unique_ptr<SceneDriver> owned;
     std::unique_ptr<SceneViewer> viewer;
     std::string session_id; // initialized before publishing driver; never changed afterwards
+    bool static_meshes_enabled=false; // written before driver publication
     std::atomic<SceneDriver*> driver{nullptr};
     std::atomic<IDirect3DDevice8*> device{nullptr};
     std::atomic<bool> terminal{false},deferred_loss{false};
@@ -31,7 +33,10 @@ RuntimeState& State() {
 }
 struct LastError { DWORD value=GetLastError();~LastError(){SetLastError(value);} };
 thread_local bool querying=false;
-struct Scope { std::uint64_t ticket=0;std::uint32_t element=0;bool sampled=false; };
+struct Scope {
+    std::uint64_t ticket=0;std::uint32_t element=0;bool sampled=false,generic=false;
+    std::unique_ptr<scene_bridge::AssetCandidate> asset;
+};
 struct ScopeStack { unsigned depth=0;Scope items[16]{}; };
 thread_local ScopeStack scopes;
 
@@ -88,9 +93,9 @@ bool ReadMemory(void*,std::uint32_t address,void* output,std::size_t size) noexc
     return address && output && ReadProcessMemory(GetCurrentProcess(),
         reinterpret_cast<const void*>(static_cast<std::uintptr_t>(address)),output,size,&copied) && copied==size;
 }
-scene_bridge::SubmissionSample Sample(std::uint32_t element) noexcept {
+scene_bridge::SubmissionSample Sample(std::uint32_t element,bool generic=false) noexcept {
     const scene_bridge::ProbeReader reader{nullptr,ReadMemory};
-    return scene_bridge::SampleSubmission(reader,element);
+    return scene_bridge::SampleSubmission(reader,element,generic);
 }
 std::wstring Environment(const wchar_t* name) {
     const DWORD required=GetEnvironmentVariableW(name,nullptr,0);
@@ -144,6 +149,7 @@ bool RuntimeInitialize() noexcept {
             auto bedroom_materials=catalog.bedroom_materials;
             auto driver=SceneDriver::Create(std::move(catalog),std::move(source),0,1);
             if (!driver) return;
+            state.static_meshes_enabled=Environment(L"T3RENDER_SCENE_LIVE_STATIC_MESHES")==L"1";
             state.session_id=std::move(session);
             state.owned=std::move(driver);state.driver.store(state.owned.get(),std::memory_order_release);
             if (Environment(L"T3RENDER_SCENE_LIVE_DX12")==L"1") {
@@ -234,7 +240,24 @@ void RuntimeSubmissionEnter(std::uint32_t element,std::uint32_t stage,std::uint3
         auto* driver=Driver(true);if (!driver) return;
         scope.ticket=driver->BeginScope(CurrentThread(),stage,section);
         if (!scope.ticket) return;
-        const auto sample=stage==1 ? Sample(element) : scene_bridge::SubmissionSample{};
+        auto sample=stage==1 ? Sample(element) : scene_bridge::SubmissionSample{};
+        std::shared_ptr<const scene_bridge::ProbeSnapshot> probe;
+        if (State().static_meshes_enabled && sample.valid)
+            probe=driver->GenericProbe(scope.ticket,CurrentThread(),sample);
+        if (probe) {
+            const scene_bridge::ProbeReader reader{nullptr,ReadMemory};
+            char name[64]{};
+            if (!scene_bridge::ReadProbeName(reader,sample.owner_fname,name) || std::strcmp(name,"StaticMeshActor")!=0) probe.reset();
+        }
+        if (probe) {
+            scope.generic=true;
+            const scene_bridge::ProbeReader reader{nullptr,ReadMemory};
+            const auto observed=scene_bridge::SampleVisibleStaticMesh(reader,*probe,sample);
+            if (scene_bridge::AttachAssetCandidate(sample,observed.asset))
+                scope.asset=std::make_unique<scene_bridge::AssetCandidate>(observed.asset);
+            scope.element=element;scope.sampled=sample.valid;
+            (void)driver->SetScopeSample(scope.ticket,CurrentThread(),sample,&observed);return;
+        }
         scope.element=element;scope.sampled=sample.valid;
         (void)driver->SetScopeSample(scope.ticket,CurrentThread(),sample);
     } catch (...) {RuntimeAbandon();}
@@ -245,12 +268,17 @@ void RuntimeSubmissionLeave() noexcept {
         if (!scopes.depth) {RuntimeDeferredLoss();return;}
         const auto depth=--scopes.depth;
         if (depth>=std::size(scopes.items)) return;
-        const auto scope=scopes.items[depth];scopes.items[depth]={};
+        const auto scope=std::move(scopes.items[depth]);scopes.items[depth]={};
         if (!scope.ticket) return;
         const bool reentered=querying;
         if (reentered) RuntimeDeferredLoss();
         auto* driver=Driver(false);if (!driver) return;
-        const auto after=scope.sampled && !reentered ? Sample(scope.element) : scene_bridge::SubmissionSample{};
+        auto after=scope.sampled && !reentered ? Sample(scope.element) : scene_bridge::SubmissionSample{};
+        if (scope.generic && after.valid && scope.asset) {
+            const scene_bridge::AssetReader reader{nullptr,ReadMemory};
+            if (scene_bridge::MatchesAssetCandidate(reader,after.owner,*scope.asset))
+                (void)scene_bridge::AttachAssetCandidate(after,*scope.asset);
+        }
         driver->EndScope(scope.ticket,CurrentThread(),after);
     } catch (...) {RuntimeAbandon();}
 }

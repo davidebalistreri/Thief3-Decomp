@@ -1,7 +1,7 @@
 """Build a sampled distance-fog preview without claiming runtime pixel color.
 
-Vertex program identity is a pre-Reset hypothesis. Fog color is from the
-fingerprinted offline LevelInfo, not an observed pixel-shader constant.
+Vertex program bytes are observed in application memory or are a pre-Reset
+hypothesis. Fog color is from offline LevelInfo, not a pixel-shader constant.
 """
 import math
 import struct
@@ -42,9 +42,9 @@ def offline_fog(actors):
 
 def fog_for_draw(draw, outcome, header, frame_begin, cb, pb, hb, shader_index, offline, camera):
     constants = trace_to_ir.observed_vertex_constants(draw, outcome, header, frame_begin, cb)
-    program = trace_to_ir.pre_reset_vertex_program(draw, outcome, header, pb, hb)
+    program = trace_to_ir.candidate_vertex_program(draw, outcome, header, pb, hb)
     if not constants or constants.get("status") != "sampled" or constants["count"] <= 28 or not program:
-        raise ValueError("fog candidate requires sampled constants and a pre-Reset program")
+        raise ValueError("fog candidate requires sampled constants and an observed or pre-Reset program")
     words = program["words"]
     names = shader_index.get(struct.pack(f"<{len(words)}I", *words), [])
     if len(names) != 1 or names[0].lower() != "fog11_light_vertex":
@@ -56,7 +56,8 @@ def fog_for_draw(draw, outcome, header, frame_begin, cb, pb, hb, shader_index, o
             not math.isclose(fog_range[1], offline["end"], abs_tol=.001) or
             fog_range[2] <= 0 or not math.isclose(fog_range[2], 1 / (offline["end"] - offline["start"]), rel_tol=1e-6)):
         raise ValueError("fog camera or distance range does not match the offline fixture")
-    return {"program_hypothesis": names[0], "offline_level_id": offline["offline_level_id"],
+    return {"program_hypothesis": names[0], "program_source": program["program_source"],
+            "offline_level_id": offline["offline_level_id"],
             "camera_position": center[:3], "start": fog_range[0], "inverse_range": fog_range[2],
             "offline_color": offline["offline_color"]}
 
@@ -74,7 +75,7 @@ def from_trace(scene, offline, offline_bytes, trace, kernel, actors_path, render
     cb = candidates.within_budget(draws, header, "vertex_constant_capture", trace_to_ir.vertex_constant_frame_words)
     pb = candidates.within_budget(draws, header, "vertex_program_capture", trace_to_ir.vertex_program_frame_words)
     hb = candidates.within_budget(draws, header, "declaration_history", trace_to_ir.pre_reset_frame_words)
-    if not (cb and pb and hb):
+    if not (cb and pb):
         raise ValueError("fog shader or constant observation budget is incomplete")
     index = candidates.shader_index(kernel, scene.source.fingerprints.get("kernel"))
     submissions = [s for s in scene.submissions if (s.render_pass, s.stage) == (render_pass, stage)]

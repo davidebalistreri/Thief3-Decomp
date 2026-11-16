@@ -491,6 +491,26 @@ def pre_reset_vertex_program(draw, result, header, program_budget, history_budge
             "shader_stable": history["shader_stable"], "draw_hresult": history["draw_hresult"]}
 
 
+def candidate_vertex_program(draw, result, header, program_budget, history_budget):
+    """Prefer paired same-frame application-memory bytes to pre-Reset history.
+
+    Neither source proves the driver's shader contents. A malformed current
+    candidate must not be hidden by falling back to an older hypothesis.
+    """
+    if not isinstance(draw, dict) or not isinstance(result, dict) or not isinstance(header, dict):
+        return None
+    observed = observed_vertex_program(draw, result, header, program_budget)
+    if observed is not None and observed.get("status") == "candidate":
+        return {**observed, "program_source": "same_frame_application_memory"}
+    raw = draw.get("vertex_program") if isinstance(draw, dict) else None
+    if raw is not None and (not isinstance(raw, dict) or raw.get("status") != "unavailable" or
+                            raw.get("words", "missing") is not None or not isinstance(raw.get("reason"), str) or
+                            raw.get("reason") not in PROGRAM_UNAVAILABLE_REASONS):
+        return None
+    prior = pre_reset_vertex_program(draw, result, header, program_budget, history_budget)
+    return None if prior is None else {**prior, "program_source": "pre_reset_hypothesis"}
+
+
 CONSTANT_UNAVAILABLE_REASONS = frozenset(("caps_unavailable", "invalid_count", "getter_failed", "verification_failed",
                                           "inconsistent_read", "frame_word_limit"))
 

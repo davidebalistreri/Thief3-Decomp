@@ -6,6 +6,7 @@ Material-to-diffuse texture bindings come from the fingerprinted offline IBTs;
 they are not claims that the original shader sampled those exact bytes.
 """
 import argparse
+from collections import Counter
 import hashlib
 import json
 import math
@@ -775,7 +776,7 @@ def main(argv=None):
                         metavar="SUBMISSION_STAGE:TEXTURE_STAGE",
                         help="hypothesize a texture sampler only for this submission stage; repeatable")
     parser.add_argument("--ambient-candidate-stage", type=int,
-                        help="use a pre-Reset ambient shader hypothesis for this submission stage")
+                        help="use an application-memory ambient shader candidate for this submission stage")
     parser.add_argument("--direct-candidate-stage", type=int,
                         help="approximate scoped direct-light candidates for this submission stage")
     parser.add_argument("--fog-candidate-stage", type=int,
@@ -786,7 +787,7 @@ def main(argv=None):
     parser.add_argument("--normal-map-candidates", action="store_true",
                         help="preview metadata-compatible offline normal maps for sampled normal-light candidates")
     parser.add_argument("--shader-normal-basis", action="store_true",
-                        help="use the sampled pre-Reset normal-light basis hypothesis")
+                        help="use the sampled normal-light shader basis hypothesis")
     parser.add_argument("--offline-actors", type=Path, help="fingerprinted t3map actor export for candidate light or fog colors")
     parser.add_argument("--direct-preview-gain", type=float, default=1.0,
                         help="uncalibrated visual gain for candidate direct lights (default: 1)")
@@ -807,7 +808,7 @@ def main(argv=None):
         extra_scenes = [SceneSnapshot.from_json(data) for data in extra_raw]
         self_attached_needed = any(scoped.SELF_ATTACHED_LIMITATION in current.source.limitations
                                    for current in (scene, *extra_scenes))
-        light_candidates_needed = any(scene_lights.LIMITATION in current.source.limitations
+        light_candidates_needed = any(any(value in current.source.limitations for value in scene_lights.LIMITATIONS)
                                       for current in (scene, *extra_scenes))
         if (args.state_trace is None) != (args.offline_scene is None):
             raise ValueError("state trace and offline scene must be supplied together")
@@ -883,6 +884,7 @@ def main(argv=None):
             if scene.source.fingerprints.get(role) != digest_file(path):
                 raise ValueError(f"{role} bundle fingerprint does not match SceneIR")
         ambient_values = None
+        ambient_program_sources = {}
         if args.ambient_candidate_stage is not None:
             matching = [(current, select_scope(current, args.render_pass, args.stage) if current is scene else select_scope(current))
                         for current in (scene, *extra_scenes)]
@@ -890,7 +892,8 @@ def main(argv=None):
             if len(matching) != 1:
                 raise ValueError("ambient candidate stage must identify exactly one scene")
             current, scope = matching[0]
-            ambient_values = ambient.from_trace(current, args.state_trace, kernel_path, *scope)
+            ambient_values = ambient.from_trace(current, args.state_trace, kernel_path, *scope,
+                                                program_sources=ambient_program_sources)
         direct_values = None
         light_override_digest = None
         if args.direct_candidate_stage is not None:
@@ -969,8 +972,10 @@ def main(argv=None):
             manifest["additional_source_limitations"] = [list(other.source.limitations) for other in extra_scenes]
             manifest["limitations"].append("Partial selected draws share a depth buffer; omitted draws and original stencil operations are not reconstructed.")
         if ambient_values is not None:
-            manifest["limitations"].append("Ambient RGB uses sampled vertex constants with a pre-Reset shader hypothesis; the active GPU and pixel shaders are unproven.")
+            manifest["ambient_program_sources"] = dict(sorted(Counter(ambient_program_sources.values()).items()))
+            manifest["limitations"].append("Ambient RGB uses sampled vertex constants and application-memory shader candidates; GPU and pixel shaders are unproven.")
         if direct_values is not None:
+            manifest["direct_program_sources"] = dict(sorted(Counter(light["program_source"] for light in direct_values.values()).items()))
             has_falloff = any("preview_falloff_mix" in light for light in direct_values.values())
             manifest["limitations"].append(
                 "Point-light Lambert shading and linear/squared falloff are preview approximations; the coefficient's radius meaning is unproven."
@@ -991,7 +996,8 @@ def main(argv=None):
             else:
                 manifest["limitations"].append("Spotlight contributions are omitted.")
         if fog_values is not None:
-            manifest["limitations"].append("Fog is a vertex-distance hypothesis from a pre-Reset program and sampled constants; its color is from offline LevelInfo, not a verified runtime pixel shader.")
+            manifest["fog_program_sources"] = dict(sorted(Counter(value["program_source"] for value in fog_values.values()).items()))
+            manifest["limitations"].append("Fog is a vertex-distance hypothesis from application-memory program candidates and sampled constants; its color is offline, not a verified runtime pixel shader.")
         else:
             manifest["limitations"].append("Fog is omitted.")
         if any("normal_map_candidate" in draw for draw in stats["draws"]):
@@ -999,7 +1005,7 @@ def main(argv=None):
             if any(draw.get("normal_map_candidate", {}).get("basis") == "inferred_uv" for draw in stats["draws"]):
                 manifest["limitations"].append("The UV-based normal preview infers bitangent sign per triangle from UV derivatives.")
         if body[:8] in (SHADER_NORMAL_MAGIC, FALLOFF_MAGIC, SHADOW_MAGIC) and args.shader_normal_basis:
-            manifest["limitations"].append("The optional shader basis and unnormalized normal sample follow a pre-Reset vertex/pixel asset hypothesis; active runtime programs and light lookup textures are unverified.")
+            manifest["limitations"].append("The optional shader basis and unnormalized normal sample follow application-memory vertex candidates and a pixel asset hypothesis; GPU programs and light lookup textures are unverified.")
         write_pair(args.output, body, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))
     except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, struct.error) as exc:

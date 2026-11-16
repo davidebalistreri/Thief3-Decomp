@@ -65,6 +65,25 @@ class ScopedLightCandidatesTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 lights.augment(self.scene, values, 4, 1)
 
+    def test_observed_program_source_is_preserved_and_revalidated(self):
+        values = observations()
+        for item in values.values():
+            item["program_source"] = "same_frame_application_memory"
+        snapshot, evidence = lights.augment(self.scene, values, 4, 1)
+        self.assertIn(lights.OBSERVED_LIMITATION, snapshot.source.limitations)
+        self.assertNotIn(lights.LIMITATION, snapshot.source.limitations)
+        self.assertEqual(evidence[0]["program_sources"], ["same_frame_application_memory"])
+        with tempfile.TemporaryDirectory(prefix="t3render-observed-light-") as directory:
+            trace = Path(directory) / "trace.jsonl"
+            trace.write_bytes(self.trace_bytes)
+            with mock.patch.object(lights, "from_trace", return_value=(snapshot, [])):
+                actual = states.from_trace(snapshot, self.offline, self.offline_bytes, trace, 4, 1,
+                                           light_actors="actors", light_game="game")
+                self.assertEqual(set(actual), {2, 3, 4, 5})
+        values[2]["program_source"] = "gpu_readback"
+        with self.assertRaisesRegex(ValueError, "light candidate"):
+            lights.augment(self.scene, values, 4, 1)
+
     def test_state_pairing_revalidates_candidates_and_rejects_tampering(self):
         candidate, _ = lights.augment(self.scene, observations(), 4, 1)
         with tempfile.TemporaryDirectory(prefix="t3render-scene-lights-") as directory:

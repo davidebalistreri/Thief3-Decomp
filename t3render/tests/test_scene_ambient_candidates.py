@@ -56,6 +56,16 @@ class AmbientCandidateTests(unittest.TestCase):
                 ambient.from_trace(scene, "trace", "kernel", 0, 1)
             index.assert_not_called()
 
+    def test_same_frame_program_reports_its_source(self):
+        constants, program, binary = self.sample()
+        program["status"] = "candidate"
+        source = []
+        with mock.patch.object(ambient.trace_to_ir, "observed_vertex_constants", return_value=constants), \
+             mock.patch.object(ambient.trace_to_ir, "observed_vertex_program", return_value=program):
+            ambient.ambient_color({}, {}, {}, {}, True, True, True,
+                                  {binary: ["Ambient11_Light_Vertex"]}, program_source=source)
+        self.assertEqual(source, ["same_frame_application_memory"])
+
 
 if __name__ == "__main__":
     unittest.main()

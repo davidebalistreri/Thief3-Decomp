@@ -15,6 +15,7 @@ import subprocess
 import sys
 
 import scene_ir_to_d3d12_packet as preview
+from scene_ir import SceneSnapshot
 import scene_pbr_variants as variants
 import scene_temporal_resolve as temporal
 import scene_trace_session as session
@@ -80,6 +81,27 @@ def _bundle(frame, bundle_path, bundle_manifest_path):
             "bundle_sha256": _digest(raw), "bundle_manifest_sha256": _digest(manifest_raw)}
 
 
+def _light_frame(frame, path):
+    path = Path(path)
+    raw = preview.read_limited(path, preview.MAX_INPUT)
+    lights = SceneSnapshot.from_json(raw)
+    scene, manifest = frame["scene"], frame["manifest"]
+    scope = {(s.render_pass, s.stage) for s in lights.submissions}
+    available = {light.id: light for light in lights.lights}
+    if (temporal._light_source(scene, manifest) != {"kind": "runtime_candidates"} or
+            manifest.get("light_scene_sha256") != _digest(raw) or lights.source.kind != "runtime" or
+            lights.source.camera_synchronized is not True or lights.source.frame_id != scene.source.frame_id or
+            lights.source.map != scene.source.map or lights.source.fingerprints != scene.source.fingerprints or
+            lights.camera != scene.camera or lights.conventions != scene.conventions or len(scope) != 1 or
+            next(iter(scope))[0] != manifest["render_pass"]):
+        raise ValueError("light snapshot does not match its synchronized frame")
+    for item in manifest["lights"]:
+        light = available.get(item["id"])
+        if light is None or light.position is None or tuple(item["position"]) != light.position or light.kind not in ("point", "omni"):
+            raise ValueError("light snapshot differs from packet light candidates")
+    return {"scene": lights, "path": path, "sha256": _digest(raw), "scope": next(iter(scope))}
+
+
 def _resident_items(resident_packet, resident_stats, next_packet, next_stats):
     old_draws, old_casters, old_context = variants.packet_signatures(resident_packet)
     new_draws, new_casters, new_context = variants.packet_signatures(next_packet)
@@ -104,12 +126,17 @@ def _resident_items(resident_packet, resident_stats, next_packet, next_stats):
     match(old_casters, casters(resident_stats), new_casters, casters(next_stats))
 
 
-def prepare(trace, bundle_path, bundle_manifest_path, paths, updates=None):
+def prepare(trace, bundle_path, bundle_manifest_path, paths, updates=None, light_scenes=None):
     if len(paths) not in (2, 3):
         raise ValueError("scene sequence requires two or three captured frames")
     if updates is not None and len(updates) != len(paths)-1:
         raise ValueError("one update bundle is required for each later frame")
+    if light_scenes is not None and len(light_scenes) != len(paths):
+        raise ValueError("one light snapshot is required for every frame")
     frames = [_frame(*map(Path, item)) for item in paths]
+    if light_scenes is not None:
+        for frame, path in zip(frames, light_scenes):
+            frame["light_evidence"] = _light_frame(frame, path)
     first = frames[0]
     baseline = _bundle(first, bundle_path, bundle_manifest_path)
     base = first["packet"]
@@ -140,6 +167,11 @@ def prepare(trace, bundle_path, bundle_manifest_path, paths, updates=None):
             _resident_items(baseline["replacement"], baseline["manifest"], update["replacement"], update["manifest"])
             current["update"] = update
         session.validate(trace, previous["scene"], current["scene"], *scope)
+        if light_scenes is not None:
+            old, new = previous["light_evidence"], current["light_evidence"]
+            if old["scope"] != new["scope"]:
+                raise ValueError("light snapshots change submission scope")
+            session.validate(trace, old["scene"], new["scene"], *old["scope"])
     return {"frames": frames, "key": baseline["key"], "trace": Path(trace),
             "trace_sha256": first["scene"].source.fingerprints["trace"], "scope": scope,
             "bundle": baseline["bundle"], "bundle_manifest": baseline["bundle_manifest"],
@@ -228,6 +260,10 @@ def run(plan, output_dir, renderer, *, wine=None, effects=(), timeout=300, envir
                                         (update["bundle_manifest"], update["bundle_manifest_sha256"], preview.MAX_INPUT)):
                 if _digest(preview.read_limited(path, limit)) != digest:
                     raise ValueError("scene update input changed during rendering")
+        if "light_evidence" in frame:
+            evidence = frame["light_evidence"]
+            if _digest(preview.read_limited(evidence["path"], preview.MAX_INPUT)) != evidence["sha256"]:
+                raise ValueError("light snapshot changed during rendering")
     for path, digest, limit in ((plan["bundle"], plan["bundle_sha256"], MAX_BUNDLE),
                                 (plan["bundle_manifest"], plan["bundle_manifest_sha256"], preview.MAX_INPUT)):
         if _digest(preview.read_limited(path, limit)) != digest:
@@ -245,6 +281,8 @@ def run(plan, output_dir, renderer, *, wine=None, effects=(), timeout=300, envir
     for index, frame in enumerate(frames):
         record = {"frame": frame["scene"].source.frame_id, "scene_sha256": frame["hashes"][0],
                   "packet_sha256": frame["hashes"][1], "packet_manifest_sha256": frame["hashes"][2]}
+        if "light_evidence" in frame:
+            record["light_scene_sha256"] = frame["light_evidence"]["sha256"]
         update = frame.get("update")
         if index == 0:
             record.update(variant_bundle_sha256=plan["bundle_sha256"],
@@ -256,11 +294,14 @@ def run(plan, output_dir, renderer, *, wine=None, effects=(), timeout=300, envir
     report = {"schema": "t3.scene.pbr-camera-sequence", "version": 1, "trace_sha256": plan["trace_sha256"],
               "bundle_sha256": plan["bundle_sha256"], "renderer_sha256": renderer_digest, "effects": list(effects),
               "update_mode": "resident_subsets" if scene_updates else "camera_only",
+              "light_snapshot_checks": ("same_frame_scope_and_packet_metadata" if all("light_evidence" in f for f in frames)
+                                        else "not_provided"),
               "resource_key": plan["key"], "render_pass": plan["scope"][0], "stage": plan["scope"][1],
               "light_source": temporal._light_source(frames[0]["scene"], frames[0]["manifest"]),
               "frames": frame_reports, "images": images,
               "limitations": ["Finalized capture processing; not a live TDS connection.",
                               "Scene updates can only select unchanged, uniquely matched resident geometry; new or changed resources are rejected.",
+                              "Light snapshot metadata is checked only when supplied; candidate properties and asset bindings remain unverified.",
                               "Temporal history is reset; per-object motion vectors are unavailable.",
                               "Repeated reads cannot exclude ABA or unobserved writes."]}
     with (output_dir/"sequence.manifest.json").open("x", encoding="utf-8") as stream:
@@ -277,6 +318,8 @@ def main(argv=None):
     parser.add_argument("--frame", nargs=3, metavar=("SCENE", "PACKET", "MANIFEST"), action="append", required=True)
     parser.add_argument("--frame-bundle", nargs=2, metavar=("BUNDLE", "MANIFEST"), action="append",
                         help="variant bundle for each later frame; allows resident subset updates")
+    parser.add_argument("--frame-light-scene", type=Path, action="append",
+                        help="same-frame runtime light snapshot for each frame")
     parser.add_argument("--renderer", type=Path, required=True)
     parser.add_argument("--wine", type=Path, help="Wine executable with Z: mapped to the host root")
     parser.add_argument("--highball-engine", type=Path, help="Highball engine root")
@@ -293,7 +336,8 @@ def main(argv=None):
             raise ValueError("supply both Highball paths or a separate Wine executable")
         wine, environment = ((args.wine, None) if args.highball_engine is None else
                              highball_environment(args.highball_engine, args.highball_bottle))
-        plan = prepare(args.trace, args.bundle, args.bundle_manifest, args.frame, updates=args.frame_bundle)
+        plan = prepare(args.trace, args.bundle, args.bundle_manifest, args.frame, updates=args.frame_bundle,
+                       light_scenes=args.frame_light_scene)
         result = run(plan, args.output_dir, args.renderer, wine=wine, effects=args.effect, timeout=args.timeout,
                      environment=environment)
         print(json.dumps(result, indent=2, allow_nan=False))

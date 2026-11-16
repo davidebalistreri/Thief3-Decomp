@@ -1,7 +1,8 @@
 """Derive approximate point and spot previews from scoped draw samples.
 
-This is not a runtime light list. Shader identity is a pre-Reset hypothesis;
-colors and brightness come from the fingerprinted offline actor export.
+This is not a verified runtime light list. Shader bytes come from bounded
+application-memory observations or pre-Reset hypotheses; colors and brightness
+come from the fingerprinted offline actor export.
 """
 import hashlib
 import json
@@ -71,7 +72,7 @@ def normal_sampler_observation(draw, light):
 
 
 def normal_shader_basis(constants):
-    """Read constants used by the matched pre-Reset normal-light vertex program."""
+    """Read constants used by the matched candidate normal-light vertex program."""
     if constants.get("count", 0) <= 38:
         raise ValueError("normal shader basis constants are incomplete")
     def reg(index):
@@ -86,9 +87,9 @@ def normal_shader_basis(constants):
 def direct_light(draw, outcome, header, frame_begin, cb, pb, hb, shader_index, lights, actors, gain,
                  *, preview_spots=False, projector_candidate=None, preview_shader_basis=False):
     constants = trace_to_ir.observed_vertex_constants(draw, outcome, header, frame_begin, cb)
-    program = trace_to_ir.pre_reset_vertex_program(draw, outcome, header, pb, hb)
+    program = trace_to_ir.candidate_vertex_program(draw, outcome, header, pb, hb)
     if not constants or constants.get("status") != "sampled" or constants["count"] <= 21 or not program:
-        raise ValueError("direct candidate requires sampled constants and a pre-Reset program")
+        raise ValueError("direct candidate requires sampled constants and an observed or pre-Reset program")
     words = program["words"]
     names = shader_index.get(struct.pack(f"<{len(words)}I", *words), [])
     if len(names) != 1 or names[0].lower() not in candidates.PROGRAM_KINDS:
@@ -104,7 +105,8 @@ def direct_light(draw, outcome, header, frame_begin, cb, pb, hb, shader_index, l
     if len(matches) != 1 or matches[0].kind != kind:
         raise ValueError("direct candidate light position or kind is ambiguous")
     light = matches[0]
-    result = {"offline_light_id": light.id, "program_hypothesis": names[0], "kind": kind}
+    result = {"offline_light_id": light.id, "program_hypothesis": names[0],
+              "program_source": program["program_source"], "kind": kind}
     if kind == "spot" and not preview_spots:
         return {**result, "mode": "skipped_spot"}
     actor_name = light.id.rsplit(":", 1)[-1]
@@ -168,7 +170,7 @@ def from_trace(scene, offline, offline_bytes, trace, kernel, actors_path, render
     cb = candidates.within_budget(draws, header, "vertex_constant_capture", trace_to_ir.vertex_constant_frame_words)
     pb = candidates.within_budget(draws, header, "vertex_program_capture", trace_to_ir.vertex_program_frame_words)
     hb = candidates.within_budget(draws, header, "declaration_history", trace_to_ir.pre_reset_frame_words)
-    if not (cb and pb and hb):
+    if not (cb and pb):
         raise ValueError("direct shader or constant observation budget is incomplete")
     index = candidates.shader_index(kernel, scene.source.fingerprints.get("kernel"))
     submissions = [s for s in scene.submissions if (s.render_pass, s.stage) == (render_pass, stage)]

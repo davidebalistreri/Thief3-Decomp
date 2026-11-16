@@ -163,6 +163,29 @@ class ProgramTraceTests(unittest.TestCase):
         records[-2]["concurrent_operations"] = True
         self.assertTrue(all("vertex_program_pre_reset" not in command for command in self.commands(records)))
 
+    def test_program_candidate_prefers_same_frame_and_keeps_history_qualified(self):
+        current = program_events()
+        sample = trace_to_ir.candidate_vertex_program(current[2], current[3], current[0], True, True)
+        self.assertEqual(sample["program_source"], "same_frame_application_memory")
+        self.assertEqual(sample["words"], WORDS)
+        self.assertEqual(trace_to_ir.candidate_vertex_program(current[2], current[3], current[0], True, False)["program_source"],
+                         "same_frame_application_memory")
+        prior = program_history_events()
+        sample = trace_to_ir.candidate_vertex_program(prior[2], prior[3], prior[0], True, True)
+        self.assertEqual(sample["program_source"], "pre_reset_hypothesis")
+        self.assertEqual(sample["words"], WORDS)
+        self.assertIsNone(trace_to_ir.candidate_vertex_program(prior[2], prior[3], prior[0], True, False))
+        for change in ("unstable", "failed", "generation", "budget"):
+            bad = program_events()
+            if change == "unstable": bad[3]["shader_stable"] = False
+            if change == "failed": bad[3]["hr"] = -1
+            if change == "generation": bad[2]["vertex_program"]["generation"] += 1
+            self.assertIsNone(trace_to_ir.candidate_vertex_program(bad[2], bad[3], bad[0], change != "budget", True))
+        prior[2]["vertex_program"] = {"status": "candidate", "generation": 5, "version": "vs_1_1", "words": []}
+        self.assertIsNone(trace_to_ir.candidate_vertex_program(prior[2], prior[3], prior[0], True, True))
+        prior[2]["vertex_program"] = {"status": "unavailable", "generation": 5, "reason": [], "words": None}
+        self.assertIsNone(trace_to_ir.candidate_vertex_program(prior[2], prior[3], prior[0], True, True))
+
 
 if __name__ == "__main__":
     unittest.main()

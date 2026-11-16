@@ -110,7 +110,9 @@ images remain local under `build/`.
 An opt-in scoped SceneIR v1 can now carry these as **candidate** lights. After
 revalidating the stage-3 snapshot, `build_scoped_light_snapshot.py` matches its
 draw constants against fingerprinted offline lights and groups repeated,
-consistent positions and pre-Reset shader hypotheses. IDs are prefixed with
+consistent positions and application-memory shader candidates. A paired
+same-frame program is preferred when present; otherwise a separately labeled
+pre-Reset hypothesis is used. Neither proves the active GPU program. IDs are prefixed with
 `candidate:` and use the offline light identity; `color`, `radius`, `intensity`
 and `enabled` remain null. The snapshot's source limitations explicitly state
 that no runtime light object or binding has been observed. The sidecar lists
@@ -138,6 +140,16 @@ provenance marker fails revalidation. The candidate entries do not themselves
 change the legacy lighting preview: its separate direct-light approximation
 still uses offline color and energy. Camera, visibility and the limitations of
 the other scene entries are unchanged. All game-derived outputs stay local.
+
+The later 2864 and 2865 Present windows each yield nine candidates (five omni,
+four spot), with 130 scoped stage-3 draws and paired same-frame program bytes.
+The two snapshots carry their own frame and camera and contain identical
+candidate light IDs and positions. They still do not establish runtime light
+objects, properties, shader execution, texture identity or complete visibility.
+The SceneIR producer and the PBR exporter revalidate each snapshot against its
+own trace frame and fingerprinted assets. The
+[sequence benchmark](../benchmarks/runtime/2026-11-16-scene-sequence/result.json)
+records both hashes and the D3D12 comparison.
 
 The offline importer now places mesh-actor lights at `hp_lighttarget` plus
 offset, rotated without `DrawScale`. Against a regenerated fixture, stage-3

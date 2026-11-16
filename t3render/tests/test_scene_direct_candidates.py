@@ -9,6 +9,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import scene_direct_candidates as direct
+from test_trace_to_ir_programs import WORDS, program_events
 
 
 def sample():
@@ -77,6 +78,37 @@ class DirectCandidateTests(unittest.TestCase):
         self.assertAlmostEqual(result["inverse_radius_candidate"], .01)
         self.assertEqual(result["offline_color"], [1, .8, .6])
         self.assertEqual((result["offline_energy"], result["gain"]), (.4, 1.5))
+        self.assertEqual(result["program_source"], "pre_reset_hypothesis")
+
+    def test_same_frame_program_is_used_before_pre_reset_history(self):
+        constants, program, binary = sample()
+        program["status"] = "candidate"
+        light = SimpleNamespace(id="light:map:lamp", kind="omni", position=(1, 2, 3), color=(1, .8, .6))
+        actors = {"lamp": {"light": {"kind": "omni", "energy": .4}}}
+        with mock.patch.object(direct.trace_to_ir, "observed_vertex_constants", return_value=constants), \
+             mock.patch.object(direct.trace_to_ir, "observed_vertex_program", return_value=program), \
+             mock.patch.object(direct.trace_to_ir, "pre_reset_vertex_program") as history:
+            result = direct.direct_light({}, {}, {}, {}, True, True, True,
+                                         {binary: ["OmniLight11_Light_Vertex"]}, [light], actors, 1)
+        self.assertEqual(result["program_source"], "same_frame_application_memory")
+        history.assert_not_called()
+
+    def test_observed_program_does_not_require_pre_reset_history_budget(self):
+        constants, _, _ = sample()
+        light = SimpleNamespace(id="light:map:lamp", kind="omni", position=(1, 2, 3), color=(1, .8, .6))
+        actors = {"lamp": {"light": {"kind": "omni", "energy": .4}}}
+        scene = SimpleNamespace(source=SimpleNamespace(frame_id=0, fingerprints={"trace": "a" * 64, "kernel": "b" * 64}),
+                                submissions=[SimpleNamespace(draw_id=1, render_pass=0, stage=3)])
+        offline = SimpleNamespace(lights=[light])
+        binary = struct.pack(f"<{len(WORDS)}I", *WORDS)
+        with mock.patch.object(direct, "offline_actors", return_value=actors), \
+             mock.patch.object(direct.bridge.trace_summary, "summarize"), \
+             mock.patch.object(direct.runtime, "read_frame", return_value=program_events()), \
+             mock.patch.object(direct.candidates, "within_budget", side_effect=[True, True, False]), \
+             mock.patch.object(direct.candidates, "shader_index", return_value={binary: ["OmniLight11_Light_Vertex"]}), \
+             mock.patch.object(direct.trace_to_ir, "observed_vertex_constants", return_value=constants):
+            result = direct.from_trace(scene, offline, b"offline", "trace", "kernel", "actors", 0, 3, 1)
+        self.assertEqual(result[1]["program_source"], "same_frame_application_memory")
 
     def test_spot_is_skipped_and_ambiguity_never_becomes_a_light(self):
         constants, program, binary = sample()

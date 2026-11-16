@@ -105,12 +105,41 @@
     },
     "restrictions": "unchanged uniquely matched resident draws and casters; no new resources or transformed geometry"
   },
+  "same_frame_light_candidates": {
+    "frames": [2864, 2865],
+    "program_source": "paired_same_frame_application_memory_not_gpu_readback",
+    "stage3_draws_per_frame": 130,
+    "candidate_lights_per_frame": {"omni": 5, "spot": 4},
+    "identical_candidate_ids_and_positions": true,
+    "light_snapshot_sha256": [
+      "b7bc665447df31982f80e4a4e7ce7dbb2cd8ba1918f0f5347cc0ee1953196c95",
+      "3f6bc0b75250fb4f7c3af034949e617ccc5219d672aad1940c12c5822dcd834c"
+    ],
+    "pbr_light_source": "runtime_candidates_with_artistic_color_intensity_and_exposure",
+    "pbr_gpu_devices": 1,
+    "pbr_bed_variants_switched_for_each_frame": true,
+    "pbr_light_snapshot_scope_and_packet_metadata_checked": true,
+    "frame_2864_pbr_offline_vs_candidate_changed_pixels": 570,
+    "frame_2864_pbr_offline_vs_candidate_mean_channel_absolute": 0.000457,
+    "frame_2864_legacy_preview": {
+      "ambient_direct_fog_draws": [60, 130, 60],
+      "total_draws": 311,
+      "triangles_including_candidate_stencil": 33208,
+      "before_image_sha256": "adf61b11f5eacdeb15b6a4d73263d8d725a279b16a765d862e8035d8732636e6",
+      "receiver_override_image_sha256": "964175f19ec2adbc0d34b1f369c3c0c910fd1249c5f15ca8d406764731c82b42",
+      "receiver_override_changed_pixels": 10698,
+      "changed_pixel_mean_absolute_rgb_before": [29.679, 22.072, 13.197],
+      "changed_pixel_mean_absolute_rgb_after": [10.419, 10.951, 11.974],
+      "whole_image_mean_absolute_rgb_before": [5.313, 4.953, 5.028],
+      "whole_image_mean_absolute_rgb_after": [5.051, 4.801, 5.012]
+    }
+  },
   "limitations": [
     "The scene is partial; geometry and resource fingerprints come from offline assets after runtime metadata matching.",
     "The 31 additional mesh bindings are offline candidates, not observed runtime mesh bindings.",
     "The flat DX12 images contain only the bed and selected BSP, without lights, textures, other objects or HUD.",
     "No pixel parity or GPU payload identity is claimed.",
-    "The direct light candidate producer required unavailable pre-Reset shader evidence; runtime light properties remain unknown.",
+    "The first preview used offline fixture lights; the later candidate producer uses paired application-memory shader observations, not GPU readback or observed runtime light objects.",
     "The temporal experiment uses runtime geometry and camera with offline lights; it is not an integrated live game loop.",
     "A real visibility change was not observed: the subset visibility control is synthetic."
   ]

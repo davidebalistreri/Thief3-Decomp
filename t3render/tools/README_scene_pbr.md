@@ -209,6 +209,13 @@ bundle against its frame, checks draw and caster semantic metadata and the
 same-frame trace, and rejects changed calibration or resource identity. The
 renderer independently checks content and preserves draw order.
 
+For runtime light candidates, append `--frame-light-scene "$LIGHT_SCENE_A"`
+and `--frame-light-scene "$LIGHT_SCENE_B"` in frame order. The runner checks
+each snapshot hash, frame, camera, packet light IDs and positions, and checks
+both light-stage submission scopes against the consecutive Present windows.
+It rehashes the snapshots after rendering. Candidate reconstruction and asset
+revalidation are performed by the packet exporter, not by this runner.
+
 The output directory must be new. Highball's child environment is constructed
 inside the process; no bottle settings are changed. For other Wine installs,
 use `--wine` with a Z: drive mapped to the host root and configure its
@@ -223,6 +230,15 @@ removed one of four draws: both variant images matched standalone subset renders
 and only the removed quadrant changed. This is not evidence of a real runtime
 visibility change. Temporal history is reset; new resources, object transforms
 and live frame delivery remain unimplemented.
+
+The same two frames were subsequently rendered using separate same-frame light
+candidate snapshots instead of the offline light fixture. Their five selected
+omni candidates share IDs and sampled positions, while color, strength and
+exposure remain artistic calibration. The verified sequence checks the two
+light snapshots and switches both bed variants on one D3D12 device. For frame
+2864, replacing offline fixture positions with the sampled candidates changes
+570 pixels, with mean absolute channel difference 0.000457/255; this small
+difference does not validate the light objects or show legacy parity.
 
 `scene_pbr_variants_fixture.py` provides `create-subset`,
 `create-subset-original`, `create-subset-replacement` and `verify-subset` for

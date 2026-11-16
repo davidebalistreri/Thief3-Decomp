@@ -108,13 +108,15 @@ def from_trace(scene, offline, offline_bytes, trace, render_pass, stage, *, samp
                (s.render_pass, s.stage) == (render_pass, stage)]
     if not anchors:
         raise ValueError("state matching requires a scoped mesh anchor")
-    has_lights = lights.LIMITATION in scene.source.limitations
+    light_limitations = [value for value in lights.LIMITATIONS if value in scene.source.limitations]
+    has_lights = bool(light_limitations)
     base = scene
     if has_lights:
         data = scene.to_dict()
-        if data["source"]["limitations"].count(lights.LIMITATION) != 1:
-            raise ValueError("ambiguous light candidate provenance")
-        data["source"]["limitations"].remove(lights.LIMITATION)
+        for limitation in light_limitations:
+            if data["source"]["limitations"].count(limitation) != 1:
+                raise ValueError("ambiguous light candidate provenance")
+            data["source"]["limitations"].remove(limitation)
         data["lights"] = []
         base = scoped.SceneSnapshot.from_dict(data)
     self_assets = (scoped.self_attached.load(offline, records, self_attached_actors, self_attached_game)

@@ -178,14 +178,15 @@ not proof of legacy shadow parity.
 
 With `--ambient-candidate-stage 1`, the exporter requires a state trace and a
 matching offline fixture. It revalidates the scoped snapshot, checks the
-frame-wide constant and pre-Reset program budgets, then requires each selected
+frame-wide constant and program budgets, then requires each selected
 draw to have sampled finite register 18 and an exact, unique match to the
 fingerprinted kernel's `Ambient11_Light_Vertex`. It uses the sampled RGB as a
 constant ambient output. A following stage-4 snapshot can modulate that output
 with its offline diffuse texture and the captured blend/depth state.
 
-The pixel shader binding is not captured, and the vertex program identity is a
-**pre-Reset hypothesis**, not proof of the active GPU program. The mode is an
+The pixel shader binding is not captured. Vertex program bytes are selected from
+a paired same-frame application-memory candidate when available, otherwise a
+pre-Reset hypothesis; neither proves the active GPU program. The mode is an
 explicit approximation, not a replay of either shader. Texture alpha still
 comes from the offline asset; unselected draws, direct lights, stencil and
 other effects remain missing. No candidate is added to the SceneIR light list.
@@ -232,8 +233,8 @@ capture-derived outputs remain local. The optional mode writes packet version
 `--direct-candidate-stage 3` adds a diagnostic point-light approximation to
 the ambient and diffuse passes. It requires the same-frame state trace,
 the corrected offline SceneIR fixture, its fingerprint-matched actor export,
-and a matching kernel bundle. Each stage-3 draw must have a unique pre-Reset
-omni/spot program hypothesis, sampled constants and a unique offline light
+and a matching kernel bundle. Each stage-3 draw must have a unique same-frame
+application-memory or pre-Reset omni/spot program candidate, sampled constants and a unique offline light
 position within 0.01 T3 units. Ambiguous or missing inputs fail closed.
 
 By default only omni candidates are shaded: register 20 supplies position; register 21.y
@@ -411,12 +412,21 @@ manifest, render and three-panel comparison stay local under `build/`. The
 records hashes and the limitations. This opt-in does not alter SceneIR, gameplay,
 the bridge, or the default renderer behavior.
 
+The same semantic override was also tested on frame 2864, captured separately
+with a different camera. Its 60 ambient, 130 direct and 60 fog draws used paired
+same-frame application-memory shader candidates. In the 10,698 pixels changed
+by the override, mean absolute RGB error against that frame's D3D8 image changed
+from `(29.679, 22.072, 13.197)` to `(10.419, 10.951, 11.974)`; whole-image
+error changed from `(5.313, 4.953, 5.028)` to `(5.051, 4.801, 5.012)`. These
+are pixel comparisons for two captures, not proof of the missing stencil volume,
+light parameters, shader execution or parity.
+
 ## Distance-fog candidate
 
 `--fog-candidate-stage 6` adds an optional distance-fog preview. It requires
 the same revalidated state trace and fingerprinted offline actor export used
 above. Every selected draw must have sampled constants and a unique matching
-pre-Reset `Fog11_Light_Vertex` program hypothesis. Register 26 must match the
+application-memory or pre-Reset `Fog11_Light_Vertex` program candidate. Register 26 must match the
 same-frame camera; register 28 must match the offline LevelInfo distance range.
 The actor export must contain exactly one LevelInfo and an explicit RGB color.
 The exporter rejects incomplete observations, mismatched provenance and
@@ -453,12 +463,12 @@ local under `build/`.
 
 `--normal-map-candidates` optionally shades direct candidates using each
 fingerprinted offline MatLib stage-1 normal texture. It requires a direct
-candidate stage and selects only sampled pre-Reset `OmniLightNormal11` or
-`SpotLightNormal11` program hypotheses. For those draws, captured texture
+candidate stage and selects only sampled `OmniLightNormal11` or
+`SpotLightNormal11` application-memory program candidates. For those draws, captured texture
 stage 0 must be bound and have supported linear wrap sampling; its dimensions,
 format and mip count must match the offline texture, whose asset usage must
 identify a normal map. The observed mip bias is applied. This metadata match is
-not proof of runtime texture identity or of the active post-Reset shader.
+not proof of runtime texture identity or of the active GPU shader.
 
 The preview transforms source tangents with the instance transform and normals
 with its inverse transpose. It infers bitangent sign per triangle from the UV
@@ -492,7 +502,7 @@ the original tangent convention.
 With `--normal-map-candidates --shader-normal-basis`, each normal-light draw
 must also provide sampled registers 0, 16 and 38. The exporter checks the
 known register-0 values, accepts only `c16.w` of ±1 and applies the sampled
-`c38.xy` UV offset. It approximates the pre-Reset candidate vertex program's
+`c38.xy` UV offset. It approximates the matched candidate vertex program's
 `cross(normal, tangent)` bitangent and tangent scaling rather than deriving a
 sign from UVs. It also approximates the named candidate pixel program's
 unnormalized `sample * 2 - 1` normal and tangent-space dot product. Tangents

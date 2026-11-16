@@ -41,7 +41,8 @@ def main(argv=None):
                     "trace_sha256": snapshot.source.fingerprints["trace"],
                     "base_scene_sha256": hashlib.sha256(raw).hexdigest(),
                     "snapshot_sha256": hashlib.sha256(body.encode()).hexdigest(),
-                    "candidates": evidence, "limitations": [lights.LIMITATION]}
+                    "candidates": evidence,
+                    "limitations": [value for value in lights.LIMITATIONS if value in snapshot.source.limitations]}
         preview.write_pair(args.output, body, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))
     except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, struct.error) as exc:

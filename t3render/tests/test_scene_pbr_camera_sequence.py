@@ -68,12 +68,15 @@ class CameraSequenceTests(unittest.TestCase):
         offline_raw = offline.to_json().encode()
         self.trace = self.root/"trace.jsonl"
         trace_digest = write_trace(self.trace, records)
-        self.paths, scenes, packets, stats = [], [], [], []
+        self.paths, self.light_scenes, scenes, packets, stats = [], [], [], [], []
         for frame in (3, 4):
             frame_records = scoped.builder.read_frame(self.trace, frame, trace_digest)
             scene, _ = scoped.build(offline, frame_records, frame, 4, 1, None, trace_digest, digest(offline_raw))
             light = VisualLight("candidate:light:test", "omni", (1, 2, 3), None, None, None, None)
             light_scene = replace(scene, lights=(light,))
+            light_raw = light_scene.to_json().encode()
+            light_path = self.root/f"{frame}.lights"; light_path.write_bytes(light_raw)
+            self.light_scenes.append(light_path)
             calibration = json.dumps({"schema": "t3.scene.pbr-preview", "version": 1, "ambient_linear": [.02]*3,
                                       "exposure": 1, "lights": [{"id": light.id, "color_linear": [1, .5, .25],
                                                                 "intensity_candela": 10, "radius_m": .1}]})
@@ -83,6 +86,7 @@ class CameraSequenceTests(unittest.TestCase):
                         "packet_sha256": digest(packet), "scene_sha256": digest(scene_raw),
                         "source_frame": frame, "source_fingerprints": scene.source.fingerprints,
                         "calibration_sha256": digest(calibration.encode()), "light_source": {"kind": "runtime_candidates"},
+                        "light_scene_sha256": digest(light_raw),
                         "render_pass": info["render_pass"], "stage": info["stage"],
                         "textures": info["textures"], "lights": info["lights"]}
             paths = tuple(self.root/f"{frame}.{kind}" for kind in ("scene", "packet", "manifest"))
@@ -97,6 +101,7 @@ class CameraSequenceTests(unittest.TestCase):
                             "scene_sha256": digest(self.paths[0][0].read_bytes()), "source_frame": 3,
                             "source_fingerprints": scenes[0].source.fingerprints,
                             "calibration_sha256": digest(calibration.encode()), "light_source": {"kind": "runtime_candidates"},
+                            "light_scene_sha256": digest(self.light_scenes[0].read_bytes()),
                             "original": stats[0], "variant": report, **replacement_stats}
         self.bundle_manifest = self.root/"variants.manifest.json"
         self.bundle_manifest.write_text(json.dumps(variant_manifest))
@@ -123,6 +128,22 @@ class CameraSequenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "changes resident"):
             self.prepare([self.paths[0], (scene, changed, changed_manifest)])
         self.assertFalse((self.root/"output").exists())
+
+    def test_light_snapshots_match_each_frame_and_packet_candidates(self):
+        plan = sequence.prepare(self.trace, self.bundle, self.bundle_manifest, self.paths, light_scenes=self.light_scenes)
+        report = sequence.run(plan, self.root/"light-output", self.renderer)
+        self.assertEqual(report["light_snapshot_checks"], "same_frame_scope_and_packet_metadata")
+        self.assertEqual([frame["light_scene_sha256"] for frame in report["frames"]],
+                         [digest(path.read_bytes()) for path in self.light_scenes])
+        with self.assertRaisesRegex(ValueError, "light snapshot"):
+            sequence.prepare(self.trace, self.bundle, self.bundle_manifest, self.paths,
+                             light_scenes=[self.light_scenes[0], self.light_scenes[0]])
+        frame = sequence._frame(*self.paths[1])
+        data = json.loads(self.light_scenes[1].read_text()); data["lights"][0]["position"][0] += 1
+        changed = self.root/"changed-lights"; changed.write_text(json.dumps(data))
+        frame["manifest"]["light_scene_sha256"] = digest(changed.read_bytes())
+        with self.assertRaisesRegex(ValueError, "packet light candidates"):
+            sequence._light_frame(frame, changed)
 
     def test_variant_bundle_tampering_and_missing_frame_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "two or three"):

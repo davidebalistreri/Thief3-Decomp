@@ -73,7 +73,8 @@ def correlate(lights, observations):
             existing = {"offline_light_id": light.id, "offline_kind": light.kind,
                         "offline_position": light.position, "sampled_position": obs["position"],
                         "sampled_position_bits": obs["position_bits"], "distance_t3_units": distance,
-                        "sections": set(), "draws": [], "programs": set(), "register21_y_values": set()}
+                        "sections": set(), "draws": [], "programs": set(), "program_sources": set(),
+                        "register21_y_values": set()}
             groups[light.id] = existing
         elif existing["sampled_position_bits"] != obs["position_bits"]:
             rejected["inconsistent_sample"] += 1
@@ -82,6 +83,7 @@ def correlate(lights, observations):
         existing["sections"].add(obs["section"])
         existing["draws"].append(obs["draw"])
         existing["programs"].add(obs["program"])
+        existing["program_sources"].add(obs.get("program_source", "pre_reset_hypothesis"))
         existing["register21_y_values"].add(obs["coefficient"])
     matched = []
     for group in groups.values():
@@ -91,6 +93,7 @@ def correlate(lights, observations):
         group["sections"] = sorted(group["sections"])
         group["draws"] = sorted(group["draws"])
         group["programs"] = sorted(group["programs"])
+        group["program_sources"] = sorted(group["program_sources"])
         group["register21_y_values"] = sorted(group["register21_y_values"])
         matched.append(group)
     return sorted(matched, key=lambda item: item["offline_light_id"]), rejected
@@ -116,14 +119,14 @@ def analyze(scene, offline, offline_bytes, records, trace_digest, index, render_
     constants_budget = within_budget(draws, header, "vertex_constant_capture", trace_to_ir.vertex_constant_frame_words)
     program_budget = within_budget(draws, header, "vertex_program_capture", trace_to_ir.vertex_program_frame_words)
     history_budget = within_budget(draws, header, "declaration_history", trace_to_ir.pre_reset_frame_words)
-    if not (constants_budget and program_budget and history_budget):
+    if not (constants_budget and program_budget):
         raise ValueError("shader or constant observation budget is incomplete")
     observations = []
     for sub in anchors:
         draw = bridge.one(records, "draw", sub.draw_id)
         result = bridge.one(records, "draw_result", sub.draw_id)
         constants = trace_to_ir.observed_vertex_constants(draw, result, header, frame_begin, constants_budget)
-        program = trace_to_ir.pre_reset_vertex_program(draw, result, header, program_budget, history_budget)
+        program = trace_to_ir.candidate_vertex_program(draw, result, header, program_budget, history_budget)
         if not constants or constants.get("status") != "sampled" or constants["count"] <= 21 or not program:
             continue
         words = program["words"]
@@ -138,7 +141,7 @@ def analyze(scene, offline, offline_bytes, records, trace_digest, index, render_
             continue
         observations.append({"draw": sub.draw_id, "section": sub.section, "position": value[:3],
                              "position_bits": tuple(bits[:3]), "kind": PROGRAM_KINDS[names[0].lower()],
-                             "program": names[0], "coefficient": coeff[1]})
+                             "program": names[0], "program_source": program["program_source"], "coefficient": coeff[1]})
     matches, rejected = correlate(offline.lights, observations)
     return {"schema": "t3.scene.light-candidates", "version": 1,
             "status": "candidates" if matches else "none", "frame": scene.source.frame_id,
@@ -148,7 +151,7 @@ def analyze(scene, offline, offline_bytes, records, trace_digest, index, render_
             "observations": len(observations), "matches": matches, "rejected": rejected,
             "limitations": ["Offline actor/light IDs and properties are candidates; no runtime light object or actor was observed.",
                             "Register 20 positions are sampled shader constants, not a semantic bridge light list or GPU readback.",
-                            "Shader names are exact matches to pre-Reset program hypotheses, not proof of the active GPU program.",
+                            "Shader names match same-frame application-memory candidates or pre-Reset hypotheses, not GPU readback.",
                             "The register-21 coefficient is recorded without asserting its light-radius meaning or calibration.",
                             "Offline light color, enabled state, radius and intensity are not claimed as runtime state."]}
 

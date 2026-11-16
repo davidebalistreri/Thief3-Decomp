@@ -91,6 +91,15 @@ class FogCandidateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "provenance"):
             fog.from_trace(scene, offline, offline_bytes, "trace", "kernel", "actors", 0, 6)
 
+    def test_same_frame_program_is_reported_with_fog_candidate(self):
+        constants, program, binary = sample()
+        program["status"] = "candidate"
+        with mock.patch.object(fog.trace_to_ir, "observed_vertex_constants", return_value=constants), \
+             mock.patch.object(fog.trace_to_ir, "observed_vertex_program", return_value=program):
+            result = fog.fog_for_draw({}, {}, {}, {}, True, True, True,
+                                      {binary: ["Fog11_Light_Vertex"]}, fog.offline_fog(actors()), (1, 2, 3))
+        self.assertEqual(result["program_source"], "same_frame_application_memory")
+
 
 if __name__ == "__main__":
     unittest.main()

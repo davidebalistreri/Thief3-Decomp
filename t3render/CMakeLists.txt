@@ -1,6 +1,17 @@
 cmake_minimum_required(VERSION 3.25)
 project(T3Render LANGUAGES C CXX)
 
+# API-neutral in-process scene state and flat diagnostic adapter. The existing
+# capture and renderer do not yet feed/consume this library automatically.
+add_library(t3render_scene_live STATIC ir/scene_live.cpp src/scene_live_flat.cpp)
+target_compile_features(t3render_scene_live PUBLIC cxx_std_17)
+if(MSVC)
+  target_compile_options(t3render_scene_live PRIVATE /W4 /utf-8)
+  set_property(TARGET t3render_scene_live PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+else()
+  target_compile_options(t3render_scene_live PRIVATE -Wall -Wextra)
+endif()
+
 option(T3RENDER_D3D12_PROBE_ONLY "Build only the standalone D3D12 probe for Win32 or x64" OFF)
 option(T3RENDER_BUILD_D3D12_REPLAY_UP "Build the limited synthetic replay and diagnostic quad preview" OFF)
 option(T3RENDER_BUILD_SCENE_D3D12 "Build the standalone textured SceneIR D3D12 renderer" OFF)

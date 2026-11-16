@@ -37,6 +37,11 @@ section for its skin. BSP entries include source index and optional source
 offset because original block IDs may repeat. Null light fields, including
 `enabled`, mean unknown; radius/intensity do not imply a physical calibration.
 
+The separate [resident semantic scene prototype](README_scene_live.md) adds
+immutable in-process resources, partial selections and map/device epochs. It is
+not yet wired to the TDS bridge or a live renderer and does not alter this
+serialized schema.
+
 ## Scoped submissions in v1
 
 Version 1 adds a `submissions` array to the v0 fields. Each entry refers to a

@@ -23,7 +23,9 @@ inline bool SameLightingAndTextures(const pbr::Frame& a, const pbr::Frame& b) {
     for (std::size_t i = 0; i < a.lights.size(); ++i) {
         const auto& x = a.lights[i]; const auto& y = b.lights[i];
         if (std::memcmp(x.position, y.position, sizeof(x.position)) || x.radius_m != y.radius_m ||
-            std::memcmp(x.color, y.color, sizeof(x.color)) || x.intensity != y.intensity) return false;
+            std::memcmp(x.color, y.color, sizeof(x.color)) || x.intensity != y.intensity ||
+            std::memcmp(x.direction, y.direction, sizeof(x.direction)) ||
+            x.cos_inner != y.cos_inner || x.cos_outer != y.cos_outer) return false;
     }
     for (std::size_t i = 0; i < a.textures.size(); ++i) {
         const auto& x = a.textures[i].mips; const auto& y = b.textures[i].mips;

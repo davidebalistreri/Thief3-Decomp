@@ -35,11 +35,11 @@ def _frame(scene_path, packet_path, manifest_path):
     if len(packet) < HEADER.size:
         raise ValueError("PBR packet is truncated")
     header = HEADER.unpack_from(packet)
-    if header[0] not in (b"T3PBR01\0", b"T3PBR02\0", b"T3PBR03\0", b"T3PBR04\0", b"T3PBR05\0"):
-        raise ValueError("unsupported PBR packet")
+    _, has_metallic = temporal.packet_features(packet)
     data = {"packet_version": header[0][6]-ord("0"), "digest": _digest(packet),
             "width": header[1], "height": header[2], "min_depth": header[3], "max_depth": header[4],
-            "view": header[5:21], "projection": header[21:37], "camera": header[37:40], "scale": header[40], "flags": 0}
+            "view": header[5:21], "projection": header[21:37], "camera": header[37:40], "scale": header[40],
+            "flags": 0, "packet_metallic": has_metallic, "packet_lighting": temporal.packet_lighting(packet)}
     scene, manifest = temporal.validate_runtime(data, scene_raw, manifest_raw)
     return {"scene": scene, "manifest": manifest, "packet": packet, "metadata": data,
             "paths": (scene_path, packet_path, manifest_path),
@@ -97,7 +97,8 @@ def _light_frame(frame, path):
         raise ValueError("light snapshot does not match its synchronized frame")
     for item in manifest["lights"]:
         light = available.get(item["id"])
-        if light is None or light.position is None or tuple(item["position"]) != light.position or light.kind not in ("point", "omni"):
+        if (light is None or light.position is None or tuple(item["position"]) != light.position or
+                light.kind not in ("point", "omni", "spot") or (light.kind == "spot") != (item.get("kind") == "spot")):
             raise ValueError("light snapshot differs from packet light candidates")
     return {"scene": lights, "path": path, "sha256": _digest(raw), "scope": next(iter(scope))}
 

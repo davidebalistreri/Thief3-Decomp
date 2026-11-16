@@ -55,12 +55,14 @@ evidence and limitations. A frame with no independently verified bed and BSP
 cannot currently be built. Independent captures cannot be combined merely
 because their frame numbers increase. The tool also requires matching
 light calibration and positions, material and shadow settings, dimensions,
-units and effect flags. Enabled generated bed, candlestick, arch and bedroom
-detail geometry must have the same GLB hashes in both manifests; enabling,
+units, effect flags and serialized light parameters. Enabled generated bed,
+candlestick, arch and bedroom detail geometry must have the same GLB hashes in
+both manifests; enabling,
 disabling or changing an override, including the prop material option,
 invalidates history. Metallic mode and its declared factors must also match;
 the GPU history parser checks the set of texture, emission and metallic
-bindings for version-5 packets. These checks do not prove that actor transforms or
+bindings for metallic version-5 and version-6 packets. Spot directions and
+cone angles must also agree. These checks do not prove that actor transforms or
 lighting were unchanged between captures. History is rejected per pixel when
 world positions differ by more than 0.05 m. Object motion vectors, animated
 geometry, transparency and temporal denoising are absent; the narrow transition

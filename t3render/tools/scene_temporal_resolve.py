@@ -46,6 +46,42 @@ def _light_source(scene, manifest):
     raise ValueError("temporal runtime light source provenance is invalid")
 
 
+def packet_features(packet):
+    if len(packet) < 196 or packet[:8] not in (b"T3PBR01\0", b"T3PBR02\0", b"T3PBR03\0",
+                                                b"T3PBR04\0", b"T3PBR05\0", b"T3PBR06\0"):
+        raise ValueError("unsupported PBR packet")
+    version = packet[6]-ord("0")
+    if version >= 5:
+        if len(packet) < 200:
+            raise ValueError("truncated PBR packet flags")
+        flags = struct.unpack_from("<I", packet, 196)[0]
+        if flags > (7 if version == 6 else 1) or (version == 6 and flags & 4 and not flags & 2):
+            raise ValueError("invalid PBR packet flags")
+        return bool(flags & 1), (bool(flags & 4) if version == 6 else True)
+    return version >= 2, False
+
+
+def packet_lighting(packet):
+    """Compare serialized lighting as well as separately supplied provenance."""
+    has_shadow, _ = packet_features(packet)
+    version = packet[6]-ord("0")
+    count = struct.unpack_from("<I", packet, 192)[0]
+    if not 1 <= count <= 16:
+        raise ValueError("invalid PBR packet light count")
+    offset = 196 + (4 if version >= 5 else 0)
+    shadow = b""
+    if has_shadow:
+        extra = 20 + (4 if version >= 3 else 0)
+        if len(packet) < offset+extra:
+            raise ValueError("truncated PBR shadow settings")
+        shadow = packet[offset:offset+20]
+        offset += extra
+    size = count * (52 if version == 6 else 32)
+    if len(packet) < offset+size:
+        raise ValueError("truncated PBR lights")
+    return packet[168:180], shadow, count, packet[offset:offset+size]
+
+
 def parse(raw, packet):
     if not isinstance(raw, bytes) or len(raw) < HEADER.size or len(raw) > MAX_BYTES:
         raise ValueError("invalid temporal buffer size")
@@ -61,15 +97,16 @@ def parse(raw, packet):
         raise ValueError("invalid temporal header")
     if not isinstance(packet, bytes) or len(packet) < 196 or hashlib.sha256(packet).digest() != digest:
         raise ValueError("temporal buffer does not match packet SHA-256")
+    has_shadow, has_metallic = packet_features(packet)
     packet_header = struct.unpack_from("<8sIIff32f4f4fIII", packet)
-    if (packet_header[0] not in (b"T3PBR01\0", b"T3PBR02\0", b"T3PBR03\0", b"T3PBR04\0", b"T3PBR05\0") or
-            packet_header[1:3] != (width, height) or packet_header[5:37] != matrix or
+    if (packet_header[1:3] != (width, height) or packet_header[5:37] != matrix or
             packet_header[37:40] != camera or packet_header[40] != scale or packet_header[44] != exposure or
-            (flags & 32 and packet_header[0] == b"T3PBR01\0")):
+            (flags & 32 and not has_shadow)):
         raise ValueError("temporal camera does not match packet")
     return {"raw": raw, "width": width, "height": height, "digest": digest.hex(), "view": matrix[:16],
             "projection": matrix[16:], "camera": camera, "scale": scale, "exposure": exposure,
             "jitter": jitter, "flags": flags, "packet_version": int(chr(packet_header[0][6])),
+            "packet_metallic": has_metallic, "packet_lighting": packet_lighting(packet),
             "min_depth": packet_header[3], "max_depth": packet_header[4]}
 
 
@@ -92,7 +129,7 @@ def validate_runtime(temporal, scene_raw, manifest_raw):
             (manifest.get("shadow_maps") is not None and not isinstance(manifest["shadow_maps"], dict)) or
             (manifest.get("candle_flames") is not None and not isinstance(manifest["candle_flames"], dict)) or
             ("bedroom_prop_materials" in manifest and not isinstance(manifest["bedroom_prop_materials"], list)) or
-            ((manifest.get("metallic_mode") is not None) != (temporal["packet_version"] == 5)) or
+            ((manifest.get("metallic_mode") is not None) != temporal["packet_metallic"]) or
             (manifest.get("metallic_mode") is not None and not _valid_metallic_mode(manifest["metallic_mode"])) or
             not isinstance(manifest.get("lights"), list) or any(not isinstance(light, dict) or
                 not isinstance(light.get("id"), str) or not isinstance(light.get("position"), list) or
@@ -122,6 +159,8 @@ def compatible(previous, current, previous_runtime=None, current_runtime=None):
     if (previous["width"], previous["height"], previous["min_depth"], previous["max_depth"], previous["scale"], previous["flags"]) != (
             current["width"], current["height"], current["min_depth"], current["max_depth"], current["scale"], current["flags"]):
         raise ValueError("temporal frames have incompatible dimensions, units or effects")
+    if previous["packet_lighting"] != current["packet_lighting"]:
+        raise ValueError("temporal frames have incompatible serialized lighting")
     if (previous_runtime is None) != (current_runtime is None):
         raise ValueError("cannot combine runtime and synthetic temporal sources")
     if current_runtime is not None:
@@ -146,7 +185,9 @@ def compatible(previous, current, previous_runtime=None, current_runtime=None):
                          for key in GEOMETRY_OVERRIDES)
         def light_signature(manifest):
             return sorted((light["id"], tuple(light["position"]), tuple(light["color_linear"]),
-                           light.get("intensity_candela"), light.get("radius_m")) for light in manifest["lights"])
+                           light.get("intensity_candela"), light.get("radius_m"), light.get("kind"),
+                           tuple(light.get("direction_world", ())), light.get("inner_degrees"), light.get("outer_degrees"))
+                          for light in manifest["lights"])
         if (material_signature(old_manifest) != material_signature(new_manifest) or
                 shadow_signature(old_manifest) != shadow_signature(new_manifest) or
                 flame_signature(old_manifest) != flame_signature(new_manifest) or

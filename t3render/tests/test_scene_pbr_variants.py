@@ -201,6 +201,21 @@ class VariantTests(unittest.TestCase):
         struct.pack_into("<f", changed, 20+key_size+old_size+196+28, 1)
         self.assertEqual(self.parse(bytes(changed), key).returncode, 2)
 
+    def test_bed_switch_keeps_spot_direction_in_resident_context(self):
+        scene, lights, config = packet_tests.inputs()
+        lights = replace(lights, lights=(replace(lights.lights[0], kind="spot"),))
+        config["version"] = 2
+        config["lights"][0].update(direction_world=[0, 0, 1], inner_degrees=12, outer_degrees=25)
+        args = (scene, lights, json.dumps(config), Resolver(), FakeRemaster(scene))
+        original, old = pbr.create_packet(*args)
+        replacement, new = pbr.create_packet(*args, bed_glb=bed_tests.glb(scene))
+        body, report = variants.build(scene, original, old, replacement, new)
+        self.assertEqual(self.parse(body, report["resource_key"]).returncode, 0)
+        key_size, old_size = struct.unpack_from("<II", body, 8)
+        changed = bytearray(body)
+        struct.pack_into("<3f", changed, 20+key_size+old_size+200+32, 1, 0, 0)
+        self.assertEqual(self.parse(bytes(changed), report["resource_key"]).returncode, 2)
+
     def test_rejects_unrelated_scene_and_metadata_changes(self):
         scene, original, old, replacement, new = inputs()
         changed = copy.deepcopy(new)

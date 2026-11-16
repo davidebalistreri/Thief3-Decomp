@@ -15,6 +15,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "tools"))
 import scene_pbr_packet as pbr
 import scene_pbr_shadow_fixture as shadow
+import scene_pbr_spot_fixture as spot
 import scene_temporal_resolve as temporal
 import scene_temporal_fixture as fixture
 import test_scene_pbr_packet as packet_tests
@@ -159,6 +160,18 @@ class TemporalResolveTests(unittest.TestCase):
             temporal.compatible(ordinary, contact)
         with self.assertRaisesRegex(ValueError, "camera"):
             temporal.parse(raw_history(self.packet, flags=32), self.packet)
+
+    def test_serialized_spot_changes_invalidate_synthetic_history(self):
+        previous = spot.fixture("spot")
+        old = temporal.parse(raw_history(previous), previous)
+        for offset, value in ((200+32, struct.pack("<3f", 1, 0, 0)),
+                              (200+32+16, struct.pack("<f", .8))):
+            changed = previous[:offset] + value + previous[offset+len(value):]
+            new = temporal.parse(raw_history(changed), changed)
+            with self.subTest(offset=offset), self.assertRaisesRegex(ValueError, "serialized lighting"):
+                temporal.compatible(old, new)
+        with self.assertRaisesRegex(ValueError, "truncated PBR lights"):
+            temporal.packet_lighting(previous[:200])
 
     def test_invalid_headers_pixels_and_settings_fail_closed(self):
         for raw in (self.raw[:-1], b"badmagic"+self.raw[8:],

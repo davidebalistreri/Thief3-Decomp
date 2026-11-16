@@ -34,6 +34,7 @@ SHADOW_MAGIC = b"T3PBR02\0"
 OFFLINE_CASTER_MAGIC = b"T3PBR03\0"
 EMISSION_MAGIC = b"T3PBR04\0"
 METALLIC_MAGIC = b"T3PBR05\0"
+SPOT_MAGIC = b"T3PBR06\0"
 MAX_LIGHTS = 16
 MAX_TRIANGLES = 100000
 MAX_DRAWS = 8192
@@ -64,7 +65,7 @@ def _rgb(value, high, name):
 def load_calibration(raw, light_scene):
     data = json.loads(raw, object_pairs_hook=preview._pairs, parse_constant=preview._invalid_number)
     if (not isinstance(data, dict) or set(data) != {"schema", "version", "ambient_linear", "exposure", "lights"} or
-            data["schema"] != "t3.scene.pbr-preview" or type(data["version"]) is not int or data["version"] != 1 or
+            data["schema"] != "t3.scene.pbr-preview" or type(data["version"]) is not int or data["version"] not in (1, 2) or
             not isinstance(data["lights"], list) or not 1 <= len(data["lights"]) <= MAX_LIGHTS):
         raise ValueError("invalid PBR preview calibration")
     ambient = _rgb(data["ambient_linear"], 4, "ambient color")
@@ -72,19 +73,40 @@ def load_calibration(raw, light_scene):
     available = {light.id: light for light in light_scene.lights}
     result, seen = [], set()
     for item in data["lights"]:
-        if (not isinstance(item, dict) or set(item) != {"id", "color_linear", "intensity_candela", "radius_m"} or
+        common = {"id", "color_linear", "intensity_candela", "radius_m"}
+        if (not isinstance(item, dict) or not common <= set(item) or
                 not isinstance(item["id"], str) or item["id"] in seen or item["id"] not in available):
             raise ValueError("invalid or duplicate PBR light identity")
         light = available[item["id"]]
-        if light.kind not in ("point", "omni"):
-            raise ValueError("PBR preview currently supports point lights only")
+        spot = light.kind == "spot"
+        expected = common | ({"direction_world", "inner_degrees", "outer_degrees"} if spot and data["version"] == 2 else set())
+        if (light.kind not in ("point", "omni", "spot") or set(item) != expected or
+                (spot and data["version"] != 2)):
+            raise ValueError("PBR spot lights require explicit version-2 cone calibration")
         if light.position is None or any(abs(x) > 1000000 for x in light.position):
             raise ValueError("PBR light position is unavailable or out of range")
         seen.add(item["id"])
-        result.append({"id": item["id"], "position": light.position,
-                       "color_linear": _rgb(item["color_linear"], 1, "light color"),
-                       "intensity_candela": _number(item["intensity_candela"], 0, 10000, "light intensity"),
-                       "radius_m": _number(item["radius_m"], .01, 20, "light radius")})
+        record = {"id": item["id"], "position": light.position,
+                  "color_linear": _rgb(item["color_linear"], 1, "light color"),
+                  "intensity_candela": _number(item["intensity_candela"], 0, 10000, "light intensity"),
+                  "radius_m": _number(item["radius_m"], .01, 20, "light radius")}
+        if spot:
+            direction = item["direction_world"]
+            if not isinstance(direction, list) or len(direction) != 3:
+                raise ValueError("spot direction must be a normalized world-space vector")
+            direction = tuple(_number(x, -1, 1, "spot direction") for x in direction)
+            length = math.sqrt(sum(x*x for x in direction))
+            if abs(length-1) > .001:
+                raise ValueError("spot direction must be a normalized world-space vector")
+            inner = _number(item["inner_degrees"], 0, 89, "spot inner angle")
+            outer = _number(item["outer_degrees"], .1, 89, "spot outer angle")
+            if outer-inner+1e-9 < .1:
+                raise ValueError("spot outer angle must exceed inner angle by at least 0.1 degrees")
+            record.update(kind="spot", direction_world=tuple(x/length for x in direction),
+                          inner_degrees=inner, outer_degrees=outer,
+                          cos_inner=math.cos(math.radians(inner)), cos_outer=math.cos(math.radians(outer)),
+                          direction_source="explicit_calibration")
+        result.append(record)
     return ambient, exposure, result
 
 
@@ -492,20 +514,27 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
         if calls > MAX_SHADOW_DRAWS or work > MAX_SHADOW_TRIANGLES:
             raise ValueError("shadow maps exceed renderer work bounds")
     viewport = scene.camera.viewport
-    magic = METALLIC_MAGIC if metallic else EMISSION_MAGIC if flame_glb is not None else OFFLINE_CASTER_MAGIC if offline is not None else SHADOW_MAGIC if shadow else MAGIC
+    has_spots = any(light.get("kind") == "spot" for light in lights)
+    magic = SPOT_MAGIC if has_spots else METALLIC_MAGIC if metallic else EMISSION_MAGIC if flame_glb is not None else OFFLINE_CASTER_MAGIC if offline is not None else SHADOW_MAGIC if shadow else MAGIC
     body = bytearray(struct.pack("<8sIIff32f4f4fIII", magic, viewport.width, viewport.height,
                                  viewport.min_depth, viewport.max_depth, *scene.camera.view, *scene.camera.projection,
                                  *camera, scale, *ambient, exposure, len(textures), len(draws), len(lights)))
-    if metallic:
-        body.extend(struct.pack("<I", int(shadow is not None)))
+    if metallic or has_spots:
+        flags = int(shadow is not None)
+        if has_spots:
+            flags |= (2 if flame_glb is not None or metallic else 0) | (4 if metallic else 0)
+        body.extend(struct.pack("<I", flags))
     if shadow is not None:
         body.extend(struct.pack("<I4f", shadow["size"], shadow["near_m"], shadow["far_m"],
                                 shadow["bias_m"], shadow["softness"]))
-        if offline is not None or flame_glb is not None or metallic:
+        if offline is not None or flame_glb is not None or metallic or has_spots:
             body.extend(struct.pack("<I", len(casters)))
     for light in lights:
         body.extend(struct.pack("<8f", *light["position"], light["radius_m"], *light["color_linear"],
                                 light["intensity_candela"]))
+        if has_spots:
+            body.extend(struct.pack("<5f", *light.get("direction_world", (0, 0, 0)),
+                                    light.get("cos_inner", 0), light.get("cos_outer", 0)))
     for tex in textures:
         body.extend(struct.pack("<III", tex["width"], tex["height"], len(tex["mips"])))
         for mip in tex["mips"]:
@@ -705,6 +734,8 @@ def main(argv=None):
                 manifest["limitations"].append("Additional static casters are offline candidates, not frame observations; save-game changes, attachments and dynamic state can make them incorrect or incomplete.")
             else:
                 manifest["limitations"].append("Off-screen casters are unavailable in this preview.")
+        if any(light.get("kind") == "spot" for light in stats["lights"]):
+            manifest["limitations"].append("Spot directions and cone angles are explicit artistic calibration, not observed runtime light properties.")
         if args.candle_flames is not None:
             manifest["limitations"].append("Candle flames use generated Godot geometry, artistic emissive radiance and offline on/off state; runtime flame state is not observed.")
         if args.bed_high is not None:

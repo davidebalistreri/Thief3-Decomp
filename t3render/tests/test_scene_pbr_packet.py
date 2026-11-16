@@ -21,6 +21,9 @@ import scene_pbr_indirect_fixture as indirect_fixture
 import scene_pbr_gtao_fixture as gtao_fixture
 import scene_pbr_volumetric_fixture as volumetric_fixture
 import scene_pbr_reflection_fixture as reflection_fixture
+import scene_pbr_variants as variants
+import scene_pbr_spot_fixture as spot_fixture
+import scene_temporal_resolve as temporal
 from scene_ir import VisualLight
 from test_scene_material_overrides import FakeRemaster, scene_fixture
 from test_scene_textured_packet import Resolver
@@ -266,8 +269,61 @@ class PbrPacketTests(unittest.TestCase):
                 pbr.load_calibration(json.dumps(value), lights)
         with self.assertRaisesRegex(ValueError, "duplicate"):
             pbr.load_calibration('{"schema":"x","schema":"y"}', lights)
-        with self.assertRaisesRegex(ValueError, "point lights"):
+        with self.assertRaisesRegex(ValueError, "version-2 cone"):
             pbr.load_calibration(json.dumps(config), replace(lights, lights=(replace(lights.lights[0], kind="spot"),)))
+
+    def test_spot_calibration_and_packet_reject_invalid_cones(self):
+        scene, lights, config = inputs()
+        spot = replace(lights.lights[0], id="candidate:light:spot", kind="spot")
+        lights = replace(lights, lights=lights.lights+(spot,))
+        config["version"] = 2
+        config["lights"].append({"id": spot.id, "color_linear": [1, .5, .25], "intensity_candela": 5,
+                                 "radius_m": .1, "direction_world": [0, 0, 1],
+                                 "inner_degrees": 12, "outer_degrees": 25})
+        packet, stats = pbr.create_packet(scene, lights, json.dumps(config), Resolver(), None)
+        self.assertEqual(packet[:8], pbr.SPOT_MAGIC)
+        self.assertEqual(self.parse(packet).returncode, 0)
+        self.assertEqual(stats["lights"][1]["direction_source"], "explicit_calibration")
+        self.assertEqual(len(variants.packet_signatures(packet)[0]), len(stats["draws"]))
+        spot_direction = 200+52+32
+        for offset, value in ((196, struct.pack("<I", 4)),
+                              (spot_direction, struct.pack("<3f", 0, 0, .5)),
+                              (spot_direction+12, struct.pack("<2f", .5, .9)),
+                              (200+32, struct.pack("<f", .5))):
+            with self.subTest(offset=offset):
+                self.assertEqual(self.parse(packet[:offset]+value+packet[offset+len(value):]).returncode, 2)
+        for field, value in (("direction_world", [0, 0, 0]), ("direction_world", [0, 0, 2]),
+                             ("inner_degrees", 25), ("outer_degrees", 90), ("outer_degrees", float("nan"))):
+            invalid = copy.deepcopy(config); invalid["lights"][1][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                pbr.load_calibration(json.dumps(invalid), lights)
+        narrow = copy.deepcopy(config); narrow["lights"][1]["outer_degrees"] = 12.1
+        self.assertEqual(len(pbr.load_calibration(json.dumps(narrow), lights)[2]), 2)
+        invalid = copy.deepcopy(config); invalid["version"] = 1
+        with self.assertRaisesRegex(ValueError, "version-2 cone"):
+            pbr.load_calibration(json.dumps(invalid), lights)
+
+    def test_spot_packets_work_with_shadows_and_metallic_materials(self):
+        scene, lights, config = inputs()
+        prefix = f"candidate:light:{scene.source.map}:{scene.source.fingerprints['map']}:"
+        spot = replace(lights.lights[0], id=prefix+"lamp", kind="spot")
+        lights = replace(lights, lights=(spot,))
+        config["version"] = 2
+        config["lights"][0].update(id=spot.id, direction_world=[0, 0, 1], inner_degrees=12, outer_degrees=25)
+        actors = {"lamp": {"attached_to": None},
+                  "StaticMeshActor__1520": {"mesh": "INNbed1A1", "casts_shadows": True}}
+        shadow = {"size": 128, "near_m": .05, "far_m": 15, "bias_m": .015, "softness": .5}
+        for use_shadow in (False, True):
+            for metallic in (False, True):
+                packet, info = pbr.create_packet(scene, lights, json.dumps(config), Resolver(), None,
+                    shadows=shadow if use_shadow else None, actors=actors if use_shadow else None, metallic=metallic)
+                with self.subTest(shadow=use_shadow, metallic=metallic):
+                    self.assertEqual(packet[:8], pbr.SPOT_MAGIC)
+                    self.assertEqual(self.parse(packet).returncode, 0)
+                    self.assertEqual(temporal.packet_features(packet), (use_shadow, metallic))
+                    self.assertEqual(len(variants.packet_signatures(packet)[0]), len(info["draws"]))
+        for mode in (None, False, True):
+            self.assertEqual(self.parse(spot_fixture.fixture("spot", shadow_caster=mode)).returncode, 0)
 
     def test_scene_light_frame_and_units_are_required(self):
         scene, lights, calibration = inputs()

@@ -14,6 +14,7 @@ using scene::Vertex;
 struct Light {
     float position[3]{}, radius_m = 0;
     float color[3]{}, intensity = 0;
+    float direction[3]{}, cos_inner = 0, cos_outer = 0;
 };
 struct Draw {
     std::uint32_t textures[4]{}, first_vertex = 0, vertex_count = 0;
@@ -43,7 +44,7 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
     Frame frame;
     char magic[8];
     if (!reader.bytes(magic, sizeof(magic)) || std::memcmp(magic, "T3PBR0", 6) ||
-        (magic[6] < '1' || magic[6] > '5') || magic[7] != '\0' ||
+        (magic[6] < '1' || magic[6] > '6') || magic[7] != '\0' ||
         !reader.u32(frame.width) || !reader.u32(frame.height) || !frame.width || !frame.height ||
         frame.width > 2048 || frame.height > 2048 || !reader.f32(frame.min_depth) || !reader.f32(frame.max_depth) ||
         frame.min_depth < 0 || frame.max_depth > 1 || frame.min_depth > frame.max_depth) return false;
@@ -59,8 +60,9 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
         !light_count || light_count > kMaxLights) return false;
     std::uint32_t offline_caster_count = 0;
     std::uint32_t flags = 0;
-    if (magic[6] == '5' && (!reader.u32(flags) || flags > 1)) return false;
-    const bool has_shadow = magic[6] == '5' ? (flags & 1) != 0 : magic[6] >= '2';
+    if (magic[6] >= '5' && (!reader.u32(flags) || flags > (magic[6] == '5' ? 1u : 7u))) return false;
+    if (magic[6] == '6' && (flags & 4u) && !(flags & 2u)) return false;
+    const bool has_shadow = magic[6] >= '5' ? (flags & 1) != 0 : magic[6] >= '2';
     if (has_shadow) {
         if (!reader.u32(frame.shadow_size) || frame.shadow_size < 64 || frame.shadow_size > 512 ||
             (frame.shadow_size & (frame.shadow_size - 1)) ||
@@ -70,8 +72,9 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
             !reader.f32(frame.shadow_softness, 2) || frame.shadow_softness < 0) return false;
         if (magic[6] >= '3' && (!reader.u32(offline_caster_count) || offline_caster_count > kMaxOfflineCasters)) return false;
     }
-    frame.has_emission = magic[6] >= '4';
-    frame.has_metallic = magic[6] == '5';
+    frame.has_emission = magic[6] == '6' ? (flags & 2u) != 0 : magic[6] >= '4';
+    frame.has_metallic = magic[6] == '6' ? (flags & 4u) != 0 : magic[6] == '5';
+    bool has_spot = false;
     frame.lights.reserve(light_count);
     for (std::uint32_t i = 0; i < light_count; ++i) {
         Light light;
@@ -79,8 +82,22 @@ inline bool ParsePacket(const std::uint8_t* bytes, std::size_t size, Frame& outp
         if (!reader.f32(light.radius_m, 20) || light.radius_m < .01f) return false;
         for (float& x : light.color) if (!reader.f32(x, 1) || x < 0) return false;
         if (!reader.f32(light.intensity, 10000) || light.intensity < 0) return false;
+        if (magic[6] == '6') {
+            for (float& x : light.direction) if (!reader.f32(x, 1)) return false;
+            if (!reader.f32(light.cos_inner, 1) || !reader.f32(light.cos_outer, 1)) return false;
+            const float length = light.direction[0]*light.direction[0] + light.direction[1]*light.direction[1] +
+                                 light.direction[2]*light.direction[2];
+            if (length == 0) {
+                if (light.cos_inner != 0 || light.cos_outer != 0) return false;
+            } else {
+                if (length < .998f || length > 1.002f || light.cos_outer < 0 ||
+                    light.cos_inner <= light.cos_outer) return false;
+                has_spot = true;
+            }
+        }
         frame.lights.push_back(light);
     }
+    if (magic[6] == '6' && !has_spot) return false;
     frame.textures.reserve(texture_count);
     for (std::uint32_t i = 0; i < texture_count; ++i) {
         std::uint32_t width, height, count;

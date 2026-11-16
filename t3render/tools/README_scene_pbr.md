@@ -19,7 +19,46 @@ in the manifest; alpha alone does not prove the original blend mode. Runtime
 light positions are scoped **candidates**. The calibration file selects
 omni/point lights and supplies artistic linear colors, intensities, source
 radii, ambient and exposure. These choices are not measured runtime values.
-Spotlights are rejected rather than approximated as point lights.
+
+## Spot lights
+
+Calibration version 2 may include a scoped `spot` light alongside point and
+omni lights. Each spot entry adds a normalized `direction_world` vector and
+`inner_degrees` / `outer_degrees`, measured as half-angles from that axis in
+the SceneIR world basis. For example:
+
+```json
+{
+  "id": "candidate:light:<qualified-id>",
+  "color_linear": [1, 0.7, 0.42],
+  "intensity_candela": 5,
+  "radius_m": 0.12,
+  "direction_world": [0, 0, -1],
+  "inner_degrees": 20,
+  "outer_degrees": 35
+}
+```
+
+The enclosing calibration retains its `schema`, `ambient_linear`, `exposure`
+and `lights` fields and sets `version` to 2. A spot uses a smooth angular
+falloff between the two cones, inverse-square intensity, the same cubemap
+shadows as point lights, and the same angular attenuation for volumetrics.
+It does not reproduce legacy projector textures or gobos. Positions and
+identities remain scoped candidates or explicit offline fixture data; the
+axis, angles, color and intensity are explicit artistic calibration, not
+observed runtime properties. Packet version 6 records these parameters
+without runtime addresses. Calibration version 1 and packets 1–5 retain their
+existing behavior. Changing a spot's axis or cone invalidates GPU temporal
+history and resident variant updates.
+
+In the local frame-2864 preview, the candidate `Light__15` used an axis from
+the offline actor rotation and an explicitly chosen 20°/35° cone, color and
+intensity. Raising that light from zero to 5 candela changed 77,544 pixels,
+with mean absolute RGB-channel change 0.649 on a 0–255 scale. The same
+calibration also rendered frames 2864 and 2865 through the resident original /
+high-poly bed switch, and the temporal path accepted their separately
+revalidated Present windows. These are standalone previews; neither the
+offline rotation nor the chosen cone proves the live TDS light state.
 
 `--offline-lights` selects lights directly from `--offline-scene` instead of
 `--light-scene`. The fixture must have `source=offline`, match the runtime
@@ -623,6 +662,15 @@ failed the same check, with three intermediate samples for each case. The six
 faces, seam, asymmetric blocker, independent lights, blocker behind the
 receiver, and unchanged hard shadow mode also passed the existing fixture
 checks with the new filter.
+
+`scene_pbr_spot_fixture.py` creates point, spot and reversed-axis packets,
+with an optional independent second light. Render them and use `verify` with
+`--point`, `--away`, `--point-mixed` and `--spot-mixed` references. The
+`--shadow-caster on|off` create option adds a shadow-only blocker for the
+existing shadow fixture's verification. The local D3D12 test
+verified the lit axis, smooth edge, dark exterior, reversed direction and
+unchanged second light. Additional shadow-caster and volumetric checks verified
+that the cone participates in those paths as well.
 
 `scene_pbr_indirect_fixture.py create <new.bin> --kind <kind>` produces a
 synthetic receiver and source. Render each packet both with and without

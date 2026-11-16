@@ -88,10 +88,11 @@ struct Constants {
     float view[16], projection[16];
     float size_scale_count[4], camera_exposure[4], ambient[4];
     float light_position_radius[kMaxLights][4], light_color_intensity[kMaxLights][4];
+    float light_spot_direction_outer[kMaxLights][4], light_spot_inner[kMaxLights][4];
     float shadow_settings[4];
     float jitter[4];
 };
-static_assert(sizeof(Constants) == 720, "unexpected PBR constant-buffer layout");
+static_assert(sizeof(Constants) == 1232, "unexpected PBR constant-buffer layout");
 struct PreviousConstants {
     float view[16], projection[16], camera_scale[4], jitter_weight[4];
 };
@@ -183,6 +184,7 @@ cbuffer Scene : register(b0) {
     row_major float4x4 view; row_major float4x4 projection;
     float4 size_scale_count; float4 camera_exposure; float4 ambient;
     float4 light_position_radius[16]; float4 light_color_intensity[16];
+    float4 light_spot_direction_outer[16]; float4 light_spot_inner[16];
     float4 shadow_settings; float4 jitter;
 };
 struct O { float4 uv:TEXCOORD0; float3 world:TEXCOORD1; float3 normal:TEXCOORD2;
@@ -203,6 +205,7 @@ cbuffer Scene : register(b0) {
     row_major float4x4 view; row_major float4x4 projection;
     float4 size_scale_count; float4 camera_exposure; float4 ambient;
     float4 light_position_radius[16]; float4 light_color_intensity[16];
+    float4 light_spot_direction_outer[16]; float4 light_spot_inner[16];
     float4 shadow_settings; float4 jitter;
 };
 #if T3_EMISSION || T3_METALLIC
@@ -212,6 +215,14 @@ cbuffer Material : register(b2) {
     float metallic;
 #endif
 };
+#endif
+#if T3_SPOTS
+float spot_attenuation(float3 to_light, uint i) {
+    if(light_spot_inner[i].y==0) return 1;
+    float t=saturate((dot(light_spot_direction_outer[i].xyz,-to_light)-light_spot_direction_outer[i].w) /
+                     max(light_spot_inner[i].x-light_spot_direction_outer[i].w,0.000001));
+    return t*t*(3-2*t);
+}
 #endif
 #if T3_SHADOWS
 float visibility(float3 world, float3 geometric_normal, float3 to_light, uint light_index) {
@@ -334,6 +345,9 @@ float4 main(float4 uv:TEXCOORD0, float3 world:TEXCOORD1, float3 normal:TEXCOORD2
 #endif
             float radius=light_position_radius[i].w;
             float3 radiance=light_color_intensity[i].rgb*light_color_intensity[i].w/max(d2,radius*radius);
+#if T3_SPOTS
+            radiance*=spot_attenuation(l,i);
+#endif
             float light_visibility=1;
 #if T3_SHADOWS
             light_visibility=visibility(world,geometric_normal,l,i);
@@ -397,8 +411,17 @@ cbuffer Scene : register(b0) {
     row_major float4x4 view; row_major float4x4 projection;
     float4 size_scale_count; float4 camera_exposure; float4 ambient;
     float4 light_position_radius[16]; float4 light_color_intensity[16];
+    float4 light_spot_direction_outer[16]; float4 light_spot_inner[16];
     float4 shadow_settings; float4 jitter;
 };
+#if T3_SPOTS
+float spot_attenuation(float3 to_light, uint i) {
+    if(light_spot_inner[i].y==0) return 1;
+    float t=saturate((dot(light_spot_direction_outer[i].xyz,-to_light)-light_spot_direction_outer[i].w) /
+                     max(light_spot_inner[i].x-light_spot_direction_outer[i].w,0.000001));
+    return t*t*(3-2*t);
+}
+#endif
 #if T3_INDIRECT
 float3 indirect_light(int2 pixel) {
     const float pi=3.14159265359;
@@ -588,6 +611,9 @@ float3 volume_lighting(float3 ray, float distance) {
 #endif
             float radius=light_position_radius[i].w;
             float3 intensity=light_color_intensity[i].rgb*light_color_intensity[i].w;
+#if T3_SPOTS
+            intensity*=spot_attenuation(to_light,i);
+#endif
             sum+=intensity/max(d2,radius*radius)*exp(-extinction*d)*visible*phase*transmittance*scattering*ds;
         }
     }
@@ -650,6 +676,7 @@ cbuffer Scene : register(b0) {
     row_major float4x4 view; row_major float4x4 projection;
     float4 size_scale_count; float4 camera_exposure; float4 ambient;
     float4 light_position_radius[16]; float4 light_color_intensity[16];
+    float4 light_spot_direction_outer[16]; float4 light_spot_inner[16];
     float4 shadow_settings; float4 jitter;
 };
 cbuffer Previous : register(b3) {
@@ -709,7 +736,11 @@ Output main(float4 position:SV_Position) {
     Output o; o.display=float4(saturate(mapped),1); o.hdr_color=float4(color,1); return o;
 })";
     ComPtr<ID3DBlob> vs, ps, tone_vs, tone_ps, shadow_vs, shadow_ps, temporal_ps;
+    bool has_spots = false;
+    for (const auto& light : frame.lights)
+        if (light.direction[0] || light.direction[1] || light.direction[2]) { has_spots = true; break; }
     const std::string options = std::string(use_gbuffer ? "#define T3_GBUFFER 1\n" : "#define T3_GBUFFER 0\n") +
+                                (has_spots ? "#define T3_SPOTS 1\n" : "#define T3_SPOTS 0\n") +
                                 (contact_hardening ? "#define T3_CONTACT_HARDENING 1\n" : "#define T3_CONTACT_HARDENING 0\n") +
                                 (indirect ? "#define T3_INDIRECT 1\n" : "#define T3_INDIRECT 0\n") +
                                 (gtao ? "#define T3_GTAO 1\n" : "#define T3_GTAO 0\n") +
@@ -999,9 +1030,13 @@ Output main(float4 position:SV_Position) {
         for (unsigned j = 0; j < 3; ++j) {
             cb.light_position_radius[i][j] = frame.lights[i].position[j];
             cb.light_color_intensity[i][j] = frame.lights[i].color[j];
+            cb.light_spot_direction_outer[i][j] = frame.lights[i].direction[j];
         }
         cb.light_position_radius[i][3] = frame.lights[i].radius_m;
         cb.light_color_intensity[i][3] = frame.lights[i].intensity;
+        cb.light_spot_direction_outer[i][3] = frame.lights[i].cos_outer;
+        cb.light_spot_inner[i][0] = frame.lights[i].cos_inner;
+        cb.light_spot_inner[i][1] = (frame.lights[i].direction[0] || frame.lights[i].direction[1] || frame.lights[i].direction[2]) ? 1.0f : 0.0f;
     }
     if (frame.shadow_size) {
         cb.shadow_settings[0] = frame.shadow_far_m; cb.shadow_settings[1] = frame.shadow_bias_m;

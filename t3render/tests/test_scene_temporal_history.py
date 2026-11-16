@@ -14,6 +14,7 @@ sys.path.insert(0, str(HERE.parent / "tools"))
 import scene_temporal_resolve as temporal
 import scene_pbr_metallic_fixture as metallic
 import scene_pbr_shadow_fixture as shadow
+import scene_pbr_spot_fixture as spot
 import test_scene_pbr_packet as packet_tests
 from test_scene_temporal_resolve import raw_history
 
@@ -113,6 +114,17 @@ class GpuHistoryParserTests(unittest.TestCase):
         no_shadows = packet_tests.gpu_fixture.fixture()
         self.assertEqual(self.parse(no_shadows, no_shadows, raw_history(no_shadows, flags=32), flags=32).returncode, 2)
         self.assertEqual(self.parse(packet, packet, raw_history(packet, flags=64), flags=64).returncode, 2)
+
+    def test_spot_direction_and_cone_changes_invalidate_history(self):
+        packet = spot.fixture("spot")
+        history = raw_history(packet)
+        self.assertEqual(self.parse(packet, packet, history).returncode, 0)
+        changed = bytearray(packet)
+        struct.pack_into("<3f", changed, 200+32, 1, 0, 0)
+        self.assertEqual(self.parse(packet, bytes(changed), history).returncode, 2)
+        changed = bytearray(packet)
+        struct.pack_into("<f", changed, 200+32+16, .8)
+        self.assertEqual(self.parse(packet, bytes(changed), history).returncode, 2)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ sys.path.insert(0, str(HERE.parent / "tools"))
 import scene_pbr_packet as pbr
 import scene_pbr_flames as flames
 import scene_pbr_emission_fixture as gpu_fixture
+import scene_pbr_variants as variants
 import test_scene_pbr_packet as packet_tests
 from test_scene_textured_packet import Resolver
 
@@ -118,6 +119,24 @@ class FlamePacketTests(unittest.TestCase):
     setUpClass = classmethod(packet_tests.PbrPacketTests.setUpClass.__func__)
     tearDownClass = classmethod(packet_tests.PbrPacketTests.tearDownClass.__func__)
     parse = packet_tests.PbrPacketTests.parse
+
+    def test_spot_and_candle_emission_share_a_packet(self):
+        scene, lights, config, actors = inputs()
+        spot_id = f"candidate:light:{scene.source.map}:{scene.source.fingerprints['map']}:spot"
+        spot = replace(lights.lights[0], id=spot_id, kind="spot")
+        lights = replace(lights, lights=lights.lights+(spot,))
+        config["version"] = 2
+        config["lights"].append({"id": spot_id, "color_linear": [1, .5, .25], "intensity_candela": 5,
+                                 "radius_m": .1, "direction_world": [0, 0, 1],
+                                 "inner_degrees": 12, "outer_degrees": 25})
+        actors["spot"] = {"attached_to": None}
+        packet, info = pbr.create_packet(scene, lights, json.dumps(config), Resolver(), None,
+                                          shadows=SHADOW, actors=actors, flame_glb=glb())
+        self.assertEqual(packet[:8], pbr.SPOT_MAGIC)
+        self.assertEqual(struct.unpack_from("<I", packet, 196)[0], 3)
+        self.assertEqual(self.parse(packet).returncode, 0)
+        self.assertEqual(info["candle_flames"]["instances"], 1)
+        self.assertEqual(len(variants.packet_signatures(packet)[0]), len(info["draws"]))
 
     def test_v4_packet_has_emissive_draw_and_rejects_bad_radiance(self):
         scene, lights, config, actors = inputs()

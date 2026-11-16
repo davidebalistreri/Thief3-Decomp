@@ -20,14 +20,14 @@ def packet_signatures(raw):
     header_bytes = take(196)
     header = struct.unpack("<8sIIff32f4f4fIII", header_bytes)
     magic, texture_count, draw_count, light_count = header[0], *header[-3:]
-    if (magic not in (b"T3PBR01\0", b"T3PBR02\0", b"T3PBR03\0", b"T3PBR04\0", b"T3PBR05\0") or
+    if (magic not in (b"T3PBR01\0", b"T3PBR02\0", b"T3PBR03\0", b"T3PBR04\0", b"T3PBR05\0", b"T3PBR06\0") or
             not 1 <= texture_count <= 64 or not 1 <= draw_count <= 8192 or not 1 <= light_count <= 16):
         raise ValueError("invalid PBR variant packet header")
     version = magic[6]-ord("0")
-    flags = struct.unpack("<I", take(4))[0] if version == 5 else (1 if version >= 2 else 0)
-    if flags not in (0, 1):
+    flags = struct.unpack("<I", take(4))[0] if version >= 5 else (1 if version >= 2 else 0)
+    if flags > (7 if version == 6 else 1) or (version == 6 and flags & 4 and not flags & 2):
         raise ValueError("invalid PBR variant flags")
-    shadows = bool(flags)
+    shadows = bool(flags & 1)
     casters = 0
     shadow_settings = b""
     if shadows:
@@ -36,7 +36,7 @@ def packet_signatures(raw):
             casters = struct.unpack("<I", take(4))[0]
             if casters > 8192:
                 raise ValueError("PBR variant caster count exceeds bounds")
-    light_data = bytes(take(light_count*32))
+    light_data = bytes(take(light_count*(52 if version == 6 else 32)))
     context = bytes(header_bytes[:184]) + struct.pack("<II", flags, light_count) + shadow_settings + light_data
     textures = []
     for _ in range(texture_count):
@@ -54,8 +54,8 @@ def packet_signatures(raw):
         if any(index >= texture_count for index in (tex0,tex1,tex2,tex3)) or not count or count % 3 or count > 300000:
             raise ValueError("invalid PBR variant draw")
         mask = bytes(take(4)) if shadows else b""
-        emission = bytes(take(12)) if version >= 4 else b""
-        metallic = bytes(take(4)) if version >= 5 else b""
+        emission = bytes(take(12)) if (flags & 2 if version == 6 else version >= 4) else b""
+        metallic = bytes(take(4)) if (flags & 4 if version == 6 else version >= 5) else b""
         vertex_offset = offset
         vertices = take(count*48)
         signature = (tuple(textures[index] for index in (tex0,tex1,tex2,tex3)), count, mask,

@@ -36,7 +36,10 @@ can fall back toward nearest sampling. The default is no upscaling.
 
 For runtime inputs, supply the synchronized SceneIR and PBR packet manifest
 for **both** frames. The tool verifies each scene, packet hash, camera, frame
-ID and fingerprint; it requires increasing frame IDs, matching map/assets,
+ID and fingerprint; it requires increasing frame IDs and the same complete
+source fingerprints, including the trace, map and assets. Thus both frames
+must come from the same finalized trace; independent captures cannot be
+combined merely because their frame numbers increase. It also requires matching
 light calibration and positions, material and shadow settings, dimensions,
 units and effect flags. Enabled generated bed, candlestick, arch and bedroom
 detail geometry must have the same GLB hashes in both manifests; enabling,

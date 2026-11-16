@@ -105,12 +105,11 @@ def compatible(previous, current, previous_runtime=None, current_runtime=None):
     if current_runtime is not None:
         old, old_manifest = previous_runtime
         new, new_manifest = current_runtime
-        if (old.source.map != new.source.map or old.source.frame_id >= new.source.frame_id or any(
-                old.source.fingerprints.get(k) != new.source.fingerprints.get(k)
-                for k in ("map", "bundle", "kernel", "offline_scene")) or
+        if (old.source.map != new.source.map or old.source.frame_id >= new.source.frame_id or
+                old.source.fingerprints != new.source.fingerprints or
                 old_manifest.get("calibration_sha256") != new_manifest.get("calibration_sha256") or
                 (old_manifest["render_pass"], old_manifest["stage"]) != (new_manifest["render_pass"], new_manifest["stage"])):
-            raise ValueError("runtime temporal frames have incompatible map, order or light calibration")
+            raise ValueError("runtime temporal frames have incompatible capture, assets, map, order or light calibration")
         def material_signature(manifest):
             return sorted((t.get("bundle"), t.get("name"), t.get("source_sha256")) for t in manifest.get("textures", []))
         def shadow_signature(manifest):

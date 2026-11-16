@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "date": "2026-11-16",
+  "test": "semantic_receiver_light_preview",
+  "status": "PARTIAL",
+  "environment": "macOS arm64, Highball CrossOver 26.3 r30, Wine x86, D3D12",
+  "frame": 1001,
+  "trace_sha256": "633047c6d44977f396b5cc270830dd48b18a551f175c43cae664e130e5f94759",
+  "d3d8_image_sha256": "458714505c76992cc95dc7a83d4581d82e1d8dc36400c6a577af8f1c92fd5e9a",
+  "baseline_packet_sha256": "bcab707c61dbbbe506ca68d6bfff7413b1a5ad1082e2fe71b49904c9409e347f",
+  "baseline_image_sha256": "2ab67962e42f2dd1da1c0dbc4952af33efd0813c4f65f1955ea68d0a230010eb",
+  "preview_packet_sha256": "53383c27a5c2ef757915a247f63371f85557de13b905bc5c466b5d1db3888ad9",
+  "preview_image_sha256": "46532d388fe2f4472995d9a5ebe28cd1f02f52b179277c2c23b99065e46c2871",
+  "override_sha256": "e773384d9c14c62fa23652fb269a4c79939d8ea27e93a31f14a8dc9ff63209b8",
+  "receiver": "StaticMeshActor__258 / GENrafters1",
+  "light_candidate": "D_384__5",
+  "receiver_rgb_multiplier": [0, 0, 0],
+  "modified_direct_submissions": 1,
+  "packet_other_than_selected_light_rgb_and_energy_byte_identical": true,
+  "whole_image": {
+    "changed_pixels": 11218,
+    "mean_absolute_rgb_before": [4.862, 4.254, 3.788],
+    "mean_absolute_rgb_after": [4.510, 4.016, 3.689]
+  },
+  "beam_rectangle": {
+    "half_open_xyxy": [549, 130, 577, 300],
+    "changed_pixels": 4681,
+    "mean_absolute_rgb_before": [37.104, 27.035, 13.867],
+    "mean_absolute_rgb_after": [1.425, 1.854, 1.857]
+  },
+  "same_frame_stencil_observation": {
+    "stencil_clear_before_light": true,
+    "volume_draw_pairs": 4,
+    "pairs_with_unique_candidate_transform_and_counts": 3,
+    "unmatched_pair_vertices": 8052,
+    "unmatched_pair_triangles": 10736,
+    "actual_volume_payloads_captured": false
+  },
+  "limitations": [
+    "The receiver override is a camera-specific visual hypothesis, not evidence of runtime occlusion or light state.",
+    "The trace records stencil operations, but candidate volume metadata does not establish runtime geometry identity.",
+    "The fourth shadow-volume pair has no captured geometry; shader and light inputs also remain incomplete.",
+    "The packet uses offline material, geometry and light candidates and is not a live TDS renderer.",
+    "The scene remains partial; flames, HUD and other missing effects prevent a claim of legacy parity."
+  ]
+}

@@ -335,6 +335,14 @@ class TexturedScenePacketTests(unittest.TestCase):
         zero, _ = packet.create_packet(scene, Resolver(), draw_states=states,
                                        direct_candidates={2: dict(light, preview_rgb_multiplier=[0, 0, 0])})
         self.assertEqual(struct.unpack_from("<4f", zero, 188 + 92), (0, 0, 0, 0))
+        receiver, receiver_info = packet.create_packet(scene, Resolver(), draw_states=states,
+            direct_candidates={2: dict(adjusted, preview_receiver_rgb_multiplier=[0, 0, 0])})
+        self.assertEqual(struct.unpack_from("<4f", receiver, 188 + 92), (0, 0, 0, 0))
+        self.assertEqual(receiver_info["draws"][0]["direct_candidate"]["preview_receiver_rgb_multiplier"], [0, 0, 0])
+        self.assertEqual(self.parse(receiver).returncode, 0)
+        with self.assertRaisesRegex(ValueError, "combined light preview multiplier"):
+            packet.create_packet(scene, Resolver(), draw_states=states,
+                direct_candidates={2: dict(adjusted, preview_receiver_rgb_multiplier=[3, 1, 1])})
         for factors in ([1, 2], [1, -1, 1], [1, True, 1], [float("nan"), 1, 1], [1, 1, 5]):
             with self.subTest(factors=factors), self.assertRaisesRegex(ValueError, "RGB multiplier"):
                 packet.create_packet(scene, Resolver(), draw_states=states,

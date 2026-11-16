@@ -339,6 +339,15 @@ curve has been verified against the legacy attenuation lookup. This uses packet
 v11; older packets continue to use squared linear falloff even if their unused
 ambient-alpha field is nonzero.
 
+Version 2 of the same override document adds a `receivers` array. Each entry
+has a full `light_id`, a SceneIR `target_id` (`actor:` or `bsp:`), and an
+`rgb_multiplier`. It applies only to matching direct-light submissions on that
+target, across its sections, and multiplies the optional per-light multiplier.
+The exporter rejects duplicate, unmatched or disabled pairs and combined values
+above 4. No draw number is used for selection. Receiver multipliers are
+explicit visual hypotheses: they do not prove a light is occluded or that the
+runtime shadow state has been observed. Version-1 documents remain unchanged.
+
 For the local frame-1001 comparison, a single-frame experiment assigns
 `(2, 1.8, 1.2)` to the four fingerprint-qualified `D_384__0`, `D_384__5`,
 `D_384__11` and `D_384__13` candidates. Other lights are unchanged. Applied to
@@ -364,6 +373,43 @@ the floor and dummy improve. These image-specific multipliers and falloff are
 visual hypotheses, not runtime light measurements. The new GPU fixture checks
 both curves and confirms that the nonzero unused field in a v10 packet does
 not alter its legacy output.
+
+#### Beam diagnostic
+
+In frame 1001, the visible central beam is the `GENrafters1` candidate owned
+by `StaticMeshActor__258`. Disabling its `D_384__5` direct-light candidate in
+isolation changes 11,218 pixels. In the half-open beam rectangle
+`(549,130)`–`(577,300)`, mean absolute RGB error against the same-frame D3D8
+backbuffer changes from `(37.104, 27.035, 13.867)` to `(1.425, 1.854,
+1.857)`; whole-image error changes from `(4.862, 4.254, 3.788)` to `(4.510,
+4.016, 3.689)`. This fit is specific to this frame and does not establish
+legacy parity. The capture shows a stencil clear and four volume draw pairs
+before the beam's light draw; three pairs have transform and count matches to
+the offline bed, crate and BSP-volume candidates. The fourth pair lacks captured
+geometry. The candidate shadow renderer does not reproduce the dark beam, and
+the cause may be missing occlusion, shader behavior or another unobserved input.
+
+For a reproducible **optional** diagnostic, extend the existing local
+`bedroom-runtime-1001-falloff-preview.overrides.json` with:
+
+```json
+{
+  "version": 2,
+  "receivers": [{
+    "light_id": "light:SouthQuarter1_int1:ed7d475b1efdc713d28b2a978e11fb0f662bdb17c5c2769d77c96e1f74b7ceba:D_384__5",
+    "target_id": "actor:SouthQuarter1_int1:ed7d475b1efdc713d28b2a978e11fb0f662bdb17c5c2769d77c96e1f74b7ceba:StaticMeshActor__258",
+    "rgb_multiplier": [0, 0, 0]
+  }]
+}
+```
+
+Keep the original document's `schema` and `lights`, use a new file, and pass it
+as `--direct-light-overrides` to the four-stage shadow-preview command above.
+For the legacy comparison, omit `--bedroom-remaster-materials`. The packet,
+manifest, render and three-panel comparison stay local under `build/`. The
+[benchmark](../benchmarks/runtime/2026-11-16-legacy-beam-preview/result.json)
+records hashes and the limitations. This opt-in does not alter SceneIR, gameplay,
+the bridge, or the default renderer behavior.
 
 ## Distance-fog candidate
 

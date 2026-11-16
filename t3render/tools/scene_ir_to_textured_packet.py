@@ -520,10 +520,15 @@ def create_packet(scene, resolver, render_pass=None, stage=None, draw_states=Non
             if struct.unpack("<f", struct.pack("<f", inverse))[0] <= 0:
                 raise ValueError("point-light inverse radius rounds to zero")
             factors = light.get("preview_rgb_multiplier", (1, 1, 1))
-            if (not isinstance(factors, (list, tuple)) or len(factors) != 3 or any(
-                    isinstance(x, bool) or not isinstance(x, (int, float)) or
-                    not 0 <= x <= light_overrides.MAX_MULTIPLIER or not math.isfinite(x) for x in factors)):
-                raise ValueError("invalid light preview RGB multiplier")
+            receiver_factors = light.get("preview_receiver_rgb_multiplier", (1, 1, 1))
+            for values in (factors, receiver_factors):
+                if (not isinstance(values, (list, tuple)) or len(values) != 3 or any(
+                        isinstance(x, bool) or not isinstance(x, (int, float)) or
+                        not 0 <= x <= light_overrides.MAX_MULTIPLIER or not math.isfinite(x) for x in values)):
+                    raise ValueError("invalid light preview RGB multiplier")
+            factors = tuple(a * b for a, b in zip(factors, receiver_factors))
+            if any(x > light_overrides.MAX_MULTIPLIER for x in factors):
+                raise ValueError("combined light preview multiplier exceeds renderer bounds")
             maximum = max(factors)
             adjusted_energy = energy * gain * maximum
             if adjusted_energy > 4:
@@ -902,7 +907,8 @@ def main(argv=None):
                                               preview_shader_basis=args.shader_normal_basis)
             if args.direct_light_overrides is not None:
                 override_raw = preview.read_limited(args.direct_light_overrides, 1024 * 1024)
-                direct_values = light_overrides.apply(direct_values, light_overrides.parse(override_raw))
+                targets = {submission.draw_id: submission.target_id for submission in current.submissions}
+                direct_values = light_overrides.apply(direct_values, light_overrides.parse(override_raw), targets)
                 light_override_digest = hashlib.sha256(override_raw).hexdigest()
         fog_values = None
         if args.fog_candidate_stage is not None:
@@ -974,6 +980,8 @@ def main(argv=None):
             if light_override_digest is not None:
                 manifest["light_preview_override_sha256"] = light_override_digest
                 manifest["limitations"].append("Semantic RGB multipliers are a user-supplied preview calibration, not observed runtime lighting.")
+                if any("preview_receiver_rgb_multiplier" in light for light in direct_values.values()):
+                    manifest["limitations"].append("Per-receiver light multipliers are visual hypotheses, not observed occlusion or runtime shadow state.")
                 if has_falloff:
                     manifest["limitations"].append("Falloff mixes between linear and squared linear are preview hypotheses, not observed legacy attenuation.")
             if any("projector_candidate" in light for light in direct_values.values()):

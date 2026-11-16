@@ -1,4 +1,5 @@
 #include "../src/scene_live_binding.hpp"
+#include "../src/scene_live_driver.hpp"
 
 #include <cstring>
 #include <iostream>
@@ -164,5 +165,60 @@ bool delivery() {
     CHECK(!state.current());
     return true;
 }
+
+bool driver_delivery() {
+    auto c=catalog();auto memory=std::make_shared<SceneResidency>();CHECK(memory->BeginMap(0,c.map,c.map_sha256));
+    const auto epoch=memory->epochs();CHECK(memory->AddMaterial(epoch.map,c.materials.at("mat:stone")));
+    CHECK(memory->AddResource(epoch.map,*c.bed));CHECK(memory->AddResource(epoch.map,*c.bsp[0]));
+    c.bed=memory->FindResource(epoch.map,bed_id);c.bsp[0]=memory->FindResource(epoch.map,bsp_id);
+    LoadedCatalog loaded;loaded.residency=memory;loaded.binding=c;
+    loaded.conventions.length_unit=LengthUnit::T3Unit;loaded.conventions.axes=Axes::T3Xyz;loaded.conventions.up_axis=UpAxis::Z;
+    FrameProvenance source;source.origin=FrameOrigin::Synthetic;source.session_id="driver-fixture";
+    auto driver=SceneDriver::Create(std::move(loaded),source,0,1);CHECK(driver);
+    const ThreadToken thread{17,123};auto p=probe();const auto bed=bed_scope();const auto bsp=bsp_scope();
+    const IndexedDraw args{true,true,0,1,0,3};
+    DrawObservation state;state.available=true;state.view=state.projection=state.world=identity;state.viewport={0,0,640,480,0,0.5f};
+    auto present=[&](bool ok=true) {auto t=driver->BeginPresent(thread);return driver->EndPresent(t,thread,ok);};
+    auto sample=[&]() {auto t=driver->BeginProbe(thread);if (!t)return false;driver->EndProbe(t,thread,p);return true;};
+    auto submit=[&](const SubmissionSample& before, const DrawObservation& endstate) {
+        auto scope=driver->BeginScope(thread,1,0);if (!scope || !driver->SetScopeSample(scope,thread,before))return false;
+        auto draw=driver->BeginDraw(thread,scope,args);if (!draw.ticket || !draw.needs_state)return false;
+        driver->EndDraw(draw.ticket,thread,true,state,endstate);driver->EndScope(scope,thread,before);return true;
+    };
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bed,state));CHECK(submit(bsp,state));
+    CHECK(present()==WindowResult::Published);auto first=driver->current();
+    CHECK(first && first->frame_id==1 && first->meshes.size()==1 && first->bsp.size()==1);
+    CHECK(first->meshes[0].selection.generation==1 && first->provenance.origin==FrameOrigin::Synthetic);
+    CHECK(sample());CHECK(submit(bsp,state));CHECK(present()==WindowResult::Published);
+    CHECK(driver->current()->meshes.empty());
+    CHECK(sample());CHECK(submit(bed,state));CHECK(present()==WindowResult::Published);
+    CHECK(driver->current()->meshes[0].selection.generation==2); // gap could hide identity reuse
+    CHECK(sample());auto moved=state;moved.world[12]=1;CHECK(submit(bed,moved));
+    CHECK(present()==WindowResult::Rejected && !driver->current());
+    CHECK(sample());CHECK(submit(bed,state));CHECK(present()==WindowResult::Published);
+    auto reset=driver->BeginReset(thread);CHECK(reset && !driver->current());driver->EndReset(reset,thread,false);
+    CHECK(present()==WindowResult::Rejected && !driver->current());
+    reset=driver->BeginReset(thread);CHECK(reset);driver->EndReset(reset,thread,true);
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bed,state));CHECK(present()==WindowResult::Published);
+    CHECK(sample());auto outer=driver->BeginScope(thread,1,0);CHECK(outer && driver->SetScopeSample(outer,thread,bed));
+    auto inner=driver->BeginScope(thread,1,0);CHECK(inner);CHECK(!driver->SetScopeSample(inner,thread,bsp));
+    CHECK(present()==WindowResult::Rejected && !driver->current());
+    driver->EndScope(inner,thread,bsp);driver->EndScope(outer,thread,bed);
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bsp,state));CHECK(present()==WindowResult::Published);
+    // A Present during process-memory sampling must not publish a stale frame.
+    CHECK(sample());auto sampling=driver->BeginScope(thread,1,0);CHECK(sampling);
+    CHECK(present()==WindowResult::Rejected && !driver->current());
+    (void)driver->SetScopeSample(sampling,thread,bed);driver->EndScope(sampling,thread,bed);
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bed,state));CHECK(present()==WindowResult::Published);
+    // A Reset spanning a draw retires the old epoch before the draw returns.
+    CHECK(sample());auto scope=driver->BeginScope(thread,1,0);CHECK(scope && driver->SetScopeSample(scope,thread,bed));
+    auto draw=driver->BeginDraw(thread,scope,args);CHECK(draw.ticket && draw.needs_state);
+    reset=driver->BeginReset(thread);CHECK(reset && !driver->current());driver->EndReset(reset,thread,true);
+    driver->EndDraw(draw.ticket,thread,true,state,state);driver->EndScope(scope,thread,bed);
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bed,state));CHECK(present()==WindowResult::Published);
+    driver->MarkLost();CHECK(!driver->current());
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bed,state));CHECK(present()==WindowResult::Published);
+    return true;
+}
 } // namespace
-int main() {if(!matching() || !delivery())return 1;std::cout<<"scene_live_binding_fixture=ok\n";}
+int main() {if(!matching() || !delivery() || !driver_delivery())return 1;std::cout<<"scene_live_binding_fixture=ok\n";}

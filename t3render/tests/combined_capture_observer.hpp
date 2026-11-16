@@ -5,6 +5,9 @@
 // proven; an experimental capture is diagnostic and may be incomplete.
 #include "prepared_buffer_capture.hpp"
 #include "../src/frame_image.hpp"
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+#include "../src/scene_live_runtime.hpp"
+#endif
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -16,14 +19,20 @@ namespace t3render::fixture {
 class CombinedCaptureObserver final {
 public:
     enum class StateBlockAction { Unsupported, Create, Apply, Capture, Delete };
-    struct ResetTicket { ir::ShaderTicket shader{}; std::uint64_t capture = 0; };
+    struct ResetTicket { ir::ShaderTicket shader{}; std::uint64_t capture = 0, live = 0; };
     CombinedCaptureObserver(IDirect3DDevice8* native, buffers::BufferProxy& buffers,
                             const D3DPRESENT_PARAMETERS& presentation, bool fixture_force_history = false) noexcept
         : native_(native), buffers_(buffers), shaders_(ShaderLimits(fixture_force_history)), device_(shaders_.OpenDevice()) {
         if (writer_active_) { shaders_.MarkUnsafe(device_); deferred_abandon_ = true; }
         else { WriterScope scope; CaptureDevice(native_, &presentation); }
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+        if (writer_active_) live::RuntimeAbandon(); else live::RuntimeDeviceCreated(native_);
+#endif
     }
     ~CombinedCaptureObserver() {
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+        live::RuntimeDeviceReleased(native_);
+#endif
         shaders_.CloseDevice(device_);
         if (writer_active_) deferred_abandon_ = true;
         else { WriterScope scope; CaptureDeviceReleased(native_); }
@@ -53,7 +62,12 @@ public:
 #endif
     ResetTicket BeginReset() noexcept {
         const DWORD before = GetLastError();
-        if (writer_active_) { Unsupported(); SetLastError(before); return {}; }
+        if (writer_active_) {
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+            live::RuntimeAbandon();
+#endif
+            Unsupported(); SetLastError(before); return {};
+        }
         {
             std::lock_guard<std::mutex> lock(state_blocks_mutex_);
             state_blocks_.clear();
@@ -62,8 +76,12 @@ public:
         const auto ticket = shaders_.BeginReset(device_);
         std::uint64_t capture_ticket;
         { WriterScope scope; capture_ticket = CaptureResetBegin(native_, static_cast<std::uint32_t>(GetCurrentThreadId())); }
+        std::uint64_t live_ticket=0;
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+        live_ticket=live::RuntimeResetBegin(native_);
+#endif
         SetLastError(before);
-        return {ticket, capture_ticket};
+        return {ticket, capture_ticket, live_ticket};
     }
     void EndReset(ResetTicket ticket, HRESULT hr, const D3DPRESENT_PARAMETERS* presentation) noexcept {
         const DWORD before = GetLastError();
@@ -71,6 +89,9 @@ public:
         reset_recovery_ = FAILED(hr) || !stable;
         if (writer_active_) deferred_abandon_ = true;
         else { WriterScope scope; CaptureResetEnd(native_, ticket.capture, presentation, hr); }
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+        live::RuntimeResetEnd(ticket.live,hr);
+#endif
         SetLastError(before);
     }
     void Unsupported(buffers::InvalidationCause cause = buffers::InvalidationCause::Explicit) noexcept {
@@ -196,10 +217,17 @@ public:
     }
     HRESULT Present(const RECT* source, const RECT* dest, HWND window, const RGNDATA* dirty) noexcept {
         if (writer_active_) {
-            const DWORD before = GetLastError(); Unsupported(); SetLastError(before);
+            const DWORD before = GetLastError();
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+            live::RuntimeDeferredLoss();
+#endif
+            Unsupported(); SetLastError(before);
             return native_->Present(source, dest, window, dirty);
         }
         const DWORD before = GetLastError();
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+        const auto live_ticket=live::RuntimePresentBegin(native_);
+#endif
         std::uint64_t present_ticket;
         {
             WriterScope scope;
@@ -211,10 +239,11 @@ public:
         const DWORD after = GetLastError();
         { WriterScope scope; CapturePresentEnd(native_, present_ticket, hr); }
 #ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+        live::RuntimePresentEnd(live_ticket,hr);
         // The hook leaves its pinned thunk/trampoline alive for in-flight
         // calls; disable it only after the capture lock has been released.
         static std::atomic<bool> disabled{false};
-        if (CaptureBridgeShouldDisable() && !disabled.exchange(true)) {
+        if (!live::RuntimeEnabled() && CaptureBridgeShouldDisable() && !disabled.exchange(true)) {
             scene_bridge::ProbeStatus status{};
             (void)scene_bridge::DisableProbe(&status);
         }
@@ -224,12 +253,23 @@ public:
     }
     HRESULT Clear(DWORD count, const D3DRECT* rectangles, DWORD flags, D3DCOLOR color, float depth, DWORD stencil) noexcept {
         const DWORD before = GetLastError();
-        if (writer_active_) { Unsupported(); SetLastError(before); return native_->Clear(count, rectangles, flags, color, depth, stencil); }
+        if (writer_active_) {
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+            live::RuntimeDeferredLoss();
+#endif
+            Unsupported(); SetLastError(before); return native_->Clear(count, rectangles, flags, color, depth, stencil);
+        }
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+        DrawCall clear_call{};const auto live_draw=live::RuntimeDrawBegin(native_,clear_call);
+#endif
         std::uint64_t operation;
         { WriterScope scope; operation = CaptureClear(native_, count, rectangles, flags, color, depth, stencil); }
         SetLastError(before);
         const HRESULT hr = native_->Clear(count, rectangles, flags, color, depth, stencil);
         const DWORD after = GetLastError();
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+        live::RuntimeDrawEnd(native_,live_draw,hr);
+#endif
         { WriterScope scope; CaptureClearResult(native_, operation, hr); }
         SetLastError(after);
         return hr;
@@ -275,7 +315,15 @@ private:
     template<class Forward>
     HRESULT Draw(DrawCall call, Forward forward) noexcept {
         const DWORD before = GetLastError();
-        if (writer_active_) { Unsupported(); SetLastError(before); return forward(); }
+        if (writer_active_) {
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+            live::RuntimeDeferredLoss();
+#endif
+            Unsupported(); SetLastError(before); return forward();
+        }
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+        const auto live_draw=live::RuntimeDrawBegin(native_,call);
+#endif
         const bool recovering = reset_recovery_;
 #ifndef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
         if (recovering) {
@@ -286,7 +334,12 @@ private:
 #endif
         if (!CaptureWantsDraw(native_)) {
             SetLastError(before);
-            return forward();
+            const HRESULT hr=forward();
+            const DWORD after=GetLastError();
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+            live::RuntimeDrawEnd(native_,live_draw,hr);
+#endif
+            SetLastError(after);return hr;
         }
         const auto buffer_ticket = buffers_.BeginDraw(native_);
         const auto shader_ticket = recovering ? ir::ShaderTicket{} : shaders_.BeginDraw(device_);
@@ -323,6 +376,9 @@ private:
             SetLastError(before);
             hr = forward();
             const DWORD after = GetLastError();
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+            live::RuntimeDrawEnd(native_,live_draw,hr);
+#endif
             const bool buffer_stable = buffer_ticket && buffers_.EndDraw(native_, buffer_ticket);
             const bool shader_stable = shader_ticket && shaders_.End(shader_ticket) && SUCCEEDED(hr) &&
                                        SUCCEEDED(shader.getter_result);

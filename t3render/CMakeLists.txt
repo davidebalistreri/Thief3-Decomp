@@ -1,10 +1,14 @@
 cmake_minimum_required(VERSION 3.25)
 project(T3Render LANGUAGES C CXX)
 
-# API-neutral in-process scene state and flat diagnostic adapter. The existing
-# capture and renderer do not yet feed/consume this library automatically.
-add_library(t3render_scene_live STATIC ir/scene_live.cpp ir/scene_live_window.cpp src/scene_live_flat.cpp src/scene_live_binding.cpp)
+# API-neutral in-process scene state and flat diagnostic adapter. The opt-in
+# hook adapter is experimental; no live D3D12 consumer is connected yet.
+add_library(t3render_scene_live STATIC ir/scene_live.cpp ir/scene_live_window.cpp src/scene_live_flat.cpp src/scene_live_binding.cpp src/scene_live_catalog.cpp src/scene_live_driver.cpp)
 target_compile_features(t3render_scene_live PUBLIC cxx_std_17)
+if(WIN32)
+  target_sources(t3render_scene_live PRIVATE src/scene_live_catalog_win.cpp)
+  target_link_libraries(t3render_scene_live PUBLIC advapi32)
+endif()
 if(MSVC)
   target_compile_options(t3render_scene_live PRIVATE /W4 /utf-8)
   set_property(TARGET t3render_scene_live PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -150,14 +154,14 @@ if(T3RENDER_BUILD_EXPERIMENTAL_COMBINED_PROXY)
   set(t3render_minhook "${CMAKE_CURRENT_SOURCE_DIR}/../sdk/third_party/minhook")
   add_library(t3render_experimental_combined_proxy SHARED
     src/proxy.cpp src/buffer_proxy.cpp src/vtable_layout.c src/capture.cpp src/frame_image.cpp
-    src/scene_bridge_probe.cpp
+    src/scene_bridge_probe.cpp src/scene_live_runtime.cpp
     ${t3render_minhook}/src/buffer.c ${t3render_minhook}/src/hook.c
     ${t3render_minhook}/src/trampoline.c ${t3render_minhook}/src/hde/hde32.c ${t3render_exports})
   target_compile_features(t3render_experimental_combined_proxy PRIVATE cxx_std_17)
   target_include_directories(t3render_experimental_combined_proxy PRIVATE ${t3render_minhook}/include)
   target_compile_definitions(t3render_experimental_combined_proxy PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
     T3RENDER_EXPERIMENTAL_COMBINED_PROXY)
-  target_link_libraries(t3render_experimental_combined_proxy PRIVATE dxguid advapi32 t3render_ir)
+  target_link_libraries(t3render_experimental_combined_proxy PRIVATE dxguid advapi32 t3render_ir t3render_scene_live)
   if(MSVC)
     target_compile_options(t3render_experimental_combined_proxy PRIVATE /W4 /utf-8)
     set_property(TARGET t3render_experimental_combined_proxy PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

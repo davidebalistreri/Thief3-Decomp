@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""Export an offline SceneIR asset catalog for the in-process scene bridge.
+
+This contains game-derived geometry and remains local. It is not a runtime
+frame, visibility observation, or proof of which assets the game loaded.
+"""
+import argparse
+import hashlib
+import math
+from pathlib import Path
+import struct
+import sys
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / "ir"))
+from scene_ir import SceneSnapshot  # noqa: E402
+import scene_ir_to_textured_packet as packet  # noqa: E402
+import scene_ir_to_d3d12_packet as preview  # noqa: E402
+
+MAX_BYTES = 64 * 1024 * 1024
+MAX_VERTICES = 1_000_000
+MAX_INDICES = 3_000_000
+MAX_SECTIONS = 1024
+
+
+def _text(value, *, optional=False):
+    if value is None and optional:
+        return struct.pack("<I", 0)
+    if not isinstance(value, str) or not value or "\0" in value:
+        raise ValueError("catalog text must be nonempty and contain no NUL")
+    encoded = value.encode("utf-8")
+    if len(encoded) > 512:
+        raise ValueError("catalog text exceeds 512 bytes")
+    return struct.pack("<I", len(encoded)) + encoded
+
+
+def _u32(value):
+    if type(value) is not int or not 0 <= value <= 0xffffffff:
+        raise ValueError("catalog integer is outside uint32")
+    return struct.pack("<I", value)
+
+
+def _float(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or abs(value) > 1_000_000:
+        raise ValueError("catalog float is outside backend bounds")
+    try:
+        return struct.pack("<f", value)
+    except (OverflowError, struct.error) as exc:
+        raise ValueError("catalog float cannot be represented") from exc
+
+
+def _geometry(geometry):
+    positions, indices, sections = geometry.positions, geometry.indices, geometry.sections
+    if (not 1 <= len(positions) <= MAX_VERTICES or not 1 <= len(indices) <= MAX_INDICES or
+            not 1 <= len(sections) <= MAX_SECTIONS or any(i >= len(positions) for i in indices)):
+        raise ValueError("catalog geometry is empty, invalid or too large")
+    attributes = (geometry.normals, geometry.uv0, geometry.tangents)
+    flags = sum(1 << i for i, values in enumerate(attributes) if values is not None)
+    body = bytearray(struct.pack("<4I", len(positions), len(indices), len(sections), flags))
+    for rows in (positions, *attributes):
+        if rows is not None:
+            for row in rows:
+                for value in row:
+                    body += _float(value)
+    for index in indices:
+        body += _u32(index)
+    for section in sections:
+        if not section.index_count or section.index_count % 3 or section.first_index + section.index_count > len(indices):
+            raise ValueError("catalog section is not an in-range triangle list")
+        body += _text(section.name) + _u32(section.first_index) + _u32(section.index_count)
+        body += _text(section.material_id, optional=True)
+    return body
+
+
+def _resource(identifier, name, source_sha, geometry):
+    return _text(identifier) + _text(name) + _text(source_sha) + _geometry(geometry)
+
+
+def export(raw):
+    if not isinstance(raw, bytes) or not raw or len(raw) > preview.MAX_INPUT:
+        raise ValueError("offline SceneIR input is empty or too large")
+    scene = SceneSnapshot.from_json(raw)
+    source, conventions = scene.source, scene.conventions
+    if source.kind != "offline" or source.frame_id is not None or source.camera_synchronized is True:
+        raise ValueError("catalog requires an offline SceneIR fixture")
+    if (conventions.length_unit != "t3_unit" or conventions.axes != "t3_xyz" or conventions.up_axis != "z" or
+            conventions.matrix_layout != "row_major" or conventions.matrix_vectors != "row" or
+            conventions.tangent_space != "unknown" or conventions.clip_depth == "minus_one_to_one"):
+        raise ValueError("catalog requires supported T3 coordinates")
+    map_name, map_sha = source.map, source.fingerprints.get("map")
+    if ":" in map_name or not map_sha:
+        raise ValueError("catalog requires a qualified map fingerprint")
+    actor_id = f"actor:{map_name}:{map_sha}:StaticMeshActor__1520"
+    instances = [item for item in scene.mesh_instances if item.id == actor_id]
+    if len(instances) != 1:
+        raise ValueError("offline fixture must contain one target bed actor")
+    instance = instances[0]
+    beds = [item for item in scene.static_mesh_resources if item.id == instance.resource_id and item.name.lower() == "innbed1a1"]
+    if len(beds) != 1:
+        raise ValueError("offline fixture must contain the target bed mesh")
+    bed = beds[0]
+    prefix, suffix = f"mesh:{map_name}:{map_sha}:", ":innbed1a1"
+    if not bed.id.startswith(prefix) or not bed.id.endswith(suffix):
+        raise ValueError("bed resource ID is not qualified by map and bundle")
+    bed_sha = bed.id[len(prefix):-len(suffix)]
+    if bed_sha not in (source.fingerprints.get("bundle"), source.fingerprints.get("kernel")) or not bed_sha:
+        raise ValueError("bed resource fingerprint is not an offline source fingerprint")
+    if not 1 <= len(scene.bsp_blocks) <= 4096:
+        raise ValueError("catalog requires a bounded offline BSP collection")
+    for block in scene.bsp_blocks:
+        if block.source_offset is None or block.id != f"bsp:{map_name}:{map_sha}:{block.source_index}:{block.source_offset}":
+            raise ValueError("BSP ID must retain offline index and offset")
+    material_by_id = {m.id: m for m in scene.materials}
+    required = {s.material_id for r in [bed, *scene.bsp_blocks] for s in r.geometry.sections if s.material_id is not None}
+    required.update(x for x in instance.material_ids if x is not None)
+    bed_materials = instance.material_ids or tuple(s.material_id for s in bed.geometry.sections)
+    if (not bed_materials or any(x is None or x not in material_by_id for x in bed_materials) or
+            any(s.material_id is None for b in scene.bsp_blocks for s in b.geometry.sections) or
+            not required or any(x not in material_by_id for x in required)):
+        raise ValueError("catalog requires known bed skin and BSP materials")
+    materials = [m for m in scene.materials if m.id in required]
+    if len(materials) > 8192:
+        raise ValueError("catalog material count exceeds bounds")
+    enum = lambda value, choices: choices.index(value)
+    c = conventions
+    values = (enum(c.handedness, ("unknown", "left", "right")),
+              enum(c.winding, ("unknown", "normal_aligned", "normal_opposed")),
+              enum(c.uv_origin, ("unknown", "top_left", "bottom_left")),
+              enum(c.clip_depth, ("unknown", "zero_to_one")))
+    body = bytearray(b"T3LCAT01")
+    for value in (map_name, map_sha, hashlib.sha256(raw).hexdigest(), actor_id):
+        body += _text(value)
+    body += struct.pack("<4I", *values)
+    body += _u32(int(c.meters_per_unit is not None))
+    if c.meters_per_unit is not None:
+        body += _float(c.meters_per_unit)
+    body += _u32(len(materials)) + _u32(len(scene.bsp_blocks))
+    for material in materials:
+        body += _text(material.id) + _text(material.name)
+    body += _resource(bed.id, bed.name, bed_sha, bed.geometry)
+    body += _u32(len(instance.material_ids))
+    for item in instance.material_ids:
+        body += _text(item, optional=True)
+    for block in scene.bsp_blocks:
+        body += _resource(block.id, f"BSP {block.source_index}", map_sha, block.geometry)
+    if len(body) + 32 > MAX_BYTES:
+        raise ValueError("catalog exceeds 64 MiB")
+    data = bytes(body) + hashlib.sha256(body).digest()
+    manifest = {"schema": "t3.scene.live-catalog", "version": 1, "source": "offline",
+                "offline_scene_sha256": hashlib.sha256(raw).hexdigest(), "catalog_sha256": hashlib.sha256(data).hexdigest(),
+                "map": map_name, "map_sha256": map_sha, "bed_resource_id": bed.id, "bed_actor_id": actor_id,
+                "bsp_blocks": len(scene.bsp_blocks), "materials": len(materials),
+                "limitations": ["Offline assets only; no frame, visibility, transform or live binding is claimed.",
+                                "BSP catalog completeness is inherited from the heuristic offline importer."]}
+    return data, manifest
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("offline_scene", type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    args = parser.parse_args(argv)
+    try:
+        raw = preview.read_limited(args.offline_scene, preview.MAX_INPUT)
+        body, manifest = export(raw)
+        packet.write_pair(args.output, body, manifest)
+    except (OSError, ValueError, UnicodeError) as exc:
+        parser.exit(2, f"{exc}\n")
+    print(f"offline_catalog=ok bytes={len(body)} bsp_blocks={manifest['bsp_blocks']}")
+
+
+if __name__ == "__main__":
+    main()

@@ -12,8 +12,11 @@ L'obiettivo è stato creato il 15 novembre alle 12:28 CET. Alla rilevazione del
 16 novembre il tempo attivo contabilizzato era circa **13 h 37 min**: non è la
 durata continuativa tra le due date. Il frame 3377 del 14 novembre è un
 antefatto conservato come riferimento, precedente alla creazione dell'obiettivo.
-Branch: `remaster/vertical-slice`. Ultimo commit del renderer incluso in questo
-recap: `cd7eb91e` (`feat(t3render): add world-space diffuse bounce`).
+Branch: `remaster/vertical-slice`. Alla prima stesura il commit del renderer
+era `cd7eb91e`; il checkpoint successivo comprende i commit fino a
+`17675fba` e il lavoro su catalogo e driver incluso insieme a questo recap.
+La rilevazione delle 13 h 37 min precede quest'ultimo checkpoint: non è una
+misura aggiornata del tempo totale.
 
 La direzione successivamente concordata è **usare D3D8 come oracle per camera,
 geometria e diagnosi**, senza cercare la perfetta parità visiva legacy. Le nuove
@@ -24,13 +27,14 @@ geometria delle pareti; DXR resta opzionale e non prioritario.
 
 | Ambito | Stato e significato |
 |---|---|
-| Bridge v0 | Validati i percorsi di submission per il letto e un BSP; non è una prova generale di tutti gli oggetti. |
+| Bridge v0 | Validati i percorsi di submission per il letto e un BSP nelle catture precedenti; non è una prova generale di tutti gli oggetti. |
 | Cattura combinata | Nei frame 2863–2865 ownership, lock shadow e screenshot coesistono per il letto e il BSP verificati. |
 | SceneIR v1 | Schema API-neutral e snapshot runtime parziali; geometria e molte associazioni provengono da asset offline verificati. |
 | Replay D3D8 → DX12 | Bedroom riconoscibile e confronti diagnostici; parità legacy completa non dimostrata e non più prioritaria. |
 | Materiali e mesh | Override semantici per pietra, pavimento e letto; altri asset Godot riutilizzati nella preview. |
 | Renderer moderno | PBR/HDR, ombre, GI approssimata e altri effetti funzionano in preview separate, non come renderer di produzione. |
 | Switch letto | Originale/high-poly/originale nello stesso processo, anche su due frame acquisiti; non modifica gameplay o collisioni, ma non è ancora integrato live. |
+| Infrastruttura live | Residency, finestre `Present`, matcher, catalogo offline e adattatore sperimentale sono preparati; l'adattatore non è stato verificato in TDS e non alimenta ancora D3D12. |
 
 ## Prove: dal frame D3D8 alla submission semantica
 
@@ -102,6 +106,34 @@ Matrice row-major e vettori riga sono espliciti. La scala `0.01905 m/unità` è
 inferita dagli asset, non calibrata runtime; winding assoluto, UV/tangent space
 e clip depth non vengono inventati quando l'evidenza manca.
 
+## Checkpoint successivo: preparazione al consumer live
+
+Tre commit successivi al primo recap aggiungono la gestione delle risorse
+residenti (`58c6ab3f`), il collettore delimitato da `Present` (`fa5ebac9`)
+e il matching semantico degli scope (`17675fba`). Insieme a questo documento
+sono stati aggiunti un catalogo binario degli asset offline, un driver che
+collega probe, scope, draw, `Present` e `Reset`, e un adattatore Windows
+sperimentale opt-in nel proxy combinato.
+
+Il catalogo esportato dalla fixture `SouthQuarter1_int1` contiene il letto,
+45 blocchi BSP e nove materiali. Il loader controlla struttura e checksum
+SHA-256; il checksum rileva corruzione, non autentica la provenienza degli
+asset. Il catalogo resta **offline**: non è un frame, né prova che il gioco
+abbia caricato o stia mostrando quelle risorse.
+
+Il driver può pubblicare una selezione solo attraverso finestre `Present`
+validate, con thread e stato camera/draw controllati; rifiuta sovrapposizioni
+e gestisce il Reset nei casi sintetici testati. I binding del letto e BSP
+rimangono candidati. Il matcher BSP dipende ancora dal letto nella lista
+osservata, il cambio mappa e il lifecycle generale non sono completi, e non
+è provata la copertura di tutti i callback nel gioco. I frame 2864/2865 citati
+nel resto del recap sono catture precedenti, non nuove prove dell'adattatore.
+
+Il codice può esporre `RuntimeCurrent()` nello stesso processo, ma nessun
+consumer D3D12 live lo legge ancora. **Non è stato dimostrato che il renderer
+segua Garrett in tempo reale**. La documentazione tecnica e i comandi sono in
+[scene live](ir/README_scene_live.md).
+
 ## Renderer, materiali e luce
 
 Il renderer PBR/HDR usa un target lineare `RGBA16F`, BRDF GGX/Schlick,
@@ -145,10 +177,14 @@ che risolva il problema specifico della trave**.
 
 ## Verifiche e limiti
 
-- Suite completa: **627 test passati**; build x86 MinGW e fixture D3D12 su
-  Highball/Wine eseguite localmente. Una precedente esecuzione completa ha
-  subito timeout in test del runner sintetico; i due casi interessati sono
-  passati isolatamente e la suite completa successiva è passata.
+- Suite completa del checkpoint corrente: **634 test passati**; build x86
+  MinGW e fixture D3D12 su Highball/Wine eseguite localmente. In una sessione
+  precedente due test del runner sintetico erano andati in timeout, poi
+  erano passati isolatamente e nella suite completa successiva.
+- Checkpoint successivo: sette test host mirati passati e proxy x86 compilato;
+  fixture sintetica del driver e fixture Windows del catalogo passate su
+  Highball senza TDS. La seconda ha accettato il catalogo locale e rifiutato
+  una copia corrotta. Non verificano i callback del proxy nel gioco.
 - Fixture GPU: source fuori schermo, occlusione, caster solo-ombra, emissivo
   opaco, camera invariata, spot, modalità temporale, combinazione con GTAO,
   volumetrici e riflessi. Lo switch letto e i frame 2864/2865 sono stati
@@ -163,15 +199,16 @@ che risolva il problema specifico della trave**.
 ## Per riprendere
 
 1. Usare 2864 e 3377 come riferimenti, mantenendo distinti i rispettivi scope.
-2. Portare progressivamente gli snapshot SceneIR verificati nel consumer live,
-   con gestione delle risorse e cambi di visibilità, senza riaprire il reverse
-   engineering generale del vecchio renderer.
-3. Validare geometricamente bedroom e override in movimento; misurare stato e
-   provenienza delle luci quando disponibili. Le catture con gioco richiedono
+2. Collegare `RuntimeCurrent()` a un consumer D3D12 persistente e verificare in
+   TDS camera, geometria e movimento; completare lifecycle, Reset e cambio
+   mappa prima di considerarlo utilizzabile. Le catture con gioco richiedono
    coordinamento con chi carica il salvataggio.
-4. Migliorare GI/occlusione, materiali e illuminazione delle pareti e della
-   trave, quindi ombre, emissivi e volumetrici. Affrontare riflessi, TAA e
-   upscale dopo una base di luce convincente; DXR rimane una scelta successiva.
+3. Portare gli override semantici live e accertare lo stato delle luci runtime,
+   distinguendo i parametri misurati dalle calibrazioni artistiche.
+4. Investire su HDR/PBR, luci fisiche, ombre e GI in tempo reale, poi su
+   emissivi, volumetrici, riflessi e pipeline temporale; migliorare la geometria
+   delle pareti e verificare la trave con la nuova illuminazione. DXR rimane
+   una scelta successiva. Non serve perfezionare il replay D3D8.
 
 Riferimenti: [ricerca bridge](T3SCENEBRIDGE_RESEARCH.md),
 [checkpoint runtime](tools/README_bridge_runtime_checkpoint.md),

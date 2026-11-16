@@ -13,6 +13,7 @@
 #define T3RENDER_COMBINED_CAPTURE_FIXTURE
 #include "../tests/d3d8_device_facade.hpp"
 #include "scene_bridge_probe.hpp"
+#include "scene_live_runtime.hpp"
 #endif
 
 #include <algorithm>
@@ -1309,6 +1310,40 @@ t3render::ir::RegistryResult T3ProxyTestReadIndex(IDirect3DDevice8* owner, IDire
 }
 #endif
 
+#ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
+namespace {
+struct ProbePair { std::uint64_t capture=0, live=0; bool active=false; };
+thread_local ProbePair probe_pair;
+std::uint64_t BridgeMuxBegin(std::uint32_t thread) noexcept {
+    if (probe_pair.active) {
+        t3render::CaptureBridgeMarkReentered();t3render::live::RuntimeDeferredLoss();return 0;
+    }
+    probe_pair.live=t3render::live::RuntimeProbeBegin(thread);
+    probe_pair.capture=t3render::CaptureBridgeBegin(thread);
+    probe_pair.active=probe_pair.capture || probe_pair.live;
+    return probe_pair.active ? 1 : 0;
+}
+void BridgeMuxEnd(std::uint64_t ticket,const t3render::scene_bridge::ProbeSnapshot& snapshot) noexcept {
+    const auto pair=probe_pair;probe_pair={};
+    if (!ticket || !pair.active) {
+        t3render::CaptureBridgeMarkReentered();t3render::live::RuntimeDeferredLoss();return;
+    }
+    if (pair.capture) t3render::CaptureBridgeEnd(pair.capture,snapshot);
+    if (pair.live) t3render::live::RuntimeProbeEnd(pair.live,snapshot);
+}
+void BridgeMuxReentry() noexcept {
+    t3render::CaptureBridgeMarkReentered();t3render::live::RuntimeDeferredLoss();
+}
+void BridgeMuxEnter(std::uint32_t element,std::uint32_t stage,std::uint32_t section) noexcept {
+    t3render::live::RuntimeSubmissionEnter(element,stage,section);
+    t3render::CaptureSubmissionEnter(element,stage,section);
+}
+void BridgeMuxLeave() noexcept {
+    t3render::CaptureSubmissionLeave();t3render::live::RuntimeSubmissionLeave();
+}
+} // namespace
+#endif
+
 extern "C" IDirect3D8* WINAPI Proxy_Direct3DCreate8(UINT sdk_version) {
     ErrorState error;
     Direct3DCreate8Fn real = RealCreate8();
@@ -1335,7 +1370,8 @@ extern "C" IDirect3D8* WINAPI Proxy_Direct3DCreate8(UINT sdk_version) {
 #ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
     wchar_t option[2]{};
     const bool combined = GetEnvironmentVariableW(L"T3RENDER_EXPERIMENTAL_COMBINED", option, 2) == 1 && option[0] == L'1';
-    if (factory && configured && combined) {
+    const bool live = combined && t3render::live::RuntimeInitialize();
+    if (factory && (configured || live) && combined) {
         auto manager = t3render::buffers::BufferProxy::Create(ReadBufferSnapshot, nullptr);
         wchar_t unlock_option[2]{};
         const bool repeated_unlock = GetEnvironmentVariableW(L"T3RENDER_EXPERIMENTAL_REPEATED_UNLOCK", unlock_option, 2) == 1 &&
@@ -1350,26 +1386,29 @@ extern "C" IDirect3D8* WINAPI Proxy_Direct3DCreate8(UINT sdk_version) {
         if (facade) {
             t3render::CaptureExperimentalFacade(repeated_unlock, repeat_recovery);
             wchar_t bridge_option[2]{};
-            if (GetEnvironmentVariableW(L"T3RENDER_SCENE_BRIDGE", bridge_option, 2) == 1 && bridge_option[0] == L'1') {
+            if (live || (GetEnvironmentVariableW(L"T3RENDER_SCENE_BRIDGE", bridge_option, 2) == 1 && bridge_option[0] == L'1')) {
                 // Direct3DCreate8 runs outside DllMain. Only the verified,
                 // explicitly requested combined capture installs this probe.
                 static std::once_flag bridge_once;
                 Observe([&] {
-                    std::call_once(bridge_once, [] {
+                    std::call_once(bridge_once, [live] {
                         t3render::scene_bridge::ProbeStatus status = t3render::scene_bridge::ProbeStatus::InvalidArguments;
-                        (void)t3render::scene_bridge::InstallProbe(t3render::CaptureBridgeBegin,
-                                                                  t3render::CaptureBridgeEnd,
-                                                                  t3render::CaptureBridgeMarkReentered, &status);
+                        (void)t3render::scene_bridge::InstallProbe(live ? BridgeMuxBegin : t3render::CaptureBridgeBegin,
+                                                                  live ? BridgeMuxEnd : t3render::CaptureBridgeEnd,
+                                                                  live ? BridgeMuxReentry : t3render::CaptureBridgeMarkReentered, &status);
                         t3render::CaptureBridgeInstallResult(status);
                         wchar_t submission_option[2]{};
-                        if (GetEnvironmentVariableW(L"T3RENDER_SCENE_BRIDGE_SUBMISSION", submission_option, 2) == 1 &&
-                            submission_option[0] == L'1') {
+                        if (live || (GetEnvironmentVariableW(L"T3RENDER_SCENE_BRIDGE_SUBMISSION", submission_option, 2) == 1 &&
+                            submission_option[0] == L'1')) {
                             auto submission_status = t3render::scene_bridge::ProbeStatus::InvalidArguments;
                             if (status == t3render::scene_bridge::ProbeStatus::Installed)
-                                (void)t3render::scene_bridge::InstallSubmissionProbe(t3render::CaptureSubmissionEnter,
-                                                                                    t3render::CaptureSubmissionLeave,
+                                (void)t3render::scene_bridge::InstallSubmissionProbe(live ? BridgeMuxEnter : t3render::CaptureSubmissionEnter,
+                                                                                    live ? BridgeMuxLeave : t3render::CaptureSubmissionLeave,
                                                                                     &submission_status);
                             t3render::CaptureSubmissionInstallResult(submission_status);
+                            if (live && (status != t3render::scene_bridge::ProbeStatus::Installed ||
+                                         submission_status != t3render::scene_bridge::ProbeStatus::Installed))
+                                t3render::live::RuntimeAbandon();
                         }
                     });
                 });
@@ -1377,6 +1416,7 @@ extern "C" IDirect3D8* WINAPI Proxy_Direct3DCreate8(UINT sdk_version) {
             return facade;
         }
         t3render::CaptureAbandonDevice(nullptr);
+        if (live) t3render::live::RuntimeAbandon();
         Diagnostic("T3Render: experimental facade unavailable; returning the native factory without capture\n");
         return factory;
     }

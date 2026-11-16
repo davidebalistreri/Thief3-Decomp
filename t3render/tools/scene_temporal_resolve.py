@@ -25,6 +25,12 @@ MAX_BYTES = HEADER.size + 2048*2048*16
 GEOMETRY_OVERRIDES = ("generated_bed", "generated_candlesticks", "generated_arch", "generated_bedroom_details")
 
 
+def _valid_metallic_mode(value):
+    return (isinstance(value, dict) and set(value) == {"candlestick_metal_factor", "other_materials_factor"} and
+            all(not isinstance(x, bool) and isinstance(x, (int, float)) and math.isfinite(x) and 0 <= x <= 1
+                for x in value.values()))
+
+
 def parse(raw, packet):
     if not isinstance(raw, bytes) or len(raw) < HEADER.size or len(raw) > MAX_BYTES:
         raise ValueError("invalid temporal buffer size")
@@ -41,7 +47,7 @@ def parse(raw, packet):
     if not isinstance(packet, bytes) or len(packet) < 196 or hashlib.sha256(packet).digest() != digest:
         raise ValueError("temporal buffer does not match packet SHA-256")
     packet_header = struct.unpack_from("<8sIIff32f4f4fIII", packet)
-    if (packet_header[0] not in (b"T3PBR01\0", b"T3PBR02\0", b"T3PBR03\0", b"T3PBR04\0") or
+    if (packet_header[0] not in (b"T3PBR01\0", b"T3PBR02\0", b"T3PBR03\0", b"T3PBR04\0", b"T3PBR05\0") or
             packet_header[1:3] != (width, height) or packet_header[5:37] != matrix or
             packet_header[37:40] != camera or packet_header[40] != scale or packet_header[44] != exposure):
         raise ValueError("temporal camera does not match packet")
@@ -69,6 +75,8 @@ def validate_runtime(temporal, scene_raw, manifest_raw):
             (manifest.get("shadow_maps") is not None and not isinstance(manifest["shadow_maps"], dict)) or
             (manifest.get("candle_flames") is not None and not isinstance(manifest["candle_flames"], dict)) or
             ("bedroom_prop_materials" in manifest and not isinstance(manifest["bedroom_prop_materials"], list)) or
+            ((manifest.get("metallic_mode") is not None) != (temporal["packet_version"] == 5)) or
+            (manifest.get("metallic_mode") is not None and not _valid_metallic_mode(manifest["metallic_mode"])) or
             not isinstance(manifest.get("lights"), list) or any(not isinstance(light, dict) or
                 not isinstance(light.get("id"), str) or not isinstance(light.get("position"), list) or
                 len(light["position"]) != 3 or not isinstance(light.get("color_linear"), list) or
@@ -121,6 +129,7 @@ def compatible(previous, current, previous_runtime=None, current_runtime=None):
                 shadow_signature(old_manifest) != shadow_signature(new_manifest) or
                 flame_signature(old_manifest) != flame_signature(new_manifest) or
                 geometry_signature(old_manifest) != geometry_signature(new_manifest) or
+                old_manifest.get("metallic_mode") != new_manifest.get("metallic_mode") or
                 ("bedroom_prop_materials" in old_manifest) != ("bedroom_prop_materials" in new_manifest) or
                 light_signature(old_manifest) != light_signature(new_manifest)):
             raise ValueError("runtime temporal frames have incompatible material, geometry or lighting settings")

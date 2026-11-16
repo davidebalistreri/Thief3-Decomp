@@ -41,8 +41,8 @@ may require a different artistic exposure.
 
 This is a first PBR preview, not a physically calibrated lighting solution:
 source strengths, color and exposure are artistic; the SDK metre scale and
-tangent basis are assumptions. Metallic response is absent; temporal history
-is an optional separate prototype. The render is a partial runtime-selected scene, and offline asset bindings for
+tangent basis are assumptions. Metallic response and temporal history are
+optional previews. The render is a partial runtime-selected scene, and offline asset bindings for
 some actors remain candidates. Height maps are not used. The legacy renderer
 and its benchmark remain independent.
 
@@ -149,8 +149,8 @@ offline caster candidates are excluded. Removing the option restores the
 original preview, without affecting gameplay or the original renderer.
 
 The metal uses `candlestick_metal_v2` albedo, normal and roughness with a
-constant AO; wax uses a simple opaque color. The renderer currently uses a
-dielectric BRDF even for metal. UV-inferred tangent frames have a flat-normal
+constant AO; wax uses a simple opaque color. Unless `--metallic` is enabled,
+the renderer uses a dielectric BRDF even for metal. UV-inferred tangent frames have a flat-normal
 fallback. Actor ownership and transforms are scoped runtime observations, but
 the resource binding remains an offline candidate. Existing offline shadow
 flags and owner-light exclusions still apply. The GLB hash, qualified actor
@@ -162,6 +162,33 @@ GLB to keep flame and holder geometry aligned. In the frame-1001 preview the
 one selected holder has 4,328 triangles, with 392 tangent fallback triangles.
 With all other preview options unchanged, the D3D12 render changes 3,228
 pixels and has mean absolute RGB difference 0.054 on a 0–255 scale.
+
+## Metallic PBR preview
+
+`--metallic` opts into packet version 5, with a bounded per-draw metallic
+factor. It assigns the generated `METAL1Goodness_D` candlestick a factor of
+0.8, matching the Godot material; other current materials remain dielectric.
+Versions 1–4 and the default behavior remain unchanged. The shader mixes
+dielectric F0 with linear base color, reduces the diffuse and ambient terms,
+and uses colored Fresnel for screen-space reflections. Diffuse bounce and
+GTAO respect the same factor. The manifest records the mode and factors.
+
+This is not a complete metallic material pipeline: no metallic texture or
+image-based environment illumination is loaded, the material's source factor
+is a preview mapping, and screen-space reflections miss off-screen geometry.
+The scene remains a partial runtime selection with candidate asset bindings.
+In frame 1001 the visible candlestick uses the factor; compared with the same
+preview without `--metallic`, 583 pixels change, with mean absolute RGB
+difference 0.0103 on a 0–255 scale. This is not a legacy parity measurement.
+
+`scene_pbr_metallic_fixture.py` verifies factors 0, 0.5, 0.8 and 1 against an
+independent GGX calculation. Synthetic D3D12 checks also confirm no diffuse
+bounce or ambient-occlusion attenuation on a fully metallic receiver, a colored
+metallic reflection, and a byte-identical dielectric-only v5 render versus the
+v1 control. The previous
+frame-1001 v4 preview also remains byte-identical. For one synthetic v5
+history pair, CPU and GPU resolve differ in 55 pixels by at most one RGB level;
+this is not validation of two synchronized runtime frames.
 
 ## Semantic high-poly arch detail
 
@@ -386,6 +413,7 @@ for the bedroom arch's generated rosette and jambs.
 Add `--bedroom-details build/assets/godot/remaster/garrett_home/highpoly/generated/bedroom_details.glb`
 for optional bed-relative artistic trim and decoration.
 Add `--bedroom-prop-materials` for the selected bedroom rafter and crate wood.
+Add `--metallic` to use the Godot candlestick's metallic factor in PBR shading.
 
 Run `t3render_scene_pbr_d3d12 <packet> --output <new.ppm> [--indirect] [--gtao] [--volumetric] [--reflections] [--filmic]` in a D3D12
 environment. The packet, manifest and PPM use exclusive creation. See the

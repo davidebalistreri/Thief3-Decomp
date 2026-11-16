@@ -148,14 +148,16 @@ class TemporalResolveTests(unittest.TestCase):
 
     def test_runtime_provenance_and_frame_order_are_required(self):
         scene, lights, calibration = packet_tests.inputs()
-        def capture(scene, lights):
-            packet, info = pbr.create_packet(scene, lights, json.dumps(calibration), Resolver(), None)
+        def capture(scene, lights, metallic=False):
+            packet, info = pbr.create_packet(scene, lights, json.dumps(calibration), Resolver(), None, metallic=metallic)
             source = scene.to_json().encode()
-            manifest = {"schema": "t3.scene.pbr-packet", "version": 1, "packet_sha256": hashlib.sha256(packet).hexdigest(),
+            manifest = {"schema": "t3.scene.pbr-packet", "version": int(chr(packet[6])), "packet_sha256": hashlib.sha256(packet).hexdigest(),
                         "scene_sha256": hashlib.sha256(source).hexdigest(), "source_frame": scene.source.frame_id,
                         "source_fingerprints": scene.source.fingerprints, "calibration_sha256": "a"*64,
                         "render_pass": info["render_pass"], "stage": info["stage"],
                         "textures": info["textures"], "lights": info["lights"]}
+            if metallic:
+                manifest["metallic_mode"] = info["metallic_mode"]
             h = struct.unpack_from("<8sIIff32f4f4fIII", packet)
             header = temporal.HEADER.pack(b"T3TEMP01", h[1], h[2], hashlib.sha256(packet).digest(),
                                           *h[5:37], *h[37:41], h[44], 0, 0, 0)
@@ -168,6 +170,19 @@ class TemporalResolveTests(unittest.TestCase):
         newer_lights = replace(lights, source=changed.source, camera=camera)
         new, new_runtime, _, _ = capture(changed, newer_lights)
         temporal.compatible(old, new, old_runtime, new_runtime)
+        old_metal, old_metal_runtime, old_metal_source, old_metal_manifest = capture(scene, lights, True)
+        new_metal, new_metal_runtime, _, _ = capture(changed, newer_lights, True)
+        temporal.compatible(old_metal, new_metal, old_metal_runtime, new_metal_runtime)
+        with self.assertRaisesRegex(ValueError, "material"):
+            temporal.compatible(old, new_metal, old_runtime, new_metal_runtime)
+        altered = copy.deepcopy(new_metal_runtime[1]); altered["metallic_mode"]["candlestick_metal_factor"] = .5
+        with self.assertRaisesRegex(ValueError, "material"):
+            temporal.compatible(old_metal, new_metal, old_metal_runtime, (new_metal_runtime[0], altered))
+        for value in (None, {}, {"candlestick_metal_factor": 2, "other_materials_factor": 0},
+                      {"candlestick_metal_factor": True, "other_materials_factor": 0}):
+            altered = copy.deepcopy(old_metal_manifest); altered["metallic_mode"] = value
+            with self.subTest(metallic_mode=value), self.assertRaisesRegex(ValueError, "provenance"):
+                temporal.validate_runtime(old_metal, old_metal_source, json.dumps(altered).encode())
         for key in temporal.GEOMETRY_OVERRIDES:
             previous_manifest = copy.deepcopy(old_runtime[1])
             current_manifest = copy.deepcopy(new_runtime[1])

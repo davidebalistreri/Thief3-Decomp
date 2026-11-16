@@ -32,6 +32,7 @@ MAGIC = b"T3PBR01\0"
 SHADOW_MAGIC = b"T3PBR02\0"
 OFFLINE_CASTER_MAGIC = b"T3PBR03\0"
 EMISSION_MAGIC = b"T3PBR04\0"
+METALLIC_MAGIC = b"T3PBR05\0"
 MAX_LIGHTS = 16
 MAX_TRIANGLES = 100000
 MAX_DRAWS = 8192
@@ -134,7 +135,7 @@ def shadow_owners(scene, lights, actors):
 def create_packet(scene, light_scene, calibration, resolver, remaster, render_pass=None, stage=None,
                   shadows=None, actors=None, offline=None, offline_raw=None, caster_resolve=None,
                   flame_glb=None, flame_radiance=8, bed_glb=None, candlestick_glb=None, arch_glb=None,
-                  details_glb=None, prop_materials=False):
+                  details_glb=None, prop_materials=False, metallic=False):
     render_pass, stage = legacy.select_scope(scene, render_pass, stage)
     legacy.select_scope(light_scene)
     if (light_scene.source.kind != "runtime" or scene.source.frame_id != light_scene.source.frame_id or
@@ -153,6 +154,8 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
         raise ValueError("generated bedroom details require bedroom remaster materials")
     if type(prop_materials) is not bool or (prop_materials and remaster is None):
         raise ValueError("bedroom prop materials require bedroom remaster materials")
+    if type(metallic) is not bool:
+        raise ValueError("metallic mode must be boolean")
     if candlestick_glb is not None and flame_glb is not None and candlestick_glb != flame_glb:
         raise ValueError("candlestick and flame geometry must use the same GLB")
     scale = scene.conventions.meters_per_unit
@@ -471,14 +474,16 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
         if calls > MAX_SHADOW_DRAWS or work > MAX_SHADOW_TRIANGLES:
             raise ValueError("shadow maps exceed renderer work bounds")
     viewport = scene.camera.viewport
-    magic = EMISSION_MAGIC if flame_glb is not None else OFFLINE_CASTER_MAGIC if offline is not None else SHADOW_MAGIC if shadow else MAGIC
+    magic = METALLIC_MAGIC if metallic else EMISSION_MAGIC if flame_glb is not None else OFFLINE_CASTER_MAGIC if offline is not None else SHADOW_MAGIC if shadow else MAGIC
     body = bytearray(struct.pack("<8sIIff32f4f4fIII", magic, viewport.width, viewport.height,
                                  viewport.min_depth, viewport.max_depth, *scene.camera.view, *scene.camera.projection,
                                  *camera, scale, *ambient, exposure, len(textures), len(draws), len(lights)))
+    if metallic:
+        body.extend(struct.pack("<I", int(shadow is not None)))
     if shadow is not None:
         body.extend(struct.pack("<I4f", shadow["size"], shadow["near_m"], shadow["far_m"],
                                 shadow["bias_m"], shadow["softness"]))
-        if offline is not None or flame_glb is not None:
+        if offline is not None or flame_glb is not None or metallic:
             body.extend(struct.pack("<I", len(casters)))
     for light in lights:
         body.extend(struct.pack("<8f", *light["position"], light["radius_m"], *light["color_linear"],
@@ -487,12 +492,18 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
         body.extend(struct.pack("<III", tex["width"], tex["height"], len(tex["mips"])))
         for mip in tex["mips"]:
             body.extend(mip)
-    for tex, vertices, shadow_mask, emission in draws:
+    if len(draws) != len(records):
+        raise ValueError("PBR draw metadata does not match geometry")
+    for (tex, vertices, shadow_mask, emission), record in zip(draws, records):
         body.extend(struct.pack("<5I", *tex, len(vertices)))
         if shadow is not None:
             body.extend(struct.pack("<I", shadow_mask))
-        if flame_glb is not None:
+        if flame_glb is not None or metallic:
             body.extend(struct.pack("<3f", *emission))
+        if metallic:
+            factor = .8 if record.get("replacement") == "candlestick_high" and record.get("material") == "METAL1Goodness_D" else 0
+            body.extend(struct.pack("<f", factor))
+            record["metallic"] = factor
         for vertex in vertices:
             body.extend(struct.pack("<12f", *vertex))
     for caster in casters:
@@ -533,6 +544,8 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
             {"target_id": record["target_id"], "material": record["material"], "replacement": record["replacement"]}
             for record in records if record["replacement"] in ("beam_wood_v2", "furniture_wood_v2")
             and record["target_kind"] == "mesh_instance"]
+    if metallic:
+        stats["metallic_mode"] = {"candlestick_metal_factor": .8, "other_materials_factor": 0}
     return bytes(body), stats
 
 
@@ -557,6 +570,7 @@ def main(argv=None):
     parser.add_argument("--arch-high", type=Path, help="generated Godot rosette and jamb GLB")
     parser.add_argument("--bedroom-details", type=Path, help="generated Godot bed-relative visual details")
     parser.add_argument("--bedroom-prop-materials", action="store_true", help="apply named Godot wood materials to scoped bedroom props")
+    parser.add_argument("--metallic", action="store_true", help="enable PBR metallic response for generated candlestick metal")
     parser.add_argument("--flame-radiance", type=float, help="artistic linear flame radiance (default: 8)")
     parser.add_argument("--shadow-map-size", type=int)
     parser.add_argument("--shadow-near-m", type=float)
@@ -630,11 +644,11 @@ def main(argv=None):
                                         if args.arch_high is not None else None,
                                         details_glb=preview.read_limited(args.bedroom_details, flames.MAX_GLB_BYTES)
                                         if args.bedroom_details is not None else None,
-                                        prop_materials=args.bedroom_prop_materials)
+                                        prop_materials=args.bedroom_prop_materials, metallic=args.metallic)
         finally:
             for bundle in bundles:
                 bundle.close()
-        manifest = {"schema": "t3.scene.pbr-packet", "version": 4 if args.candle_flames is not None else 3 if args.offline_shadow_casters else 2 if shadow is not None else 1,
+        manifest = {"schema": "t3.scene.pbr-packet", "version": int(chr(body[6])),
                     "source_frame": scene.source.frame_id,
                     "scene_sha256": hashlib.sha256(scene_raw).hexdigest(),
                     "light_scene_sha256": hashlib.sha256(light_raw).hexdigest(),
@@ -658,7 +672,8 @@ def main(argv=None):
         if args.bed_high is not None:
             manifest["limitations"].append("The generated Godot bed visually replaces the observed INNbed1A1 actor; its material mapping, normal strength and UV-inferred tangents are preview approximations.")
         if args.candlestick_high is not None:
-            manifest["limitations"].append("Generated candlesticks replace scoped candidate actors; metal uses a dielectric approximation, wax is opaque, and UV-inferred tangents are approximate.")
+            metal = "metallic factor is mapped to the Godot material's authored value" if args.metallic else "metal uses a dielectric approximation"
+            manifest["limitations"].append(f"Generated candlesticks replace scoped candidate actors; {metal}, wax is opaque, and UV-inferred tangents are approximate.")
         if args.arch_high is not None:
             manifest["limitations"].append("Generated rosette and jambs modify a scoped candidate arch; material mapping and UV-inferred tangents are approximations.")
         if args.bedroom_details is not None:

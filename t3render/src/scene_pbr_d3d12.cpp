@@ -139,8 +139,13 @@ cbuffer Scene : register(b0) {
     float4 light_position_radius[16]; float4 light_color_intensity[16];
     float4 shadow_settings; float4 jitter;
 };
-#if T3_EMISSION
-cbuffer Emission : register(b2) { float3 emissive_radiance; };
+#if T3_EMISSION || T3_METALLIC
+cbuffer Material : register(b2) {
+    float3 emissive_radiance;
+#if T3_METALLIC
+    float metallic;
+#endif
+};
 #endif
 #if T3_SHADOWS
 float visibility(float3 world, float3 geometric_normal, float3 to_light, uint light_index) {
@@ -200,7 +205,11 @@ float4 main(float4 uv:TEXCOORD0, float3 world:TEXCOORD1, float3 normal:TEXCOORD2
     float3 view_delta=camera_exposure.xyz-world;
     float3 v=view_delta*rsqrt(max(dot(view_delta,view_delta),0.00000001));
     float nv=saturate(dot(n,v));
+#if T3_METALLIC
+    float3 result=albedo*(1-metallic)*ambient.rgb*ao;
+#else
     float3 result=albedo*ambient.rgb*ao;
+#endif
 #if T3_GBUFFER
     float3 direct_diffuse=0;
 #endif
@@ -221,9 +230,18 @@ float4 main(float4 uv:TEXCOORD0, float3 world:TEXCOORD1, float3 normal:TEXCOORD2
             float denom=nh*nh*(a2-1)+1;
             float distribution=a2/max(pi*denom*denom,0.00000001);
             float geometry=(nv/(nv*(1-k)+k))*(nl/(nl*(1-k)+k));
+#if T3_METALLIC
+            float3 f0=lerp(float3(0.04,0.04,0.04),albedo,metallic);
+            float3 fresnel=f0+(1-f0)*pow(1-vh,5);
+#else
             float3 fresnel=0.04+(1-0.04)*pow(1-vh,5);
+#endif
             float3 specular=distribution*geometry*fresnel/max(4*nv*nl,0.00000001);
+#if T3_METALLIC
+            float3 diffuse=(1-fresnel)*(1-metallic)*albedo/pi;
+#else
             float3 diffuse=(1-fresnel)*albedo/pi;
+#endif
             float radius=light_position_radius[i].w;
             float3 radiance=light_color_intensity[i].rgb*light_color_intensity[i].w/max(d2,radius*radius);
             float light_visibility=1;
@@ -243,7 +261,11 @@ float4 main(float4 uv:TEXCOORD0, float3 world:TEXCOORD1, float3 normal:TEXCOORD2
     float3 relative=(world-camera_exposure.xyz)*size_scale_count.z;
     o.position=all(abs(relative)<=60000)?float4(relative,1):float4(0,0,0,0);
     o.normal=float4(geometric_normal,roughness);
+#if T3_METALLIC
+    o.diffuse=float4(min(max(direct_diffuse,0),65504),metallic);
+#else
     o.diffuse=float4(min(max(direct_diffuse,0),65504),1);
+#endif
     o.albedo=float4(albedo,ao); return o;
 #else
     return float4(min(max(result,0),65504),1);
@@ -336,7 +358,11 @@ float3 indirect_light(int2 pixel) {
         float form=min(area/d2,1)*receiver_cos*source_cos;
         sum+=diffuse_light.Load(int3(qpixel,0)).rgb*form;
     }
+#if T3_METALLIC
+    return min(sum*receiver.rgb*receiver.a*(1-diffuse_light.Load(int3(pixel,0)).a)/pi,65504);
+#else
     return min(sum*receiver.rgb*receiver.a/pi,65504);
+#endif
 }
 #endif
 #if T3_GTAO
@@ -430,7 +456,14 @@ float3 screen_reflection(int2 pixel) {
             reflected+=hdr.Load(int3(q,0)).rgb; weight+=1;
         }
         if(weight==0) return 0;
+#if T3_METALLIC
+        float3 base_color=surface_albedo.Load(int3(pixel,0)).rgb;
+        float metal=diffuse_light.Load(int3(pixel,0)).a;
+        float3 f0=lerp(float3(0.04,0.04,0.04),base_color,metal);
+        float3 fresnel=f0+(1-f0)*pow(1-nv,5);
+#else
         float fresnel=0.04+0.96*pow(1-nv,5);
+#endif
         float roughness_fade=(1-nr.w)*(1-nr.w);
         float edge=saturate((1-max(abs(ndc.x),abs(ndc.y)))*8);
         return reflected/weight*fresnel*roughness_fade*edge*saturate((7.3-distance)/1.5);
@@ -481,7 +514,11 @@ float4 main(float4 position:SV_Position):SV_Target {
 #if T3_GTAO
     float visibility=ambient_visibility(int2(position.xy));
     float4 surface=surface_albedo.Load(int3(position.xy,0));
+#if T3_METALLIC
+    c=max(c-surface.rgb*surface.a*(1-diffuse_light.Load(int3(int2(position.xy),0)).a)*ambient.rgb*(1-visibility),0);
+#else
     c=max(c-surface.rgb*surface.a*ambient.rgb*(1-visibility),0);
+#endif
 #endif
 #if T3_INDIRECT
     float3 bounce=indirect_light(int2(position.xy));
@@ -576,7 +613,8 @@ Output main(float4 position:SV_Position) {
                                 (reflections ? "#define T3_REFLECTIONS 1\n" : "#define T3_REFLECTIONS 0\n") +
                                 (filmic ? "#define T3_FILMIC 1\n" : "#define T3_FILMIC 0\n") +
                                 (temporal_output ? "#define T3_TEMPORAL_EXPORT 1\n" : "#define T3_TEMPORAL_EXPORT 0\n") +
-                                (frame.has_emission ? "#define T3_EMISSION 1\n" : "#define T3_EMISSION 0\n");
+                                (frame.has_emission ? "#define T3_EMISSION 1\n" : "#define T3_EMISSION 0\n") +
+                                (frame.has_metallic ? "#define T3_METALLIC 1\n" : "#define T3_METALLIC 0\n");
     const std::string shadow_option = frame.shadow_size ? "#define T3_SHADOWS 1\n" : "#define T3_SHADOWS 0\n";
     const std::string pixel_source = shadow_option + options + ps_source;
     const std::string tone_source = shadow_option + options + tone_ps_source;
@@ -616,7 +654,7 @@ Output main(float4 position:SV_Position) {
         params[i+2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     }
     params[12].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[12].Constants.ShaderRegister = 2; params[12].Constants.Num32BitValues = 3;
+    params[12].Constants.ShaderRegister = 2; params[12].Constants.Num32BitValues = frame.has_metallic ? 4 : 3;
     params[12].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     params[13].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; params[13].Descriptor.ShaderRegister = 3;
     params[13].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
@@ -934,7 +972,10 @@ Output main(float4 position:SV_Position) {
     for (UINT i = 0; i < (use_gbuffer ? 5u : 1u); ++i) list->ClearRenderTargetView(geometry_rtvs[i], clear.Color, 0, nullptr);
     list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1, 0, 0, nullptr);
     for (const auto& draw : frame.draws) {
-        if (frame.has_emission) list->SetGraphicsRoot32BitConstants(12, 3, draw.emission, 0);
+        if (frame.has_metallic) {
+            const float material[4] = {draw.emission[0], draw.emission[1], draw.emission[2], draw.metallic};
+            list->SetGraphicsRoot32BitConstants(12, 4, material, 0);
+        } else if (frame.has_emission) list->SetGraphicsRoot32BitConstants(12, 3, draw.emission, 0);
         for (UINT i = 0; i < 4; ++i) {
             auto handle = gpu_base; handle.ptr += (UINT64(draw.textures[i])*2+(i == 0 ? 1 : 0))*srv_step;
             list->SetGraphicsRootDescriptorTable(i+1, handle);

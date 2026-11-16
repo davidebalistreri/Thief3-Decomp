@@ -2,6 +2,8 @@
 
 // Bounded GPU history input; frame ordering still requires SceneIR provenance.
 #include "scene_pbr_packet.hpp"
+#include <algorithm>
+#include <tuple>
 
 namespace t3render::temporal {
 struct History {
@@ -15,6 +17,7 @@ inline bool SameLightingAndTextures(const pbr::Frame& a, const pbr::Frame& b) {
         a.meters_per_unit != b.meters_per_unit ||
         a.shadow_size != b.shadow_size || a.shadow_near_m != b.shadow_near_m || a.shadow_far_m != b.shadow_far_m ||
         a.shadow_bias_m != b.shadow_bias_m || a.shadow_softness != b.shadow_softness || a.has_emission != b.has_emission ||
+        a.has_metallic != b.has_metallic ||
         std::memcmp(a.ambient, b.ambient, sizeof(a.ambient)) || a.lights.size() != b.lights.size() ||
         a.textures.size() != b.textures.size()) return false;
     for (std::size_t i = 0; i < a.lights.size(); ++i) {
@@ -27,6 +30,20 @@ inline bool SameLightingAndTextures(const pbr::Frame& a, const pbr::Frame& b) {
         if (x.size() != y.size()) return false;
         for (std::size_t j = 0; j < x.size(); ++j)
             if (x[j].width != y[j].width || x[j].height != y[j].height || x[j].rgba != y[j].rgba) return false;
+    }
+    if (a.has_metallic) {
+        using MaterialSignature = std::tuple<std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t,
+                                             float, float, float, float>;
+        std::vector<MaterialSignature> left, right;
+        const auto collect = [](const pbr::Frame& frame, std::vector<MaterialSignature>& values) {
+            for (const auto& draw : frame.draws)
+                values.emplace_back(draw.textures[0], draw.textures[1], draw.textures[2], draw.textures[3],
+                                    draw.metallic, draw.emission[0], draw.emission[1], draw.emission[2]);
+        };
+        collect(a, left); collect(b, right);
+        std::sort(left.begin(), left.end()); left.erase(std::unique(left.begin(), left.end()), left.end());
+        std::sort(right.begin(), right.end()); right.erase(std::unique(right.begin(), right.end()), right.end());
+        if (left != right) return false;
     }
     return true;
 }

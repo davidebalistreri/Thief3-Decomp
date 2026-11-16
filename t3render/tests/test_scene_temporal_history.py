@@ -12,6 +12,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "tools"))
 import scene_temporal_resolve as temporal
+import scene_pbr_metallic_fixture as metallic
 import test_scene_pbr_packet as packet_tests
 from test_scene_temporal_resolve import raw_history
 
@@ -89,6 +90,19 @@ class GpuHistoryParserTests(unittest.TestCase):
                 bad = history[:offset]+value+history[offset+len(value):]
                 self.assertEqual(self.parse(packet, packet, bad).returncode, 2)
         self.assertEqual(self.parse(packet, packet, history[:-1]).returncode, 2)
+
+    def test_rejects_changed_metallic_binding_even_when_factor_set_is_unchanged(self):
+        packet = metallic.fixture()
+        history = raw_history(packet)
+        self.assertEqual(self.parse(packet, packet, history).returncode, 0)
+        first = 196+4+32+7*16+20+12
+        second = first+4+6*48+20+12
+        changed = bytearray(packet)
+        changed[first:first+4], changed[second:second+4] = changed[second:second+4], changed[first:first+4]
+        self.assertEqual(self.parse(packet, bytes(changed), history).returncode, 2)
+        changed = bytearray(packet)
+        struct.pack_into("<f", changed, first-12, 1)
+        self.assertEqual(self.parse(packet, bytes(changed), history).returncode, 2)
 
 
 if __name__ == "__main__":

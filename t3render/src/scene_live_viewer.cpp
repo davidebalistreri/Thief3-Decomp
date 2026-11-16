@@ -91,6 +91,7 @@ struct Diagnostics {
            <<",\"static_mesh_samples\":"<<s.static_mesh_samples<<",\"static_mesh_scopes\":"<<s.static_mesh_scopes
            <<",\"static_mesh_rejected\":"<<s.static_mesh_rejected
            <<",\"map_witness_conflicts\":"<<s.map_witness_conflicts
+           <<",\"unscoped_viewport_attempts\":"<<s.unscoped_viewport_attempts
            <<",\"bsp_scopes\":"<<s.bsp_scopes<<",\"bsp_cache_hits\":"<<s.bsp_cache_hits
            <<",\"draw_geometry_bad\":"<<s.draw_geometry_bad
            <<",\"draw_camera_bad\":"<<s.draw_camera_bad<<",\"draw_world_bad\":"<<s.draw_world_bad
@@ -140,6 +141,8 @@ struct Diagnostics {
                                    scope==IdentityScope::FullObjectScan ? "full_object_scan" : "unknown";
         const char* light_coverage=snapshot.light_coverage==LightCoverage::Complete ? "complete" :
                                    snapshot.light_coverage==LightCoverage::Partial ? "partial" : "unknown";
+        const char* viewport_source=snapshot.camera.viewport_source==ViewportSource::ScopedDraw ? "scoped_draw" :
+                                    snapshot.camera.viewport_source==ViewportSource::CameraMatchedDraw ? "camera_matched_draw" : "unknown";
         std::size_t ready_lights=0,disabled_lights=0,incomplete_lights=0;
         for (const auto& light:snapshot.lights) {
             const auto status=ClassifyVisualLight(light);
@@ -155,7 +158,8 @@ struct Diagnostics {
            <<",\"width\":"<<frame.camera.width<<",\"height\":"<<frame.camera.height
            <<",\"viewport\":{\"x\":"<<snapshot.camera.x<<",\"y\":"<<snapshot.camera.y
            <<",\"width\":"<<snapshot.camera.width<<",\"height\":"<<snapshot.camera.height
-           <<",\"min_depth\":"<<snapshot.camera.min_depth<<",\"max_depth\":"<<snapshot.camera.max_depth<<'}'
+           <<",\"min_depth\":"<<snapshot.camera.min_depth<<",\"max_depth\":"<<snapshot.camera.max_depth
+           <<",\"source\":\""<<viewport_source<<"\"}"
            <<",\"mesh_instances\":"<<snapshot.meshes.size()<<",\"bsp_blocks\":"<<snapshot.bsp.size()
            <<",\"light_coverage\":\""<<light_coverage<<"\",\"visual_lights\":"<<snapshot.lights.size()
            <<",\"ready_lights\":"<<ready_lights<<",\"disabled_lights\":"<<disabled_lights

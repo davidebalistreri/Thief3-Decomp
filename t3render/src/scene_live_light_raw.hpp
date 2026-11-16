@@ -112,7 +112,8 @@ inline bool RawLightFrameMatches(const RawLightFrame& raw,const Snapshot& snapsh
         std::memcmp(raw.camera.view.data(),snapshot.camera.view.data(),sizeof(float)*raw.camera.view.size())==0 &&
         std::memcmp(raw.camera.projection.data(),snapshot.camera.projection.data(),sizeof(float)*raw.camera.projection.size())==0 &&
         raw.camera.x==snapshot.camera.x && raw.camera.y==snapshot.camera.y && raw.camera.width==snapshot.camera.width &&
-        raw.camera.height==snapshot.camera.height && std::memcmp(&raw.camera.min_depth,&snapshot.camera.min_depth,sizeof(float))==0 &&
+        raw.camera.height==snapshot.camera.height && raw.camera.viewport_source==snapshot.camera.viewport_source &&
+        std::memcmp(&raw.camera.min_depth,&snapshot.camera.min_depth,sizeof(float))==0 &&
         std::memcmp(&raw.camera.max_depth,&snapshot.camera.max_depth,sizeof(float))==0 &&
         snapshot.light_coverage==LightCoverage::Partial && RawLightBatchMatches(*raw.batch,snapshot.lights);
 }

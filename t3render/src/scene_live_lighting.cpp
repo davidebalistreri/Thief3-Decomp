@@ -94,7 +94,7 @@ bool LightingMatchesSnapshot(const Snapshot& snapshot,const VerifiedLighting& li
         snapshot.conventions.axes==lighting.conventions.axes && snapshot.conventions.up_axis==lighting.conventions.up_axis &&
         snapshot.conventions.handedness==lighting.conventions.handedness && snapshot.conventions.winding==lighting.conventions.winding &&
         snapshot.conventions.uv_origin==lighting.conventions.uv_origin && snapshot.conventions.clip_depth==lighting.conventions.clip_depth &&
-        a.x==b.x && a.y==b.y && a.width==b.width && a.height==b.height &&
+        a.x==b.x && a.y==b.y && a.width==b.width && a.height==b.height && a.viewport_source==b.viewport_source &&
         std::memcmp(&a.min_depth,&b.min_depth,sizeof(float))==0 && std::memcmp(&a.max_depth,&b.max_depth,sizeof(float))==0 &&
         std::memcmp(a.view.data(),b.view.data(),sizeof(float)*a.view.size())==0 &&
         std::memcmp(a.projection.data(),b.projection.data(),sizeof(float)*a.projection.size())==0;

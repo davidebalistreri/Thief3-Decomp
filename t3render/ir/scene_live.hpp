@@ -46,10 +46,13 @@ struct MeshOverride {
     std::string map, map_sha256, instance_id;
     std::shared_ptr<const Resource> source, replacement;
 };
+// How the viewport was associated with the camera, as asserted by the producer.
+enum class ViewportSource { Unknown, ScopedDraw, CameraMatchedDraw };
 struct Camera {
     Matrix view{}, projection{};
     std::uint32_t x = 0, y = 0, width = 0, height = 0;
     float min_depth = 0, max_depth = 1;
+    ViewportSource viewport_source = ViewportSource::Unknown;
 };
 // Producer's binding assessment; Candidate must not be promoted to Verified.
 enum class BindingEvidence { Unknown, Candidate, Verified };

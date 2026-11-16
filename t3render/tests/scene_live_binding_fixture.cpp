@@ -243,7 +243,7 @@ bool static_mesh_driver_lifecycle() {
         if (bool(available)!=bool(evidence)) return false;
         if (!driver->SetScopeSample(scope,thread,value,evidence))return false;
         const auto draw=driver->BeginDraw(thread,scope,args);
-        if (!draw.ticket || draw.needs_state!=expected)return false;
+        if (!draw.ticket || (expected && !draw.needs_state))return false;
         driver->EndDraw(draw.ticket,thread,true,state,state);driver->EndScope(scope,thread,value);return true;
     };
     CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(before,&observed,true));
@@ -323,6 +323,62 @@ bool delivery() {
     return true;
 }
 
+bool driver_camera_only() {
+    auto c=catalog();auto memory=std::make_shared<SceneResidency>();CHECK(memory->BeginMap(0,c.map,c.map_sha256));
+    const auto epoch=memory->epochs();CHECK(memory->AddMaterial(epoch.map,c.materials.at("mat:stone")));
+    CHECK(memory->AddResource(epoch.map,*c.bed));CHECK(memory->AddResource(epoch.map,*c.bsp[0]));
+    c.bed=memory->FindSceneResource(epoch.map,bed_id);c.bsp[0]=memory->FindSceneResource(epoch.map,bsp_id);
+    LoadedCatalog loaded;loaded.residency=memory;loaded.binding=c;
+    loaded.conventions.length_unit=LengthUnit::T3Unit;loaded.conventions.axes=Axes::T3Xyz;loaded.conventions.up_axis=UpAxis::Z;
+    FrameProvenance source;source.origin=FrameOrigin::Synthetic;source.session_id="camera-only-fixture";
+    auto driver=SceneDriver::Create(std::move(loaded),source,0,1);CHECK(driver);
+    const ThreadToken thread{17,123};auto p=probe();const auto bed=bed_scope(),bsp=bsp_scope();
+    const IndexedDraw args{true,true,0,1,0,3};
+    DrawObservation state;state.available=true;state.view=state.projection=state.world=identity;state.viewport={0,0,640,480,0,0.5f};
+    auto present=[&]() {const auto id=driver->BeginPresent(thread);return driver->EndPresent(id,thread,true);};
+    auto sample=[&]() {const auto id=driver->BeginProbe(thread);if (!id)return false;driver->EndProbe(id,thread,p);return true;};
+    auto submit=[&](const SubmissionSample& value) {
+        const auto scope=driver->BeginScope(thread,1,0);if (!scope || !driver->SetScopeSample(scope,thread,value))return false;
+        const auto draw=driver->BeginDraw(thread,scope,args);if (!draw.ticket || !draw.needs_state || !draw.needs_world)return false;
+        driver->EndDraw(draw.ticket,thread,true,state,state);driver->EndScope(scope,thread,value);return true;
+    };
+    auto unscoped=[&](const DrawObservation& before,const DrawObservation& after,bool expected) {
+        const auto draw=driver->BeginDraw(thread,0,args);if (!draw.ticket || draw.needs_state!=expected || draw.needs_world)return false;
+        driver->EndDraw(draw.ticket,thread,true,before,after);return true;
+    };
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bed));CHECK(present()==WindowResult::Published);
+    auto first=driver->current();CHECK(first && first->meshes[0].selection.generation==1 &&
+        first->camera.viewport_source==ViewportSource::ScopedDraw);
+    CHECK(sample());
+    const auto clear=driver->BeginDraw(thread,0,IndexedDraw{});CHECK(clear.ticket && !clear.needs_state);
+    driver->EndDraw(clear.ticket,thread,true,{},{});
+    auto other=state;other.view[12]=1;CHECK(unscoped(other,other,true));
+    CHECK(unscoped(state,other,true)); // camera changed during the draw
+    other=state;other.viewport.max_depth=1;CHECK(unscoped(state,other,true));
+    CHECK(unscoped(state,state,true));CHECK(present()==WindowResult::Published);
+    CHECK(driver->current()->meshes.empty() && driver->current()->bsp.empty() &&
+          driver->current()->camera.viewport_source==ViewportSource::CameraMatchedDraw);
+    CHECK(sample());CHECK(submit(bed));CHECK(present()==WindowResult::Published);
+    CHECK(driver->current()->meshes[0].selection.generation==2);
+    p.target.entry_available=false;p.map_witness={};CHECK(sample());CHECK(unscoped(state,state,false));
+    CHECK(present()==WindowResult::Rejected && !driver->current());
+    p=without_bed();CHECK(sample());CHECK(unscoped(state,state,true));
+    other=state;other.viewport.max_depth=1;CHECK(unscoped(other,other,true));
+    CHECK(present()==WindowResult::Rejected && !driver->current());
+    CHECK(sample());CHECK(unscoped(other,other,true));CHECK(submit(bsp));
+    CHECK(present()==WindowResult::Published && driver->current()->bsp.size()==1 &&
+          driver->current()->camera.viewport_source==ViewportSource::ScopedDraw && driver->current()->camera.max_depth==0.5f);
+    CHECK(sample());other=state;other.view[12]=1;
+    for (int i=0;i<5;++i) CHECK(unscoped(other,other,i<4));
+    CHECK(present()==WindowResult::Rejected && !driver->current());
+    const auto reset=driver->BeginReset(thread);CHECK(reset);driver->EndReset(reset,thread,true);
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(unscoped(state,state,true));
+    CHECK(present()==WindowResult::Published && driver->current()->meshes.empty() &&
+          driver->current()->camera.viewport_source==ViewportSource::CameraMatchedDraw);
+    CHECK(driver->stats().unscoped_viewport_attempts==12);
+    return true;
+}
+
 bool driver_delivery() {
     auto c=catalog();auto memory=std::make_shared<SceneResidency>();CHECK(memory->BeginMap(0,c.map,c.map_sha256));
     const auto epoch=memory->epochs();CHECK(memory->AddMaterial(epoch.map,c.materials.at("mat:stone")));
@@ -379,6 +435,8 @@ bool driver_delivery() {
           raw_frame->batch->items[0].field_74==bits(4));
     auto forged=std::make_shared<Snapshot>(*first);forged->camera.view[12]=9;
     CHECK(!RawLightFrameMatches(*raw_frame,*forged) && !driver->LightDiagnosticsIfCurrent(forged));
+    forged=std::make_shared<Snapshot>(*first);forged->camera.viewport_source=ViewportSource::CameraMatchedDraw;
+    CHECK(!RawLightFrameMatches(*raw_frame,*forged));
     auto diagnostics=driver->stats();
     CHECK(diagnostics.published==1 && diagnostics.selected_probes==1 && diagnostics.bed_scopes==1 &&
           diagnostics.bsp_scopes==2 && diagnostics.bsp_cache_hits==1 && diagnostics.last_rejection==0);
@@ -559,17 +617,26 @@ bool driver_gpu_pipeline() {
     viewer->Notify();CHECK(pipeline_wait(*viewer,3,2));
     CHECK(viewer->stats().frame_id==5 && driver.current()->camera.view[12]==0.25f &&
           driver.current()->light_coverage==LightCoverage::Unknown && driver.current()->lights.empty());
+    CHECK(sample());const auto unscoped=driver.BeginDraw(thread,0,args);CHECK(unscoped.ticket && unscoped.needs_state);
+    driver.EndDraw(unscoped.ticket,thread,true,draw_state,draw_state);
+    CHECK(present()==WindowResult::Published);viewer->Notify();CHECK(pipeline_wait(*viewer,4,2));
+    CHECK(viewer->stats().frame_id==6 && driver.current()->meshes.empty() && driver.current()->bsp.empty() &&
+          driver.current()->camera.viewport_source==ViewportSource::CameraMatchedDraw);
+    CHECK(sample());CHECK(submit(bed));CHECK(submit(bsp));CHECK(present()==WindowResult::Published);
+    viewer->Notify();CHECK(pipeline_wait(*viewer,5,2));
+    CHECK(viewer->stats().frame_id==7 && driver.current()->meshes.size()==1 && driver.current()->bsp.size()==1 &&
+          driver.current()->camera.viewport_source==ViewportSource::ScopedDraw);
     viewer->Stop();
     const auto deadline=GetTickCount64()+20000;
     while (!viewer->stats().stopped && GetTickCount64()<deadline) Sleep(10);
     CHECK(viewer->stats().stopped && !viewer->stats().failed);
-    std::cout<<"scene_live_driver_dx12_fixture=ok source=synthetic light_same_window=ok map_conflict_clear=ok frame_and_reset=ok\n";
+    std::cout<<"scene_live_driver_dx12_fixture=ok source=synthetic light_same_window=ok map_conflict_clear=ok frame_reset_empty=ok\n";
     return true;
 }
 #endif
 } // namespace
 int main() {
-    if(!matching() || !static_mesh_matching() || !static_mesh_driver_lifecycle() || !delivery() || !driver_delivery())return 1;
+    if(!matching() || !static_mesh_matching() || !static_mesh_driver_lifecycle() || !delivery() || !driver_camera_only() || !driver_delivery())return 1;
 #ifdef T3RENDER_TEST_LIVE_DX12_DRIVER
     if (!driver_gpu_pipeline()) return 1;
 #endif

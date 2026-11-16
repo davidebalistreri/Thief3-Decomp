@@ -230,6 +230,8 @@ bool light_lifecycle_and_evidence() {
     next_snapshot=complete;++next_snapshot.stage;CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));
     next_snapshot=complete;next_snapshot.provenance.session_id="other";CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));
     next_snapshot=complete;next_snapshot.camera.view[12]+=1;CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));
+    next_snapshot=complete;next_snapshot.camera.viewport_source=ViewportSource::CameraMatchedDraw;
+    CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));
     next_snapshot=complete;next_snapshot.light_coverage=LightCoverage::Partial;CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));
     next_snapshot=complete;next_snapshot.lights[0].enabled.value=false;CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));
     next_snapshot=complete;next_snapshot.conventions.axes=Axes::Unknown;CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));

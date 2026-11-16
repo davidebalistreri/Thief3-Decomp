@@ -62,9 +62,12 @@ public:
                             const MeshSelection& section);
     std::uint64_t BeginBsp(ThreadToken thread, std::uint32_t render_pass, std::uint32_t stage,
                            const BspSelection& section);
-    std::uint64_t BeginDraw(ThreadToken thread);
-    // For a selected scope, geometry and camera must match the independent
-    // draw-state checks; outside a scope those checks are ignored.
+    // An adapter may request a bounded unscoped camera/viewport observation.
+    // It must independently establish a current map witness before allowing it.
+    std::uint64_t BeginDraw(ThreadToken thread, bool allow_unscoped_viewport = false,
+                            bool* sample_viewport = nullptr);
+    // For a selected scope all independent draw-state checks must match.
+    // A requested unscoped sample uses only camera and viewport checks.
     bool EndDraw(std::uint64_t ticket, ThreadToken thread, bool succeeded,
                  bool scoped_geometry_matches, bool scoped_camera_matches, bool scoped_transform_matches,
                  bool viewport_stable, const Viewport& viewport);
@@ -94,6 +97,8 @@ private:
     std::uint64_t next_ticket_ = 1;
     bool primed_ = false, tainted_ = false, boundary_ambiguous_ = false, active_probe_matches_ = false;
     bool rebind_required_ = false, draw_scoped_ = false;
+    bool draw_unscoped_viewport_ = false, fallback_conflicted_ = false;
+    std::uint32_t fallback_attempts_ = 0;
     std::uint32_t last_rejection_ = 0;
     std::uint64_t draw_scope_ticket_ = 0;
     ThreadToken previous_thread_{}, present_thread_{}, probe_thread_{}, scope_thread_{}, draw_thread_{}, light_thread_{};
@@ -101,6 +106,7 @@ private:
     std::uint64_t present_ticket_ = 0, probe_ticket_ = 0, scope_ticket_ = 0, draw_ticket_ = 0, light_ticket_ = 0;
     std::optional<ProbeCamera> camera_;
     std::optional<Viewport> viewport_;
+    std::optional<Viewport> fallback_viewport_;
     std::optional<LightCoverage> light_coverage_;
     std::vector<VisualLight> lights_;
     std::optional<MeshSelection> mesh_;

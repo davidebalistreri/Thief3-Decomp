@@ -75,7 +75,9 @@ bool SameProvenance(const FrameProvenance& a, const FrameProvenance& b) {
     return a.origin == b.origin && a.session_id == b.session_id && a.capture_sha256 == b.capture_sha256;
 }
 bool ValidCamera(const Camera& camera) {
-    return Finite(camera.view) && Finite(camera.projection) && camera.width && camera.height &&
+    return (camera.viewport_source == ViewportSource::Unknown || camera.viewport_source == ViewportSource::ScopedDraw ||
+            camera.viewport_source == ViewportSource::CameraMatchedDraw) &&
+        Finite(camera.view) && Finite(camera.projection) && camera.width && camera.height &&
         camera.x <= UINT32_MAX-camera.width && camera.y <= UINT32_MAX-camera.height &&
         std::isfinite(camera.min_depth) && std::isfinite(camera.max_depth) && camera.min_depth <= camera.max_depth;
 }

@@ -22,7 +22,7 @@ void RuntimeSubmissionLeave() noexcept;
 
 struct RuntimeDraw {
     std::uint64_t ticket=0;
-    bool needs_state=false;
+    bool needs_state=false,needs_world=false;
     DrawObservation before;
 };
 RuntimeDraw RuntimeDrawBegin(IDirect3DDevice8* device, const DrawCall& call) noexcept;

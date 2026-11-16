@@ -41,7 +41,7 @@ struct SceneDriver::Impl {
     struct Draw {
         ThreadToken thread;std::uint64_t window=0,scope=0;IndexedDraw arguments;
         std::shared_ptr<const Resource> resource;ProbeCamera camera;scene_bridge::SubmissionSample before;
-        std::uint32_t section=0;
+        std::uint32_t section=0;bool unscoped_viewport=false;
     };
     struct Present { ThreadToken thread;std::uint64_t window=0,frame=0; };
     struct Reset { ThreadToken thread;std::uint64_t residency=0; };
@@ -70,7 +70,7 @@ struct SceneDriver::Impl {
     std::uint64_t next_ticket=1,next_frame=0,generation=0,last_seen_frame=0;
     Identity identity{};
     DriverStats diagnostics;
-    bool identity_known=false;
+    bool identity_known=false,latest_map_matches=false;
     std::atomic<bool> disabled{false};
 
     Impl(LoadedCatalog input,FrameProvenance source,std::uint32_t selected_pass,std::uint32_t selected_stage)
@@ -83,7 +83,7 @@ struct SceneDriver::Impl {
     void ClearLightRawInterval() {pending_light_raw.reset();light_raw_seen=false;light_raw_conflict=false;}
     void Lost() {
         ++diagnostics.losses;
-        latest.reset();latest_thread={};bsp_matches.clear();
+        latest.reset();latest_thread={};latest_map_matches=false;bsp_matches.clear();
         ClearLightRawInterval();published_light_raw.reset();light_raw_owner.reset();
         for (auto& item:actor_tracks) item.second.known=false;
         if (window) window->MarkLost();
@@ -99,7 +99,7 @@ struct SceneDriver::Impl {
         if (!Empty() || !catalog.residency->epochs().ready) return false;
         const auto epoch=catalog.residency->epochs();
         window=std::make_unique<SceneWindow>(*catalog.residency,epoch,provenance,catalog.conventions,pass,stage);
-        latest.reset();latest_thread={};bsp_matches.clear();identity_known=false;
+        latest.reset();latest_thread={};latest_map_matches=false;bsp_matches.clear();identity_known=false;
         ClearLightRawInterval();published_light_raw.reset();light_raw_owner.reset();
         for (auto& item:actor_tracks) item.second.known=false;
         return true;
@@ -139,7 +139,7 @@ std::uint64_t SceneDriver::BeginProbe(ThreadToken thread) noexcept {
         if (!s.probes.empty() || !s.light_samples.empty() || !s.scopes.empty() || !s.draws.empty() || !s.presents.empty() || !s.resets.empty()) s.Lost();
         const auto id=s.Ticket();if (!id) { s.Disable();return 0; }
         const auto ticket=s.window ? s.window->BeginProbe(thread) : 0;
-        s.latest.reset();s.latest_thread={};s.bsp_matches.clear();s.probes.emplace(id,Impl::Probe{thread,ticket});return id;
+        s.latest.reset();s.latest_thread={};s.latest_map_matches=false;s.bsp_matches.clear();s.probes.emplace(id,Impl::Probe{thread,ticket});return id;
     } catch (...) { impl_->Disable();return 0; }
 }
 void SceneDriver::EndProbe(std::uint64_t ticket,ThreadToken thread,const scene_bridge::ProbeSnapshot& snapshot) noexcept {
@@ -156,7 +156,8 @@ void SceneDriver::EndProbe(std::uint64_t ticket,ThreadToken thread,const scene_b
         const bool selected=snapshot.pass.available && snapshot.pass.value==s.pass;
         const bool stable=selected && ReadProbeCamera(snapshot,thread.id,s.pass,camera);
         const bool accepted=s.window->EndProbe(record.window,thread,snapshot.pass.available,snapshot.pass.value,stable,camera);
-        if (selected && stable && ClassifyMapWitness(s.catalog.binding,snapshot)==MapWitnessStatus::Conflicts) {
+        const auto witness=selected && stable ? ClassifyMapWitness(s.catalog.binding,snapshot) : MapWitnessStatus::Unknown;
+        if (witness==MapWitnessStatus::Conflicts) {
             if (accepted) ++s.diagnostics.selected_probes;
             ++s.diagnostics.map_witness_conflicts;
             // Discard both the previous snapshot and any partial selection
@@ -167,7 +168,8 @@ void SceneDriver::EndProbe(std::uint64_t ticket,ThreadToken thread,const scene_b
         if (accepted && selected && stable) {
             ++s.diagnostics.selected_probes;
             s.latest=std::make_shared<const scene_bridge::ProbeSnapshot>(snapshot);s.latest_camera=camera;s.latest_thread=thread;
-        } else { if (selected) ++s.diagnostics.selected_probe_bad;s.latest.reset();s.latest_thread={}; }
+            s.latest_map_matches=witness==MapWitnessStatus::Matches;
+        } else { if (selected) ++s.diagnostics.selected_probe_bad;s.latest.reset();s.latest_thread={};s.latest_map_matches=false; }
     } catch (...) { impl_->Disable(); }
 }
 
@@ -361,9 +363,14 @@ DrawStart SceneDriver::BeginDraw(ThreadToken thread,std::uint64_t enclosing_scop
                 record.before=scope->second.before;record.section=scope->second.section;
             }
         } else if (!s.scopes.empty()) s.Lost();
-        record.window=s.window ? s.window->BeginDraw(thread) : 0;
-        const bool needs=record.window && record.resource;
-        s.draws.emplace(id,std::move(record));return {id,needs};
+        bool unscoped=false;
+        const bool allow_unscoped=!record.resource && draw.triangle_count && s.latest && s.latest_map_matches &&
+                                  SameThread(thread,s.latest_thread);
+        record.window=s.window ? s.window->BeginDraw(thread,allow_unscoped,&unscoped) : 0;
+        if (unscoped) {record.unscoped_viewport=true;record.camera=s.latest_camera;++s.diagnostics.unscoped_viewport_attempts;}
+        const bool needs=record.window && (record.resource || record.unscoped_viewport);
+        const bool needs_world=record.window && bool(record.resource);
+        s.draws.emplace(id,std::move(record));return {id,needs,needs_world};
     } catch (...) { impl_->Disable();return {}; }
 }
 void SceneDriver::EndDraw(std::uint64_t ticket,ThreadToken thread,bool succeeded,
@@ -377,7 +384,7 @@ void SceneDriver::EndDraw(std::uint64_t ticket,ThreadToken thread,bool succeeded
         if (!SameThread(thread,record.thread)) { s.Lost();return; }
         if (!record.window || !s.window) return;
         const bool geometry=record.resource && ScopeDrawMatches(*record.resource,record.section,record.arguments);
-        const bool camera=record.resource && before.available && after.available &&
+        const bool camera=(record.resource || record.unscoped_viewport) && before.available && after.available &&
             ScopeCameraMatches(record.camera,before.view,before.projection) && ScopeCameraMatches(record.camera,after.view,after.projection);
         const bool world=record.resource && before.available && after.available &&
             ScopeWorldMatches(record.before,before.world) && ScopeWorldMatches(record.before,after.world);
@@ -416,7 +423,7 @@ WindowResult SceneDriver::EndPresent(std::uint64_t ticket,ThreadToken thread,boo
         const auto item=s.presents.find(ticket);
         if (!ticket || item==s.presents.end()) { s.Lost();return WindowResult::Rejected; }
         const auto record=item->second;s.presents.erase(item);
-        s.latest.reset();s.latest_thread={};
+        s.latest.reset();s.latest_thread={};s.latest_map_matches=false;
         if (!SameThread(thread,record.thread)) { s.Lost();return WindowResult::Rejected; }
         const auto result=record.window && s.window ? s.window->EndPresent(record.window,thread,succeeded) : WindowResult::Rejected;
         s.published_light_raw.reset();s.light_raw_owner.reset();

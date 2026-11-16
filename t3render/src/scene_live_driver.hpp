@@ -16,12 +16,13 @@ struct DrawObservation {
 };
 struct DrawStart {
     std::uint64_t ticket = 0;
-    bool needs_state = false;
+    bool needs_state = false, needs_world = false;
 };
 struct DriverStats {
     std::uint64_t probes = 0, selected_probes = 0, selected_probe_bad = 0, bed_scopes = 0, bsp_scopes = 0, bsp_cache_hits = 0;
     std::uint64_t static_mesh_samples = 0, static_mesh_scopes = 0, static_mesh_rejected = 0;
     std::uint64_t map_witness_conflicts = 0;
+    std::uint64_t unscoped_viewport_attempts = 0;
     std::uint64_t draw_geometry_bad = 0, draw_camera_bad = 0, draw_world_bad = 0, draw_viewport_bad = 0;
     std::uint64_t scope_unstable = 0, scope_rejected = 0, losses = 0, primed = 0, published = 0, rejected = 0;
     std::uint32_t last_rejection = 0;

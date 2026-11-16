@@ -127,13 +127,13 @@ struct QueryGuard {
     QueryGuard() noexcept { if (!querying) {querying=true;entered=true;} else RuntimeDeferredLoss(); }
     ~QueryGuard() { if (entered) querying=false; }
 };
-bool Query(IDirect3DDevice8* device,DrawObservation& observation) noexcept {
+bool Query(IDirect3DDevice8* device,DrawObservation& observation,bool needs_world) noexcept {
     if (!device) return false;
     QueryGuard guard;if (!guard.entered) return false;
     D3DMATRIX view{},projection{},world{};D3DVIEWPORT8 viewport{};
     static_assert(sizeof(D3DMATRIX)==sizeof(float)*16,"unexpected D3D8 matrix size");
     if (FAILED(device->GetTransform(D3DTS_VIEW,&view)) || FAILED(device->GetTransform(D3DTS_PROJECTION,&projection)) ||
-        FAILED(device->GetTransform(D3DTS_WORLD,&world)) || FAILED(device->GetViewport(&viewport))) return false;
+        (needs_world && FAILED(device->GetTransform(D3DTS_WORLD,&world))) || FAILED(device->GetViewport(&viewport))) return false;
     DrawObservation result;result.available=true;
     std::memcpy(result.view.data(),&view,sizeof(view));std::memcpy(result.projection.data(),&projection,sizeof(projection));
     std::memcpy(result.world.data(),&world,sizeof(world));
@@ -328,8 +328,8 @@ RuntimeDraw RuntimeDrawBegin(IDirect3DDevice8* device,const DrawCall& call) noex
         args.first_index=call.start_index;args.triangle_count=call.primitive_count;
         args.min_vertex=call.min_vertex_index;args.vertex_count=call.num_vertices;
         const auto start=driver->BeginDraw(CurrentThread(),scope,args);
-        RuntimeDraw result;result.ticket=start.ticket;result.needs_state=start.needs_state;
-        if (result.needs_state) (void)Query(device,result.before);
+        RuntimeDraw result;result.ticket=start.ticket;result.needs_state=start.needs_state;result.needs_world=start.needs_world;
+        if (result.needs_state) (void)Query(device,result.before,result.needs_world);
         return result;
     } catch (...) {RuntimeAbandon();return {};}
 }
@@ -338,7 +338,7 @@ void RuntimeDrawEnd(IDirect3DDevice8* device,const RuntimeDraw& draw,HRESULT res
     try {
         if (!draw.ticket) return;
         DrawObservation after;
-        if (draw.needs_state && draw.before.available && IsDevice(device)) (void)Query(device,after);
+        if (draw.needs_state && draw.before.available && IsDevice(device)) (void)Query(device,after,draw.needs_world);
         auto* driver=Driver(false);if (driver) driver->EndDraw(draw.ticket,CurrentThread(),SUCCEEDED(result),draw.before,after);
     } catch (...) {RuntimeAbandon();}
 }

@@ -73,9 +73,28 @@ An adapter must bracket every relevant operation, report lost hooks/reentry,
 validate its own scope identity and sampling, catch exceptions without exposing
 them to the game, and recreate the collector after map/device epoch changes.
 The collector cannot independently prove callback coverage, a live binding or
-an unobserved Reset. A scope without a draw is not selected; without any
-verified draw viewport the interval is rejected. The experimental adapter's
-callback coverage in TDS is not yet verified.
+an unobserved Reset. A scope without a draw is not selected. When no selected
+draw supplies a viewport, the adapter may inspect at most four unselected
+draws in the interval after a stable selected probe with a matching candidate
+map witness. It checks view/projection against that probe and checks viewport
+stability before and after the draw. Differing camera-matched viewports make
+the fallback unavailable; a selected draw viewport always takes precedence.
+This can publish a partial camera-only snapshot, not a claim that missing
+objects are invisible or destroyed. No fallback is attempted without a map
+witness, and the witness still does not prove map lifecycle or ownership.
+The camera's `viewport_source` and viewer diagnostic `viewport.source` record
+`scoped_draw` versus `camera_matched_draw`; `unscoped_viewport_attempts` counts
+requests. If neither source is available the interval remains rejected.
+Unselected draws can be from another stage, so their viewport is evidence of
+that camera-matched draw only, not proof of the selected stage's viewport.
+The adapter's callback coverage and the extra getter cost in TDS are not yet
+verified. Fallback reads view, projection and viewport, not world transform.
+
+Host fixtures cover absence and return of selected geometry, mismatched camera,
+conflicting viewport, missing witness, the four-attempt cap, selected-draw
+precedence and Reset. A synthetic Highball/D3D12 worker test renders a
+camera-only frame between geometry frames. These do not establish live TDS
+visibility or measure performance.
 
 `scene_live_binding.hpp` translates the existing probe values to this model.
 At the section-call entry, `ResolveBed` accepts only the researched

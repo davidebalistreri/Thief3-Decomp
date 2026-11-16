@@ -432,3 +432,22 @@ misure del lag. Sono passati il test del probe, 16 test live e sette test di
 replay, incluse le catture locali; il proxy sperimentale e le fixture DX12
 compilano x86. Il gioco non è stato riavviato e prestazioni e integrazione
 live rimangono da verificare in seguito.
+
+## Aggiornamento: frame parziale senza draw semantici
+
+Il collector può mantenere camera e viewport anche quando nessun draw viene
+associato a letto o BSP: richiede un witness di mappa compatibile e confronta
+view, projection e viewport prima e dopo un draw non selezionato nella stessa
+finestra `Present`. Sono consentiti al massimo quattro tentativi; viewport
+discordanti annullano il fallback e un viewport da draw semantico prevale.
+La provenienza distingue `camera_matched_draw` da `scoped_draw`. Il primo può
+appartenere a un altro stage: non dimostra il viewport dello stage selezionato,
+la visibilità completa o la distruzione degli oggetti mancanti. Senza witness
+il frame resta rifiutato. Il fallback non legge la world matrix.
+
+Le fixture host verificano assenza e riapparizione delle mesh, camera errata,
+viewport discordanti, precedenza e Reset. Una fixture sintetica Highball/DX12
+esercita il viewer con geometria → frame camera-only → geometria. I sette
+test di replay sulle trace esistenti continuano a passare: i frame 1243–1245
+del tentativo precedente rimangono rifiutati. Non è stato riavviato TDS e il
+costo delle letture aggiuntive non è stato misurato nel gioco.

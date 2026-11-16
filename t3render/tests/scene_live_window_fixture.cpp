@@ -82,6 +82,43 @@ bool valid_sequence() {
     return true;
 }
 
+bool camera_only_windows() {
+    SceneResidency scene;CHECK(setup(scene));SceneWindow window(scene,scene.epochs(),provenance(),conventions(),0,1);
+    CHECK(prime(window,0));CHECK(probe(window));
+    bool requested=false;
+    auto d=window.BeginDraw(thread,true,&requested);CHECK(d && requested);
+    CHECK(window.EndDraw(d,thread,true,false,false,false,true,viewport)); // different camera
+    d=window.BeginDraw(thread,true,&requested);CHECK(d && requested);
+    CHECK(window.EndDraw(d,thread,true,false,true,false,true,viewport));
+    CHECK(end(window,1)==WindowResult::Published);
+    auto empty=scene.current();CHECK(empty && empty->meshes.empty() && empty->bsp.empty() &&
+        empty->camera.viewport_source==ViewportSource::CameraMatchedDraw);
+    CHECK(probe(window));d=window.BeginDraw(thread,true,&requested);CHECK(d && requested);
+    CHECK(window.EndDraw(d,thread,true,false,true,false,true,viewport));
+    auto different=viewport;different.max_depth=1;
+    d=window.BeginDraw(thread,true,&requested);CHECK(d && requested);
+    CHECK(window.EndDraw(d,thread,true,false,true,false,true,different));
+    CHECK(end(window,2)==WindowResult::Rejected && !scene.current());
+    CHECK(window.last_rejection() & WindowNoViewport);
+    CHECK(probe(window));d=window.BeginDraw(thread,true,&requested);CHECK(d && requested);
+    CHECK(window.EndDraw(d,thread,true,false,true,false,true,different));
+    CHECK(submit_mesh(window));CHECK(end(window,3)==WindowResult::Published);
+    CHECK(scene.current()->camera.viewport_source==ViewportSource::ScopedDraw && scene.current()->camera.max_depth==0.5f);
+    CHECK(probe(window));
+    for (int i=0;i<5;++i) {
+        d=window.BeginDraw(thread,true,&requested);CHECK(d && requested==(i<4));
+        CHECK(window.EndDraw(d,thread,true,false,false,false,false,viewport));
+    }
+    CHECK(end(window,4)==WindowResult::Rejected && !scene.current());
+    CHECK(probe(window));d=window.BeginDraw(thread,false,&requested);CHECK(d && !requested);
+    CHECK(window.EndDraw(d,thread,true,false,true,false,true,viewport));
+    CHECK(end(window,5)==WindowResult::Rejected && !scene.current());
+    CHECK(probe(window));d=window.BeginDraw(thread,true,&requested);CHECK(d && requested);
+    CHECK(window.EndDraw(d,thread,true,false,true,false,true,viewport));
+    CHECK(end(window,6)==WindowResult::Published && scene.current()->meshes.empty());
+    return true;
+}
+
 bool light_windows() {
     SceneResidency scene;CHECK(setup(scene));SceneWindow window(scene,scene.epochs(),provenance(),conventions(),0,1);
     VisualLight candle;candle.id="light:candle";candle.generation=1;candle.binding=BindingEvidence::Candidate;
@@ -237,6 +274,6 @@ bool overlaps_and_invalidations() {
 } // namespace
 
 int main() {
-    if (!valid_sequence() || !light_windows() || !invalid_intervals_recover() || !overlaps_and_invalidations()) return 1;
+    if (!valid_sequence() || !camera_only_windows() || !light_windows() || !invalid_intervals_recover() || !overlaps_and_invalidations()) return 1;
     std::cout << "scene_live_window_fixture=ok\n";
 }

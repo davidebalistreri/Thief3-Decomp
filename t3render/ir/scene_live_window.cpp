@@ -51,11 +51,12 @@ bool SceneWindow::Eligible(ThreadToken thread) {
     return !tainted_;
 }
 void SceneWindow::ClearInterval() {
-    camera_.reset(); viewport_.reset(); mesh_.reset(); bsp_.reset();light_coverage_.reset();lights_.clear();
+    camera_.reset(); viewport_.reset(); fallback_viewport_.reset(); mesh_.reset(); bsp_.reset();light_coverage_.reset();lights_.clear();
     meshes_.clear(); blocks_.clear(); mesh_index_.clear(); block_index_.clear();
     probe_ticket_ = scope_ticket_ = draw_ticket_ = light_ticket_ = 0;
     probe_thread_ = scope_thread_ = draw_thread_ = light_thread_ = {};
-    scope_draws_ = 0; draw_scoped_ = false; draw_scope_ticket_ = 0; tainted_ = false; active_probe_matches_ = false;
+    scope_draws_ = 0; draw_scoped_ = draw_unscoped_viewport_ = fallback_conflicted_ = false;
+    fallback_attempts_ = 0; draw_scope_ticket_ = 0; tainted_ = false; active_probe_matches_ = false;
 }
 
 std::uint64_t SceneWindow::BeginPresent(ThreadToken thread, std::uint64_t frame_id, bool adapter_quiescent) {
@@ -84,21 +85,24 @@ WindowResult SceneWindow::EndPresent(std::uint64_t ticket, ThreadToken thread, b
     if (!epoch_valid) RequireRebind();
     const bool no_pending = !probe_ticket_ && !scope_ticket_ && !draw_ticket_ && !light_ticket_;
     const bool was_primed = primed_;
+    const Viewport* selected_viewport = viewport_ ? &*viewport_ :
+        (!fallback_conflicted_ && fallback_viewport_ ? &*fallback_viewport_ : nullptr);
     last_rejection_ = (!primed_ ? WindowNotPrimed : 0u) | (!succeeded ? WindowPresentFailed : 0u) |
         (!epoch_valid ? WindowEpochInvalid : 0u) | (tainted_ ? WindowTainted : 0u) |
         (boundary_ambiguous_ ? WindowBoundaryAmbiguous : 0u) | (!no_pending ? WindowPending : 0u) |
-        (!camera_ ? WindowNoCamera : 0u) | (!viewport_ ? WindowNoViewport : 0u) |
+        (!camera_ ? WindowNoCamera : 0u) | (!selected_viewport ? WindowNoViewport : 0u) |
         (rebind_required_ ? WindowNeedsRebind : 0u);
     bool published = false;
-    if (primed_ && succeeded && epoch_valid && !tainted_ && !boundary_ambiguous_ && no_pending && camera_ && viewport_) {
+    if (primed_ && succeeded && epoch_valid && !tainted_ && !boundary_ambiguous_ && no_pending && camera_ && selected_viewport) {
         FrameInput frame;
         frame.map_epoch = epochs_.map; frame.device_epoch = epochs_.device; frame.frame_id = present_frame_;
         frame.render_pass = pass_; frame.stage = stage_; frame.provenance = provenance_; frame.conventions = conventions_;
         frame.synchronized = true;
         frame.camera.view = camera_->view; frame.camera.projection = camera_->projection;
-        frame.camera.x = viewport_->x; frame.camera.y = viewport_->y;
-        frame.camera.width = viewport_->width; frame.camera.height = viewport_->height;
-        frame.camera.min_depth = viewport_->min_depth; frame.camera.max_depth = viewport_->max_depth;
+        frame.camera.x = selected_viewport->x; frame.camera.y = selected_viewport->y;
+        frame.camera.width = selected_viewport->width; frame.camera.height = selected_viewport->height;
+        frame.camera.min_depth = selected_viewport->min_depth; frame.camera.max_depth = selected_viewport->max_depth;
+        frame.camera.viewport_source = viewport_ ? ViewportSource::ScopedDraw : ViewportSource::CameraMatchedDraw;
         frame.meshes = meshes_; frame.bsp = blocks_;
         frame.light_coverage=light_coverage_.value_or(LightCoverage::Unknown);frame.lights=lights_;
         published = residency_.Publish(frame);
@@ -209,7 +213,8 @@ std::uint64_t SceneWindow::BeginBsp(ThreadToken thread, std::uint32_t pass, std:
     bsp_ = std::move(copy); mesh_.reset(); scope_ticket_ = ticket; scope_thread_ = thread; scope_draws_ = 0;
     return ticket;
 }
-std::uint64_t SceneWindow::BeginDraw(ThreadToken thread) {
+std::uint64_t SceneWindow::BeginDraw(ThreadToken thread, bool allow_unscoped_viewport, bool* sample_viewport) {
+    if (sample_viewport) *sample_viewport = false;
     std::lock_guard<std::mutex> lock(mutex_);
     if (!Eligible(thread)) return 0;
     if (draw_ticket_ || probe_ticket_ || light_ticket_ || (scope_ticket_ && !SameThread(thread, scope_thread_))) {
@@ -218,6 +223,9 @@ std::uint64_t SceneWindow::BeginDraw(ThreadToken thread) {
     const auto ticket = NextTicket(); if (!ticket) return 0;
     draw_ticket_ = ticket; draw_thread_ = thread;
     draw_scoped_ = scope_ticket_ != 0; draw_scope_ticket_ = scope_ticket_;
+    draw_unscoped_viewport_ = !draw_scoped_ && sample_viewport && allow_unscoped_viewport &&
+        active_probe_matches_ && camera_ && !viewport_ && !fallback_conflicted_ && fallback_attempts_ < 4;
+    if (draw_unscoped_viewport_) { ++fallback_attempts_; *sample_viewport = true; }
     return ticket;
 }
 bool SceneWindow::EndDraw(std::uint64_t ticket, ThreadToken thread, bool succeeded,
@@ -228,10 +236,17 @@ bool SceneWindow::EndDraw(std::uint64_t ticket, ThreadToken thread, bool succeed
         (draw_scoped_ && scope_ticket_ != draw_scope_ticket_)) {
         RequireRebind(); return false;
     }
-    const bool scoped = draw_scoped_;
-    draw_ticket_ = 0; draw_thread_ = {}; draw_scoped_ = false; draw_scope_ticket_ = 0;
+    const bool scoped = draw_scoped_, sampled_unscoped = draw_unscoped_viewport_;
+    draw_ticket_ = 0; draw_thread_ = {}; draw_scoped_ = draw_unscoped_viewport_ = false; draw_scope_ticket_ = 0;
     if (!succeeded) { tainted_ = true; return false; }
-    if (!scoped) return true;
+    if (!scoped) {
+        if (sampled_unscoped && scoped_camera_matches && viewport_stable && ValidViewport(viewport)) {
+            if (fallback_viewport_ && !SameViewport(*fallback_viewport_,viewport)) {
+                fallback_viewport_.reset(); fallback_conflicted_ = true;
+            } else fallback_viewport_ = viewport;
+        }
+        return true;
+    }
     if (!scoped_geometry_matches || !scoped_camera_matches || !scoped_transform_matches || !viewport_stable || !ValidViewport(viewport) ||
         (viewport_ && !SameViewport(*viewport_, viewport)) || scope_draws_ == UINT32_MAX) {
         tainted_ = true; return false;

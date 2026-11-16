@@ -9,7 +9,10 @@ Present window. The existing JSON SceneIR schema has not changed.
 Resources contain immutable geometry and sections, a semantic ID and the
 fingerprint of their source asset. The caller must establish both the key and
 fingerprint; the cache does not hash or authenticate the geometry. Materials
-and per-instance bindings are separate. Each selected mesh includes an
+and per-instance bindings are separate. Register the catalog first and obtain
+its immutable objects with `FindResource` for the matcher. On publication,
+the matcher's in-memory resource handle and material names must agree with the
+resident objects; these handles are never serialized. Each selected mesh includes an
 instance generation, transform, binding evidence (`Verified` or `Candidate`)
 and the observed sections. BSP blocks have the same evidence distinction.
 There are no COM, D3D or engine object types in these structures; producer IDs
@@ -70,6 +73,39 @@ an unobserved Reset. A scope without a draw is not selected; without any
 verified draw viewport the interval is rejected. The collector is not yet
 connected to the game or a graphics device.
 
+`scene_live_binding.hpp` translates the existing probe values to this model.
+At the section-call entry, `ResolveBed` accepts only the researched
+`StaticMeshActor__1520` / `INNbed1A1` path with its owner, class, map, asset and
+mesh-node checks. It compares bounds, counts, section ranges and runtime
+material names with the offline resource and instance skin. `ResolveBsp`
+requires a complete supplied offline BSP catalog, checks current VBSP membership
+and stable metadata, and requires a unique match in both directions. The
+importer itself is heuristic, so the catalog-completeness assertion is not an
+independent runtime measurement. The map and asset fingerprints qualify offline
+IDs; neither is a fingerprint obtained from the running resource manager.
+Consequently both returned bindings are **candidates**, and no transient
+process address is copied into them.
+
+The adapter must call the resolver at scope entry, check the indexed triangle
+draw arguments with `ScopeDrawMatches`, compare pre/post draw view, projection
+and world matrices with `ScopeCameraMatches` / `ScopeWorldMatches`, and pass
+those results to `SceneWindow::EndDraw`; compare entry/exit samples with
+`ScopeUnchanged` at `EndScope`. The draw check compares arguments and offline indices, not the VB/IB
+bytes actually consumed by the GPU. These functions do not by themselves
+prove callback ordering, visibility or the Present interval. The current map
+check depends on the target bed appearing in the sampled list: when it does
+not, this matcher declines BSP as well. Removing that limitation needs a
+separately observed map/lifetime signal, not reuse of the last seen actor.
+
+The local frames 2864/2865 were revalidated against their common finalized
+trace and fed through the matcher, residency and Present collector: each yielded
+two bed sections and two GMP-block-5 sections, with viewport depth 0..0.5. For
+this offline exercise, the trace's recorded stable scope was represented by
+identical entry/exit samples and a synthetic thread creation token. The recorded
+draw matrices were compared once; post-draw matrix stability was not captured.
+Those facts were not newly sampled from a live process. The resulting snapshots were marked
+`CapturedReplay`, and their resource bindings remained `Candidate`.
+
 `scene_live_flat.cpp` converts a selected snapshot to the existing API-neutral
 flat SceneIR renderer input using row-major, row-vector transforms and stable
 material-ID colors. Culling is disabled because absolute winding is unknown. It accepts T3 XYZ /
@@ -85,7 +121,7 @@ Run the synthetic lifecycle, visibility, transform, reset and concurrent-reader
 fixture, and cross-compile the library:
 
 ```sh
-python3 -B -m unittest t3render.tests.test_scene_live t3render.tests.test_scene_live_window
+python3 -B -m unittest t3render.tests.test_scene_live t3render.tests.test_scene_live_window t3render.tests.test_scene_live_binding
 cmake --build build/t3render-mingw --target t3render_scene_live
 ```
 

@@ -49,6 +49,9 @@ struct Camera {
 enum class BindingEvidence { Unknown, Candidate, Verified };
 struct MeshSelection {
     std::string instance_id, resource_id;
+    // Optional in-memory attestation from a matcher; never serialized.
+    std::shared_ptr<const Resource> matched_resource;
+    std::vector<std::optional<std::string>> matched_material_names;
     // Assigned by the producer, never a process address. Changes on identity reuse.
     std::uint64_t generation = 0;
     BindingEvidence binding = BindingEvidence::Unknown;
@@ -59,6 +62,8 @@ struct MeshSelection {
 };
 struct BspSelection {
     std::string resource_id;
+    std::shared_ptr<const Resource> matched_resource; // in-memory only
+    std::vector<std::optional<std::string>> matched_material_names;
     BindingEvidence binding = BindingEvidence::Unknown;
     std::vector<std::uint32_t> sections;
 };
@@ -141,6 +146,8 @@ public:
     // Epoch and frame arguments prevent a late event from erasing a newer frame.
     bool DiscardFrame(std::uint64_t map_epoch, std::uint64_t device_epoch, std::uint64_t through_frame_id);
     Epochs epochs() const;
+    // Returns the immutable resident object only for the requested map epoch.
+    std::shared_ptr<const Resource> FindResource(std::uint64_t map_epoch, const std::string& id) const;
     std::shared_ptr<const Snapshot> current() const;
 
 private:

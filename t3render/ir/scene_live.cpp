@@ -184,9 +184,17 @@ bool SceneResidency::Publish(const FrameInput& frame) {
         if (!Id(mesh.instance_id) || !mesh.generation || !ValidEvidence(mesh.binding) || !Finite(mesh.transform) ||
             !mesh_ids.insert(mesh.instance_id).second || resource == resources_.end() ||
             resource->second->kind != ResourceKind::StaticMesh ||
+            (mesh.matched_resource && mesh.matched_resource != resource->second) ||
+            (!mesh.matched_material_names.empty() && mesh.matched_material_names.size() != resource->second->geometry.sections.size()) ||
             !ValidSections(mesh.sections, resource->second->geometry.sections.size()) ||
             (!mesh.material_ids.empty() && mesh.material_ids.size() != resource->second->geometry.sections.size())) return false;
         for (const auto& id : mesh.material_ids) if (id && materials_.find(*id) == materials_.end()) return false;
+        for (std::size_t i=0;i<mesh.matched_material_names.size();++i) if (mesh.matched_material_names[i]) {
+            const auto& id=mesh.material_ids.empty() ? resource->second->geometry.sections[i].material_id : mesh.material_ids[i];
+            if (!id) return false;
+            const auto found=materials_.find(*id);
+            if (found==materials_.end() || found->second.name!=*mesh.matched_material_names[i]) return false;
+        }
         const auto identity = identities.find(mesh.instance_id);
         if (identity != identities.end()) {
             if (mesh.generation < identity->second.generation ||
@@ -202,7 +210,15 @@ bool SceneResidency::Publish(const FrameInput& frame) {
         const auto resource = resources_.find(block.resource_id);
         if (!ValidEvidence(block.binding) || !bsp_ids.insert(block.resource_id).second || resource == resources_.end() ||
             resource->second->kind != ResourceKind::BspBlock ||
+            (block.matched_resource && block.matched_resource != resource->second) ||
+            (!block.matched_material_names.empty() && block.matched_material_names.size() != resource->second->geometry.sections.size()) ||
             !ValidSections(block.sections, resource->second->geometry.sections.size())) return false;
+        for (std::size_t i=0;i<block.matched_material_names.size();++i) if (block.matched_material_names[i]) {
+            const auto& id=resource->second->geometry.sections[i].material_id;
+            if (!id) return false;
+            const auto found=materials_.find(*id);
+            if (found==materials_.end() || found->second.name!=*block.matched_material_names[i]) return false;
+        }
         next->bsp.push_back({block, resource->second});
     }
     // All allocations are completed before mutating the published state.
@@ -223,6 +239,12 @@ bool SceneResidency::DiscardFrame(std::uint64_t map_epoch, std::uint64_t device_
 Epochs SceneResidency::epochs() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return {map_epoch_, device_epoch_, ready_ && !resetting_};
+}
+std::shared_ptr<const Resource> SceneResidency::FindResource(std::uint64_t map_epoch, const std::string& id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!map_epoch_ || map_epoch != map_epoch_) return {};
+    const auto found=resources_.find(id);
+    return found == resources_.end() ? nullptr : found->second;
 }
 std::shared_ptr<const Snapshot> SceneResidency::current() const {
     std::lock_guard<std::mutex> lock(mutex_);

@@ -46,11 +46,11 @@ bool probe(SceneWindow& window, ProbeCamera value=camera) {
 }
 bool submit_mesh(SceneWindow& window, MeshSelection value=mesh()) {
     auto s=window.BeginMesh(thread,0,1,value);CHECK(s);auto d=window.BeginDraw(thread);CHECK(d);
-    CHECK(window.EndDraw(d,thread,true,true,viewport));CHECK(window.EndScope(s,thread,true));return true;
+    CHECK(window.EndDraw(d,thread,true,true,true,true,true,viewport));CHECK(window.EndScope(s,thread,true));return true;
 }
 bool submit_bsp(SceneWindow& window, BspSelection value=bsp()) {
     auto s=window.BeginBsp(thread,0,1,value);CHECK(s);auto d=window.BeginDraw(thread);CHECK(d);
-    CHECK(window.EndDraw(d,thread,true,true,viewport));CHECK(window.EndScope(s,thread,true));return true;
+    CHECK(window.EndDraw(d,thread,true,true,true,true,true,viewport));CHECK(window.EndScope(s,thread,true));return true;
 }
 WindowResult end(SceneWindow& window, std::uint64_t frame_id, bool succeeded=true) {
     auto p=window.BeginPresent(thread,frame_id,true);
@@ -63,7 +63,7 @@ bool valid_sequence() {
     CHECK(!window.BeginProbe(thread)); // no prior Present boundary
     CHECK(prime(window,100));
     auto unscoped=window.BeginDraw(thread);CHECK(unscoped);
-    CHECK(window.EndDraw(unscoped,thread,true,false,Viewport{})); // tracked, but no viewport needed
+    CHECK(window.EndDraw(unscoped,thread,true,false,false,false,false,Viewport{})); // tracked, but no viewport needed
     CHECK(probe(window));
     CHECK(!window.BeginMesh(thread,0,2,mesh())); // another stage is not selected
     CHECK(submit_mesh(window,mesh(0)));CHECK(submit_mesh(window,mesh(1)));CHECK(submit_mesh(window,mesh(1)));
@@ -86,12 +86,12 @@ bool invalid_intervals_recover() {
     SceneResidency scene;CHECK(setup(scene));SceneWindow window(scene,scene.epochs(),provenance(),conventions(),0,1);
     CHECK(prime(window,0));CHECK(probe(window));CHECK(submit_mesh(window));CHECK(end(window,1)==WindowResult::Published);
     CHECK(probe(window));auto s=window.BeginMesh(thread,0,1,mesh());CHECK(s);auto d=window.BeginDraw(thread);CHECK(d);
-    CHECK(!window.EndDraw(d,thread,false,true,viewport));CHECK(window.EndScope(s,thread,true));
+    CHECK(!window.EndDraw(d,thread,false,true,true,true,true,viewport));CHECK(window.EndScope(s,thread,true));
     CHECK(end(window,2)==WindowResult::Rejected);CHECK(!scene.current());
     // The clean ending Present still primes a new interval.
     CHECK(probe(window));CHECK(submit_mesh(window));CHECK(end(window,3)==WindowResult::Published);
     CHECK(probe(window));s=window.BeginMesh(thread,0,1,mesh());CHECK(s);d=window.BeginDraw(thread);CHECK(d);
-    CHECK(!window.EndDraw(d,thread,true,false,viewport));CHECK(window.EndScope(s,thread,true));
+    CHECK(!window.EndDraw(d,thread,true,true,true,true,false,viewport));CHECK(window.EndScope(s,thread,true));
     CHECK(end(window,4)==WindowResult::Rejected);CHECK(!scene.current());
     CHECK(probe(window));CHECK(submit_mesh(window));CHECK(end(window,5)==WindowResult::Published);
     CHECK(probe(window));auto changed=camera;changed.view[12]=1;
@@ -111,15 +111,24 @@ bool invalid_intervals_recover() {
     CHECK(probe(window));CHECK(submit_mesh(window));
     auto scope=window.BeginBsp(thread,0,1,bsp());CHECK(scope);auto draw=window.BeginDraw(thread);CHECK(draw);
     auto different=viewport;different.max_depth=1;
-    CHECK(!window.EndDraw(draw,thread,true,true,different));CHECK(window.EndScope(scope,thread,true));
+    CHECK(!window.EndDraw(draw,thread,true,true,true,true,true,different));CHECK(window.EndScope(scope,thread,true));
     CHECK(end(window,14)==WindowResult::Rejected);CHECK(!scene.current());
     CHECK(probe(window));CHECK(submit_mesh(window));auto conflicting=mesh(1);conflicting.transform[12]=5;
     scope=window.BeginMesh(thread,0,1,conflicting);CHECK(scope);draw=window.BeginDraw(thread);CHECK(draw);
-    CHECK(window.EndDraw(draw,thread,true,true,viewport));CHECK(!window.EndScope(scope,thread,true));
+    CHECK(window.EndDraw(draw,thread,true,true,true,true,true,viewport));CHECK(!window.EndScope(scope,thread,true));
     CHECK(end(window,15)==WindowResult::Rejected);CHECK(!scene.current());
+    CHECK(probe(window));scope=window.BeginMesh(thread,0,1,mesh());CHECK(scope);draw=window.BeginDraw(thread);CHECK(draw);
+    CHECK(!window.EndDraw(draw,thread,true,false,true,true,true,viewport));CHECK(window.EndScope(scope,thread,true));
+    CHECK(end(window,16)==WindowResult::Rejected);CHECK(!scene.current());
+    CHECK(probe(window));scope=window.BeginMesh(thread,0,1,mesh());CHECK(scope);draw=window.BeginDraw(thread);CHECK(draw);
+    CHECK(!window.EndDraw(draw,thread,true,true,false,true,true,viewport));CHECK(window.EndScope(scope,thread,true));
+    CHECK(end(window,17)==WindowResult::Rejected);CHECK(!scene.current());
+    CHECK(probe(window));scope=window.BeginMesh(thread,0,1,mesh());CHECK(scope);draw=window.BeginDraw(thread);CHECK(draw);
+    CHECK(!window.EndDraw(draw,thread,true,true,true,false,true,viewport));CHECK(window.EndScope(scope,thread,true));
+    CHECK(end(window,18)==WindowResult::Rejected);CHECK(!scene.current());
     CHECK(probe(window));scope=window.BeginMesh(thread,0,1,mesh());CHECK(scope);
     CHECK(window.EndScope(scope,thread,true)); // a scope with no draw does not establish visibility
-    CHECK(end(window,16)==WindowResult::Rejected);CHECK(!scene.current());
+    CHECK(end(window,19)==WindowResult::Rejected);CHECK(!scene.current());
     return true;
 }
 
@@ -151,7 +160,7 @@ bool overlaps_and_invalidations() {
     auto unscoped_draw=fresh.BeginDraw(thread);CHECK(unscoped_draw);
     present=fresh.BeginPresent(thread,31,true);CHECK(present);
     CHECK(fresh.EndPresent(present,thread,true)==WindowResult::Rejected);CHECK(!scene.current() && fresh.needs_rebind());
-    CHECK(!fresh.EndDraw(unscoped_draw,thread,true,true,viewport));
+    CHECK(!fresh.EndDraw(unscoped_draw,thread,true,false,false,false,true,viewport));
     SceneWindow concurrent(scene,scene.epochs(),provenance(),conventions(),0,1);
     CHECK(prime(concurrent,32));present=concurrent.BeginPresent(thread,33,true);CHECK(present);
     CHECK(!concurrent.BeginPresent(thread,33,true));

@@ -141,6 +141,7 @@ std::uint64_t SceneWindow::BeginMesh(ThreadToken thread, std::uint32_t pass, std
     if (probe_ticket_ || scope_ticket_ || draw_ticket_) { RequireRebind(); return 0; }
     if (pass != pass_ || stage != stage_) return 0;
     if (!active_probe_matches_ || section.sections.size() != 1 || section.material_ids.size() > 1024 ||
+        section.matched_material_names.size() > 1024 ||
         section.instance_id.empty() || section.instance_id.size() > 512 ||
         section.resource_id.empty() || section.resource_id.size() > 512 || !section.generation) {
         tainted_ = true; return 0;
@@ -156,7 +157,8 @@ std::uint64_t SceneWindow::BeginBsp(ThreadToken thread, std::uint32_t pass, std:
     if (!Eligible(thread)) return 0;
     if (probe_ticket_ || scope_ticket_ || draw_ticket_) { RequireRebind(); return 0; }
     if (pass != pass_ || stage != stage_) return 0;
-    if (!active_probe_matches_ || section.sections.size() != 1 || section.resource_id.empty() ||
+    if (!active_probe_matches_ || section.sections.size() != 1 || section.matched_material_names.size() > 1024 ||
+        section.resource_id.empty() ||
         section.resource_id.size() > 512) { tainted_ = true; return 0; }
     auto copy = section;
     const auto ticket = NextTicket(); if (!ticket) return 0;
@@ -175,6 +177,7 @@ std::uint64_t SceneWindow::BeginDraw(ThreadToken thread) {
     return ticket;
 }
 bool SceneWindow::EndDraw(std::uint64_t ticket, ThreadToken thread, bool succeeded,
+                          bool scoped_geometry_matches, bool scoped_camera_matches, bool scoped_transform_matches,
                           bool viewport_stable, const Viewport& viewport) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!ticket || ticket != draw_ticket_ || !SameThread(thread, draw_thread_) || present_ticket_ ||
@@ -185,7 +188,7 @@ bool SceneWindow::EndDraw(std::uint64_t ticket, ThreadToken thread, bool succeed
     draw_ticket_ = 0; draw_thread_ = {}; draw_scoped_ = false; draw_scope_ticket_ = 0;
     if (!succeeded) { tainted_ = true; return false; }
     if (!scoped) return true;
-    if (!viewport_stable || !ValidViewport(viewport) ||
+    if (!scoped_geometry_matches || !scoped_camera_matches || !scoped_transform_matches || !viewport_stable || !ValidViewport(viewport) ||
         (viewport_ && !SameViewport(*viewport_, viewport)) || scope_draws_ == UINT32_MAX) {
         tainted_ = true; return false;
     }
@@ -205,7 +208,8 @@ bool SceneWindow::MergeScope() {
             return true;
         }
         auto& item = meshes_[found->second];
-        if (item.resource_id != mesh_->resource_id || item.generation != mesh_->generation ||
+        if (item.resource_id != mesh_->resource_id || item.matched_resource != mesh_->matched_resource ||
+            item.matched_material_names != mesh_->matched_material_names || item.generation != mesh_->generation ||
             item.binding != mesh_->binding ||
             std::memcmp(item.transform.data(), mesh_->transform.data(), sizeof(float)*item.transform.size()) != 0 ||
             item.material_ids != mesh_->material_ids) return false;
@@ -227,7 +231,8 @@ bool SceneWindow::MergeScope() {
         return true;
     }
     auto& item = blocks_[found->second];
-    if (item.binding != bsp_->binding) return false;
+    if (item.binding != bsp_->binding || item.matched_resource != bsp_->matched_resource ||
+        item.matched_material_names != bsp_->matched_material_names) return false;
     const auto section = bsp_->sections[0];
     if (std::find(item.sections.begin(), item.sections.end(), section) == item.sections.end()) {
         if (item.sections.size() >= 1024) return false;

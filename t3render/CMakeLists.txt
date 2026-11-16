@@ -3,7 +3,7 @@ project(T3Render LANGUAGES C CXX)
 
 # API-neutral in-process scene state and flat diagnostic adapter. The existing
 # capture and renderer do not yet feed/consume this library automatically.
-add_library(t3render_scene_live STATIC ir/scene_live.cpp ir/scene_live_window.cpp src/scene_live_flat.cpp)
+add_library(t3render_scene_live STATIC ir/scene_live.cpp ir/scene_live_window.cpp src/scene_live_flat.cpp src/scene_live_binding.cpp)
 target_compile_features(t3render_scene_live PUBLIC cxx_std_17)
 if(MSVC)
   target_compile_options(t3render_scene_live PRIVATE /W4 /utf-8)

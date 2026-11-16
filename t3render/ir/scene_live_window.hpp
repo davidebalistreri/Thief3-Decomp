@@ -47,7 +47,10 @@ public:
     std::uint64_t BeginBsp(ThreadToken thread, std::uint32_t render_pass, std::uint32_t stage,
                            const BspSelection& section);
     std::uint64_t BeginDraw(ThreadToken thread);
+    // For a selected scope, geometry and camera must match the independent
+    // draw-state checks; outside a scope those checks are ignored.
     bool EndDraw(std::uint64_t ticket, ThreadToken thread, bool succeeded,
+                 bool scoped_geometry_matches, bool scoped_camera_matches, bool scoped_transform_matches,
                  bool viewport_stable, const Viewport& viewport);
     bool EndScope(std::uint64_t ticket, ThreadToken thread, bool stable);
 

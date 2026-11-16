@@ -21,7 +21,10 @@ The GPU pass and the separate **offline CPU reference**
 through the previous camera, compute a current-to-previous pixel vector,
 reject out-of-frame or position-mismatched history, clamp accepted HDR history
 to the current 3x3 color neighborhood, and blend before the existing display
-conversion. This is a standalone frame consumer, not yet an integrated
+conversion. Sampling stays nearest except for a 1/32-pixel transition before
+texel boundaries; each contributing history sample must pass the position
+check independently. This limits precision-dependent discontinuities without
+the full bilinear blur that degrades the subpixel fixture. This is a standalone frame consumer, not yet an integrated
 real-time game loop. The CPU reference accepts `--weight` from 0 to 0.95.
 When the exported renderer uses `--filmic`, the resolve applies the same
 filmic curve; frames with different effect or curve flags cannot be combined.
@@ -58,8 +61,8 @@ the GPU history parser checks the set of texture, emission and metallic
 bindings for version-5 packets. These checks do not prove that actor transforms or
 lighting were unchanged between captures. History is rejected per pixel when
 world positions differ by more than 0.05 m. Object motion vectors, animated
-geometry, transparency and temporal denoising are absent;
-nearest history sampling and a fixed rejection threshold can ghost or flicker.
+geometry, transparency and temporal denoising are absent; the narrow transition
+and fixed rejection threshold can still ghost or flicker.
 This is a static-scene camera-motion prototype, not a production TAA claim.
 
 The GPU packet does not contain SceneIR frame IDs. Before a runtime GPU
@@ -103,9 +106,19 @@ differ slightly. Textures, lights, other objects and HUD are absent, and pixel
 parity is not claimed. The raw trace, snapshots and images remain under `build/`.
 
 The same capture could not produce the existing light candidates: the direct
-candidate path requires unavailable pre-Reset shader evidence. Therefore the
-runtime PBR and temporal resolves have not been validated on these frames. This
-does not turn the flat sequence into a live game loop.
+candidate path requires unavailable pre-Reset shader evidence. The separate
+`--offline-lights` PBR option uses a fingerprinted offline fixture and artistic
+calibration, with no claim that those lights are active in TDS. Using that
+option, frames 2864 and 2865 produced PBR/HDR renders with shadows, indirect
+light, GTAO and filmic conversion. Both CPU and GPU resolved their temporal
+history after checking the finalized trace. The CPU reprojected 783,848 pixels,
+rejected 2,505 for position and 79 outside the frame; the maximum reprojection,
+including jitter, was 1.009 pixels. CPU and GPU images differed on 12,321 pixels,
+with mean absolute RGB-channel difference 0.0054 and maximum 5 on a 0–255 scale.
+The older nearest-only path on the same inputs had maximum 45; the synthetic
+subpixel fixture still improved mean error from 6 to 0 on both CPU and GPU.
+This remains a two-frame static-scene experiment, not a live game loop or proof
+of runtime light state.
 
 Synthetic examples must use `--synthetic`; their manifest records
 `source = synthetic` and has no frame IDs. In particular, rerendering frame
@@ -140,8 +153,9 @@ camera translation produced one-pixel vectors, while a 0.2 m depth change
 rejected all 4,096 fixture pixels; the GPU matched both controls. On the
 synthetic frame-1001 pair, CPU and GPU differed in 9,886 pixels with mean
 absolute RGB difference 0.00424 and maximum channel difference 8 on a 0–255
-scale. These are synthetic checks; no two-frame runtime temporal resolve has
-been claimed. `test_scene_trace_session.py` exercises synthetic multi-frame
+scale. Those earlier measurements are synthetic checks. The separate real
+two-frame experiment and its offline lighting limitations are described above.
+`test_scene_trace_session.py` exercises synthetic multi-frame
 continuity and the CLI; `test_scene_temporal_resolve.py` covers history
 rejection, clamping and runtime provenance; `test_scene_temporal_history.py`
 tests the GPU input parser.

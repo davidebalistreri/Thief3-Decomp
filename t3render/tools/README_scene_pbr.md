@@ -3,9 +3,10 @@
 `t3render_scene_pbr_d3d12` is a separate, standalone SceneIR consumer. It uses
 the synchronized camera and one scoped set of asset-backed geometry, not the
 legacy draw states, shaders or multipass replay. `scene_pbr_packet.py`
-revalidates both the geometry snapshot and a same-frame candidate-light
-snapshot against the trace and fingerprinted offline assets. The snapshots'
-existing provenance limitations remain in the packet manifest.
+revalidates the geometry snapshot against the trace and fingerprinted offline
+assets. Lighting may use either a revalidated same-frame candidate-light
+snapshot or the explicitly selected offline fixture described below. Existing
+provenance limitations remain in the packet manifest.
 
 The exporter selects the same bed-relative BSP wall and floor replacements as
 the Godot prototype. Their locally generated albedo, OpenGL normal, roughness
@@ -19,6 +20,18 @@ light positions are scoped **candidates**. The calibration file selects
 omni/point lights and supplies artistic linear colors, intensities, source
 radii, ambient and exposure. These choices are not measured runtime values.
 Spotlights are rejected rather than approximated as point lights.
+
+`--offline-lights` selects lights directly from `--offline-scene` instead of
+`--light-scene`. The fixture must have `source=offline`, match the runtime
+geometry snapshot's map, conventions and asset fingerprints, and have the exact
+SHA-256 recorded as `offline_scene` in that snapshot. The calibration refers
+to its `light:...` IDs rather than `candidate:light:...`. Positions and light
+identities remain offline data; color, strength, radius and exposure remain
+artistic values. The geometry snapshot and its trace are still revalidated,
+and the manifest records `light_source.kind=offline_fixture` and the fixture
+hash. No offline light is inserted into the runtime SceneIR or claimed to be
+active in TDS. The temporal resolver rejects history from a different lighting
+source or fixture. Existing scoped candidates remain the default alternative.
 
 The albedo texture uses an sRGB view, so hardware decodes before filtering;
 normal, roughness and AO use linear views. The original assets' precomputed

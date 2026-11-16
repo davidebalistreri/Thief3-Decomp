@@ -44,12 +44,33 @@
       "4573e60eb1586da5d7c7e3d21e3be354f5b4d1a8bc1da4b8370c8ab86d9c2d99"
     ]
   },
+  "pbr_temporal": {
+    "frames": [2864, 2865],
+    "light_source": "fingerprinted_offline_fixture_not_runtime_observation",
+    "offline_fixture_sha256": "00fc4bd8b7418fa5560485542010bb65cd4f595143d5d7ec80c42693123ddd1c",
+    "artistic_calibration_sha256": "3ee566b0899354bdfb9427f09206e63e959f616c43c43e5b4b8fc6c4692365ec",
+    "packet_sha256": [
+      "82a7275bfbd79c822e9c65f15a7cd0ddaa611157459a2008ba80be7de47ff4f5",
+      "6f3bc2fc84540515e43941b25e186842833a756231919829ff5cec36d920df01"
+    ],
+    "triangles_per_frame": 3629,
+    "lights": 5,
+    "effects": ["shadow_maps", "ambient_indirect", "gtao", "filmic"],
+    "jitter_pixels": [-0.25, 0.25],
+    "history_weight": 0.8,
+    "cpu_counts": {"reprojected": 783848, "disoccluded": 2505, "outside": 79},
+    "max_reprojection_pixels": 1.008663874,
+    "cpu_gpu_rgb_difference": {"changed_pixels": 12321, "mean_channel_absolute": 0.005391015, "max_channel_absolute": 5},
+    "cpu_image_sha256": "5b376cd283c79c8ba43fa8f0510079c45d9703b36d544ca91a3ff32037ee53ee",
+    "gpu_image_sha256": "384a01ad857e2e1a892cd6351f96ab48aad9a3f7d6641ade847c21217d968f8b",
+    "synthetic_subpixel_mean_error": {"jittered": 6, "resolved_cpu": 0, "resolved_gpu": 0}
+  },
   "limitations": [
     "The scene is partial; geometry and resource fingerprints come from offline assets after runtime metadata matching.",
     "The 31 additional mesh bindings are offline candidates, not observed runtime mesh bindings.",
     "The flat DX12 images contain only the bed and selected BSP, without lights, textures, other objects or HUD.",
     "No pixel parity or GPU payload identity is claimed.",
     "The direct light candidate producer required unavailable pre-Reset shader evidence; runtime light properties remain unknown.",
-    "No runtime temporal accumulation was tested; this is not an integrated live game loop."
+    "The temporal experiment uses runtime geometry and camera with offline lights; it is not an integrated live game loop."
   ]
 }

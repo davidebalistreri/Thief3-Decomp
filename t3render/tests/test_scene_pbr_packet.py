@@ -1,4 +1,6 @@
 from dataclasses import replace
+import copy
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -84,6 +86,51 @@ class PbrPacketTests(unittest.TestCase):
 
     def parse(self, raw):
         return subprocess.run([str(self.binary)], input=raw, capture_output=True, timeout=10)
+
+    def test_offline_light_fixture_is_explicit_and_fingerprinted(self):
+        scene, _, config = inputs()
+        data = scene.to_dict()
+        data["source"].update(kind="offline", frame_id=None, camera_synchronized=None,
+                              fingerprints={key: value for key, value in scene.source.fingerprints.items()
+                                            if key not in ("trace", "offline_scene")})
+        data["camera"] = None
+        data["submissions"] = []
+        light_id = f"light:{scene.source.map}:{scene.source.fingerprints['map']}:lamp"
+        data["lights"] = [{"id": light_id, "kind": "omni", "position": [1, 2, 3], "color": None,
+                           "radius": None, "intensity": None, "enabled": None}]
+        offline = pbr.SceneSnapshot.from_dict(data)
+        raw = offline.to_json().encode()
+        source = replace(scene.source, fingerprints=dict(scene.source.fingerprints, offline_scene=hashlib.sha256(raw).hexdigest()))
+        scene = replace(scene, source=source)
+        config["lights"][0]["id"] = light_id
+        calibration = json.dumps(config)
+        packet, info = pbr.create_packet(scene, offline, calibration, Resolver(), None, offline_light_bytes=raw)
+        self.assertEqual(self.parse(packet).returncode, 0)
+        self.assertEqual(info["lights"][0]["id"], light_id)
+        self.assertEqual(pbr.lighting_source(scene, offline, raw),
+                         {"kind": "offline_fixture", "sha256": hashlib.sha256(raw).hexdigest()})
+        self.assertEqual(scene.lights, ())
+        actors = {"lamp": {"attached_to": None}, "StaticMeshActor__1520": {"mesh": "INNbed1A1", "casts_shadows": True}}
+        shadow = {"size": 128, "near_m": .05, "far_m": 15, "bias_m": .015, "softness": .5}
+        pbr.create_packet(scene, offline, calibration, Resolver(), None, shadows=shadow, actors=actors,
+                          offline_light_bytes=raw)
+        altered = copy.deepcopy(data)
+        altered["lights"][0]["position"][0] += 1
+        bad = pbr.SceneSnapshot.from_dict(altered)
+        for fixture, content in ((bad, raw), (offline, raw+b" "), (offline, None)):
+            with self.subTest(fixture=fixture == offline, raw=content is not None), self.assertRaises(ValueError):
+                pbr.create_packet(scene, fixture, calibration, Resolver(), None, offline_light_bytes=content)
+        for change in ("map", "fingerprint"):
+            altered = copy.deepcopy(data)
+            if change == "map": altered["source"]["map"] = "OtherMap"
+            else: altered["source"]["fingerprints"]["map"] = "0"*64
+            other = pbr.SceneSnapshot.from_dict(altered)
+            other_raw = other.to_json().encode()
+            other_source = replace(scene.source, fingerprints=dict(scene.source.fingerprints,
+                                                                     offline_scene=hashlib.sha256(other_raw).hexdigest()))
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "offline light fixture"):
+                pbr.create_packet(replace(scene, source=other_source), other, calibration, Resolver(), None,
+                                  offline_light_bytes=other_raw)
 
     def test_semantic_materials_lights_and_geometry_reach_independent_parser(self):
         scene, lights, calibration = inputs()

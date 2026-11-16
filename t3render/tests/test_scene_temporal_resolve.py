@@ -68,6 +68,27 @@ class TemporalResolveTests(unittest.TestCase):
         self.assertEqual(stats["counts"].get("disoccluded"), 1)
         self.assertEqual(struct.unpack_from("<ffI", motion, temporal.MOTION_HEADER.size+(32*64+32)*12)[2], 2)
 
+    def test_history_sampling_is_stable_around_texel_boundaries(self):
+        current = bytearray(raw_history(self.packet, color=(.2, .2, .2)))
+        previous = bytearray(raw_history(self.packet, color=(.2, .2, .2), jitter=(-.5, 0)))
+        pixel, right = 32*64+32, 32*64+33
+        struct.pack_into("<4e", current, temporal.HEADER.size+pixel*8, .5, .5, .5, 1)
+        struct.pack_into("<4e", current, temporal.HEADER.size+right*8, .8, .8, .8, 1)
+        struct.pack_into("<4e", previous, temporal.HEADER.size+pixel*8, .8, .8, .8, 1)
+        def value(offset):
+            altered = bytearray(current)
+            position = temporal.HEADER.size+64*64*8+pixel*8
+            struct.pack_into("<4e", altered, position, offset, 0, -1.5, 1)
+            resolved, _, _ = temporal.resolve(temporal.parse(bytes(previous), self.packet),
+                                               temporal.parse(bytes(altered), self.packet))
+            return struct.unpack_from("<4e", resolved, temporal.HEADER.size+pixel*8)[0]
+        self.assertAlmostEqual(value(-.000001), .74, delta=.002)
+        self.assertAlmostEqual(value(.000001), .74, delta=.002)
+        self.assertAlmostEqual(value(-.046875/32), .5, delta=.002)
+        previous_position = temporal.HEADER.size+64*64*8+pixel*8
+        struct.pack_into("<4e", previous, previous_position, 10, 10, 10, 1)
+        self.assertAlmostEqual(value(-.046875/32), .26, delta=.002)
+
     def test_camera_translation_reprojects_one_pixel(self):
         shifted = bytearray(self.packet)
         struct.pack_into("<f", shifted, 24+12*4, -1/32)
@@ -170,6 +191,17 @@ class TemporalResolveTests(unittest.TestCase):
         newer_lights = replace(lights, source=changed.source, camera=camera)
         new, new_runtime, _, _ = capture(changed, newer_lights)
         temporal.compatible(old, new, old_runtime, new_runtime)
+        offline_hash = scene.source.fingerprints["offline_scene"]
+        offline_source = {"kind": "offline_fixture", "sha256": offline_hash}
+        offline_old = dict(old_runtime[1], light_source=offline_source, light_scene_sha256=offline_hash)
+        offline_new = dict(new_runtime[1], light_source=offline_source, light_scene_sha256=offline_hash)
+        temporal.validate_runtime(old, source, json.dumps(offline_old).encode())
+        temporal.compatible(old, new, (old_runtime[0], offline_old), (new_runtime[0], offline_new))
+        with self.assertRaisesRegex(ValueError, "capture"):
+            temporal.compatible(old, new, (old_runtime[0], offline_old), new_runtime)
+        altered_lighting = dict(offline_old, light_scene_sha256="0"*64)
+        with self.assertRaisesRegex(ValueError, "light source"):
+            temporal.validate_runtime(old, source, json.dumps(altered_lighting).encode())
         fingerprints = dict(changed.source.fingerprints, trace="c"*64)
         other_source = replace(changed.source, fingerprints=fingerprints)
         other_camera = replace(camera, source=replace(camera.source, fingerprint=fingerprints["trace"]))

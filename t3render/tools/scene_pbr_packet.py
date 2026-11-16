@@ -112,16 +112,19 @@ def shadow_parameters(value):
     return result
 
 
-def shadow_owners(scene, lights, actors):
+def shadow_owners(scene, lights, actors, light_source="runtime_candidates"):
     """Validate semantic light ownership using the fingerprinted actor export."""
     if not isinstance(actors, dict):
         raise ValueError("shadow maps require the fingerprinted offline actors")
-    prefix = f"candidate:light:{scene.source.map}:{scene.source.fingerprints.get('map')}:"
+    if light_source not in ("runtime_candidates", "offline_fixture"):
+        raise ValueError("unsupported shadow light source")
+    prefix = ("candidate:" if light_source == "runtime_candidates" else "") + \
+        f"light:{scene.source.map}:{scene.source.fingerprints.get('map')}:"
     owners = []
     for light in lights:
         identity = light["id"]
         if not identity.startswith(prefix) or ":" in identity[len(prefix):]:
-            raise ValueError("shadow light requires a qualified candidate identity")
+            raise ValueError("shadow light requires a qualified light identity")
         name = identity[len(prefix):]
         actor = actors.get(name)
         if not isinstance(actor, dict):
@@ -133,16 +136,30 @@ def shadow_owners(scene, lights, actors):
     return owners
 
 
+def lighting_source(scene, light_scene, offline_light_bytes=None):
+    """Keep offline fixture lights separate from observed runtime candidates."""
+    if offline_light_bytes is None:
+        legacy.select_scope(light_scene)
+        if (light_scene.source.kind != "runtime" or scene.source.frame_id != light_scene.source.frame_id or
+                scene.source.map != light_scene.source.map or scene.source.fingerprints != light_scene.source.fingerprints or
+                scene.camera != light_scene.camera or scene.conventions != light_scene.conventions):
+            raise ValueError("PBR light candidates must share the synchronized scene frame")
+        return {"kind": "runtime_candidates"}
+    if (not isinstance(offline_light_bytes, bytes) or light_scene.source.kind != "offline" or
+            hashlib.sha256(offline_light_bytes).hexdigest() != scene.source.fingerprints.get("offline_scene") or
+            SceneSnapshot.from_json(offline_light_bytes).to_dict() != light_scene.to_dict() or
+            scene.source.map != light_scene.source.map or scene.conventions != light_scene.conventions or
+            any(scene.source.fingerprints.get(key) != value for key, value in light_scene.source.fingerprints.items())):
+        raise ValueError("offline light fixture does not match the runtime scene provenance")
+    return {"kind": "offline_fixture", "sha256": hashlib.sha256(offline_light_bytes).hexdigest()}
+
+
 def create_packet(scene, light_scene, calibration, resolver, remaster, render_pass=None, stage=None,
                   shadows=None, actors=None, offline=None, offline_raw=None, caster_resolve=None,
                   flame_glb=None, flame_radiance=8, bed_glb=None, candlestick_glb=None, arch_glb=None,
-                  details_glb=None, prop_materials=False, metallic=False):
+                  details_glb=None, prop_materials=False, metallic=False, offline_light_bytes=None):
     render_pass, stage = legacy.select_scope(scene, render_pass, stage)
-    legacy.select_scope(light_scene)
-    if (light_scene.source.kind != "runtime" or scene.source.frame_id != light_scene.source.frame_id or
-            scene.source.map != light_scene.source.map or scene.source.fingerprints != light_scene.source.fingerprints or
-            scene.camera != light_scene.camera or scene.conventions != light_scene.conventions):
-        raise ValueError("PBR light candidates must share the synchronized scene frame")
+    light_source = lighting_source(scene, light_scene, offline_light_bytes)
     if remaster is not None:
         remaster.validate_scene(scene)
     if bed_glb is not None and remaster is None:
@@ -173,7 +190,7 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
         raise ValueError("offline caster inputs require an offline scene")
     if flame_glb is not None and shadow is None:
         raise ValueError("candle flames require shadow maps and fingerprinted offline actors")
-    owners = shadow_owners(scene, lights, actors) if shadow is not None else None
+    owners = shadow_owners(scene, lights, actors, light_source["kind"]) if shadow is not None else None
     resources = {m.id: m for m in scene.static_mesh_resources}
     instances = {m.id: m for m in scene.mesh_instances}
     blocks = {b.id: b for b in scene.bsp_blocks}
@@ -553,7 +570,10 @@ def create_packet(scene, light_scene, calibration, resolver, remaster, render_pa
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("scene", type=Path, help="synchronized scoped geometry snapshot")
-    parser.add_argument("--light-scene", type=Path, required=True, help="same-frame candidate-light snapshot")
+    lighting = parser.add_mutually_exclusive_group(required=True)
+    lighting.add_argument("--light-scene", type=Path, help="same-frame candidate-light snapshot")
+    lighting.add_argument("--offline-lights", action="store_true",
+                          help="use calibrated fixture lights without claiming runtime observation")
     parser.add_argument("--calibration", type=Path, required=True, help="explicit artistic light and exposure values")
     parser.add_argument("--state-trace", type=Path, required=True)
     parser.add_argument("--offline-scene", type=Path, required=True)
@@ -600,13 +620,16 @@ def main(argv=None):
                 args.shadow_near_m, args.shadow_far_m, args.shadow_bias_m, args.shadow_softness))):
             raise ValueError("shadow parameters require --shadows")
         scene_raw = preview.read_limited(args.scene, preview.MAX_INPUT)
-        light_raw = preview.read_limited(args.light_scene, preview.MAX_INPUT)
         offline_raw = preview.read_limited(args.offline_scene, preview.MAX_INPUT)
+        light_raw = offline_raw if args.offline_lights else preview.read_limited(args.light_scene, preview.MAX_INPUT)
         calibration = preview.read_limited(args.calibration, 1024 * 1024)
         scene, light_scene, offline = (SceneSnapshot.from_json(raw) for raw in (scene_raw, light_raw, offline_raw))
         game = game_dir(args.game_dir)
-        for current, scope in ((scene, legacy.select_scope(scene, args.render_pass, args.stage)),
-                               (light_scene, legacy.select_scope(light_scene))):
+        source = lighting_source(scene, light_scene, offline_raw if args.offline_lights else None)
+        scenes = [(scene, legacy.select_scope(scene, args.render_pass, args.stage))]
+        if not args.offline_lights:
+            scenes.append((light_scene, legacy.select_scope(light_scene)))
+        for current, scope in scenes:
             states.from_trace(current, offline, offline_raw, args.state_trace, *scope,
                               self_attached_actors=args.offline_actors, self_attached_game=game,
                               light_actors=args.offline_actors, light_game=game)
@@ -648,7 +671,8 @@ def main(argv=None):
                        if args.arch_high is not None else None,
                        "details_glb": preview.read_limited(args.bedroom_details, flames.MAX_GLB_BYTES)
                        if args.bedroom_details is not None else None,
-                       "prop_materials": args.bedroom_prop_materials, "metallic": args.metallic}
+                       "prop_materials": args.bedroom_prop_materials, "metallic": args.metallic,
+                       "offline_light_bytes": offline_raw if args.offline_lights else None}
             body, stats = create_packet(scene, light_scene, calibration, resolver, remaster,
                                         args.render_pass, args.stage, **options)
             original_stats = variant_report = None
@@ -661,13 +685,16 @@ def main(argv=None):
                 bundle.close()
         manifest = {"schema": "t3.scene.pbr-packet", "version": int(chr(body[6])) if variant_report is None else 1,
                     "source_frame": scene.source.frame_id,
+                    "light_source": source,
                     "scene_sha256": hashlib.sha256(scene_raw).hexdigest(),
                     "light_scene_sha256": hashlib.sha256(light_raw).hexdigest(),
                     "calibration_sha256": hashlib.sha256(calibration).hexdigest(),
                     "packet_sha256": hashlib.sha256(body).hexdigest(), "source_fingerprints": scene.source.fingerprints,
                     "source_limitations": list(scene.source.limitations),
                     "light_source_limitations": list(light_scene.source.limitations),
-                    "limitations": ["PBR light positions are scoped candidates; colors, strengths and exposure are artistic preview values, not runtime measurements.",
+                    "limitations": [("PBR light positions come from the offline fixture; their runtime presence and state are unknown. Colors, strengths and exposure are artistic preview values."
+                                     if args.offline_lights else
+                                     "PBR light positions are scoped candidates; colors, strengths and exposure are artistic preview values, not runtime measurements."),
                                     "Legacy geometry/material bindings are asset-backed candidates; the selected frame is incomplete.",
                                     "Sections with nonopaque offline diffuse alpha are omitted. Other unreplaced materials use vertex normals and roughness 0.8.",
                                     "Override AO, roughness and normals are generated offline; tangent space and the SDK unit scale are assumptions."],

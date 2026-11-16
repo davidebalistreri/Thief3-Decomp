@@ -606,18 +606,31 @@ Output main(float4 position:SV_Position) {
             float2 screen=float2((clip.x/clip.w*0.5+0.5)*size.x+0.5+previous_jitter_weight.x,
                                  (0.5-clip.y/clip.w*0.5)*size.y+0.5+previous_jitter_weight.y);
             if(all(screen>=0)&&all(screen<float2(size))) {
-                int2 q=int2(screen);
-                float4 old_position=history_position.Load(int3(q,0));
+                int2 base=int2(screen);
+                float2 fraction=screen-float2(base);
+                float2 blend=saturate((fraction-(1.0-2.0/32.0))*32.0);
                 float3 expected=p.xyz+(camera_exposure.xyz-previous_camera_scale.xyz)*size_scale_count.z;
-                float3 difference=old_position.xyz-expected;
-                if(old_position.w>0.5&&dot(difference,difference)<=0.0025) {
+                float3 history=0; float total=0;
+                [unroll] for(int y=0;y<2;++y) [unroll] for(int x=0;x<2;++x) {
+                    int2 q=min(base+int2(x,y),size-1);
+                    float w=(x?blend.x:1-blend.x)*(y?blend.y:1-blend.y);
+                    if(w>0) {
+                        float4 old_position=history_position.Load(int3(q,0));
+                        float3 difference=old_position.xyz-expected;
+                        if(old_position.w>0.5&&dot(difference,difference)<=0.0025) {
+                            history+=history_color.Load(int3(q,0)).rgb*w;
+                            total+=w;
+                        }
+                    }
+                }
+                if(total>0.000001) {
                     float3 low=color, high=color;
                     [unroll] for(int y=-1;y<=1;++y) [unroll] for(int x=-1;x<=1;++x) {
                         int2 nearby=clamp(pixel+int2(x,y),int2(0,0),size-1);
                         float3 sample=current_color.Load(int3(nearby,0)).rgb;
                         low=min(low,sample); high=max(high,sample);
                     }
-                    float3 old=clamp(history_color.Load(int3(q,0)).rgb,low,high);
+                    float3 old=clamp(history/total,low,high);
                     color=lerp(color,old,previous_jitter_weight.z);
                 }
             }

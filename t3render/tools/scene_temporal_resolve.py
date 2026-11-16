@@ -32,6 +32,19 @@ def _valid_metallic_mode(value):
                 for x in value.values()))
 
 
+def _light_source(scene, manifest):
+    source = manifest.get("light_source", {"kind": "runtime_candidates"})
+    if source == {"kind": "runtime_candidates"}:
+        return source
+    if (isinstance(source, dict) and set(source) == {"kind", "sha256"} and
+            source["kind"] == "offline_fixture" and isinstance(source["sha256"], str) and
+            re.fullmatch(r"[0-9a-f]{64}", source["sha256"]) and
+            source["sha256"] == scene.source.fingerprints.get("offline_scene") and
+            source["sha256"] == manifest.get("light_scene_sha256")):
+        return source
+    raise ValueError("temporal runtime light source provenance is invalid")
+
+
 def parse(raw, packet):
     if not isinstance(raw, bytes) or len(raw) < HEADER.size or len(raw) > MAX_BYTES:
         raise ValueError("invalid temporal buffer size")
@@ -94,6 +107,7 @@ def validate_runtime(temporal, scene_raw, manifest_raw):
     if (floats(scene.camera.view) != temporal["view"] or floats(scene.camera.projection) != temporal["projection"] or
             scene.conventions.meters_per_unit is None or floats((scene.conventions.meters_per_unit,))[0] != temporal["scale"]):
         raise ValueError("temporal camera or units differ from SceneIR")
+    _light_source(scene, manifest)
     return scene, manifest
 
 
@@ -108,6 +122,7 @@ def compatible(previous, current, previous_runtime=None, current_runtime=None):
         new, new_manifest = current_runtime
         if (old.source.map != new.source.map or old.source.frame_id + 1 != new.source.frame_id or
                 old.source.fingerprints != new.source.fingerprints or
+                _light_source(old, old_manifest) != _light_source(new, new_manifest) or
                 old_manifest.get("calibration_sha256") != new_manifest.get("calibration_sha256") or
                 (old_manifest["render_pass"], old_manifest["stage"]) != (new_manifest["render_pass"], new_manifest["stage"])):
             raise ValueError("runtime temporal frames have incompatible capture, assets, map, order or light calibration")
@@ -150,6 +165,14 @@ def _view_projection(view, projection):
     return tuple(sum(view[i*4+k]*projection[k*4+j] for k in range(4)) for i in range(4) for j in range(4))
 
 
+def _history_neighbours(coordinate, extent):
+    # Smooth only a 1/32-pixel interval before each texel boundary. A wider
+    # filter destroys the subpixel detail reconstructed by jittered frames.
+    base = int(coordinate)
+    blend = min(1, max(0, (coordinate-base-(1-2/32))*32))
+    return ((base, 1-blend), (min(base+1, extent-1), blend))
+
+
 def resolve(previous, current, weight=.8):
     compatible(previous, current)
     if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not math.isfinite(weight) or not 0 <= weight <= .95:
@@ -189,10 +212,18 @@ def resolve(previous, current, weight=.8):
             continue
         x, y = index % width, index // width
         motion_x, motion_y = sx-(x+.5), sy-(y+.5)
-        qx, qy = int(sx), int(sy)
-        old_at = (qy*width+qx)*4
-        dx, dy, dz = (old_position[old_at+k] - (position[at+k]+camera_delta[k]) for k in range(3))
-        if old_position[old_at+3] < .5 or dx*dx+dy*dy+dz*dz > .05**2:
+        samples = []
+        for qy, wy in _history_neighbours(sy, height):
+            for qx, wx in _history_neighbours(sx, width):
+                sample_weight = wx*wy
+                if sample_weight <= 0:
+                    continue
+                old_at = (qy*width+qx)*4
+                dx, dy, dz = (old_position[old_at+k] - (position[at+k]+camera_delta[k]) for k in range(3))
+                if old_position[old_at+3] >= .5 and dx*dx+dy*dy+dz*dz <= .05**2:
+                    samples.append((old_at, sample_weight))
+        total = sum(value for _, value in samples)
+        if total <= 1e-6:
             counts["disoccluded"] += 1
             struct.pack_into("<ffI", motion, MOTION_HEADER.size+index*12, motion_x, motion_y, 2)
             continue
@@ -202,7 +233,8 @@ def resolve(previous, current, weight=.8):
         for channel in range(3):
             values = [color[(ny*width+nx)*4+channel] for ny in range(max(0,y-1), min(height,y+2))
                       for nx in range(max(0,x-1), min(width,x+2))]
-            history = min(max(old_color[old_at+channel], min(values)), max(values))
+            history = sum(old_color[old_at+channel]*sample_weight for old_at, sample_weight in samples)/total
+            history = min(max(history, min(values)), max(values))
             rgb.append(color[at+channel]*(1-weight)+history*weight)
         struct.pack_into("<4e", out, HEADER.size+index*8, *rgb, color[at+3])
         counts["reprojected"] += 1
@@ -324,6 +356,7 @@ def main(argv=None):
                               "previous_frame": None if args.synthetic else old_runtime[0].source.frame_id,
                               "current_frame": None if args.synthetic else new_runtime[0].source.frame_id,
                               "previous_packet_sha256": previous["digest"], "current_packet_sha256": current["digest"],
+                              "light_source": None if args.synthetic else _light_source(*new_runtime),
                               "trace_session": trace_session}, indent=2))
             return 0
         result, motion, stats = resolve(previous, current, args.weight)
@@ -333,6 +366,7 @@ def main(argv=None):
                     "current_frame": None if args.synthetic else new_runtime[0].source.frame_id,
                     "source_map": None if args.synthetic else new_runtime[0].source.map,
                     "source_fingerprints": {} if args.synthetic else new_runtime[0].source.fingerprints,
+                    "light_source": None if args.synthetic else _light_source(*new_runtime),
                     "trace_session": trace_session,
                     "submission_scope": None if args.synthetic else {"render_pass": new_runtime[1]["render_pass"],
                                                                         "stage": new_runtime[1]["stage"]},
@@ -341,7 +375,7 @@ def main(argv=None):
                     "packet_sha256": current["digest"], "history_sha256": hashlib.sha256(result).hexdigest(),
                     "motion_sha256": hashlib.sha256(motion).hexdigest(),
                     "limitations": ["Reprojection uses static world positions and camera motion; object motion vectors are not available.",
-                                    "History is nearest sampled, position rejected and neighborhood clamped; temporal stability is not guaranteed.",
+                                    "History uses narrow boundary blending with per-sample position rejection and neighborhood clamping; temporal stability is not guaranteed.",
                                     "Upscaling is a depth-aware spatial preview; history and motion remain at native resolution."],
                     "upscale": args.upscale, "image_size": [current["width"]*args.upscale, current["height"]*args.upscale],
                     **stats}

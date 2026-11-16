@@ -117,6 +117,20 @@ bool matching() {
     CHECK(ResolveBsp(c,p,block,0,bsp));
     CHECK(bsp.resource_id==bsp_id && bsp.binding==BindingEvidence::Candidate);
     auto no_bed=without_bed();
+    CHECK(ClassifyMapWitness(c,p)==MapWitnessStatus::Matches &&
+          ClassifyMapWitness(c,no_bed)==MapWitnessStatus::Matches);
+    auto map_conflict=p;text(map_conflict.target.outer[0].name,"LOADGAME:another");
+    CHECK(ClassifyMapWitness(c,map_conflict)==MapWitnessStatus::Conflicts);
+    map_conflict=p;map_conflict.target.outer[0].stable=false;
+    CHECK(ClassifyMapWitness(c,map_conflict)==MapWitnessStatus::Unknown);
+    map_conflict=p;text(map_conflict.target.outer[0].name,"LOADGAME:");
+    CHECK(ClassifyMapWitness(c,map_conflict)==MapWitnessStatus::Unknown);
+    map_conflict=no_bed;text(map_conflict.map_witness.outer.name,"another");
+    CHECK(ClassifyMapWitness(c,map_conflict)==MapWitnessStatus::Conflicts);
+    map_conflict.map_witness.entry.owner_stable=false;
+    CHECK(ClassifyMapWitness(c,map_conflict)==MapWitnessStatus::Unknown);
+    map_conflict=no_bed;text(map_conflict.map_witness.outer.name,"another");map_conflict.target=p.target;
+    CHECK(ClassifyMapWitness(c,map_conflict)==MapWitnessStatus::Conflicts);
     CHECK(ResolveBsp(c,no_bed,block,0,bsp) && bsp.identity_scope==IdentityScope::VisibleList);
     CHECK(!ResolveBed(c,no_bed,bed,0,1,mesh));
     auto no_witness=no_bed;no_witness.map_witness={};CHECK(!ResolveBsp(c,no_witness,block,0,bsp));
@@ -386,6 +400,36 @@ bool driver_delivery() {
     reset=driver->BeginReset(thread);CHECK(reset && !driver->current());driver->EndReset(reset,thread,true);
     CHECK(!driver->EndLightSample(light_ticket,thread,true,LightCoverage::Partial,{light}));
     CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bsp,state));CHECK(present()==WindowResult::Published);
+    // A second selected probe in one Present interval can contradict the
+    // catalog after an earlier matched scope. The old snapshot must become
+    // unusable immediately and the partial interval must never be published.
+    auto previous=driver->current();CHECK(previous && sample());CHECK(submit(bsp,state));
+    auto conflicting=probe();text(conflicting.target.outer[0].name,"LOADGAME:another");
+    conflicting.current_camera.derived_matrix_bits[12]=bits(0.5f); // interval camera also changed
+    auto probe_ticket=driver->BeginProbe(thread);CHECK(probe_ticket);
+    driver->EndProbe(probe_ticket,thread,conflicting);
+    bool called=false;
+    CHECK(!driver->current() && !driver->SubmitIfCurrent(previous,[](void* value) noexcept {
+        *static_cast<bool*>(value)=true;return true;
+    },&called) && !called);
+    CHECK(driver->stats().map_witness_conflicts==1);
+    CHECK(present()==WindowResult::Primed && !driver->current());
+    CHECK(sample());CHECK(submit(bsp,state));CHECK(present()==WindowResult::Published);
+    previous=driver->current();p=without_bed();text(p.map_witness.outer.name,"another");
+    CHECK(sample());CHECK(!driver->current() && driver->stats().map_witness_conflicts==2);
+    CHECK(!driver->SubmitIfCurrent(previous,[](void*) noexcept {return true;},nullptr));
+    CHECK(present()==WindowResult::Primed);p=probe();
+    CHECK(sample());CHECK(submit(bsp,state));CHECK(present()==WindowResult::Published);
+    previous=driver->current();auto other_pass=probe();other_pass.pass.value=1;
+    text(other_pass.target.outer[0].name,"LOADGAME:another");
+    probe_ticket=driver->BeginProbe(thread);CHECK(probe_ticket);
+    driver->EndProbe(probe_ticket,thread,other_pass);
+    CHECK(driver->current()==previous && driver->stats().map_witness_conflicts==2);
+    // A malformed witness is unknown, not evidence of a map transition.
+    previous=driver->current();p=without_bed();text(p.map_witness.outer.name,"another");
+    p.map_witness.entry.owner_stable=false;CHECK(sample());
+    CHECK(driver->current()==previous && driver->stats().map_witness_conflicts==2);
+    CHECK(present()==WindowResult::Rejected && !driver->current());
     return true;
 }
 #ifdef T3RENDER_TEST_LIVE_DX12_DRIVER
@@ -446,18 +490,25 @@ bool driver_gpu_pipeline() {
           driver.current()->lights[0]==light);
     VerifiedLighting lighting;CHECK(BuildVerifiedLighting(*driver.current(),lighting)==LightingResult::Ready &&
                                     LightingMatchesSnapshot(*driver.current(),lighting) && lighting.lights.size()==1);
-    const auto reset=driver.BeginReset(thread);CHECK(reset);viewer->Notify();CHECK(pipeline_wait(*viewer,1,1));
+    auto conflicting=p;text(conflicting.target.outer[0].name,"LOADGAME:another");
+    const auto probe_ticket=driver.BeginProbe(thread);CHECK(probe_ticket);
+    driver.EndProbe(probe_ticket,thread,conflicting);viewer->Notify();
+    CHECK(!driver.current() && pipeline_wait(*viewer,1,1) && driver.stats().map_witness_conflicts==1);
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bed));CHECK(submit(bsp));
+    CHECK(present()==WindowResult::Published);viewer->Notify();CHECK(pipeline_wait(*viewer,2,1));
+    CHECK(viewer->stats().frame_id==3);
+    const auto reset=driver.BeginReset(thread);CHECK(reset);viewer->Notify();CHECK(pipeline_wait(*viewer,2,2));
     driver.EndReset(reset,thread,true);CHECK(present()==WindowResult::Primed);
     p.current_camera.derived_matrix_bits[12]=bits(0.25f);draw_state.view[12]=0.25f;
     CHECK(sample());CHECK(submit(bed));CHECK(submit(bsp));CHECK(present()==WindowResult::Published);
-    viewer->Notify();CHECK(pipeline_wait(*viewer,2,1));
-    CHECK(viewer->stats().frame_id==3 && driver.current()->camera.view[12]==0.25f &&
+    viewer->Notify();CHECK(pipeline_wait(*viewer,3,2));
+    CHECK(viewer->stats().frame_id==5 && driver.current()->camera.view[12]==0.25f &&
           driver.current()->light_coverage==LightCoverage::Unknown && driver.current()->lights.empty());
     viewer->Stop();
     const auto deadline=GetTickCount64()+20000;
     while (!viewer->stats().stopped && GetTickCount64()<deadline) Sleep(10);
     CHECK(viewer->stats().stopped && !viewer->stats().failed);
-    std::cout<<"scene_live_driver_dx12_fixture=ok source=synthetic light_same_window=ok frame_and_reset=ok\n";
+    std::cout<<"scene_live_driver_dx12_fixture=ok source=synthetic light_same_window=ok map_conflict_clear=ok frame_and_reset=ok\n";
     return true;
 }
 #endif

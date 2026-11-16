@@ -149,6 +149,14 @@ void SceneDriver::EndProbe(std::uint64_t ticket,ThreadToken thread,const scene_b
         const bool selected=snapshot.pass.available && snapshot.pass.value==s.pass;
         const bool stable=selected && ReadProbeCamera(snapshot,thread.id,s.pass,camera);
         const bool accepted=s.window->EndProbe(record.window,thread,snapshot.pass.available,snapshot.pass.value,stable,camera);
+        if (selected && stable && ClassifyMapWitness(s.catalog.binding,snapshot)==MapWitnessStatus::Conflicts) {
+            if (accepted) ++s.diagnostics.selected_probes;
+            ++s.diagnostics.map_witness_conflicts;
+            // Discard both the previous snapshot and any partial selection
+            // made earlier in this Present interval. This witness is not a
+            // map-change notification, so do not invent a new map epoch.
+            s.Lost();return;
+        }
         if (accepted && selected && stable) {
             ++s.diagnostics.selected_probes;
             s.latest=std::make_shared<const scene_bridge::ProbeSnapshot>(snapshot);s.latest_camera=camera;s.latest_thread=thread;

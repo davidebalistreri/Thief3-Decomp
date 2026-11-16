@@ -44,18 +44,26 @@ bool ReadFloats(const std::uint32_t* bits, float* output, std::size_t count) {
     }
     return true;
 }
-bool OuterMatches(const BindingCatalog& catalog, const ProbeNamedObject& outer) {
-    if (catalog.map.empty() || catalog.map.size() > 128 || !Digest(catalog.map_sha256) ||
-        !outer.member || !outer.stable || !outer.name_available) return false;
+bool OuterAvailable(const ProbeNamedObject& outer) {
+    if (!outer.member || !outer.stable || !outer.name_available || !outer.name[0]) return false;
     const auto* end = static_cast<const char*>(std::memchr(outer.name, '\0', sizeof(outer.name)));
     if (!end) return false;
+    for (const char* p=outer.name;p!=end;++p)
+        if (static_cast<unsigned char>(*p)<32 || static_cast<unsigned char>(*p)>=127) return false;
+    constexpr char prefix[] = "LOADGAME:";
+    return static_cast<std::size_t>(end-outer.name)!=sizeof(prefix)-1 ||
+           !EqualAscii(prefix,outer.name,sizeof(outer.name));
+}
+bool OuterMatches(const BindingCatalog& catalog, const ProbeNamedObject& outer) {
+    if (catalog.map.empty() || catalog.map.size() > 128 || !Digest(catalog.map_sha256) || !OuterAvailable(outer)) return false;
+    const auto* end = static_cast<const char*>(std::memchr(outer.name, '\0', sizeof(outer.name)));
     const std::string name(outer.name, end);
     constexpr char prefix[] = "LOADGAME:";
     if (name.size() >= sizeof(prefix)-1 && EqualAscii(name.substr(0,sizeof(prefix)-1),prefix,sizeof(prefix)))
         return EqualAscii(catalog.map,name.c_str()+sizeof(prefix)-1,name.size()-(sizeof(prefix)-1)+1);
     return EqualAscii(catalog.map,name.c_str(),name.size()+1);
 }
-bool TargetMapMatches(const BindingCatalog& catalog, const ProbeSnapshot& snapshot) {
+bool TargetMapWitnessValid(const BindingCatalog& catalog, const ProbeSnapshot& snapshot) {
     const auto& target = snapshot.target;
     if (catalog.map.empty() || catalog.map.size() > 128 || !Digest(catalog.map_sha256) || !target.entry_available ||
         (!target.visible_list_only && (!target.object_scan_complete || target.object_scan_truncated || target.actors_named_target != 1)) ||
@@ -68,9 +76,12 @@ bool TargetMapMatches(const BindingCatalog& catalog, const ProbeSnapshot& snapsh
         !entry.owner_fname.available || (entry.owner_fname.value>>16) != 1521 || !entry.owner_class.available ||
         !cls.member || !cls.stable || !cls.name_available || !cls.fname.available || (cls.fname.value>>16) != 0 ||
         !Value(cls.address,entry.owner_class.value) || !EqualAscii("StaticMeshActor",cls.name,sizeof(cls.name))) return false;
-    return OuterMatches(catalog,target.outer[0]);
+    return OuterAvailable(target.outer[0]);
 }
-bool WitnessMapMatches(const BindingCatalog& catalog, const ProbeSnapshot& snapshot) {
+bool TargetMapMatches(const BindingCatalog& catalog, const ProbeSnapshot& snapshot) {
+    return TargetMapWitnessValid(catalog,snapshot) && OuterMatches(catalog,snapshot.target.outer[0]);
+}
+bool VisibleMapWitnessValid(const ProbeSnapshot& snapshot) {
     const auto& witness=snapshot.map_witness;const auto& entry=witness.entry;const auto& cls=witness.owner_class;
     if (!witness.available || !witness.list_stable || !witness.object_table_complete || snapshot.entries_truncated ||
         !snapshot.count.available || !snapshot.array.available || !snapshot.array.value ||
@@ -85,7 +96,7 @@ bool WitnessMapMatches(const BindingCatalog& catalog, const ProbeSnapshot& snaps
         !Value(cls.address,entry.owner_class.value) || !EqualAscii("StaticMeshActor",cls.name,sizeof(cls.name)) ||
         !witness.owner_outer.available || !witness.owner_outer.value || !Value(witness.outer.address,witness.owner_outer.value) ||
         !witness.outer.fname.available || (witness.outer.fname.value>>16)!=0 ||
-        !witness.outer.outer.available || witness.outer.outer.value || !OuterMatches(catalog,witness.outer)) return false;
+        !witness.outer.outer.available || witness.outer.outer.value || !OuterAvailable(witness.outer)) return false;
     const auto& listed=snapshot.entries[entry.list_index];
     if (listed.list_index!=entry.list_index || !Value(listed.address,entry.address.value) ||
         !Value(listed.vtable,kMeshVtable) || !Value(listed.type,4)) return false;
@@ -93,6 +104,9 @@ bool WitnessMapMatches(const BindingCatalog& catalog, const ProbeSnapshot& snaps
     for (std::uint32_t i=0;i<snapshot.entries_attempted;++i)
         if (Value(snapshot.entries[i].address,entry.address.value)) ++occurrences;
     return occurrences==1;
+}
+bool WitnessMapMatches(const BindingCatalog& catalog, const ProbeSnapshot& snapshot) {
+    return VisibleMapWitnessValid(snapshot) && OuterMatches(catalog,snapshot.map_witness.outer);
 }
 bool General(const ProbeSnapshot& snapshot, const SubmissionSample& before, bool map_matches) {
     ProbeCamera ignored;
@@ -208,6 +222,15 @@ bool IdentityTransform(const std::uint32_t* bits) {
     return true;
 }
 } // namespace
+
+MapWitnessStatus ClassifyMapWitness(const BindingCatalog& catalog,const ProbeSnapshot& snapshot) {
+    if (catalog.map.empty() || catalog.map.size()>128 || !Digest(catalog.map_sha256)) return MapWitnessStatus::Unknown;
+    const bool target=TargetMapWitnessValid(catalog,snapshot);
+    const bool visible=VisibleMapWitnessValid(snapshot);
+    if ((target && !OuterMatches(catalog,snapshot.target.outer[0])) ||
+        (visible && !OuterMatches(catalog,snapshot.map_witness.outer))) return MapWitnessStatus::Conflicts;
+    return target || visible ? MapWitnessStatus::Matches : MapWitnessStatus::Unknown;
+}
 
 bool ReadProbeCamera(const scene_bridge::ProbeSnapshot& snapshot, std::uint32_t thread_id,
                      std::uint32_t render_pass, ProbeCamera& camera) {

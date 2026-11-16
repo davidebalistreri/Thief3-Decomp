@@ -318,3 +318,21 @@ Per questa ottimizzazione sono passati il test host del probe e i 15 test
 `test_scene_live*.py`, incluso il confronto materiali sulla cattura locale
 2864. La build MinGW del proxy sperimentale e delle due fixture DX12 è passata;
 queste fixture non sono state rieseguite su GPU per questo aggiornamento.
+
+## Aggiornamento: invalidazione per witness di mappa incompatibile
+
+Un probe selezionato e stabile può osservare un actor il cui outer è
+incompatibile con la mappa del catalogo dopo che altre sezioni sono già state
+raccolte nella stessa finestra `Present`. Il driver ora invalida subito lo
+snapshot precedente e l'intervallo parziale, impedendo anche la submission di
+uno snapshot trattenuto dal viewer; una nuova finestra richiede un confine
+pulito. I witness incompleti rimangono sconosciuti. La telemetria espone
+`map_witness_conflicts`.
+
+I 15 test host live sono passati; una fixture x86 Highball/DX12 sintetica ha
+verificato anche la pulizia del viewer, il successivo recupero e il Reset. I
+test coprono entrambe le forme di witness, il rifiuto di una submission già
+preparata e i dati incompleti. Il witness resta un
+candidato: questa protezione non rileva tutti i cambi mappa, non identifica i
+reload della stessa mappa e non carica automaticamente un altro catalogo.
+Non è una verifica nel gioco.

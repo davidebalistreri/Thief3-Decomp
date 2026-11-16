@@ -262,6 +262,13 @@ researched bed and offline-matched BSP. The optional v4 static mesh path below
 adds bounded candidates but has not been exercised in TDS. Map changes and
 general resource lifetimes are not yet observed. The
 separate visible-actor map witness is a candidate, not a map lifecycle hook.
+If a structurally valid target or visible-actor witness contradicts the loaded
+catalog on a selected, stable probe, the driver immediately discards the
+current snapshot and the partial Present interval, then requires a clean
+boundary before rebind. An incomplete witness remains unknown. The
+`map_witness_conflicts` telemetry counter records these conservative
+invalidations. They do not establish that a map change occurred, reload a
+catalog, detect same-map reloads, or cover changes without an observable witness.
 It must not be presented as a general scene bridge or enabled in a game session
 as a verified feature.
 

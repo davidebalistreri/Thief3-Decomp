@@ -31,6 +31,13 @@ struct BindingCatalog {
 bool ReadProbeCamera(const scene_bridge::ProbeSnapshot& snapshot, std::uint32_t thread_id,
                      std::uint32_t render_pass, ProbeCamera& camera);
 
+// A validated visible actor's outer can contradict the loaded catalog, but it
+// is only a candidate witness: neither match nor conflict is a map lifecycle
+// event or a runtime package fingerprint.
+enum class MapWitnessStatus { Unknown, Matches, Conflicts };
+MapWitnessStatus ClassifyMapWitness(const BindingCatalog& catalog,
+                                    const scene_bridge::ProbeSnapshot& snapshot);
+
 // At +0x24 scope entry, match the sampled entry to the current probe and
 // offline metadata. The adapter retains the transient entry sample until
 // ScopeUnchanged at exit, and brackets successful matching draws and Present

@@ -89,6 +89,7 @@ struct Diagnostics {
            <<",\"selected_probe_bad\":"<<s.selected_probe_bad<<",\"bed_scopes\":"<<s.bed_scopes
            <<",\"static_mesh_samples\":"<<s.static_mesh_samples<<",\"static_mesh_scopes\":"<<s.static_mesh_scopes
            <<",\"static_mesh_rejected\":"<<s.static_mesh_rejected
+           <<",\"map_witness_conflicts\":"<<s.map_witness_conflicts
            <<",\"bsp_scopes\":"<<s.bsp_scopes<<",\"bsp_cache_hits\":"<<s.bsp_cache_hits
            <<",\"draw_geometry_bad\":"<<s.draw_geometry_bad
            <<",\"draw_camera_bad\":"<<s.draw_camera_bad<<",\"draw_world_bad\":"<<s.draw_world_bad

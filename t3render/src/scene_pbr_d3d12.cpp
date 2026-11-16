@@ -3,6 +3,7 @@
 #include "scene_pbr_packet.hpp"
 #include "scene_pbr_variants.hpp"
 #include "scene_temporal_history.hpp"
+#include "scene_world_gi.hpp"
 #include <bcrypt.h>
 #include <cmath>
 #include <iostream>
@@ -163,8 +164,14 @@ struct VariantRun {
     }
 };
 
+struct WorldGiSelection {
+    bool ready = false;
+    std::vector<std::uint32_t> draws, casters;
+    std::vector<t3render::world_gi::Vec> irradiance;
+};
+
 int Render(const Frame& frame, const wchar_t* output, bool indirect, bool gtao, bool volumetric, bool reflections, bool filmic,
-           bool contact_hardening,
+           bool contact_hardening, bool world_indirect,
            const wchar_t* temporal_output, float jitter_x, float jitter_y, const std::uint8_t* digest,
            const t3render::temporal::History* history, float history_weight, VariantRun* variant = nullptr) {
     if (variant && (!variant->variants || temporal_output || history || variant->draws.size() != frame.draws.size() ||
@@ -188,12 +195,24 @@ cbuffer Scene : register(b0) {
     float4 shadow_settings; float4 jitter;
 };
 struct O { float4 uv:TEXCOORD0; float3 world:TEXCOORD1; float3 normal:TEXCOORD2;
-           float4 tangent:TEXCOORD3; float4 position:SV_Position; };
-O main(float3 p:POSITION, float2 uv:TEXCOORD0, float3 n:NORMAL, float4 t:TANGENT) {
+           float4 tangent:TEXCOORD3;
+#if T3_WORLD_INDIRECT
+           float3 indirect_world:TEXCOORD4;
+#endif
+           float4 position:SV_Position; };
+O main(float3 p:POSITION, float2 uv:TEXCOORD0, float3 n:NORMAL, float4 t:TANGENT
+#if T3_WORLD_INDIRECT
+       , float3 indirect_world:GI
+#endif
+) {
     O o; o.position=mul(mul(float4(p,1),view),projection);
     o.position.x+=o.position.w*(1+2*jitter.x)/size_scale_count.x;
     o.position.y-=o.position.w*(1+2*jitter.y)/size_scale_count.y;
-    o.uv=float4(uv,0,0); o.world=p; o.normal=n; o.tangent=t; return o;
+    o.uv=float4(uv,0,0); o.world=p; o.normal=n; o.tangent=t;
+#if T3_WORLD_INDIRECT
+    o.indirect_world=indirect_world;
+#endif
+    return o;
 })";
     static const char ps_source[] = R"(
 Texture2D albedo_tex:register(t0); Texture2D normal_tex:register(t1);
@@ -283,10 +302,18 @@ float visibility(float3 world, float3 geometric_normal, float3 to_light, uint li
 #if T3_GBUFFER
 struct Output { float4 color:SV_Target0; float4 position:SV_Target1; float4 normal:SV_Target2;
                 float4 diffuse:SV_Target3; float4 albedo:SV_Target4; };
-Output main(float4 uv:TEXCOORD0, float3 world:TEXCOORD1, float3 normal:TEXCOORD2, float4 tangent:TEXCOORD3) {
+Output main(float4 uv:TEXCOORD0, float3 world:TEXCOORD1, float3 normal:TEXCOORD2, float4 tangent:TEXCOORD3
+#if T3_WORLD_INDIRECT
+            , float3 indirect_world:TEXCOORD4
+#endif
+) {
 #else
 float4 main(float4 uv:TEXCOORD0, float3 world:TEXCOORD1, float3 normal:TEXCOORD2,
-            float4 tangent:TEXCOORD3):SV_Target {
+            float4 tangent:TEXCOORD3
+#if T3_WORLD_INDIRECT
+            , float3 indirect_world:TEXCOORD4
+#endif
+):SV_Target {
 #endif
     const float pi=3.14159265359;
     float3 albedo=albedo_tex.Sample(samp,uv.xy).rgb; // sRGB SRV filters in linear light.
@@ -310,6 +337,13 @@ float4 main(float4 uv:TEXCOORD0, float3 world:TEXCOORD1, float3 normal:TEXCOORD2
     float3 result=albedo*(1-metallic)*ambient.rgb*ao;
 #else
     float3 result=albedo*ambient.rgb*ao;
+#endif
+#if T3_WORLD_INDIRECT
+#if T3_METALLIC
+    result+=max(indirect_world,0)*albedo*ao*(1-metallic)/pi;
+#else
+    result+=max(indirect_world,0)*albedo*ao/pi;
+#endif
 #endif
 #if T3_GBUFFER
     float3 direct_diffuse=0;
@@ -740,6 +774,7 @@ Output main(float4 position:SV_Position) {
     for (const auto& light : frame.lights)
         if (light.direction[0] || light.direction[1] || light.direction[2]) { has_spots = true; break; }
     const std::string options = std::string(use_gbuffer ? "#define T3_GBUFFER 1\n" : "#define T3_GBUFFER 0\n") +
+                                (world_indirect ? "#define T3_WORLD_INDIRECT 1\n" : "#define T3_WORLD_INDIRECT 0\n") +
                                 (has_spots ? "#define T3_SPOTS 1\n" : "#define T3_SPOTS 0\n") +
                                 (contact_hardening ? "#define T3_CONTACT_HARDENING 1\n" : "#define T3_CONTACT_HARDENING 0\n") +
                                 (indirect ? "#define T3_INDIRECT 1\n" : "#define T3_INDIRECT 0\n") +
@@ -752,9 +787,10 @@ Output main(float4 position:SV_Position) {
                                 (frame.has_metallic ? "#define T3_METALLIC 1\n" : "#define T3_METALLIC 0\n");
     const std::string shadow_option = frame.shadow_size ? "#define T3_SHADOWS 1\n" : "#define T3_SHADOWS 0\n";
     const std::string pixel_source = shadow_option + options + ps_source;
+    const std::string vertex_source = options + vs_source;
     const std::string tone_source = shadow_option + options + tone_ps_source;
     const std::string temporal_source = options + temporal_ps_source;
-    if (!Compile(compile, vs_source, "vs_5_0", vs) || !Compile(compile, pixel_source.c_str(), "ps_5_0", ps) ||
+    if (!Compile(compile, vertex_source.c_str(), "vs_5_0", vs) || !Compile(compile, pixel_source.c_str(), "ps_5_0", ps) ||
         (frame.shadow_size && (!Compile(compile, shadow_vs_source, "vs_5_0", shadow_vs) ||
                                !Compile(compile, shadow_ps_source, "ps_5_0", shadow_ps))) ||
         !Compile(compile, tone_vs_source, "vs_5_0", tone_vs) || !Compile(compile, tone_source.c_str(), "ps_5_0", tone_ps) ||
@@ -821,10 +857,11 @@ Output main(float4 position:SV_Position) {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 20, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}};
+        {"TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"GI", 0, DXGI_FORMAT_R32G32B32_FLOAT, 1, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}};
     D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{}; desc.pRootSignature = root.p;
     desc.VS = {vs->GetBufferPointer(), vs->GetBufferSize()}; desc.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
-    desc.InputLayout = {input, 4}; desc.SampleMask = UINT_MAX;
+    desc.InputLayout = {input, world_indirect ? 5u : 4u}; desc.SampleMask = UINT_MAX;
     for (auto& blend : desc.BlendState.RenderTarget) {
         blend.SrcBlend = blend.SrcBlendAlpha = D3D12_BLEND_ONE;
         blend.DestBlend = blend.DestBlendAlpha = D3D12_BLEND_ZERO;
@@ -849,6 +886,7 @@ Output main(float4 position:SV_Position) {
         auto shadow_desc = desc;
         shadow_desc.VS = {shadow_vs->GetBufferPointer(), shadow_vs->GetBufferSize()};
         shadow_desc.PS = {shadow_ps->GetBufferPointer(), shadow_ps->GetBufferSize()};
+        shadow_desc.InputLayout = {input, 4};
         shadow_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
         shadow_desc.NumRenderTargets = 1;
         for (UINT i = 1; i < 5; ++i) shadow_desc.RTVFormats[i] = DXGI_FORMAT_UNKNOWN;
@@ -1011,7 +1049,7 @@ Output main(float4 position:SV_Position) {
     }
     const std::size_t vertex_bytes = frame.vertices.size()*sizeof(Vertex);
     const auto vertex_desc = Buffer(vertex_bytes), constant_desc = Buffer((sizeof(Constants)+255)&~std::size_t(255));
-    ComPtr<ID3D12Resource> vertices, constants;
+    ComPtr<ID3D12Resource> vertices, constants, world_gi_buffer;
     if (!Check(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &vertex_desc, D3D12_RESOURCE_STATE_GENERIC_READ,
              nullptr, IID_PPV_ARGS(vertices.put())), "CreateVertices") ||
         !Check(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &constant_desc, D3D12_RESOURCE_STATE_GENERIC_READ,
@@ -1020,6 +1058,12 @@ Output main(float4 position:SV_Position) {
     if (!Check(vertices->Map(0, &no_read, &mapped), "MapVertices") || !mapped) return 1;
     std::memcpy(mapped, frame.vertices.data(), vertex_bytes);
     const D3D12_RANGE vertex_written{0, vertex_bytes}; vertices->Unmap(0, &vertex_written);
+    const std::size_t gi_bytes = frame.vertices.size()*sizeof(t3render::world_gi::Vec);
+    if (world_indirect) {
+        const auto gi_desc=Buffer(gi_bytes);
+        if (!Check(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &gi_desc,
+                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(world_gi_buffer.put())), "CreateWorldGi")) return 1;
+    }
     Constants cb{};
     std::memcpy(cb.view, frame.view, sizeof(cb.view)); std::memcpy(cb.projection, frame.projection, sizeof(cb.projection));
     cb.size_scale_count[0] = static_cast<float>(frame.width); cb.size_scale_count[1] = static_cast<float>(frame.height);
@@ -1065,6 +1109,10 @@ Output main(float4 position:SV_Position) {
     }
     std::wstring current_output(output);
     std::uint64_t render_index = 0;
+    std::uint8_t gi_selected=0;
+    WorldGiSelection gi_selections[2];
+    std::vector<std::uint32_t> all_draws(frame.draws.size()), all_casters(frame.offline_casters.size());
+    std::iota(all_draws.begin(),all_draws.end(),0u); std::iota(all_casters.begin(),all_casters.end(),0u);
     if (variant) std::printf("variant_gpu_resources=shared textures=%zu\n", frame.textures.size());
     for (;;) {
         if (render_index) {
@@ -1077,11 +1125,38 @@ Output main(float4 position:SV_Position) {
                 Transition(list.p, image.p, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
         }
         const std::uint8_t selected = variant && variant->variants->ReplacementSelected() ? 2 : 1;
+        if (world_indirect) {
+            const auto& selected_draws=variant ? variant->active_draws[selected-1] : all_draws;
+            const auto& selected_casters=variant ? variant->active_casters[selected-1] : all_casters;
+            auto& cached=gi_selections[selected-1];
+            const bool needs_bake=!cached.ready || cached.draws!=selected_draws || cached.casters!=selected_casters;
+            if (needs_bake || gi_selected!=selected) {
+                if (needs_bake) {
+                    std::vector<t3render::world_gi::Vec> baked; std::string error;
+                    t3render::world_gi::Statistics stats;
+                    if (!t3render::world_gi::Bake(frame,selected_draws,selected_casters,baked,error,&stats) || baked.size()!=frame.vertices.size()) {
+                        std::fprintf(stderr,"world GI bake failed: %s\n",error.c_str()); return 1;
+                    }
+                    cached.irradiance=std::move(baked); cached.draws=selected_draws; cached.casters=selected_casters; cached.ready=true;
+                    std::printf("world_indirect=ready samples=%zu receivers=%zu workers=%u draws=%zu casters=%zu\n",
+                                stats.surfels,stats.receivers,stats.workers,cached.draws.size(),cached.casters.size());
+                }
+                mapped=nullptr;
+                if (!Check(world_gi_buffer->Map(0,&no_read,&mapped),"MapWorldGi") || !mapped) return 1;
+                std::memcpy(mapped,cached.irradiance.data(),gi_bytes);
+                const D3D12_RANGE written{0,gi_bytes}; world_gi_buffer->Unmap(0,&written);
+                gi_selected=selected;
+            }
+        }
         list->SetGraphicsRootSignature(root.p);
         ID3D12DescriptorHeap* heaps[] = {srv_heap.p}; list->SetDescriptorHeaps(1, heaps);
         list->SetGraphicsRootConstantBufferView(0, constants->GetGPUVirtualAddress());
         const D3D12_VERTEX_BUFFER_VIEW vb{vertices->GetGPUVirtualAddress(), static_cast<UINT>(vertex_bytes), sizeof(Vertex)};
         list->IASetVertexBuffers(0, 1, &vb); list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        if (world_indirect) {
+            const D3D12_VERTEX_BUFFER_VIEW gi_vb{world_gi_buffer->GetGPUVirtualAddress(),static_cast<UINT>(gi_bytes),sizeof(t3render::world_gi::Vec)};
+            list->IASetVertexBuffers(1,1,&gi_vb);
+        }
         const auto gpu_base = srv_heap->GetGPUDescriptorHandleForHeapStart();
         if (frame.shadow_size) {
             // Direct3D cubemap order and per-face right/up axes, in world coordinates.
@@ -1224,7 +1299,7 @@ Output main(float4 position:SV_Position) {
             }
             const std::uint32_t flags = (indirect ? 1u : 0u) | (gtao ? 2u : 0u) |
                                         (volumetric ? 4u : 0u) | (reflections ? 8u : 0u) | (filmic ? 16u : 0u) |
-                                        (contact_hardening ? 32u : 0u);
+                                        (contact_hardening ? 32u : 0u) | (world_indirect ? 64u : 0u);
             const bool saved = WriteTemporal(temporal_output, frame, digest, jitter_x, jitter_y, flags,
                                              static_cast<const std::uint8_t*>(color), static_cast<const std::uint8_t*>(position), temporal_fp);
             temporal_position_readback->Unmap(0, &no_write); temporal_color_readback->Unmap(0, &no_write);
@@ -1296,11 +1371,11 @@ Output main(float4 position:SV_Position) {
 
 int wmain(int argc, wchar_t** argv) {
     const auto usage = []() {
-        std::fwprintf(stderr, L"usage: t3render_scene_pbr_d3d12 <pbr.bin> --output <new-image.ppm> [effects] [--contact-hardening] [--temporal-output <new.bin> [--jitter <x> <y>]] [--temporal-input <history.bin> --previous-packet <pbr.bin> [--history-weight <0..0.95>]] [(--variant-cycle <replacement.ppm> <restored.ppm> | --variant-stream) --resource-key <key>]\n");
+        std::fwprintf(stderr, L"usage: t3render_scene_pbr_d3d12 <pbr.bin> --output <new-image.ppm> [effects] [--world-indirect] [--contact-hardening] [--temporal-output <new.bin> [--jitter <x> <y>]] [--temporal-input <history.bin> --previous-packet <pbr.bin> [--history-weight <0..0.95>]] [(--variant-cycle <replacement.ppm> <restored.ppm> | --variant-stream) --resource-key <key>]\n");
         return 2;
     };
-    if (argc < 4 || argc > 21 || std::wcscmp(argv[2], L"--output") || !argv[3][0]) return usage();
-    bool indirect = false, gtao = false, volumetric = false, reflections = false, filmic = false, contact_hardening = false;
+    if (argc < 4 || argc > 22 || std::wcscmp(argv[2], L"--output") || !argv[3][0]) return usage();
+    bool indirect = false, gtao = false, volumetric = false, reflections = false, filmic = false, contact_hardening = false, world_indirect = false;
     bool jitter_set = false, weight_set = false; float jitter_x = 0, jitter_y = 0, history_weight = .8f;
     const wchar_t* temporal_output = nullptr;
     const wchar_t* temporal_input = nullptr; const wchar_t* previous_packet = nullptr;
@@ -1313,6 +1388,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (!std::wcscmp(argv[i], L"--reflections") && !reflections) reflections = true;
         else if (!std::wcscmp(argv[i], L"--filmic") && !filmic) filmic = true;
         else if (!std::wcscmp(argv[i], L"--contact-hardening") && !contact_hardening) contact_hardening = true;
+        else if (!std::wcscmp(argv[i], L"--world-indirect") && !world_indirect) world_indirect = true;
         else if (!std::wcscmp(argv[i], L"--temporal-output") && !temporal_output && i+1 < argc && argv[i+1][0])
             temporal_output = argv[++i];
         else if (!std::wcscmp(argv[i], L"--temporal-input") && !temporal_input && i+1 < argc && argv[i+1][0])
@@ -1340,7 +1416,7 @@ int wmain(int argc, wchar_t** argv) {
         }
         else return usage();
     }
-    if ((jitter_set && !temporal_output) || (temporal_output && !std::wcscmp(temporal_output, argv[3])) ||
+    if ((indirect && world_indirect) || (jitter_set && !temporal_output) || (temporal_output && !std::wcscmp(temporal_output, argv[3])) ||
         ((temporal_input || previous_packet || weight_set) && !(temporal_input && previous_packet && temporal_output)) ||
         (temporal_input && temporal_output && !std::wcscmp(temporal_input, temporal_output)) ||
         ((variant_output != nullptr || variant_stream) != (variant_key != nullptr)) || (variant_output && variant_stream) ||
@@ -1366,7 +1442,7 @@ int wmain(int argc, wchar_t** argv) {
         }
         run.ResetSelection();
         if (contact_hardening && !combined.shadow_size) return usage();
-        return Render(combined, argv[3], indirect, gtao, volumetric, reflections, filmic, contact_hardening,
+        return Render(combined, argv[3], indirect, gtao, volumetric, reflections, filmic, contact_hardening, world_indirect,
                       nullptr, 0, 0, nullptr, nullptr, 0, &run);
     }
     Frame frame;
@@ -1391,12 +1467,12 @@ int wmain(int argc, wchar_t** argv) {
         const bool close_error = std::fclose(file) != 0;
         const std::uint32_t flags = (indirect ? 1u : 0u) | (gtao ? 2u : 0u) |
                                     (volumetric ? 4u : 0u) | (reflections ? 8u : 0u) | (filmic ? 16u : 0u) |
-                                    (contact_hardening ? 32u : 0u);
+                                    (contact_hardening ? 32u : 0u) | (world_indirect ? 64u : 0u);
         if (error || close_error || !t3render::temporal::ParseHistory(bytes.data(), size, previous, frame, previous_digest, flags, history)) {
             std::fprintf(stderr, "invalid or incompatible temporal history\n"); return 2;
         }
         std::printf("temporal_frame_order=unverified; validate SceneIR provenance separately\n");
     }
-    return Render(frame, argv[3], indirect, gtao, volumetric, reflections, filmic, contact_hardening, temporal_output, jitter_x, jitter_y, digest,
+    return Render(frame, argv[3], indirect, gtao, volumetric, reflections, filmic, contact_hardening, world_indirect, temporal_output, jitter_x, jitter_y, digest,
                   temporal_input ? &history : nullptr, history_weight);
 }

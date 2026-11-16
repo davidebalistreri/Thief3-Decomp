@@ -106,7 +106,8 @@ positions, geometric normals, albedo and directly lit diffuse radiance in
 half-float buffers. The display pass gathers 24 nearby visible samples,
 weights their colors by estimated surface area, distance and both surface
 orientations, and rejects sampled foreground blockers. It does not feed the
-constant ambient term, specular highlights or emission back into the bounce.
+constant ambient term or specular highlights into the bounce. Emissive draws
+contribute when they are enabled.
 
 This is a bounded screen-space approximation, not complete GI: the gather
 uses at most 64 pixels and 3 metres, only the first visible layer, and two
@@ -121,6 +122,61 @@ RGB difference 0.066 on a 0–255 scale and a maximum channel increase of 80.
 This is a subtle, incomplete local bounce rather than a claim of visual parity
 or a calibrated GI solution. With the flag omitted, the same frame was
 byte-identical to the previous version.
+
+## World-space diffuse bounce
+
+`--world-indirect` selects an independent, camera-independent one-bounce
+preview instead of `--indirect`; the two options are mutually exclusive. The
+renderer samples 128 surface points by area from the selected packet geometry,
+reserving 32 for emissive surfaces when both emissive and diffuse surfaces
+exist. It estimates their direct Lambertian radiance from the calibrated point
+and spot lights and emissive draws, tracing hard visibility to each light's
+center through a bounded CPU BVH. It then traces source-to-receiver visibility
+and interpolates the result per vertex. Optional offline shadow casters occlude
+rays but are not radiance sources. The GPU adds the result in linear HDR with the receiver's albedo,
+material AO and metallic factor before display conversion.
+
+The bake uses the packet's submitted geometry, including its portions outside
+the camera image. Unsubmitted surfaces cannot emit or reflect in this preview;
+offline caster geometry has no material and only occludes. Surface sampling,
+diffuse Fresnel, source texture filtering, the 3 mm ray offset and the 5 cm–15 m
+bounce distance range are approximations. A finite number of samples and
+per-vertex interpolation can miss small sources or smear visibility across
+large triangles. Normal maps and specular or multiple bounces are not included.
+GTAO continues to attenuate the constant ambient term, while this world-space
+bounce uses traced geometry and material AO. The 16-million vertex/sample
+budget rejects excessive work. This CPU preparation is not real-time GI.
+Identical position/normal receivers share a result, and up to eight workers
+process independent receivers. On the local translated D3D12 runtime, the
+original/high-poly/original bedroom cycle took about 36 seconds in an
+optimized build; only the first two selections required a bake.
+
+The same geometry and lighting produce the same bake when only the camera
+moves. Resident original/high-poly selections retain separate in-process
+results and recompute when their selected geometry changes. Temporal history
+records this mode and is rejected if geometry, materials, lights or the mode
+change. `scene_pbr_camera_sequence.py` accepts `--effect world-indirect`.
+
+On the local frame-2864 five-light preview with filmic conversion and contact
+hardening, the world-space path changed 500,819 pixels and had a mean absolute
+RGB-channel difference of 1.143 on a 0–255 scale versus no bounce; the existing
+screen-space path changed 67,059 pixels with mean difference 0.078. These are
+changes within a partial, artistically calibrated scene, not a comparison to
+ground truth or a claim that the beam is corrected.
+
+`scene_world_gi_fixture.py` creates an emitter fully outside the camera image,
+an optional intervening blocker and an emitter-off control. Render the base
+without the option and the other three with `--world-indirect`; the fixture's
+`verify` checks colored bounce, blocker occlusion and absence of feedback from
+unlit geometry; `--screen-reference` optionally verifies that the screen-space
+control cannot see the emitter. The local D3D12 and independent host checks
+passed, including camera invariance, spotlight direction and a shadow-only
+offline blocker (`--blocked --shadow-only`). On the captured 2864–2865 pair,
+the CPU and GPU temporal resolves passed same-Present validation and differed
+by a mean 0.0057 RGB-channel levels, with a maximum difference of 5 on a
+0–255 scale. These checks do not make the preview a live TDS integration.
+The synthetic path also passed with GTAO, volumetrics, reflections, contact
+hardening and filmic conversion enabled together.
 
 ## Horizon ambient occlusion
 

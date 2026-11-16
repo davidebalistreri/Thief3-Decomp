@@ -30,6 +30,9 @@ When the exported renderer uses `--filmic`, the resolve applies the same
 filmic curve; frames with different effect or curve flags cannot be combined.
 The optional `--contact-hardening` shadow filter is also recorded as an
 effect; history from the ordinary filter cannot be mixed with it.
+`--world-indirect` is recorded separately from screen-space bounce. Its history
+requires unchanged submitted geometry, occluders and material inputs because
+a changed off-screen surface can alter illumination at an unchanged pixel.
 
 `--upscale 2` optionally reconstructs the output image at twice the width and
 height, in linear HDR before tonemapping. It uses bilinear weights while

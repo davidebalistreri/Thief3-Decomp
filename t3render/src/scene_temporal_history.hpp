@@ -50,6 +50,23 @@ inline bool SameLightingAndTextures(const pbr::Frame& a, const pbr::Frame& b) {
     return true;
 }
 
+inline bool SameWorldGiGeometry(const pbr::Frame& a, const pbr::Frame& b) {
+    if (a.vertices.size()!=b.vertices.size() || a.draws.size()!=b.draws.size() ||
+        a.offline_casters.size()!=b.offline_casters.size() ||
+        std::memcmp(a.vertices.data(),b.vertices.data(),a.vertices.size()*sizeof(scene::Vertex))) return false;
+    for (std::size_t i=0; i<a.draws.size(); ++i) {
+        const auto& x=a.draws[i]; const auto& y=b.draws[i];
+        if (x.first_vertex!=y.first_vertex || x.vertex_count!=y.vertex_count || x.shadow_mask!=y.shadow_mask ||
+            x.metallic!=y.metallic || std::memcmp(x.textures,y.textures,sizeof(x.textures)) ||
+            std::memcmp(x.emission,y.emission,sizeof(x.emission))) return false;
+    }
+    for (std::size_t i=0; i<a.offline_casters.size(); ++i) {
+        const auto& x=a.offline_casters[i]; const auto& y=b.offline_casters[i];
+        if (x.first_vertex!=y.first_vertex || x.vertex_count!=y.vertex_count || x.shadow_mask!=y.shadow_mask) return false;
+    }
+    return true;
+}
+
 inline bool ParseHistory(const std::uint8_t* bytes, std::size_t size, const pbr::Frame& previous,
                          const pbr::Frame& current, const std::uint8_t* expected_digest,
                          std::uint32_t expected_flags, History& output) {
@@ -66,7 +83,8 @@ inline bool ParseHistory(const std::uint8_t* bytes, std::size_t size, const pbr:
     for (float& x : history.camera) if (!reader.f32(x)) return false;
     if (!reader.f32(history.scale, 1) || history.scale < .00001f || !reader.f32(history.exposure, 32) || history.exposure < .01f ||
         !reader.f32(history.jitter[0], .5f) || !reader.f32(history.jitter[1], .5f) ||
-        !reader.u32(history.flags) || history.flags != expected_flags || history.flags > 63 ||
+        !reader.u32(history.flags) || history.flags != expected_flags || history.flags > 127 ||
+        ((history.flags & 64u) && ((history.flags & 1u) || !SameWorldGiGeometry(previous,current))) ||
         ((history.flags & 32u) && !previous.shadow_size) ||
         std::memcmp(history.view, previous.view, sizeof(history.view)) ||
         std::memcmp(history.projection, previous.projection, sizeof(history.projection)) ||

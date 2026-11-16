@@ -16,6 +16,8 @@ sys.path.insert(0, str(HERE.parent / "tools"))
 import scene_pbr_packet as pbr
 import scene_pbr_shadow_fixture as shadow
 import scene_pbr_spot_fixture as spot
+import scene_world_gi_fixture as world
+import scene_pbr_variants as variants
 import scene_temporal_resolve as temporal
 import scene_temporal_fixture as fixture
 import test_scene_pbr_packet as packet_tests
@@ -173,10 +175,22 @@ class TemporalResolveTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "truncated PBR lights"):
             temporal.packet_lighting(previous[:200])
 
+    def test_world_gi_history_requires_unchanged_geometry(self):
+        packet=world.fixture()
+        old=temporal.parse(raw_history(packet,flags=64),packet)
+        changed=bytearray(packet)
+        offset=variants.packet_signatures(packet)[0][0][1]
+        struct.pack_into("<f",changed,offset,.1)
+        new=temporal.parse(raw_history(bytes(changed),flags=64),bytes(changed))
+        with self.assertRaisesRegex(ValueError,"unchanged geometry"):
+            temporal.compatible(old,new)
+        with self.assertRaisesRegex(ValueError,"header"):
+            temporal.parse(raw_history(packet,flags=65),packet)
+
     def test_invalid_headers_pixels_and_settings_fail_closed(self):
         for raw in (self.raw[:-1], b"badmagic"+self.raw[8:],
                     self.raw[:16]+bytes(32)+self.raw[48:],
-                    self.raw[:temporal.HEADER.size-4]+struct.pack("<I", 64)+self.raw[temporal.HEADER.size:]):
+                    self.raw[:temporal.HEADER.size-4]+struct.pack("<I", 128)+self.raw[temporal.HEADER.size:]):
             with self.subTest(raw=raw[:8]), self.assertRaises(ValueError):
                 temporal.parse(raw, self.packet)
         for change in ((temporal.HEADER.size, struct.pack("<H", 0x7c00)),

@@ -19,6 +19,7 @@ import sys
 import scene_ir_to_d3d12_packet as preview
 import scene_trace_session
 import compare_bridge_fixture as comparison
+import scene_pbr_variants as variants
 from scene_ir import SceneSnapshot
 
 HEADER = struct.Struct("<8sII32s32f7fI")
@@ -89,7 +90,7 @@ def parse(raw, packet):
     magic, width, height, digest = header[:4]
     matrix, camera, scale, exposure, jitter, flags = header[4:36], header[36:39], header[39], header[40], header[41:43], header[43]
     if (magic != b"T3TEMP01" or not 1 <= width <= 2048 or not 1 <= height <= 2048 or
-            len(raw) != HEADER.size+width*height*16 or flags > 63 or
+            len(raw) != HEADER.size+width*height*16 or flags > 127 or (flags & 64 and flags & 1) or
             any(not math.isfinite(x) or abs(x) > 1000000 for x in (*matrix, *camera)) or
             not math.isfinite(scale) or not .00001 <= scale <= 1 or
             not math.isfinite(exposure) or not .01 <= exposure <= 32 or
@@ -103,10 +104,11 @@ def parse(raw, packet):
             packet_header[37:40] != camera or packet_header[40] != scale or packet_header[44] != exposure or
             (flags & 32 and not has_shadow)):
         raise ValueError("temporal camera does not match packet")
+    world_geometry = variants.packet_signatures(packet)[:2] if flags & 64 else None
     return {"raw": raw, "width": width, "height": height, "digest": digest.hex(), "view": matrix[:16],
             "projection": matrix[16:], "camera": camera, "scale": scale, "exposure": exposure,
             "jitter": jitter, "flags": flags, "packet_version": int(chr(packet_header[0][6])),
-            "packet_metallic": has_metallic, "packet_lighting": packet_lighting(packet),
+            "packet_metallic": has_metallic, "packet_lighting": packet_lighting(packet), "world_geometry": world_geometry,
             "min_depth": packet_header[3], "max_depth": packet_header[4]}
 
 
@@ -161,6 +163,8 @@ def compatible(previous, current, previous_runtime=None, current_runtime=None):
         raise ValueError("temporal frames have incompatible dimensions, units or effects")
     if previous["packet_lighting"] != current["packet_lighting"]:
         raise ValueError("temporal frames have incompatible serialized lighting")
+    if previous["flags"] & 64 and previous["world_geometry"] != current["world_geometry"]:
+        raise ValueError("temporal world GI requires unchanged geometry and materials")
     if (previous_runtime is None) != (current_runtime is None):
         raise ValueError("cannot combine runtime and synthetic temporal sources")
     if current_runtime is not None:

@@ -39,7 +39,7 @@ def _frame(scene_path, packet_path, manifest_path):
     data = {"packet_version": header[0][6]-ord("0"), "digest": _digest(packet),
             "width": header[1], "height": header[2], "min_depth": header[3], "max_depth": header[4],
             "view": header[5:21], "projection": header[21:37], "camera": header[37:40], "scale": header[40],
-            "flags": 0, "packet_metallic": has_metallic, "packet_lighting": temporal.packet_lighting(packet)}
+            "flags": 0, "packet_metallic": has_metallic, "packet_lighting": temporal.packet_lighting(packet), "world_geometry": None}
     scene, manifest = temporal.validate_runtime(data, scene_raw, manifest_raw)
     return {"scene": scene, "manifest": manifest, "packet": packet, "metadata": data,
             "paths": (scene_path, packet_path, manifest_path),
@@ -326,12 +326,14 @@ def main(argv=None):
     parser.add_argument("--highball-engine", type=Path, help="Highball engine root")
     parser.add_argument("--highball-bottle", type=Path, help="Highball bottle with Z: mapped to the host root")
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--effect", action="append", choices=("indirect", "gtao", "volumetric", "reflections", "filmic", "contact-hardening"), default=[])
+    parser.add_argument("--effect", action="append", choices=("indirect", "world-indirect", "gtao", "volumetric", "reflections", "filmic", "contact-hardening"), default=[])
     parser.add_argument("--timeout", type=float, default=300)
     args = parser.parse_args(argv)
     try:
         if len(set(args.effect)) != len(args.effect):
             raise ValueError("effects must be distinct")
+        if {"indirect", "world-indirect"} <= set(args.effect):
+            raise ValueError("choose either screen-space or world-space indirect lighting")
         if (args.highball_engine is None) != (args.highball_bottle is None) or (
                 args.wine is not None and args.highball_engine is not None):
             raise ValueError("supply both Highball paths or a separate Wine executable")

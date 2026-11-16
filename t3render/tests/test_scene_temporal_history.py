@@ -15,6 +15,8 @@ import scene_temporal_resolve as temporal
 import scene_pbr_metallic_fixture as metallic
 import scene_pbr_shadow_fixture as shadow
 import scene_pbr_spot_fixture as spot
+import scene_world_gi_fixture as world
+import scene_pbr_variants as variants
 import test_scene_pbr_packet as packet_tests
 from test_scene_temporal_resolve import raw_history
 
@@ -113,7 +115,7 @@ class GpuHistoryParserTests(unittest.TestCase):
         self.assertEqual(self.parse(packet, packet, history, flags=0).returncode, 2)
         no_shadows = packet_tests.gpu_fixture.fixture()
         self.assertEqual(self.parse(no_shadows, no_shadows, raw_history(no_shadows, flags=32), flags=32).returncode, 2)
-        self.assertEqual(self.parse(packet, packet, raw_history(packet, flags=64), flags=64).returncode, 2)
+        self.assertEqual(self.parse(packet, packet, raw_history(packet, flags=128), flags=128).returncode, 2)
 
     def test_spot_direction_and_cone_changes_invalidate_history(self):
         packet = spot.fixture("spot")
@@ -125,6 +127,16 @@ class GpuHistoryParserTests(unittest.TestCase):
         changed = bytearray(packet)
         struct.pack_into("<f", changed, 200+32+16, .8)
         self.assertEqual(self.parse(packet, bytes(changed), history).returncode, 2)
+
+    def test_world_gi_history_rejects_changed_geometry(self):
+        packet=world.fixture()
+        history=raw_history(packet,flags=64)
+        self.assertEqual(self.parse(packet,packet,history,flags=64).returncode,0)
+        changed=bytearray(packet)
+        offset=variants.packet_signatures(packet)[0][0][1]
+        struct.pack_into("<f",changed,offset,.1)
+        self.assertEqual(self.parse(packet,bytes(changed),history,flags=64).returncode,2)
+        self.assertEqual(self.parse(packet,packet,raw_history(packet,flags=65),flags=65).returncode,2)
 
 
 if __name__ == "__main__":

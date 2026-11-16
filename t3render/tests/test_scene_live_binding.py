@@ -18,7 +18,8 @@ class SceneLiveBindingTests(unittest.TestCase):
             subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pthread",
                             str(ROOT / "tests/scene_live_binding_fixture.cpp"), str(ROOT / "ir/scene_live.cpp"),
                             str(ROOT / "ir/scene_live_window.cpp"), str(ROOT / "src/scene_live_binding.cpp"),
-                            str(ROOT / "src/scene_live_driver.cpp"),
+                            str(ROOT / "src/scene_live_driver.cpp"), str(ROOT / "src/scene_live_flat.cpp"),
+                            str(ROOT / "src/scene_live_materials.cpp"),
                             "-o", str(binary)], check=True, capture_output=True, timeout=60)
             result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, timeout=30)
             self.assertIn("scene_live_binding_fixture=ok", result.stdout)

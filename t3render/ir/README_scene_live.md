@@ -305,6 +305,32 @@ catalog, detect same-map reloads, or cover changes without an observable witness
 It must not be presented as a general scene bridge or enabled in a game session
 as a verified feature.
 
+For an adapter that has a separately established map lifecycle signal,
+`SceneDriver::BeginMapTransition` immediately retires the current snapshot and
+continues tracking outstanding callbacks while the old window is disabled.
+`CommitMapTransition` accepts a separately loaded, unused catalog only after
+those callbacks and any Reset have drained. It validates the catalog's map and
+resource handles, atomically adopts its immutable resources into the existing
+residency, advances map and device epochs, clears identity tracks and requires
+a fresh Present boundary. An invalid catalog, stale epoch, failed Reset or
+undrained callback leaves the transition pending and the old snapshot retired.
+The prepared residency is consumed; old snapshot holders cannot submit it.
+This also handles an explicitly signalled reload of the same map.
+
+The viewer can request overrides and material assets for the exact current
+snapshot. When the material library changes, its worker rebuilds the D3D12
+backend; the old GPU cache and stale bed override are not reused. A synthetic
+host fixture checks same-map and different-map adoption, in-flight callbacks,
+Reset, asset handles and old-snapshot rejection. A synthetic Highball fixture
+checks the worker's same-map reload and material-library replacement. The
+runtime adapter does **not** yet detect or forward a TDS map lifecycle event,
+load a replacement catalog, or update its optional light sampler's map context.
+The current catalog format also requires the researched bed and a BSP catalog;
+the different-map fixture uses synthetic equivalents, so maps without that
+bed still need a more general catalog and binding path.
+Consequently this API is not a live map-change implementation or proof of a
+same-map reload in the game.
+
 Host fixtures cover catalog round trips and corruption, candidate binding,
 window publication, overlap, Reset and rebind. The Windows loader and driver
 fixtures passed on Highball without TDS; the loader read a local catalog with

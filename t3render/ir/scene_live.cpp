@@ -150,6 +150,37 @@ bool SceneResidency::BeginMap(std::uint64_t expected_map_epoch, const std::strin
     return true;
 }
 
+bool SceneResidency::MatchesMap(Epochs expected,const std::string& map,const std::string& map_sha256) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return expected.ready && ready_ && !resetting_ && expected.map==map_epoch_ && expected.device==device_epoch_ &&
+        map_==map && map_sha256_==map_sha256;
+}
+
+bool SceneResidency::AdoptPrepared(SceneResidency& prepared,Epochs current,Epochs incoming,
+                                    const std::string& map,const std::string& map_sha256) noexcept {
+    if (&prepared==this) return false;
+    try {
+        std::scoped_lock lock(mutex_,prepared.mutex_);
+        if (!current.ready || !incoming.ready || !ready_ || resetting_ || !prepared.ready_ || prepared.resetting_ ||
+            !map_epoch_ || !prepared.map_epoch_ || current.map!=map_epoch_ || current.device!=device_epoch_ ||
+            incoming.map!=prepared.map_epoch_ || incoming.device!=prepared.device_epoch_ ||
+            map_epoch_==UINT64_MAX || device_epoch_==UINT64_MAX || prepared.has_frame_ || prepared.snapshot_ ||
+            prepared.map_!=map || prepared.map_sha256_!=map_sha256) return false;
+        // These swaps and clears do not allocate. Invalidate both old readers
+        // and the consumed source while holding both locks.
+        map_.swap(prepared.map_);map_sha256_.swap(prepared.map_sha256_);
+        materials_.swap(prepared.materials_);resources_.swap(prepared.resources_);
+        geometry_bytes_=prepared.geometry_bytes_;prepared.geometry_bytes_=0;
+        ++map_epoch_;++device_epoch_;
+        identities_.clear();light_generations_.clear();snapshot_.reset();provenance_.reset();conventions_.reset();
+        has_frame_=false;last_frame_=0;
+        prepared.materials_.clear();prepared.resources_.clear();prepared.identities_.clear();prepared.light_generations_.clear();
+        prepared.map_.clear();prepared.map_sha256_.clear();prepared.map_epoch_=prepared.device_epoch_=0;
+        prepared.ready_=false;prepared.has_frame_=false;prepared.last_frame_=0;
+        return true;
+    } catch (...) {return false;}
+}
+
 std::uint64_t SceneResidency::BeginReset() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (resetting_ || device_epoch_ == UINT64_MAX) return false;

@@ -23,9 +23,14 @@ struct DriverStats {
     std::uint64_t static_mesh_samples = 0, static_mesh_scopes = 0, static_mesh_rejected = 0;
     std::uint64_t map_witness_conflicts = 0;
     std::uint64_t unscoped_viewport_attempts = 0;
+    std::uint64_t map_transitions = 0;
     std::uint64_t draw_geometry_bad = 0, draw_camera_bad = 0, draw_world_bad = 0, draw_viewport_bad = 0;
     std::uint64_t scope_unstable = 0, scope_rejected = 0, losses = 0, primed = 0, published = 0, rejected = 0;
     std::uint32_t last_rejection = 0;
+};
+struct VisualAssets {
+    std::shared_ptr<const MeshOverride> bed_override;
+    std::shared_ptr<const BedroomMaterialLibrary> bedroom_materials;
 };
 
 // Connects the established probe/submission samples and device boundaries to
@@ -72,9 +77,15 @@ public:
     WindowResult EndPresent(std::uint64_t ticket, ThreadToken thread, bool succeeded) noexcept;
     std::uint64_t BeginReset(ThreadToken thread) noexcept;
     void EndReset(std::uint64_t ticket, ThreadToken thread, bool succeeded) noexcept;
+    // The adapter must supply a real map lifecycle signal; a candidate map
+    // witness alone is not one. Begin immediately retires the current frame.
+    // Commit consumes a validated, unused catalog only after callbacks drain.
+    bool BeginMapTransition() noexcept;
+    bool CommitMapTransition(LoadedCatalog& prepared) noexcept;
     // Call for hook loss, reentry, untracked operations or a replaced device.
     void MarkLost() noexcept;
     std::shared_ptr<const Snapshot> current() const noexcept;
+    bool VisualAssetsIfCurrent(const std::shared_ptr<const Snapshot>& expected, VisualAssets& output) const noexcept;
     // Only the raw diagnostics attached to this exact current snapshot are
     // returned. No diagnostic data enters the SceneIR or the lighting path.
     std::shared_ptr<const RawLightFrame> LightDiagnosticsIfCurrent(const std::shared_ptr<const Snapshot>& expected) const noexcept;

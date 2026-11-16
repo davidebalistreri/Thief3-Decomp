@@ -16,6 +16,8 @@ struct ViewerProvider {
     DriverStats (*driver_stats)(void*) noexcept = nullptr;
     // Optional diagnostic side channel; it must match the exact snapshot.
     std::shared_ptr<const RawLightFrame> (*light_diagnostics)(void*,const std::shared_ptr<const Snapshot>&) noexcept = nullptr;
+    // Optional exact-snapshot catalog assets, for map transitions/reloads.
+    bool (*visual_assets)(void*,const std::shared_ptr<const Snapshot>&,VisualAssets&) noexcept = nullptr;
     std::shared_ptr<const MeshOverride> bed_override;
     std::shared_ptr<const BedroomMaterialLibrary> bedroom_materials;
     bool bedroom_material_ids = false;
@@ -28,7 +30,7 @@ struct ViewerProvider {
 };
 struct ViewerStats {
     bool initialized = false, failed = false, stopped = false;
-    std::uint64_t frames = 0, dropped = 0, cleared = 0, resident_retirements = 0;
+    std::uint64_t frames = 0, dropped = 0, cleared = 0, resident_retirements = 0, renderer_rebuilds = 0;
     std::uint64_t map_epoch = 0, device_epoch = 0, frame_id = 0;
     std::uint32_t bedroom_material_runs = 0, textured_draws = 0, pbr_draws = 0, shadowed_lights = 0;
 };

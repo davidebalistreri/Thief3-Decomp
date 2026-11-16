@@ -92,6 +92,7 @@ struct Diagnostics {
            <<",\"static_mesh_rejected\":"<<s.static_mesh_rejected
            <<",\"map_witness_conflicts\":"<<s.map_witness_conflicts
            <<",\"unscoped_viewport_attempts\":"<<s.unscoped_viewport_attempts
+           <<",\"map_transitions\":"<<s.map_transitions
            <<",\"bsp_scopes\":"<<s.bsp_scopes<<",\"bsp_cache_hits\":"<<s.bsp_cache_hits
            <<",\"draw_geometry_bad\":"<<s.draw_geometry_bad
            <<",\"draw_camera_bad\":"<<s.draw_camera_bad<<",\"draw_world_bad\":"<<s.draw_world_bad
@@ -233,8 +234,8 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
         diagnostics.Open(state->provider.diagnostic_directory,state->provider.diagnostic_session_id);
         diagnostics.Event("viewer_started");
         if (state->window) { window = CreateViewerWindow(); if (!window) failed = true; }
-        auto gpu = failed || state->stop.load() ? nullptr : FlatD3D12::Create(window,128u*1024u*1024u,
-                                                                               state->provider.bedroom_materials);
+        auto active_materials=state->provider.bedroom_materials;
+        auto gpu = failed || state->stop.load() ? nullptr : FlatD3D12::Create(window,128u*1024u*1024u,active_materials);
         if (!gpu && !state->stop.load()) failed = true;
         if (gpu) {
             diagnostics.Event("viewer_initialized");
@@ -277,9 +278,23 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
                 continue;
             }
             if (current == last) continue;
+            VisualAssets assets{state->provider.bed_override,state->provider.bedroom_materials};
+            if (state->provider.visual_assets &&
+                !state->provider.visual_assets(state->provider.context.get(),current,assets)) {
+                std::lock_guard<std::mutex> lock(state->mutex);++state->stats.dropped;continue;
+            }
+            if (assets.bedroom_materials!=active_materials) {
+                // Texture descriptors are immutable for a backend. Rebuild on
+                // the worker, after prior GPU work has completed.
+                gpu.reset();active_materials=assets.bedroom_materials;
+                gpu=FlatD3D12::Create(window,128u*1024u*1024u,active_materials);
+                if (!gpu) {failed=true;break;}
+                std::lock_guard<std::mutex> lock(state->mutex);++state->stats.renderer_rebuilds;
+            }
             ResidentFlatFrame frame;
             const bool wants_image=diagnostics.WantsImage(*current);
-            if (!BuildResidentFlatFrame(*current, frame,state->provider.bed_override.get(),state->provider.bedroom_material_ids)) {
+            if (!BuildResidentFlatFrame(*current,frame,assets.bed_override.get(),
+                                        state->provider.bedroom_material_ids || bool(assets.bedroom_materials))) {
                 failed=true;break;
             }
             VerifiedLighting verified;

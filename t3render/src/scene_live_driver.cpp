@@ -4,6 +4,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 
@@ -28,6 +29,28 @@ bool SameIdentity(const Identity& a,const Identity& b) {
     return a.owner==b.owner && a.index==b.index && a.fname==b.fname && a.node==b.node &&
         a.proxy==b.proxy && a.resource==b.resource;
 }
+bool ValidCatalog(const LoadedCatalog& catalog,Epochs& epoch) {
+    if (!catalog.residency || !catalog.binding.bed || catalog.binding.bsp.empty() ||
+        !catalog.binding.bsp_catalog_complete) return false;
+    epoch=catalog.residency->epochs();
+    if (!epoch.map || !catalog.residency->MatchesMap(epoch,catalog.binding.map,catalog.binding.map_sha256) ||
+        catalog.residency->FindSceneResource(epoch.map,catalog.binding.bed->id)!=catalog.binding.bed) return false;
+    for (const auto& bsp:catalog.binding.bsp)
+        if (!bsp || catalog.residency->FindSceneResource(epoch.map,bsp->id)!=bsp) return false;
+    if (catalog.binding.static_mesh_actors.size()>8192) return false;
+    for (const auto& [id,candidate]:catalog.binding.static_mesh_actors) {
+        if (candidate.instance_id!=id || !candidate.resource ||
+            catalog.residency->FindSceneResource(epoch.map,candidate.resource->id)!=candidate.resource ||
+            candidate.material_ids.size()!=candidate.resource->geometry.sections.size()) return false;
+        for (const auto& material:candidate.material_ids)
+            if (!material || !catalog.binding.materials.count(*material)) return false;
+    }
+    if (catalog.bed_override && (catalog.bed_override->map!=catalog.binding.map ||
+        catalog.bed_override->map_sha256!=catalog.binding.map_sha256 ||
+        catalog.bed_override->instance_id!=catalog.binding.bed_instance_id ||
+        catalog.bed_override->source!=catalog.binding.bed || !catalog.bed_override->replacement)) return false;
+    return true;
+}
 } // namespace
 
 struct SceneDriver::Impl {
@@ -49,6 +72,9 @@ struct SceneDriver::Impl {
     struct ActorTrack { Identity identity{};std::uint64_t generation=0,last_seen=0;bool known=false; };
     mutable std::mutex mutex;
     LoadedCatalog catalog;
+    // Stable across catalog adoption, including exception paths that disable
+    // the driver without holding its mutex.
+    const std::shared_ptr<SceneResidency> residency;
     FrameProvenance provenance;
     const std::uint32_t pass,stage;
     std::unique_ptr<SceneWindow> window;
@@ -70,19 +96,19 @@ struct SceneDriver::Impl {
     std::uint64_t next_ticket=1,next_frame=0,generation=0,last_seen_frame=0;
     Identity identity{};
     DriverStats diagnostics;
-    bool identity_known=false,latest_map_matches=false;
+    bool identity_known=false,latest_map_matches=false,transitioning=false;
     std::atomic<bool> disabled{false};
 
     Impl(LoadedCatalog input,FrameProvenance source,std::uint32_t selected_pass,std::uint32_t selected_stage)
-        : catalog(std::move(input)),provenance(std::move(source)),pass(selected_pass),stage(selected_stage) {}
+        : catalog(std::move(input)),residency(catalog.residency),provenance(std::move(source)),pass(selected_pass),stage(selected_stage) {}
     std::uint64_t Ticket() {
         if (!next_ticket || next_ticket==UINT64_MAX) { disabled.store(true);return 0; }
         return next_ticket++;
     }
     bool Empty() const { return probes.empty() && light_samples.empty() && scopes.empty() && draws.empty() && presents.empty() && resets.empty(); }
     void ClearLightRawInterval() {pending_light_raw.reset();light_raw_seen=false;light_raw_conflict=false;}
-    void Lost() {
-        ++diagnostics.losses;
+    void Lost(bool count=true) {
+        if (count) ++diagnostics.losses;
         latest.reset();latest_thread={};latest_map_matches=false;bsp_matches.clear();
         ClearLightRawInterval();published_light_raw.reset();light_raw_owner.reset();
         for (auto& item:actor_tracks) item.second.known=false;
@@ -91,8 +117,8 @@ struct SceneDriver::Impl {
     void Disable() noexcept {
         disabled.store(true);
         try {
-            const auto epoch=catalog.residency->epochs();
-            (void)catalog.residency->DiscardFrame(epoch.map,epoch.device,UINT64_MAX);
+            const auto epoch=residency->epochs();
+            (void)residency->DiscardFrame(epoch.map,epoch.device,UINT64_MAX);
         } catch (...) {}
     }
     bool Rebind() {
@@ -111,20 +137,8 @@ SceneDriver::~SceneDriver() = default;
 std::unique_ptr<SceneDriver> SceneDriver::Create(LoadedCatalog catalog,FrameProvenance provenance,
                                                  std::uint32_t pass,std::uint32_t stage) noexcept {
     try {
-        if (!catalog.residency || !catalog.binding.bed || catalog.binding.bsp.empty() ||
-            !catalog.binding.bsp_catalog_complete || provenance.origin==FrameOrigin::Unknown || provenance.session_id.empty()) return {};
-        const auto epoch=catalog.residency->epochs();
-        if (!epoch.map || !epoch.ready || catalog.residency->FindSceneResource(epoch.map,catalog.binding.bed->id)!=catalog.binding.bed) return {};
-        for (const auto& bsp:catalog.binding.bsp)
-            if (!bsp || catalog.residency->FindSceneResource(epoch.map,bsp->id)!=bsp) return {};
-        if (catalog.binding.static_mesh_actors.size()>8192) return {};
-        for (const auto& [id,candidate]:catalog.binding.static_mesh_actors) {
-            if (candidate.instance_id!=id || !candidate.resource ||
-                catalog.residency->FindSceneResource(epoch.map,candidate.resource->id)!=candidate.resource ||
-                candidate.material_ids.size()!=candidate.resource->geometry.sections.size()) return {};
-            for (const auto& material:candidate.material_ids)
-                if (!material || !catalog.binding.materials.count(*material)) return {};
-        }
+        Epochs epoch;
+        if (!ValidCatalog(catalog,epoch) || provenance.origin==FrameOrigin::Unknown || provenance.session_id.empty()) return {};
         auto impl=std::make_unique<Impl>(std::move(catalog),std::move(provenance),pass,stage);
         if (!impl->Rebind()) return {};
         return std::unique_ptr<SceneDriver>(new SceneDriver(std::move(impl)));
@@ -151,6 +165,7 @@ void SceneDriver::EndProbe(std::uint64_t ticket,ThreadToken thread,const scene_b
         const auto record=item->second;s.probes.erase(item);
         ++s.diagnostics.probes;
         if (!SameThread(thread,record.thread) || snapshot.thread_id!=thread.id) { s.Lost();return; }
+        if (s.transitioning) return;
         if (!record.window || !s.window) return;
         ProbeCamera camera;
         const bool selected=snapshot.pass.available && snapshot.pass.value==s.pass;
@@ -264,6 +279,7 @@ bool SceneDriver::SetScopeSample(std::uint64_t ticket,ThreadToken thread,
             s.Lost();return false;
         }
         auto& scope=item->second;scope.sampled=true;scope.before=before;
+        if (s.transitioning) return true;
         if (!s.presents.empty() || !s.resets.empty() || !s.probes.empty() || !s.light_samples.empty() || !s.draws.empty() || s.scopes.size()!=1) {
             s.Lost();return false;
         }
@@ -406,7 +422,7 @@ std::uint64_t SceneDriver::BeginPresent(ThreadToken thread,std::uint64_t* frame_
         if (s.disabled.load()) return 0;
         if (s.presents.size()>=kMaxPending || s.next_frame==UINT64_MAX) { s.Disable();return 0; }
         const bool quiescent=s.Empty();
-        if (quiescent && (!s.window || s.window->needs_rebind())) (void)s.Rebind();
+        if (!s.transitioning && quiescent && (!s.window || s.window->needs_rebind())) (void)s.Rebind();
         if (!quiescent) s.Lost();
         const auto id=s.Ticket();if (!id) { s.Disable();return 0; }
         const auto frame=s.next_frame++;
@@ -425,6 +441,9 @@ WindowResult SceneDriver::EndPresent(std::uint64_t ticket,ThreadToken thread,boo
         const auto record=item->second;s.presents.erase(item);
         s.latest.reset();s.latest_thread={};s.latest_map_matches=false;
         if (!SameThread(thread,record.thread)) { s.Lost();return WindowResult::Rejected; }
+        if (s.transitioning) {
+            ++s.diagnostics.rejected;s.diagnostics.last_rejection=WindowNeedsRebind;return WindowResult::Rejected;
+        }
         const auto result=record.window && s.window ? s.window->EndPresent(record.window,thread,succeeded) : WindowResult::Rejected;
         s.published_light_raw.reset();s.light_raw_owner.reset();
         if (result==WindowResult::Published && s.pending_light_raw && !s.light_raw_conflict) {
@@ -478,18 +497,55 @@ void SceneDriver::EndReset(std::uint64_t ticket,ThreadToken thread,bool succeede
         s.identity_known=false;
     } catch (...) { impl_->Disable(); }
 }
+bool SceneDriver::BeginMapTransition() noexcept {
+    try {
+        auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
+        if (s.disabled.load() || s.transitioning) return false;
+        s.transitioning=true;s.Lost(false);return true;
+    } catch (...) {impl_->Disable();return false;}
+}
+bool SceneDriver::CommitMapTransition(LoadedCatalog& prepared) noexcept {
+    try {
+        static_assert(std::is_nothrow_move_assignable<LoadedCatalog>::value,"catalog adoption must not throw");
+        auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
+        if (s.disabled.load() || !s.transitioning || !s.Empty() ||
+            !prepared.residency || prepared.residency==s.catalog.residency) return false;
+        Epochs incoming;
+        if (!ValidCatalog(prepared,incoming)) return false;
+        auto current=s.catalog.residency;const auto previous=current->epochs();
+        if (!previous.ready || previous.map==UINT64_MAX || previous.device==UINT64_MAX) return false;
+        const Epochs next{previous.map+1,previous.device+1,true};
+        auto window=std::make_unique<SceneWindow>(*current,next,s.provenance,prepared.conventions,s.pass,s.stage);
+        if (!current->AdoptPrepared(*prepared.residency,previous,incoming,prepared.binding.map,prepared.binding.map_sha256)) return false;
+        prepared.residency=current;s.catalog=std::move(prepared);s.window=std::move(window);
+        s.latest.reset();s.latest_thread={};s.latest_map_matches=false;s.bsp_matches.clear();s.actor_tracks.clear();
+        s.identity={};s.identity_known=false;s.generation=s.last_seen_frame=0;
+        s.ClearLightRawInterval();s.published_light_raw.reset();s.light_raw_owner.reset();
+        s.transitioning=false;++s.diagnostics.map_transitions;return true;
+    } catch (...) {impl_->Disable();return false;}
+}
 void SceneDriver::MarkLost() noexcept {
     try { auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);if (!s.disabled.load()) s.Lost(); }
     catch (...) { impl_->Disable(); }
 }
 std::shared_ptr<const Snapshot> SceneDriver::current() const noexcept {
-    try { return impl_->disabled.load() ? nullptr : impl_->catalog.residency->current(); }
+    try {
+        auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
+        return s.disabled.load() || s.transitioning ? nullptr : s.residency->current();
+    }
     catch (...) { return {}; }
+}
+bool SceneDriver::VisualAssetsIfCurrent(const std::shared_ptr<const Snapshot>& expected,VisualAssets& output) const noexcept {
+    try {
+        auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
+        if (s.disabled.load() || s.transitioning || !expected || s.catalog.residency->current()!=expected) return false;
+        output={s.catalog.bed_override,s.catalog.bedroom_materials};return true;
+    } catch (...) {return false;}
 }
 std::shared_ptr<const RawLightFrame> SceneDriver::LightDiagnosticsIfCurrent(const std::shared_ptr<const Snapshot>& expected) const noexcept {
     try {
         auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
-        if (s.disabled.load() || !expected || expected!=s.light_raw_owner || !s.published_light_raw ||
+        if (s.disabled.load() || s.transitioning || !expected || expected!=s.light_raw_owner || !s.published_light_raw ||
             s.catalog.residency->current()!=expected || !RawLightFrameMatches(*s.published_light_raw,*expected)) return {};
         return s.published_light_raw;
     } catch (...) {return {};}
@@ -502,7 +558,7 @@ bool SceneDriver::SubmitIfCurrent(const std::shared_ptr<const Snapshot>& expecte
                                   bool (*submit)(void*) noexcept, void* context) noexcept {
     try {
         auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
-        return !s.disabled.load() && s.catalog.residency->SubmitIfCurrent(expected,submit,context);
+        return !s.disabled.load() && !s.transitioning && s.catalog.residency->SubmitIfCurrent(expected,submit,context);
     } catch (...) { impl_->Disable();return false; }
 }
 } // namespace t3render::live

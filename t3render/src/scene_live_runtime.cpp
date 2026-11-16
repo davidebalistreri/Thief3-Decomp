@@ -79,6 +79,10 @@ DriverStats ViewerDriverStats(void*) noexcept {
     try { auto* driver=State().driver.load(std::memory_order_acquire);return driver ? driver->stats() : DriverStats{}; }
     catch (...) { return {}; }
 }
+bool ViewerVisualAssets(void*,const std::shared_ptr<const Snapshot>& expected,VisualAssets& output) noexcept {
+    try {auto* driver=Driver(true);return driver && driver->VisualAssetsIfCurrent(expected,output);}
+    catch (...) {return false;}
+}
 struct GuardedSubmission { RuntimeState* state; SubmitOperation operation; void* argument; };
 bool SubmitIfSafe(void* context) noexcept {
     auto& item=*static_cast<GuardedSubmission*>(context);
@@ -169,11 +173,11 @@ bool RuntimeInitialize() noexcept {
                 ViewerProvider provider;provider.context=std::shared_ptr<void>(&state,[](void*){});
                 provider.current=ViewerCurrent;provider.submit_if_current=ViewerSubmit;
                 provider.driver_stats=ViewerDriverStats;
+                provider.visual_assets=ViewerVisualAssets;
                 provider.light_diagnostics=state.light_raw_diagnostics_enabled ? ViewerLightDiagnostics : nullptr;
                 provider.bed_override=std::move(bed_override);
                 provider.bedroom_materials=std::move(bedroom_materials);
-                provider.bedroom_material_ids=provider.bedroom_materials ||
-                    Environment(L"T3RENDER_SCENE_LIVE_BEDROOM_MATERIAL_IDS")==L"1";
+                provider.bedroom_material_ids=Environment(L"T3RENDER_SCENE_LIVE_BEDROOM_MATERIAL_IDS")==L"1";
                 provider.diagnostic_directory=diagnostic_directory;
                 provider.diagnostic_session_id=state.session_id;
                 state.viewer=SceneViewer::Start(std::move(provider),true);

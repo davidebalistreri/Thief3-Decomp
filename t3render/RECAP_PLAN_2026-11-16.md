@@ -451,3 +451,27 @@ esercita il viewer con geometria → frame camera-only → geometria. I sette
 test di replay sulle trace esistenti continuano a passare: i frame 1243–1245
 del tentativo precedente rimangono rifiutati. Non è stato riavviato TDS e il
 costo delle letture aggiuntive non è stato misurato nel gioco.
+
+## Aggiornamento: adozione atomica del catalogo
+
+Il driver dispone ora di una transizione esplicita per cambio o reload di
+mappa: invalida subito lo snapshot, attende il completamento delle callback e
+di eventuali Reset, poi adotta un catalogo preparato nella stessa residency.
+L'operazione incrementa le epoche di mappa e dispositivo, azzera le identità
+e richiede un nuovo confine `Present`. Cataloghi invalidi, epoche obsolete o
+operazioni in corso non possono riattivare il vecchio frame.
+
+Il viewer richiede gli override associati allo snapshot corrente e ricrea il
+backend D3D12 se cambia la libreria dei materiali: nel reload sintetico non
+riusa l'override del letto o la cache della mappa precedente. I test host
+coprono reload della stessa mappa, cambio mappa, callback in corso, Reset e
+rifiuto degli snapshot vecchi; una fixture Highball verifica viewer e nuova
+libreria senza TDS.
+
+Il punto di notifica del cambio mappa nel gioco non è stato identificato né
+collegato a questa API; anche il contesto mappa del probe luci deve essere
+aggiornato prima dell'integrazione. Il witness candidato non è trattato come
+un evento di lifecycle. Il formato del catalogo richiede ancora il letto
+ricercato e un catalogo BSP; la mappa diversa del test è sintetica. Non
+abbiamo quindi verificato il cambio mappa live o il caricamento di livelli
+privi di quel letto.

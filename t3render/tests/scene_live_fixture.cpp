@@ -399,10 +399,45 @@ bool submission_epoch_gate() {
     CHECK(!scene.SubmitIfCurrent(current,counted_submit,&calls) && calls==2);
     return true;
 }
+
+bool prepared_catalog_transition() {
+    SceneResidency scene;CHECK(setup(scene));const auto old_epoch=scene.epochs();
+    CHECK(scene.Publish(frame(old_epoch,42)));auto old=scene.current();
+    SceneResidency prepared;CHECK(setup(prepared));const auto incoming=prepared.epochs();
+    const auto bed=prepared.FindSceneResource(incoming.map,"mesh:bed");CHECK(bed && bed!=old->meshes[0].resource);
+    auto wrong=incoming;++wrong.device;
+    CHECK(!scene.AdoptPrepared(prepared,old_epoch,wrong,"bedroom",hash_a));
+    CHECK(!scene.AdoptPrepared(prepared,old_epoch,incoming,"different",hash_a));
+    CHECK(!scene.AdoptPrepared(scene,old_epoch,old_epoch,"bedroom",hash_a));
+    CHECK(scene.current()==old && prepared.FindSceneResource(incoming.map,"mesh:bed")==bed);
+    CHECK(scene.AdoptPrepared(prepared,old_epoch,incoming,"bedroom",hash_a));
+    const auto epoch=scene.epochs();CHECK(epoch.map==old_epoch.map+1 && epoch.device==old_epoch.device+1 && epoch.ready);
+    CHECK(!scene.current() && scene.FindSceneResource(epoch.map,"mesh:bed")==bed);
+    CHECK(!prepared.epochs().ready && !prepared.FindSceneResource(incoming.map,"mesh:bed"));
+    CHECK(!scene.Publish(frame(old_epoch,43)));CHECK(scene.Publish(frame(epoch,0)));
+    unsigned calls=0;CHECK(!scene.SubmitIfCurrent(old,counted_submit,&calls) && calls==0);
+    CHECK(!DisplayContinuityMatches(*old,*scene.current()));
+    CHECK(old->meshes[0].resource!=scene.current()->meshes[0].resource);
+    CHECK(!scene.AdoptPrepared(prepared,epoch,incoming,"bedroom",hash_a));
+
+    SceneResidency used;CHECK(setup(used));const auto used_epoch=used.epochs();
+    CHECK(used.Publish(frame(used_epoch,1)));auto current=scene.current();
+    CHECK(!scene.AdoptPrepared(used,epoch,used_epoch,"bedroom",hash_a));CHECK(scene.current()==current);
+    SceneResidency next;CHECK(next.BeginMap(0,"next",hash_b));const auto next_epoch=next.epochs();
+    CHECK(next.AddMaterial(next_epoch.map,{"mat:red","red"}));CHECK(next.AddMaterial(next_epoch.map,{"mat:blue","blue"}));
+    CHECK(next.AddResource(next_epoch.map,resource("mesh:bed",ResourceKind::StaticMesh)));
+    CHECK(next.AddResource(next_epoch.map,resource("bsp:wall",ResourceKind::BspBlock)));
+    const auto reset=scene.BeginReset();CHECK(reset);
+    CHECK(!scene.AdoptPrepared(next,epoch,next_epoch,"next",hash_b));CHECK(scene.EndReset(reset,true));
+    const auto after_reset=scene.epochs();CHECK(scene.AdoptPrepared(next,after_reset,next_epoch,"next",hash_b));
+    CHECK(scene.MatchesMap(scene.epochs(),"next",hash_b));
+    CHECK(scene.Publish(frame(scene.epochs(),1)) && scene.current()->map=="next");
+    return true;
+}
 } // namespace
 
 int main() {
     if (!updates_and_flat_adapter() || !bedroom_material_selection() || !light_lifecycle_and_evidence() || !atomic_validation_and_generations() ||
-        !reset_and_map_change() || !concurrent_readers() || !submission_epoch_gate()) return 1;
+        !reset_and_map_change() || !concurrent_readers() || !submission_epoch_gate() || !prepared_catalog_transition()) return 1;
     std::cout << "scene_live_fixture=ok\n";
 }

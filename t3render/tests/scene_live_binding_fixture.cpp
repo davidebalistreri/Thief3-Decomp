@@ -1,5 +1,6 @@
 #include "../src/scene_live_binding.hpp"
 #include "../src/scene_live_driver.hpp"
+#include "../src/scene_live_flat.hpp"
 #include "../src/scene_live_lighting.hpp"
 #ifdef T3RENDER_TEST_LIVE_DX12_DRIVER
 #include "../src/scene_live_viewer.hpp"
@@ -8,6 +9,8 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <atomic>
+#include <thread>
 
 using namespace t3render::live;
 using namespace t3render::scene_bridge;
@@ -94,6 +97,26 @@ SubmissionSample bed_scope() {
 SubmissionSample bsp_scope() {
     SubmissionSample s;s.valid=true;s.self=0x1000;s.pass=0;s.element=0x10000+7*0x1ac;s.vtable=0x10e4a668;
     s.type=5;matrix(s.matrix);s.bsp_source=0x9000;s.bsp_blocks=0x10000;s.bsp_index=7;return s;
+}
+bool prepared_catalog(LoadedCatalog& out,const std::string& map="bedroom",const std::string& fingerprint=map_hash,
+                      bool with_override=false) {
+    auto c=catalog();c.map=map;c.map_sha256=fingerprint;
+    c.bed_instance_id="actor:"+map+":"+fingerprint+":StaticMeshActor__1520";
+    auto bed=*c.bed;bed.id="mesh:"+map+":"+fingerprint+":"+bundle_hash+":innbed1a1";
+    auto block=*c.bsp[0];block.id="bsp:"+map+":"+fingerprint+":5:100";block.source_sha256=fingerprint;
+    auto residency=std::make_shared<SceneResidency>();CHECK(residency->BeginMap(0,map,fingerprint));
+    const auto epoch=residency->epochs();CHECK(residency->AddMaterial(epoch.map,c.materials.at("mat:stone")));
+    CHECK(residency->AddResource(epoch.map,bed));CHECK(residency->AddResource(epoch.map,block));
+    c.bed=residency->FindSceneResource(epoch.map,bed.id);c.bsp[0]=residency->FindSceneResource(epoch.map,block.id);
+    LoadedCatalog value;value.residency=residency;value.binding=std::move(c);
+    value.conventions.length_unit=LengthUnit::T3Unit;value.conventions.axes=Axes::T3Xyz;value.conventions.up_axis=UpAxis::Z;
+    if (with_override) {
+        auto override=std::make_shared<MeshOverride>();override->map=map;override->map_sha256=fingerprint;
+        override->instance_id=value.binding.bed_instance_id;override->source=value.binding.bed;
+        bed.id="remaster:fixture:bed";override->replacement=std::make_shared<const Resource>(std::move(bed));
+        value.bed_override=std::move(override);
+    }
+    out=std::move(value);return true;
 }
 bool matching() {
     auto c=catalog();auto p=probe();auto bed=bed_scope();auto block=bsp_scope();
@@ -320,6 +343,91 @@ bool delivery() {
     auto changed=bed;changed.owner++;CHECK(!window.EndScope(scope,thread,ScopeUnchanged(bed,changed)));
     present=window.BeginPresent(thread,3,true);CHECK(present);CHECK(window.EndPresent(present,thread,true)==WindowResult::Rejected);
     CHECK(!state.current());
+    return true;
+}
+
+bool driver_map_transition() {
+    LoadedCatalog initial;CHECK(prepared_catalog(initial,"bedroom",map_hash,true));
+    auto residency=initial.residency;const auto previous_override=initial.bed_override;
+    FrameProvenance source;source.origin=FrameOrigin::Synthetic;source.session_id="transition-fixture";
+    auto driver=SceneDriver::Create(std::move(initial),source,0,1);CHECK(driver);
+    const ThreadToken thread{17,123};auto p=probe();const auto bed=bed_scope(),bsp=bsp_scope();
+    const IndexedDraw args{true,true,0,1,0,3};
+    DrawObservation state;state.available=true;state.view=state.projection=state.world=identity;state.viewport={0,0,640,480,0,.5f};
+    auto present=[&]() {auto t=driver->BeginPresent(thread);return driver->EndPresent(t,thread,true);};
+    auto sample=[&]() {auto t=driver->BeginProbe(thread);if (!t)return false;driver->EndProbe(t,thread,p);return true;};
+    auto submit=[&](const SubmissionSample& value) {
+        auto scope=driver->BeginScope(thread,1,0);if (!scope || !driver->SetScopeSample(scope,thread,value))return false;
+        auto draw=driver->BeginDraw(thread,scope,args);if (!draw.ticket || !draw.needs_state)return false;
+        driver->EndDraw(draw.ticket,thread,true,state,state);driver->EndScope(scope,thread,value);return true;
+    };
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bed));CHECK(present()==WindowResult::Published);
+    auto old=driver->current();CHECK(old);VisualAssets visuals;
+    CHECK(driver->VisualAssetsIfCurrent(old,visuals) && visuals.bed_override==previous_override);
+    LoadedCatalog prepared;CHECK(prepared_catalog(prepared,"bedroom",map_hash,true));
+    const auto incoming_residency=prepared.residency;const auto incoming_bed=prepared.binding.bed;
+    const auto incoming_override=prepared.bed_override;const auto old_epoch=residency->epochs();
+    CHECK(sample());auto scope=driver->BeginScope(thread,1,0);CHECK(scope && driver->SetScopeSample(scope,thread,bed));
+    const auto draw=driver->BeginDraw(thread,scope,args);CHECK(draw.ticket && draw.needs_state);
+    const auto losses=driver->stats().losses;
+    CHECK(driver->BeginMapTransition() && !driver->BeginMapTransition() && !driver->current() &&
+          driver->stats().losses==losses);
+    CHECK(!driver->VisualAssetsIfCurrent(old,visuals));bool called=false;
+    CHECK(!driver->SubmitIfCurrent(old,[](void* p) noexcept {*static_cast<bool*>(p)=true;return true;},&called) && !called);
+    CHECK(!driver->CommitMapTransition(prepared)); // draw and scope still in flight
+    driver->EndDraw(draw.ticket,thread,true,state,state);driver->EndScope(scope,thread,bed);
+    const auto late_probe=driver->BeginProbe(thread);CHECK(late_probe && !driver->CommitMapTransition(prepared));
+    driver->EndProbe(late_probe,thread,p);
+    const auto late_scope=driver->BeginScope(thread,1,0);CHECK(late_scope && driver->SetScopeSample(late_scope,thread,bed));
+    const auto late_draw=driver->BeginDraw(thread,late_scope,args);CHECK(late_draw.ticket && !late_draw.needs_state);
+    CHECK(!driver->CommitMapTransition(prepared));driver->EndDraw(late_draw.ticket,thread,true,{},{});
+    driver->EndScope(late_scope,thread,bed);
+    auto pending=driver->BeginPresent(thread);CHECK(pending && !driver->CommitMapTransition(prepared));
+    CHECK(driver->EndPresent(pending,thread,true)==WindowResult::Rejected);
+    CHECK(driver->stats().last_rejection & WindowNeedsRebind);
+    auto invalid=prepared;invalid.binding.map="other";
+    CHECK(!driver->CommitMapTransition(invalid) && incoming_residency->epochs().ready);
+    auto reset=driver->BeginReset(thread);CHECK(reset && !driver->CommitMapTransition(prepared));
+    driver->EndReset(reset,thread,false);CHECK(!driver->CommitMapTransition(prepared));
+    reset=driver->BeginReset(thread);CHECK(reset);driver->EndReset(reset,thread,true);
+    const auto before_adoption=residency->epochs();
+    CHECK(driver->CommitMapTransition(prepared) && !prepared.residency && !incoming_residency->epochs().ready);
+    const auto next=residency->epochs();CHECK(next.map==old_epoch.map+1 && next.device==before_adoption.device+1);
+    CHECK(residency->FindSceneResource(next.map,incoming_bed->id)==incoming_bed);
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bed));CHECK(present()==WindowResult::Published);
+    auto current=driver->current();CHECK(current && current->meshes[0].resource==incoming_bed &&
+        current->meshes[0].selection.generation==1 && !DisplayContinuityMatches(*old,*current));
+    CHECK(driver->VisualAssetsIfCurrent(current,visuals) && visuals.bed_override==incoming_override &&
+          visuals.bed_override->source==incoming_bed);
+    ResidentFlatFrame frame;CHECK(!BuildResidentFlatFrame(*current,frame,previous_override.get()));
+    CHECK(BuildResidentFlatFrame(*current,frame,visuals.bed_override.get()) && frame.override_instances==1);
+    CHECK(!driver->SubmitIfCurrent(old,[](void*) noexcept {return true;},nullptr));
+
+    LoadedCatalog other;CHECK(prepared_catalog(other,"cellar",bundle_hash,true));
+    CHECK(driver->BeginMapTransition() && driver->CommitMapTransition(other));
+    CHECK(present()==WindowResult::Primed);text(p.target.outer[0].name,"LOADGAME:cellar");
+    CHECK(sample());CHECK(submit(bed));CHECK(submit(bsp));CHECK(present()==WindowResult::Published);
+    CHECK(driver->current()->map=="cellar" && driver->current()->map_sha256==bundle_hash &&
+          driver->current()->meshes.size()==1 && driver->current()->bsp.size()==1 &&
+          driver->stats().map_transitions==2);
+    LoadedCatalog reload;CHECK(prepared_catalog(reload,"bedroom",map_hash,true));
+    std::atomic<bool> done{false},bad{false};std::atomic<unsigned> reads{0};
+    std::thread reader([&] {
+        while (!done.load()) {
+            auto snapshot=driver->current();VisualAssets assets;
+            if (snapshot && driver->VisualAssetsIfCurrent(snapshot,assets)) {
+                if (!assets.bed_override || assets.bed_override->map!=snapshot->map ||
+                    assets.bed_override->map_sha256!=snapshot->map_sha256 || snapshot->meshes.empty() ||
+                    assets.bed_override->source!=snapshot->meshes[0].resource) bad.store(true);
+                ++reads;
+            }
+        }
+    });
+    for (unsigned i=0;i<100000 && !reads.load();++i) std::this_thread::yield();
+    bool ok=reads.load() && driver->BeginMapTransition() && driver->CommitMapTransition(reload);
+    p=probe();ok=ok && present()==WindowResult::Primed && sample() && submit(bed) && present()==WindowResult::Published;
+    done.store(true);reader.join();
+    CHECK(ok && !bad.load() && driver->current()->map=="bedroom" && driver->stats().map_transitions==3);
     return true;
 }
 
@@ -554,6 +662,9 @@ bool pipeline_submit(void* context,const std::shared_ptr<const Snapshot>& expect
                      SubmitOperation submit,void* argument) noexcept {
     return static_cast<PipelineFixture*>(context)->driver->SubmitIfCurrent(expected,submit,argument);
 }
+bool pipeline_visuals(void* context,const std::shared_ptr<const Snapshot>& expected,VisualAssets& output) noexcept {
+    return static_cast<PipelineFixture*>(context)->driver->VisualAssetsIfCurrent(expected,output);
+}
 bool pipeline_wait(SceneViewer& viewer,std::uint64_t frames,std::uint64_t cleared=0) {
     const auto deadline=GetTickCount64()+20000;
     while (GetTickCount64()<deadline) {
@@ -576,6 +687,7 @@ bool driver_gpu_pipeline() {
     auto state=std::make_shared<PipelineFixture>();state->driver=SceneDriver::Create(std::move(loaded),source,0,1);
     CHECK(state->driver);
     ViewerProvider provider;provider.context=state;provider.current=pipeline_current;provider.submit_if_current=pipeline_submit;
+    provider.visual_assets=pipeline_visuals;
     auto viewer=SceneViewer::Start(std::move(provider),false);CHECK(viewer && pipeline_wait(*viewer,0));
     auto& driver=*state->driver;const ThreadToken thread{17,123};auto p=probe();
     const auto bed=bed_scope(),bsp=bsp_scope();const IndexedDraw args{true,true,0,1,0,3};
@@ -626,17 +738,35 @@ bool driver_gpu_pipeline() {
     viewer->Notify();CHECK(pipeline_wait(*viewer,5,2));
     CHECK(viewer->stats().frame_id==7 && driver.current()->meshes.size()==1 && driver.current()->bsp.size()==1 &&
           driver.current()->camera.viewport_source==ViewportSource::ScopedDraw);
+    LoadedCatalog replacement;CHECK(prepared_catalog(replacement,"bedroom",map_hash,true));
+    auto library=std::make_shared<BedroomMaterialLibrary>();
+    const char* names[]{"remaster:material:stone_wall_v2","remaster:material:wood_floor_v2"};
+    for (unsigned i=0;i<2;++i) {
+        library->materials[i].id=names[i];
+        for (unsigned channel=0;channel<4;++channel) {
+            library->materials[i].source_sha256[channel]=map_hash;
+            library->materials[i].channels[channel].mips.push_back({1,1,{100,120,140,255}});
+        }
+    }
+    replacement.bedroom_materials=library;const auto new_override=replacement.bed_override;
+    CHECK(driver.BeginMapTransition());viewer->Notify();CHECK(pipeline_wait(*viewer,5,3));
+    CHECK(driver.CommitMapTransition(replacement));CHECK(present()==WindowResult::Primed);
+    CHECK(sample());CHECK(submit(bed));CHECK(submit(bsp));CHECK(present()==WindowResult::Published);
+    viewer->Notify();CHECK(pipeline_wait(*viewer,6,3));VisualAssets selected;
+    CHECK(viewer->stats().frame_id==9 && viewer->stats().renderer_rebuilds==1 &&
+          driver.VisualAssetsIfCurrent(driver.current(),selected) && selected.bed_override==new_override &&
+          selected.bedroom_materials==library);
     viewer->Stop();
     const auto deadline=GetTickCount64()+20000;
     while (!viewer->stats().stopped && GetTickCount64()<deadline) Sleep(10);
     CHECK(viewer->stats().stopped && !viewer->stats().failed);
-    std::cout<<"scene_live_driver_dx12_fixture=ok source=synthetic light_same_window=ok map_conflict_clear=ok frame_reset_empty=ok\n";
+    std::cout<<"scene_live_driver_dx12_fixture=ok source=synthetic light_same_window=ok map_reload_assets=ok frame_reset_empty=ok\n";
     return true;
 }
 #endif
 } // namespace
 int main() {
-    if(!matching() || !static_mesh_matching() || !static_mesh_driver_lifecycle() || !delivery() || !driver_camera_only() || !driver_delivery())return 1;
+    if(!matching() || !static_mesh_matching() || !static_mesh_driver_lifecycle() || !delivery() || !driver_map_transition() || !driver_camera_only() || !driver_delivery())return 1;
 #ifdef T3RENDER_TEST_LIVE_DX12_DRIVER
     if (!driver_gpu_pipeline()) return 1;
 #endif

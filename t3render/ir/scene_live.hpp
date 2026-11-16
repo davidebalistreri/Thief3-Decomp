@@ -185,6 +185,12 @@ class SceneResidency {
 public:
     // Call on every observed map unload/load, including reloading the same map.
     bool BeginMap(std::uint64_t expected_map_epoch, const std::string& map, const std::string& map_sha256);
+    // Atomically consume an unused, prepared catalog into this residency.
+    // Both epoch tickets and the prepared map identity must still match.
+    // The caller must separately stop and drain its producer callbacks.
+    bool AdoptPrepared(SceneResidency& prepared, Epochs expected_current, Epochs expected_prepared,
+                       const std::string& map, const std::string& map_sha256) noexcept;
+    bool MatchesMap(Epochs expected, const std::string& map, const std::string& map_sha256) const;
     // Call before forwarding every Reset, whether it later succeeds or fails.
     std::uint64_t BeginReset(); // zero means no reset ticket
     bool EndReset(std::uint64_t ticket, bool succeeded);

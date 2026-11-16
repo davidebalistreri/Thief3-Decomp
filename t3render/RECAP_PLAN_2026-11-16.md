@@ -302,7 +302,19 @@ fixture hanno verificato movimento e visibilità con `GENrafters1` offline e
 camera sintetica, oltre a rifiuto delle corrispondenze incoerenti. Non è ancora
 una prova di alcun attore aggiuntivo nel gioco.
 
-La lettura completa è costosa: una fixture con 1.000 oggetti non pertinenti ha
-misurato 428 letture per uno scope generico. Il percorso rimane disattivato per
-default; prestazioni, callback reali e cambio mappa attendono una verifica TDS
-successiva. I cinque materiali ignoti e le classi attore diverse restano aperti.
+La lettura completa è costosa: nella stessa fixture con 1.000 oggetti non
+pertinenti uno scope generico è passato da 428 a 359 letture. Il campionamento
+completo, live con letto e live senza letto è passato rispettivamente da
+1.409/346/243 a 1.354/295/235 letture. Classe e outer vengono cercati insieme,
+mantenendo i controlli di unicità e stabilità; le stringhe sono lette a blocchi
+con fallback ai confini di memoria. In una tabella sintetica da 16.005 slot
+restano cinque scansioni complete per osservazione generica, contro sette prima.
+Sono conteggi sintetici, non misure FPS: il lag segnalato non è stato ancora
+riverificato nel gioco. Il percorso rimane disattivato per default; prestazioni,
+callback reali e cambio mappa attendono una verifica TDS successiva. I cinque
+materiali ignoti e le classi attore diverse restano aperti.
+
+Per questa ottimizzazione sono passati il test host del probe e i 15 test
+`test_scene_live*.py`, incluso il confronto materiali sulla cattura locale
+2864. La build MinGW del proxy sperimentale e delle due fixture DX12 è passata;
+queste fixture non sono state rieseguite su GPU per questo aggiornamento.

@@ -52,13 +52,21 @@ inline bool ReadProbeBytesOffset(const ProbeReader& reader, std::uint32_t base, 
 }
 
 inline bool ReadMeshNodeName(const ProbeReader& reader, std::uint32_t address, char (&name)[128]) noexcept {
-    for (std::uint32_t i = 0; i < sizeof(name); ++i) {
-        std::uint32_t at = 0;
-        unsigned char c = 0;
-        if (!ProbeOffset(address, i, at) || !ReadProbe(reader, at, &c, 1)) return false;
-        if (!c) { name[i] = '\0'; return i != 0; }
-        if (c < 32 || c >= 127 || i + 1 == sizeof(name)) return false;
-        name[i] = static_cast<char>(c);
+    // A node name has no length prefix. Read bounded chunks for the common
+    // case, but retry bytewise if a chunk crosses an unreadable boundary:
+    // a valid terminator may still precede that boundary.
+    constexpr std::uint32_t kChunk=32;
+    for (std::uint32_t first=0;first<sizeof(name);first+=kChunk) {
+        std::uint32_t at=0;unsigned char bytes[kChunk]{};
+        if (!ProbeOffset(address,first,at)) return false;
+        const bool bulk=ReadProbe(reader,at,bytes,sizeof(bytes));
+        for (std::uint32_t j=0;j<kChunk;++j) {
+            const auto i=first+j;unsigned char c=bytes[j];
+            if (!bulk && (!ProbeOffset(address,i,at) || !ReadProbe(reader,at,&c,1))) return false;
+            if (!c) {name[i]='\0';return i!=0;}
+            if (c<32 || c>=127 || i+1==sizeof(name)) return false;
+            name[i]=static_cast<char>(c);
+        }
     }
     return false;
 }
@@ -99,14 +107,26 @@ inline void ReadMeshNodeSections(const ProbeReader& reader, std::uint32_t elemen
     const auto material_bytes = node.section_count * sizeof(materials[0]);
     if (!ReadProbe(reader, node.section_array.value, sections, section_bytes) ||
         !ReadProbe(reader, node.instance_materials.value, materials, material_bytes)) return;
+    struct SharedName { std::uint32_t address=0, uses=0; bool available=false; char text[128]{}; };
+    SharedName names[2*kMaxMeshNodeSections]{};std::size_t name_count=0;
+    auto name_for=[&](std::uint32_t address,char (&text)[128],bool& available) noexcept {
+        if (!address) {available=false;return true;}
+        for (std::size_t i=0;i<name_count;++i) if (names[i].address==address) {
+            ++names[i].uses;available=names[i].available;std::memcpy(text,names[i].text,sizeof(text));return true;
+        }
+        if (name_count>=2*kMaxMeshNodeSections) return false;
+        auto& item=names[name_count];item.address=address;item.uses=1;
+        if (!ReadMeshSectionName(reader,address,item.text,item.available)) return false;
+        ++name_count;available=item.available;std::memcpy(text,item.text,sizeof(text));return true;
+    };
     for (std::uint32_t i = 0; i < node.section_count; ++i) {
         auto& out = node.sections[i];
         out.triangles = sections[i][3]; out.first_vertex = sections[i][4]; out.vertex_count = sections[i][5];
         out.first_index = sections[i][6]; out.index_count = sections[i][7]; out.unknown = sections[i][8];
         if (std::uint64_t{out.first_vertex} + out.vertex_count > node.vertex_count ||
             std::uint64_t{out.first_index} + out.index_count > node.index_count ||
-            !ReadMeshSectionName(reader, sections[i][0], out.name, out.name_available) ||
-            !ReadMeshSectionName(reader, materials[i][0], out.material_name, out.material_name_available)) return;
+            !name_for(sections[i][0],out.name,out.name_available) ||
+            !name_for(materials[i][0],out.material_name,out.material_name_available)) return;
     }
     const auto node_after = ReadProbeOffset(reader, element, 0x108);
     const auto sections_pointer_after = ReadProbeOffset(reader, node.address.value, 0x30);
@@ -120,6 +140,13 @@ inline void ReadMeshNodeSections(const ProbeReader& reader, std::uint32_t elemen
         !ReadProbe(reader, node.instance_materials.value, materials_after, material_bytes) ||
         std::memcmp(sections, sections_after, section_bytes) != 0 ||
         std::memcmp(materials, materials_after, material_bytes) != 0) return;
+    // Shared names are rechecked after all section records, so caching does
+    // not rely on an earlier string when a later section is sampled.
+    for (std::size_t i=0;i<name_count;++i) if (names[i].uses>1) {
+        char text[128]{};bool available=false;
+        if (!ReadMeshSectionName(reader,names[i].address,text,available) || available!=names[i].available ||
+            std::memcmp(text,names[i].text,sizeof(text))!=0) return;
+    }
     node.sections_copied = node.section_count;
     node.sections_available = true;
 }
@@ -403,6 +430,30 @@ inline bool ReadProbeName(const ProbeReader& reader, std::uint32_t fname, char (
     return true;
 }
 
+inline bool ReadOwnerPose(const ProbeReader& reader,std::uint32_t owner,
+                          std::uint32_t (&location)[3],std::uint32_t (&rotation)[3]) noexcept {
+    std::uint32_t pose[6]{};
+    if (ReadProbeBytesOffset(reader,owner,0x2c,pose,sizeof(pose))) {
+        std::memcpy(location,pose,sizeof(location));std::memcpy(rotation,pose+3,sizeof(rotation));return true;
+    }
+    // Preserve acceptance when unrelated bytes in a bulk read are inaccessible.
+    return ReadProbeBytesOffset(reader,owner,0x2c,location,sizeof(location)) &&
+           ReadProbeBytesOffset(reader,owner,0x38,rotation,sizeof(rotation));
+}
+
+inline void ReadOwnerNamedPose(const ProbeReader& reader,std::uint32_t owner,ProbeEntry& item) noexcept {
+    std::uint32_t fields[9]{};
+    if (ReadProbeBytesOffset(reader,owner,0x20,fields,sizeof(fields))) {
+        item.owner_fname={fields[0],true};item.owner_class={fields[1],true};
+        std::memcpy(item.owner_location_bits,fields+3,sizeof(item.owner_location_bits));
+        std::memcpy(item.owner_rotation_bits,fields+6,sizeof(item.owner_rotation_bits));
+        item.owner_location_available=item.owner_rotation_available=true;return;
+    }
+    item.owner_fname=ReadProbeOffset(reader,owner,0x20);item.owner_class=ReadProbeOffset(reader,owner,0x24);
+    item.owner_location_available=ReadProbeBytesOffset(reader,owner,0x2c,item.owner_location_bits,sizeof(item.owner_location_bits));
+    item.owner_rotation_available=ReadProbeBytesOffset(reader,owner,0x38,item.owner_rotation_bits,sizeof(item.owner_rotation_bits));
+}
+
 inline void ReadProbeOwners(const ProbeReader& reader, ProbeSnapshot& snapshot) noexcept {
     constexpr std::uint32_t kObjects = 0x10f3e4a0;
     constexpr std::uint32_t kMaximumObjects = 65536;
@@ -461,13 +512,8 @@ inline void ReadProbeOwners(const ProbeReader& reader, ProbeSnapshot& snapshot) 
         item.owner_table_member = true;
         const std::uint32_t owner = item.owner_candidate.value;
         item.owner_object_index = ReadProbeOffset(reader, owner, 0x04);
-        item.owner_fname = ReadProbeOffset(reader, owner, 0x20);
-        item.owner_class = ReadProbeOffset(reader, owner, 0x24);
+        ReadOwnerNamedPose(reader,owner,item);
         item.owner_backlink = ReadProbeOffset(reader, owner, 0xb4);
-        item.owner_location_available = ReadProbeBytesOffset(reader, owner, 0x2c,
-            item.owner_location_bits, sizeof(item.owner_location_bits));
-        item.owner_rotation_available = ReadProbeBytesOffset(reader, owner, 0x38,
-            item.owner_rotation_bits, sizeof(item.owner_rotation_bits));
         item.object_matrix_available = ReadProbeBytesOffset(reader, item.address.value, 0x04,
             item.object_matrix_bits, sizeof(item.object_matrix_bits));
         if (item.owner_fname.available) item.owner_name_available = ReadProbeName(reader, item.owner_fname.value, item.owner_name);
@@ -498,8 +544,7 @@ inline void ReadProbeOwners(const ProbeReader& reader, ProbeSnapshot& snapshot) 
             check_count.available && check_count.value == snapshot.count.value &&
             check_array.available && check_array.value == snapshot.array.value &&
             check_entry.available && check_entry.value == item.address.value &&
-            ReadProbeBytesOffset(reader, owner, 0x2c, location, sizeof(location)) &&
-            ReadProbeBytesOffset(reader, owner, 0x38, rotation, sizeof(rotation)) &&
+            ReadOwnerPose(reader,owner,location,rotation) &&
             ReadProbeBytesOffset(reader, item.address.value, 0x04, matrix, sizeof(matrix)) &&
             std::memcmp(location, item.owner_location_bits, sizeof(location)) == 0 &&
             std::memcmp(rotation, item.owner_rotation_bits, sizeof(rotation)) == 0 &&
@@ -524,12 +569,13 @@ inline bool FindUniqueProbeObject(const ProbeReader& reader, const ProbeArray32&
     return found == 1 && ReadProbe(reader, 0x10f3e4a0, &after, sizeof(after)) && SameProbeArray(table, after);
 }
 
-inline ProbeNamedObject ReadNamedProbeObject(const ProbeReader& reader, const ProbeArray32& table,
-                                             ProbeValue pointer) noexcept {
+inline ProbeNamedObject ReadNamedProbeObjectAtSlot(const ProbeReader& reader,const ProbeArray32& table,
+                                                   ProbeValue pointer,std::uint32_t slot) noexcept {
     ProbeNamedObject result;
     result.address = pointer;
-    std::uint32_t slot = 0, slot_address = 0;
-    if (!pointer.available || !FindUniqueProbeObject(reader, table, pointer.value, slot) ||
+    std::uint32_t slot_address = 0;
+    if (!pointer.available || !pointer.value || !ValidProbeArray(table,static_cast<std::uint32_t>(kMaxTargetObjects)) ||
+        slot>=table.count ||
         !ProbeOffset(table.data, slot * 4, slot_address)) return result;
     const auto member = ReadProbeU32(reader, slot_address);
     if (!member.available || member.value != pointer.value) return result;
@@ -549,6 +595,43 @@ inline ProbeNamedObject ReadNamedProbeObject(const ProbeReader& reader, const Pr
         check_name.value == result.fname.value && check_outer.available && check_outer.value == result.outer.value &&
         ReadProbe(reader, 0x10f3e4a0, &after, sizeof(after)) && SameProbeArray(table, after);
     return result;
+}
+
+inline ProbeNamedObject ReadNamedProbeObject(const ProbeReader& reader, const ProbeArray32& table,
+                                             ProbeValue pointer) noexcept {
+    std::uint32_t slot=0;
+    if (!pointer.available || !FindUniqueProbeObject(reader,table,pointer.value,slot)) {
+        ProbeNamedObject result;result.address=pointer;return result;
+    }
+    return ReadNamedProbeObjectAtSlot(reader,table,pointer,slot);
+}
+
+// Establish unique membership for a class and outer in one bounded table
+// sweep. Both objects are still individually checked at their slots before
+// and after their fields and names are read.
+inline bool ReadNamedProbePair(const ProbeReader& reader,const ProbeArray32& table,
+                               ProbeValue first,ProbeValue second,
+                               ProbeNamedObject& first_out,ProbeNamedObject& second_out) noexcept {
+    if (!first.available || !second.available || !first.value || !second.value || first.value==second.value ||
+        !ValidProbeArray(table,static_cast<std::uint32_t>(kMaxTargetObjects))) return false;
+    std::uint32_t first_slot=0,second_slot=0,first_count=0,second_count=0;
+    for (std::uint32_t start=0;start<table.count;) {
+        std::uint32_t values[128]{};const auto count=std::min<std::uint32_t>(128,table.count-start);
+        std::uint32_t address=0;
+        if (!ProbeOffset(table.data,start*4,address) || !ReadProbe(reader,address,values,count*4)) return false;
+        for (std::uint32_t i=0;i<count;++i) {
+            if (values[i]==first.value) {first_slot=start+i;if (++first_count>1)return false;}
+            if (values[i]==second.value) {second_slot=start+i;if (++second_count>1)return false;}
+        }
+        start+=count;
+    }
+    ProbeArray32 after{};
+    if (first_count!=1 || second_count!=1 || !ReadProbe(reader,0x10f3e4a0,&after,sizeof(after)) ||
+        !SameProbeArray(table,after)) return false;
+    const auto first_sample=ReadNamedProbeObjectAtSlot(reader,table,first,first_slot);
+    const auto second_sample=ReadNamedProbeObjectAtSlot(reader,table,second,second_slot);
+    if (!first_sample.member || !first_sample.stable || !second_sample.member || !second_sample.stable) return false;
+    first_out=first_sample;second_out=second_sample;return true;
 }
 
 inline void ReadTargetProbe(const ProbeReader& reader, ProbeSnapshot& snapshot) noexcept {

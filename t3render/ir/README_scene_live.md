@@ -306,10 +306,14 @@ only no accepted submission in this selected scope, not actor destruction.
 viewer telemetry show attempted/accepted/rejected scope samples.
 
 This path performs expensive bounded table, asset and mesh-pool reads per
-candidate scope. An in-memory fixture with 1,000 unrelated objects used 428
-reads for one complete generic scope; this is a read-count measurement, not a
-frame-rate result. It stays off by default and needs optimization and a later
-coordinated TDS test before evaluating live coverage or the reported lag.
+candidate scope. In the same in-memory fixture with 1,000 unrelated objects,
+the complete generic scope used 428 reads before the probe optimization and
+359 afterwards. Two class/outer membership sweeps are now combined while
+retaining independent slot and stability checks. A synthetic 16,005-slot table
+still needs five complete sweeps (630 reads of 128-slot chunks, including the
+last partial chunks) per generic observation, down from seven before the
+change. These are read counts, not frame-rate results. The path stays off by
+default; live coverage and the reported lag require a later coordinated TDS test.
 Host fixtures reject ambiguous identity/materials and exercise transform,
 visibility, reappearance and Reset. A Highball GPU fixture used offline
 `StaticMeshActor__258 / GENrafters1` geometry with a synthetic camera and
@@ -371,7 +375,7 @@ For non-capture frames, the live probe avoids scanning every UObject by name;
 other passes use a minimal sample. The stronger full probe is still used when
 a capture is active. In a synthetic registry with 1,000 unrelated objects,
 the full, live-bed and live-no-bed paths required 1,409, 346 and 243 reads
-respectively in the updated fixture. This is a
+before the optimization and 1,354, 295 and 235 afterwards, respectively. This is a
 read-count comparison, not a measured frame-rate improvement. The expensive
 probe and DXGI presentation inside the scene lock are plausible sources of the
 lag reported in the two TDS attempts; their individual costs remain unmeasured.

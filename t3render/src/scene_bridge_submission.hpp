@@ -144,9 +144,9 @@ inline ProbeStaticMesh SampleVisibleStaticMesh(const ProbeReader& reader,const P
     ProbeArray32 table{};
     if (!ReadProbe(reader,0x10f3e4a0,&table,sizeof(table)) ||
         !ValidProbeArray(table,static_cast<std::uint32_t>(kMaxTargetObjects))) return result;
-    const auto cls=ReadNamedProbeObject(reader,table,entry.owner_class);
     const auto outer_pointer=ReadProbeOffset(reader,entry.owner_candidate.value,0x18);
-    const auto outer=ReadNamedProbeObject(reader,table,outer_pointer);
+    ProbeNamedObject cls,outer;
+    if (!ReadNamedProbePair(reader,table,entry.owner_class,outer_pointer,cls,outer)) return result;
     if (!cls.member || !cls.stable || !cls.name_available || !cls.fname.available ||
         (cls.fname.value>>16)!=0 || std::strcmp(cls.name,"StaticMeshActor")!=0 ||
         !outer_pointer.available || !outer_pointer.value || !outer.member || !outer.stable ||
@@ -158,8 +158,8 @@ inline ProbeStaticMesh SampleVisibleStaticMesh(const ProbeReader& reader,const P
     one.entries[0]=snapshot.entries[selected];one.object_table_complete=false;ReadProbeOwners(reader,one);
     const auto& later=one.entries[0];
     const auto outer_after=ReadProbeOffset(reader,entry.owner_candidate.value,0x18);
-    const auto cls_after=ReadNamedProbeObject(reader,table,entry.owner_class);
-    const auto map_after=ReadNamedProbeObject(reader,table,outer_pointer);
+    ProbeNamedObject cls_after,map_after;
+    if (!ReadNamedProbePair(reader,table,entry.owner_class,outer_pointer,cls_after,map_after)) return result;
     if (!one.object_table_complete || !later.owner_stable || !later.owner_candidate.available ||
         later.owner_candidate.value!=entry.owner_candidate.value || !later.owner_fname.available ||
         later.owner_fname.value!=entry.owner_fname.value || !later.owner_class.available ||

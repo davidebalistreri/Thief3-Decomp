@@ -606,6 +606,14 @@ inline ProbeNamedObject ReadNamedProbeObject(const ProbeReader& reader, const Pr
     return ReadNamedProbeObjectAtSlot(reader,table,pointer,slot);
 }
 
+inline bool SameNamedProbeObject(const ProbeNamedObject& a,const ProbeNamedObject& b) noexcept {
+    return a.member && a.stable && a.name_available && b.member && b.stable && b.name_available &&
+        a.address.available && b.address.available && a.address.value==b.address.value &&
+        a.index.available && b.index.available && a.index.value==b.index.value &&
+        a.fname.available && b.fname.available && a.fname.value==b.fname.value &&
+        a.outer.available && b.outer.available && a.outer.value==b.outer.value && std::strcmp(a.name,b.name)==0;
+}
+
 // Establish unique membership for a class and outer in one bounded table
 // sweep. Both objects are still individually checked at their slots before
 // and after their fields and names are read.
@@ -721,8 +729,11 @@ inline void ReadTargetProbe(const ProbeReader& reader, ProbeSnapshot& snapshot) 
     if (!item.owner_table_member || !item.owner_candidate.available || item.owner_candidate.value != actor) return;
     target.entry = item;
     target.entry_available = true;
-    target.owner_class = ReadNamedProbeObject(reader, table, item.owner_class);
-    auto outer = ReadProbeOffset(reader, actor, 0x18);
+    const auto first_outer = ReadProbeOffset(reader, actor, 0x18);
+    ProbeNamedObject cls,first_map;
+    if (!ReadNamedProbePair(reader,table,item.owner_class,first_outer,cls,first_map)) return;
+    target.owner_class=cls;target.outer[0]=first_map;target.outer_count=1;
+    auto outer = first_map.outer;
     while (outer.available && outer.value && target.outer_count < 4) {
         auto& named = target.outer[target.outer_count++];
         named = ReadNamedProbeObject(reader, table, outer);
@@ -749,13 +760,20 @@ inline void ReadTargetProbe(const ProbeReader& reader, ProbeSnapshot& snapshot) 
         single.entries[0].type = ReadProbeOffset(reader, flesh.value, 0x44);
         ReadProbeOwners(reader, single);
         const auto& reread = single.entries[0];
+        const auto outer_after=ReadProbeOffset(reader,actor,0x18);
+        ProbeNamedObject cls_after,map_after;
+        const bool identity_stable=outer_after.available && first_outer.available && outer_after.value==first_outer.value &&
+            ReadNamedProbePair(reader,table,before.owner_class,first_outer,cls_after,map_after) &&
+            SameNamedProbeObject(cls,cls_after) && SameNamedProbeObject(first_map,map_after);
         if (!reread.owner_stable || !reread.owner_candidate.available || reread.owner_candidate.value != actor ||
             !reread.owner_fname.available || reread.owner_fname.value != before.owner_fname.value ||
             !reread.owner_class.available || reread.owner_class.value != before.owner_class.value ||
             std::memcmp(reread.owner_location_bits, before.owner_location_bits, sizeof(before.owner_location_bits)) != 0 ||
             std::memcmp(reread.owner_rotation_bits, before.owner_rotation_bits, sizeof(before.owner_rotation_bits)) != 0 ||
-            std::memcmp(reread.object_matrix_bits, before.object_matrix_bits, sizeof(before.object_matrix_bits)) != 0)
+            std::memcmp(reread.object_matrix_bits, before.object_matrix_bits, sizeof(before.object_matrix_bits)) != 0 ||
+            !identity_stable)
         {
+            target.entry_available = false;
             target.asset = {};
             target.mesh_node = {};
         }
@@ -806,8 +824,11 @@ inline void ReadLiveTargetProbe(const ProbeReader& reader, ProbeSnapshot& snapsh
     ProbeArray32 table{};
     if (!ReadProbe(reader,0x10f3e4a0,&table,sizeof(table)) ||
         !ValidProbeArray(table,static_cast<std::uint32_t>(kMaxTargetObjects))) return;
-    target.owner_class=ReadNamedProbeObject(reader,table,item.owner_class);
-    auto outer=ReadProbeOffset(reader,item.owner_candidate.value,0x18);
+    const auto first_outer=ReadProbeOffset(reader,item.owner_candidate.value,0x18);
+    ProbeNamedObject cls,first_map;
+    if (!ReadNamedProbePair(reader,table,item.owner_class,first_outer,cls,first_map)) return;
+    target.owner_class=cls;target.outer[0]=first_map;target.outer_count=1;
+    auto outer=first_map.outer;
     while (outer.available && outer.value && target.outer_count<4) {
         auto& named=target.outer[target.outer_count++];named=ReadNamedProbeObject(reader,table,outer);
         if (!named.member || !named.stable) break;
@@ -827,13 +848,19 @@ inline void ReadLiveTargetProbe(const ProbeReader& reader, ProbeSnapshot& snapsh
     single.entries[0].type=ReadProbeOffset(reader,before.address.value,0x44);
     ReadProbeOwners(reader,single);
     const auto& later=single.entries[0];
+    const auto outer_after=ReadProbeOffset(reader,before.owner_candidate.value,0x18);
+    ProbeNamedObject cls_after,map_after;
+    const bool pair_after=ReadNamedProbePair(reader,table,before.owner_class,first_outer,cls_after,map_after);
+    const bool identity_stable=outer_after.available && first_outer.available && outer_after.value==first_outer.value &&
+        pair_after && SameNamedProbeObject(cls,cls_after) && SameNamedProbeObject(first_map,map_after);
     if (!later.owner_stable || !later.owner_candidate.available || later.owner_candidate.value!=before.owner_candidate.value ||
         !later.owner_fname.available || later.owner_fname.value!=before.owner_fname.value ||
         !later.owner_class.available || later.owner_class.value!=before.owner_class.value ||
         std::memcmp(later.owner_location_bits,before.owner_location_bits,sizeof(before.owner_location_bits)) ||
         std::memcmp(later.owner_rotation_bits,before.owner_rotation_bits,sizeof(before.owner_rotation_bits)) ||
-        std::memcmp(later.object_matrix_bits,before.object_matrix_bits,sizeof(before.object_matrix_bits))) {
-        target.asset={};target.mesh_node={};
+        std::memcmp(later.object_matrix_bits,before.object_matrix_bits,sizeof(before.object_matrix_bits)) || !identity_stable) {
+        // An obsolete target outer must not witness a BSP or bed selection.
+        target.entry_available=false;target.asset={};target.mesh_node={};
     }
 }
 
@@ -881,9 +908,9 @@ inline void ReadCurrentMapWitness(const ProbeReader& reader, ProbeSnapshot& snap
         if (!entry.owner_stable || !entry.owner_table_member || !entry.owner_candidate.available ||
             !entry.owner_candidate.value || !entry.owner_fname.available || !entry.owner_name_available ||
             (entry.owner_fname.value>>16)==1521 || std::strcmp(entry.owner_name,"StaticMeshActor")!=0) continue;
-        const auto cls=ReadNamedProbeObject(reader,table,entry.owner_class);
         const auto owner_outer=ReadProbeOffset(reader,entry.owner_candidate.value,0x18);
-        const auto outer=ReadNamedProbeObject(reader,table,owner_outer);
+        ProbeNamedObject cls,outer;
+        if (!ReadNamedProbePair(reader,table,entry.owner_class,owner_outer,cls,outer)) continue;
         if (!cls.member || !cls.stable || !cls.name_available || !cls.fname.available ||
             (cls.fname.value>>16)!=0 || std::strcmp(cls.name,"StaticMeshActor")!=0 ||
             !outer.member || !outer.stable || !outer.name_available || !outer.fname.available ||
@@ -894,13 +921,13 @@ inline void ReadCurrentMapWitness(const ProbeReader& reader, ProbeSnapshot& snap
         ReadProbeOwners(reader,candidates);
         const auto& later=candidates.entries[0];
         const auto outer_after=ReadProbeOffset(reader,entry.owner_candidate.value,0x18);
-        const auto cls_after=ReadNamedProbeObject(reader,table,entry.owner_class);
-        const auto map_after=ReadNamedProbeObject(reader,table,owner_outer);
+        ProbeNamedObject cls_after,map_after;
+        const bool pair_after=ReadNamedProbePair(reader,table,entry.owner_class,owner_outer,cls_after,map_after);
         if (!candidates.object_table_complete || !later.owner_stable || !later.owner_candidate.available ||
             later.owner_candidate.value!=entry.owner_candidate.value || !later.owner_fname.available ||
             later.owner_fname.value!=entry.owner_fname.value || !later.owner_class.available ||
             later.owner_class.value!=entry.owner_class.value || !outer_after.available ||
-            !owner_outer.available || outer_after.value!=owner_outer.value ||
+            !owner_outer.available || outer_after.value!=owner_outer.value || !pair_after ||
             !cls_after.member || !cls_after.stable || !cls_after.name_available ||
             !cls_after.fname.available || cls_after.fname.value!=cls.fname.value || std::strcmp(cls_after.name,cls.name)!=0 ||
             !map_after.member || !map_after.stable || !map_after.name_available ||

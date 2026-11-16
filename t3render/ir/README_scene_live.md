@@ -112,6 +112,13 @@ witness with a conflicting map is never bypassed. The witness does not
 independently bind the VBSP to that map or detect every map transition, and
 repeated reads cannot exclude ABA.
 
+The target bed's class and map outer are checked together for unique table
+membership, then checked again after sampling its asset and mesh node. A
+changed identity invalidates the target as a witness; an independently sampled
+visible actor may still provide a witness. The no-bed witness also checks the
+class and outer together, without weakening the uniqueness checks. These
+bounded double reads still cannot exclude ABA or unobserved mutations.
+
 In the existing synchronized capture, frame 1243 contains no visible bed but
 does contain other static actors and VBSP index 7. Its metadata uniquely
 matches offline GMP block 5, including counts, bounds and material sections;
@@ -119,6 +126,13 @@ draw 10 is within the observed BSP submission. That old trace did not capture
 the other actors' outers, so it cannot validate the new witness or prove the
 map. The new path and disappearance/reappearance behavior are synthetic-only
 until another TDS test.
+
+For the later `scene-live-inprocess-20261116-diagnostic` capture, offline
+callback replay of frames 1243–1245 rejects all three frames without a
+validated viewport and accepts no semantic bed or BSP scope. The recorded
+probe has no independent map-witness field; its VBSP index 7 metadata matches
+the golden frame 2864, but that alone cannot establish ownership or map
+identity. This replay is not a new live verification.
 
 The local frames 2864/2865 were revalidated against their common finalized
 trace and fed through the matcher, residency and Present collector: each yielded

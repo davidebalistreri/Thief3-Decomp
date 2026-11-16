@@ -408,3 +408,27 @@ Una prova **sintetica** con la fixture `SouthQuarter1_int1` reale ha trovato
 `Light__15` nella posizione attesa; non è una nuova misura runtime. Il report
 include le impronte dei due file, la camera quando invertibile e i limiti di
 provenienza.
+
+## Aggiornamento: witness e confronto delle catture live
+
+Il probe ora legge insieme classe e outer di mappa, conservando il controllo
+di unicità nella tabella. Nel percorso letto ricontrolla identità e outer dopo
+aver campionato asset e mesh: se cambiano, il target non può più attestare
+letto o BSP. Un altro attore visibile può fornire un witness indipendente. Le
+fixture coprono cambi di outer, nome, classe e duplicazioni; le doppie letture
+non escludono ABA o mutazioni non osservate.
+
+Il replay offline dei frame 1243–1245 della cattura
+`scene-live-inprocess-20261116-diagnostic` li rifiuta senza viewport validato
+e non accetta scope semantici di letto o BSP. La trace non contiene il campo
+del witness indipendente; i metadati del VBSP indice 7 coincidono con quelli
+del frame golden 2864, ma non provano la mappa né la proprietà di un draw.
+È un confronto su registrazioni esistenti, non una nuova prova live.
+
+Nella fixture con 1.000 oggetti non pertinenti, il caso senza letto passa da
+235 a 217 letture; con letto, i nuovi controlli portano il percorso completo
+da 1.354 a 1.385 e quello live da 295 a 326. Sono conteggi sintetici, non
+misure del lag. Sono passati il test del probe, 16 test live e sette test di
+replay, incluse le catture locali; il proxy sperimentale e le fixture DX12
+compilano x86. Il gioco non è stato riavviato e prestazioni e integrazione
+live rimangono da verificare in seguito.

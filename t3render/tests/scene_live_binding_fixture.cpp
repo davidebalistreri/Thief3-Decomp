@@ -134,6 +134,11 @@ bool matching() {
     CHECK(ResolveBsp(c,no_bed,block,0,bsp) && bsp.identity_scope==IdentityScope::VisibleList);
     CHECK(!ResolveBed(c,no_bed,bed,0,1,mesh));
     auto no_witness=no_bed;no_witness.map_witness={};CHECK(!ResolveBsp(c,no_witness,block,0,bsp));
+    auto stale_target=p;stale_target.target.entry_available=false;
+    CHECK(ClassifyMapWitness(c,stale_target)==MapWitnessStatus::Unknown &&
+          !ResolveBed(c,stale_target,bed,0,1,mesh) && !ResolveBsp(c,stale_target,block,0,bsp));
+    auto fallback=no_bed;fallback.target=p.target;fallback.target.entry_available=false;
+    CHECK(ResolveBsp(c,fallback,block,0,bsp)); // only the independently sampled map witness can replace it
     auto wrong_witness=no_bed;text(wrong_witness.map_witness.outer.name,"another");CHECK(!ResolveBsp(c,wrong_witness,block,0,bsp));
     wrong_witness=no_bed;wrong_witness.map_witness.entry.owner_backlink.value++;CHECK(!ResolveBsp(c,wrong_witness,block,0,bsp));
     wrong_witness=no_bed;wrong_witness.map_witness.entry.owner_fname.value=(1521u<<16)|7;CHECK(!ResolveBsp(c,wrong_witness,block,0,bsp));

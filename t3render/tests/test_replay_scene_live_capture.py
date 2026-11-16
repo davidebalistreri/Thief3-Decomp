@@ -121,6 +121,34 @@ class CaptureReplayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "transform"):
             replay.compare_snapshots(changed, Path(os.environ["T3RENDER_CAPTURED_SCENE_DIR"]), report["trace_sha256"], 0)
 
+    @unittest.skipUnless(os.environ.get("T3RENDER_EARLY_LIVE_TRACE") and
+                         os.environ.get("T3RENDER_CAPTURED_CATALOG"), "early live capture not supplied")
+    def test_early_bed_absent_capture_does_not_invent_map_witness(self):
+        # The historical capture has a matching BSP candidate, but predates
+        # the independent map-witness field. Its owner map is not observable.
+        report = replay.replay(Path(os.environ["T3RENDER_EARLY_LIVE_TRACE"]),
+                               Path(os.environ["T3RENDER_CAPTURED_CATALOG"]), [1243, 1244, 1245])
+        self.assertEqual(report["source"], "captured_replay")
+        self.assertEqual([item["result"] for item in report["frames"]], ["rejected"] * 3)
+        self.assertEqual([item["selected_probes"] for item in report["frames"]], [1, 2, 3])
+        self.assertTrue(all(item["last_rejection"] & 128 for item in report["frames"])) # no validated viewport
+        self.assertTrue(all(not item["bsp_scopes"] and not item["bed_scopes"] for item in report["frames"]))
+        if os.environ.get("T3RENDER_CAPTURED_TRACE"):
+            earlier, _, _ = replay.read_capture(Path(os.environ["T3RENDER_EARLY_LIVE_TRACE"]), [1243])
+            golden, _, _ = replay.read_capture(Path(os.environ["T3RENDER_CAPTURED_TRACE"]), [2864])
+            def observation(rows, frame):
+                matches = [item for item in rows[frame] if item["event"] == "scene_bridge_observation" and item["pass"] == 0]
+                self.assertEqual(len(matches), 1)
+                return matches[0]
+            early_obs, golden_obs = observation(earlier, 1243), observation(golden, 2864)
+            self.assertIsNone(early_obs.get("map_witness"))
+            self.assertEqual(early_obs["target"]["list_occurrences"], 0)
+            def block(obs):
+                matches = [item for item in obs["bsp"]["candidates"] if item["source_index"] == 7]
+                self.assertEqual(len(matches), 1)
+                return {key: matches[0][key] for key in ("counts", "bounds_bits", "transform_bits", "sections")}
+            self.assertEqual(block(early_obs), block(golden_obs))
+
 
 if __name__ == "__main__":
     unittest.main()

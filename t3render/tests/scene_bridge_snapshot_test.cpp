@@ -61,6 +61,22 @@ struct ChangeDuringWitness {
     }
 };
 
+struct ChangeDuringWitnessPair {
+    Memory* memory;
+    bool duplicate_map=false;
+    unsigned occurrence=0,trigger=0;
+    bool changed=false;
+    static bool read(void* context,std::uint32_t address,void* output,std::size_t count) noexcept {
+        auto& state=*static_cast<ChangeDuringWitnessPair*>(context);
+        const bool ok=Memory::read(state.memory,address,output,count);
+        if (ok && address==0x4020 && count==36 && ++state.occurrence==state.trigger) {
+            state.changed=true;
+            state.memory->put<std::uint32_t>(0x8014,state.duplicate_map ? 0x1a000 : 0x7000);
+        }
+        return ok;
+    }
+};
+
 struct ChangeDuringNodeName {
     Memory* memory;
     bool changed=false;
@@ -69,6 +85,31 @@ struct ChangeDuringNodeName {
         const bool ok=Memory::read(state.memory,address,output,count);
         if (ok && address==0xf100 && count==32 && !state.changed) {
             state.changed=true;state.memory->put<std::uint8_t>(0xf101,'X');
+        }
+        return ok;
+    }
+};
+
+struct ChangeDuringTargetIdentity {
+    enum class Kind { ActorOuter, ClassOuter, MapOuter, MapName, DuplicateClass, DuplicateMap };
+    Memory* memory;
+    Kind kind;
+    bool changed=false;
+    static bool read(void* context,std::uint32_t address,void* output,std::size_t count) noexcept {
+        auto& state=*static_cast<ChangeDuringTargetIdentity*>(context);
+        const bool ok=Memory::read(state.memory,address,output,count);
+        // The node name is read after the initial actor/class/map witness,
+        // while the resource is still being inspected.
+        if (ok && address==0xf100 && count==32 && !state.changed) {
+            state.changed=true;
+            switch (state.kind) {
+                case Kind::ActorOuter: state.memory->put<std::uint32_t>(0x4018,0x7000);break;
+                case Kind::ClassOuter: state.memory->put<std::uint32_t>(0x7018,0x1a000);break;
+                case Kind::MapOuter: state.memory->put<std::uint32_t>(0x1a018,0x7000);break;
+                case Kind::MapName: state.memory->put<std::uint8_t>(0x1b01c,'X');break;
+                case Kind::DuplicateClass: state.memory->put<std::uint32_t>(0x8014,0x7000);break;
+                case Kind::DuplicateMap: state.memory->put<std::uint32_t>(0x8014,0x1a000);break;
+            }
         }
         return ok;
     }
@@ -323,6 +364,20 @@ int main() {
     assert(sample.target.owner_class.stable && sample.target.owner_class.name_available);
     assert(sample.target.asset.status == AssetStatus::Candidate && sample.target.asset.stable);
     assert(std::strcmp(sample.target.asset.name, mesh_name) == 0);
+    // A map/class identity observed before asset sampling cannot authorize a
+    // bed or BSP if it changes before the sample finishes.
+    for (auto kind:{ChangeDuringTargetIdentity::Kind::ActorOuter,ChangeDuringTargetIdentity::Kind::ClassOuter,
+                    ChangeDuringTargetIdentity::Kind::MapOuter,ChangeDuringTargetIdentity::Kind::MapName,
+                    ChangeDuringTargetIdentity::Kind::DuplicateClass,ChangeDuringTargetIdentity::Kind::DuplicateMap})
+        for (bool full:{false,true}) {
+            auto changing=complete;changing.put<std::uint32_t>(0x10efef54,0);
+            changing.put<std::uint32_t>(0x10f3e4a4,6);changing.put<std::uint32_t>(0x10f3e4a8,6);
+            ChangeDuringTargetIdentity state{&changing,kind,false};ProbeReader unstable{&state,ChangeDuringTargetIdentity::read};
+            const auto observed=full ? SampleProbe(unstable,42,0x1000,0x109271ae) :
+                                       SampleLiveProbe(unstable,42,0x1000,0x109271ae);
+            assert(state.changed && !observed.target.entry_available &&
+                   observed.target.asset.status!=AssetStatus::Candidate && !observed.map_witness.available);
+        }
     assert(sample.target.mesh_node.pool_scan_complete && sample.target.mesh_node.nodes_scanned == 1 &&
            sample.target.mesh_node.occurrences == 1 && sample.target.mesh_node.stable);
     assert(sample.target.mesh_node.vertex_count == 257 && sample.target.mesh_node.index_count == 708 &&
@@ -401,6 +456,14 @@ int main() {
             witness=full ? SampleProbe(unstable,42,0x1000,0x109271ae) : SampleLiveProbe(unstable,42,0x1000,0x109271ae);
             assert(state.changed && !witness.map_witness.available);
         }
+    for (bool duplicate_map:{false,true}) for (bool full:{false,true}) {
+        auto changing=complete;changing.put<std::uint32_t>(0x4020,(2u<<16)|7);changing.put<std::uint32_t>(0x10efef54,0);
+        changing.put<std::uint32_t>(0x10f3e4a4,6);changing.put<std::uint32_t>(0x10f3e4a8,6);
+        ChangeDuringWitnessPair state{&changing,duplicate_map,0,full ? 3u : 2u,false};
+        ProbeReader unstable{&state,ChangeDuringWitnessPair::read};
+        witness=full ? SampleProbe(unstable,42,0x1000,0x109271ae) : SampleLiveProbe(unstable,42,0x1000,0x109271ae);
+        assert(state.changed && !witness.map_witness.available);
+    }
     reader.context=&complete;
     // The live path checks only the visible actor's identity; it must not scan
     // each unrelated UObject by name on every game frame.
@@ -464,8 +527,12 @@ int main() {
     huge.put<std::uint32_t>(0x4020,(2u<<16)|7);
     huge.table_base=table_base;huge.table_slots=huge_slots;
     ProbeReader huge_reader{&huge,Memory::read};
+    huge.table_chunks=0;huge.read_calls=0;
     const auto huge_probe=SampleLiveProbe(huge_reader,42,0x1000,0x109271ae);
     assert(huge_probe.map_witness.available);
+    const auto no_bed_chunks=huge.table_chunks, no_bed_reads=huge.read_calls;
+    assert(no_bed_chunks==4*((huge_slots+127)/128));
+    std::printf("no_bed_large_table slots=%u chunks=%u reads=%u\n",huge_slots,no_bed_chunks,no_bed_reads);
     huge.table_chunks=0;huge.read_calls=0;
     const auto huge_first=SampleSubmission(huge_reader,0x3000);
     const auto huge_observation=SampleVisibleStaticMesh(huge_reader,huge_probe,huge_first);

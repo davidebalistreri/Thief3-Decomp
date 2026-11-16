@@ -164,16 +164,30 @@ void SceneDriver::EndProbe(std::uint64_t ticket,ThreadToken thread,const scene_b
     } catch (...) { impl_->Disable(); }
 }
 
-std::uint64_t SceneDriver::BeginLightSample(ThreadToken thread) noexcept {
+std::uint64_t SceneDriver::BeginLightSample(ThreadToken thread,std::uint64_t* generation) noexcept {
+    if (generation) *generation=0;
     try {
         auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
         if (s.disabled.load() || !s.window || !s.latest) return 0;
-        if (s.light_samples.size()>=kMaxPending) {s.Disable();return 0;}
+        if (s.light_samples.size()>=kMaxPending || s.next_frame==UINT64_MAX) {s.Disable();return 0;}
         if (!SameThread(thread,s.latest_thread) || !s.Empty()) {s.Lost();return 0;}
         const auto id=s.Ticket();if (!id) {s.Disable();return 0;}
         const auto window=s.window->BeginLightSample(thread);
-        s.light_samples.emplace(id,Impl::LightSample{thread,window});return id;
+        s.light_samples.emplace(id,Impl::LightSample{thread,window});
+        if (window && generation) *generation=s.next_frame+1;
+        return id;
     } catch (...) {impl_->Disable();return 0;}
+}
+bool SceneDriver::CancelLightSample(std::uint64_t ticket,ThreadToken thread) noexcept {
+    try {
+        auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
+        if (s.disabled.load()) return false;
+        const auto item=s.light_samples.find(ticket);
+        if (!ticket || item==s.light_samples.end()) {s.Lost();return false;}
+        const auto record=item->second;s.light_samples.erase(item);
+        if (!SameThread(thread,record.thread)) {s.Lost();return false;}
+        return record.window && s.window && s.window->CancelLightSample(record.window,thread);
+    } catch (...) {impl_->Disable();return false;}
 }
 bool SceneDriver::EndLightSample(std::uint64_t ticket,ThreadToken thread,bool stable,LightCoverage coverage,
                                  const std::vector<VisualLight>& lights) noexcept {

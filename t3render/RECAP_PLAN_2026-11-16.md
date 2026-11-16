@@ -358,3 +358,29 @@ e sei di replay; i due test sulle catture locali, inizialmente saltati, sono
 passati isolatamente dopo avere indicato le fixture. Il nuovo fixture compila
 anche con MinGW x86. Non è stato riavviato TDS e il lag rimane da verificare
 più avanti.
+
+## Aggiornamento: lista luce candidata nello stesso intervallo
+
+L'analisi statica ha individuato un percorso di raccolta più mirato: nel
+culling `0x10925c00` inserisce oggetti nell'array del renderer `+0x74/+0x7c`,
+che può contenere oggetti della vtable luce. Il nuovo adattatore opt-in
+`T3RENDER_SCENE_LIVE_LIGHTS=1` legge al massimo 128 elementi e pubblica al
+massimo 32 actor candidati, verificando vtable, backlink, slot actor/outer,
+nome e witness della mappa. Le letture sono delimitate dalla stessa finestra
+`Present` del probe selezionato. Posizione e binding restano `Candidate`;
+copertura sempre `Partial`, nessun altro parametro viene promosso a luce
+fisica e il PBR resta disattivato. La generazione cambia a ogni intervallo,
+senza affermare continuità dell'actor tra frame.
+
+La fixture sintetica ha percorso lettura, conversione e pubblicazione, con
+test di mutazione, annullamento, sovrapposizione a `Present` e Reset. Il
+runner espone `--live-lights` e la diagnostica riporta ID e posizioni
+candidate per frame. La lista non prova copertura completa, visibilità per
+draw o unicità globale degli UObject; il fingerprint della mappa è offline.
+L'adattatore e il suo costo non sono stati verificati in TDS, come richiesto.
+Sono passati i test host del lettore, della diagnostica e del driver, oltre ai
+14 test simulati del runner. La suite live ha riportato 15 passati e un test
+saltato perché la fixture locale non era indicata; il test su quella stessa
+fixture era passato nel checkpoint precedente. Proxy e fixture compilano x86
+con MinGW. I messaggi di avvio nei test del runner provengono da mock: il
+gioco non è stato avviato.

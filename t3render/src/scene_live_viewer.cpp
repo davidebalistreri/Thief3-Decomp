@@ -2,6 +2,7 @@
 #include "scene_live_dx12.hpp"
 #include "scene_live_flat.hpp"
 #include "scene_live_lighting.hpp"
+#include "scene_live_light_diagnostics.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -172,7 +173,8 @@ struct Diagnostics {
         for (unsigned i=0;i<16;++i) { if (i) out<<',';out<<snapshot.camera.view[i]; }
         out<<"],\"projection\":[";
         for (unsigned i=0;i<16;++i) { if (i) out<<',';out<<snapshot.camera.projection[i]; }
-        out<<"]}\n";const auto text=out.str();
+        out<<']';WriteLightDetails(out,snapshot.lights);
+        out<<"}\n";const auto text=out.str();
         if (WriteBytes(log,text.data(),text.size())) ++entries;
         else { CloseHandle(log);log=INVALID_HANDLE_VALUE; }
     }

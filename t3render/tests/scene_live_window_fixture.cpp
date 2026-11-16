@@ -120,6 +120,17 @@ bool light_windows() {
     SceneWindow fresh(scene,scene.epochs(),provenance(),conventions(),0,1);
     CHECK(prime(fresh,48));CHECK(probe(fresh));const auto different=fresh.BeginLightSample(thread);CHECK(different);
     CHECK(!fresh.EndLightSample(different,other,true,LightCoverage::Partial,{candle}));CHECK(fresh.needs_rebind());
+    SceneWindow cancelled(scene,scene.epochs(),provenance(),conventions(),0,1);
+    CHECK(prime(cancelled,49));CHECK(probe(cancelled));
+    auto accepted=cancelled.BeginLightSample(thread);CHECK(accepted);
+    CHECK(cancelled.EndLightSample(accepted,thread,true,LightCoverage::Partial,{candle}));
+    auto unreadable=cancelled.BeginLightSample(thread);CHECK(unreadable && cancelled.CancelLightSample(unreadable,thread));
+    CHECK(submit_bsp(cancelled));CHECK(end(cancelled,50)==WindowResult::Published);
+    CHECK(scene.current()->light_coverage==LightCoverage::Unknown && scene.current()->lights.empty());
+    CHECK(probe(cancelled));unreadable=cancelled.BeginLightSample(thread);CHECK(unreadable);
+    const auto overlap=cancelled.BeginPresent(thread,51,true);CHECK(overlap);
+    CHECK(!cancelled.CancelLightSample(unreadable,thread));
+    CHECK(cancelled.EndPresent(overlap,thread,true)==WindowResult::Rejected && cancelled.needs_rebind());
     return true;
 }
 

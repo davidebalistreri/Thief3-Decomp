@@ -1,5 +1,6 @@
 #include "scene_live_runtime.hpp"
 #include "scene_live_catalog_win.hpp"
+#include "scene_live_visible_lights.hpp"
 #include "scene_live_viewer.hpp"
 
 #include <windows.h>
@@ -21,6 +22,8 @@ struct RuntimeState {
     std::unique_ptr<SceneViewer> viewer;
     std::string session_id; // initialized before publishing driver; never changed afterwards
     bool static_meshes_enabled=false; // written before driver publication
+    bool light_candidates_enabled=false;
+    std::string map, map_sha256; // catalog fingerprint, not a runtime package measurement
     std::atomic<SceneDriver*> driver{nullptr};
     std::atomic<IDirect3DDevice8*> device{nullptr};
     std::atomic<bool> terminal{false},deferred_loss{false};
@@ -147,9 +150,11 @@ bool RuntimeInitialize() noexcept {
             FrameProvenance source;source.origin=FrameOrigin::LiveProcess;source.session_id=session;
             auto bed_override=catalog.bed_override;
             auto bedroom_materials=catalog.bedroom_materials;
+            state.map=catalog.binding.map;state.map_sha256=catalog.binding.map_sha256;
             auto driver=SceneDriver::Create(std::move(catalog),std::move(source),0,1);
             if (!driver) return;
             state.static_meshes_enabled=Environment(L"T3RENDER_SCENE_LIVE_STATIC_MESHES")==L"1";
+            state.light_candidates_enabled=Environment(L"T3RENDER_SCENE_LIVE_LIGHTS")==L"1";
             state.session_id=std::move(session);
             state.owned=std::move(driver);state.driver.store(state.owned.get(),std::memory_order_release);
             if (Environment(L"T3RENDER_SCENE_LIVE_DX12")==L"1") {
@@ -226,7 +231,22 @@ void RuntimeProbeEnd(std::uint64_t ticket,const scene_bridge::ProbeSnapshot& sna
     try {
         if (!ticket) return;
         if (querying) RuntimeDeferredLoss();
-        auto* driver=Driver(false);if (driver) driver->EndProbe(ticket,CurrentThread(),snapshot);
+        auto* driver=Driver(false);if (!driver) return;
+        const auto thread=CurrentThread();driver->EndProbe(ticket,thread,snapshot);
+        auto& state=State();
+        if (!state.light_candidates_enabled) return;
+        std::uint64_t generation=0;
+        const auto light_ticket=driver->BeginLightSample(thread,&generation);
+        if (!light_ticket) return;
+        const scene_bridge::ProbeReader reader{nullptr,ReadMemory};
+        const auto sample=generation ? scene_bridge::SampleVisibleLightCandidates(reader,snapshot.self,state.map.c_str()) :
+                                      scene_bridge::VisibleLightCandidates{};
+        std::vector<VisualLight> lights;
+        const bool ready=BuildVisibleLightCandidates(sample,state.map,state.map_sha256,generation,lights);
+        // A nested callback may have marked loss while memory was being read.
+        driver=Driver(false);if (!driver) return;
+        if (ready) (void)driver->EndLightSample(light_ticket,thread,true,LightCoverage::Partial,lights);
+        else (void)driver->CancelLightSample(light_ticket,thread);
     } catch (...) {RuntimeAbandon();}
 }
 void RuntimeSubmissionEnter(std::uint32_t element,std::uint32_t stage,std::uint32_t section) noexcept {

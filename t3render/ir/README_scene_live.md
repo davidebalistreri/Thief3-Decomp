@@ -423,8 +423,12 @@ the selected probe's thread between consecutive `Present` boundaries. A sample
 that overlaps `Present`, Reset or another in-flight operation invalidates the
 interval. Repeated samples in the same window must agree. Stability, coverage
 and field evidence are still claims supplied by the adapter, not facts the
-collector can independently verify. The current TDS hook supplies no light
-samples, so live snapshots retain `Unknown` coverage.
+collector can independently verify. The opt-in `T3RENDER_SCENE_LIVE_LIGHTS=1`
+adapter can sample candidate actors from the selected renderer list after the
+probe; it publishes only `Partial` coverage and candidate positions. It is
+unverified in TDS. Without opt-in or when the sample is unavailable, live
+snapshots retain `Unknown` coverage. The bounded list, identity limitations
+and static evidence are described in [the light probe](README_scene_light_probe.md).
 
 `BuildVerifiedLighting` accepts only complete coverage and fully verified
 enabled lights, omits only lights whose disabled state is verified, and

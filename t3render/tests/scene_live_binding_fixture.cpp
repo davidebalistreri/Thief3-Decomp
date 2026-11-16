@@ -343,8 +343,12 @@ bool driver_delivery() {
     VisualLight light;light.id="light:candle";light.generation=1;light.binding=BindingEvidence::Candidate;
     light.position={Vec3{1,2,3},BindingEvidence::Candidate};
     CHECK(!driver->BeginLightSample(thread));
-    CHECK(sample());auto light_ticket=driver->BeginLightSample(thread);CHECK(light_ticket);
+    CHECK(sample());std::uint64_t light_generation=0;
+    auto light_ticket=driver->BeginLightSample(thread,&light_generation);CHECK(light_ticket && light_generation==2);
+    light.generation=light_generation;
     CHECK(driver->EndLightSample(light_ticket,thread,true,LightCoverage::Partial,{light}));
+    light_generation=0;light_ticket=driver->BeginLightSample(thread,&light_generation);
+    CHECK(light_ticket && light_generation==2 && driver->EndLightSample(light_ticket,thread,true,LightCoverage::Partial,{light}));
     CHECK(submit(bed,state));CHECK(submit(bsp,state));CHECK(submit(bsp,state));
     live_ticket=driver->BeginPresent(thread,&live_frame);
     CHECK(live_ticket && live_frame==1 && driver->EndPresent(live_ticket,thread,true)==WindowResult::Published);
@@ -355,7 +359,10 @@ bool driver_delivery() {
     CHECK(diagnostics.published==1 && diagnostics.selected_probes==1 && diagnostics.bed_scopes==1 &&
           diagnostics.bsp_scopes==2 && diagnostics.bsp_cache_hits==1 && diagnostics.last_rejection==0);
     CHECK(first->meshes[0].selection.generation==1 && first->provenance.origin==FrameOrigin::Synthetic);
-    p=without_bed();CHECK(sample());CHECK(submit(bsp,state));CHECK(present()==WindowResult::Published);
+    p=without_bed();CHECK(sample());
+    light_ticket=driver->BeginLightSample(thread,&light_generation);CHECK(light_ticket && light_generation==3);
+    CHECK(driver->CancelLightSample(light_ticket,thread));
+    CHECK(submit(bsp,state));CHECK(present()==WindowResult::Published);
     CHECK(driver->current()->meshes.empty() && driver->current()->bsp.size()==1 &&
           driver->current()->lights.empty() && driver->current()->light_coverage==LightCoverage::Unknown);
     p=probe();

@@ -231,6 +231,12 @@ class CaptureBatchTests(unittest.TestCase):
         _, static = batch.env_for(self.root / "engine", self.root / "bottle", self.root / "output", 3,
                                   scene_bridge=True, submission_scope=True, live_catalog=catalog, live_static_meshes=True)
         self.assertEqual(static["T3RENDER_SCENE_LIVE_STATIC_MESHES"], "1")
+        with self.assertRaises(batch.BatchError):
+            batch.env_for(self.root / "engine", self.root / "bottle", self.root / "output", 3, live_lights=True)
+        _, lights = batch.env_for(self.root / "engine", self.root / "bottle", self.root / "output", 3,
+                                  scene_bridge=True, submission_scope=True, live_catalog=catalog, live_lights=True)
+        self.assertEqual(lights["T3RENDER_SCENE_LIVE_LIGHTS"], "1")
+        self.assertNotIn("T3RENDER_SCENE_LIVE_LIGHTS", selected)
         live_only, selected = batch.env_for(self.root / "engine", self.root / "bottle", self.root / "output", 3,
                                             scene_bridge=True, submission_scope=True, live_catalog=catalog, live_only=True)
         self.assertNotIn("T3RENDER_CAPTURE_PATH", live_only)
@@ -282,11 +288,13 @@ class CaptureBatchTests(unittest.TestCase):
              mock.patch.object(batch.subprocess, "Popen"):
             result = batch.execute(*map(str, resolved), delay=0, timeout=10, frames=3, terminate=True,
                                    scene_bridge=True, submission_scope=True, live_catalog=str(catalog), live_only=True,
-                                   live_static_meshes=True)
+                                   live_static_meshes=True, live_lights=True)
         self.assertTrue(result["live_only"] and result["temporary_proxy_removed"])
         self.assertTrue(result["live_static_meshes_requested"])
+        self.assertTrue(result["live_light_candidates_requested"])
         deployment = json.loads((output / "deployment.json").read_text())
         self.assertEqual(deployment["capture_config"]["T3RENDER_SCENE_LIVE_STATIC_MESHES"], "1")
+        self.assertEqual(deployment["capture_config"]["T3RENDER_SCENE_LIVE_LIGHTS"], "1")
         self.assertEqual(result["frames_requested"], 0)
         self.assertFalse((output / "bedroom.jsonl").exists())
         self.assertFalse((output / "capture.ready").exists())

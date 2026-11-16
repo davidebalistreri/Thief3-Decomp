@@ -52,6 +52,9 @@ public:
     std::uint64_t BeginLightSample(ThreadToken thread);
     bool EndLightSample(std::uint64_t ticket, ThreadToken thread, bool stable, LightCoverage coverage,
                         const std::vector<VisualLight>& lights);
+    // Drop an unreadable diagnostic sample without asserting light coverage.
+    // An overlapping boundary or wrong thread still invalidates the window.
+    bool CancelLightSample(std::uint64_t ticket, ThreadToken thread);
 
     // The adapter has already matched one semantic section to its scope.
     // A successful draw and stable scope end are still required to select it.

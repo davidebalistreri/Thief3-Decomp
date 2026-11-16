@@ -168,6 +168,15 @@ bool SceneWindow::EndLightSample(std::uint64_t ticket, ThreadToken thread, bool 
     if (light_coverage_ && (*light_coverage_!=coverage || !(lights_==copy))) { tainted_=true;return false; }
     light_coverage_=coverage;lights_=std::move(copy);return true;
 }
+bool SceneWindow::CancelLightSample(std::uint64_t ticket, ThreadToken thread) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!ticket || ticket!=light_ticket_ || !SameThread(thread,light_thread_) || present_ticket_) {
+        RequireRebind();return false;
+    }
+    light_ticket_=0;light_thread_={};
+    light_coverage_.reset();lights_.clear();
+    return !rebind_required_ && !tainted_;
+}
 
 std::uint64_t SceneWindow::BeginMesh(ThreadToken thread, std::uint32_t pass, std::uint32_t stage,
                                      const MeshSelection& section) {

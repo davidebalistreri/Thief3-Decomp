@@ -754,6 +754,82 @@ inline void ReadLiveTargetProbe(const ProbeReader& reader, ProbeSnapshot& snapsh
     }
 }
 
+// When the target bed is not in the visible list, use a different current
+// StaticMeshActor as a map-name witness. This never carries a witness across
+// frames and does not assert that the actor owns the VBSP. All table scans and
+// candidate copies are bounded; uncertainty simply leaves the witness empty.
+inline void ReadCurrentMapWitness(const ProbeReader& reader, ProbeSnapshot& snapshot) noexcept {
+    if (snapshot.target.entry_available || !snapshot.count.available || !snapshot.array.available ||
+        !snapshot.array.value || snapshot.entries_truncated || snapshot.count.value!=snapshot.entries_attempted ||
+        snapshot.entries_attempted>kMaxProbeEntries) return;
+    auto list_stable=[&]() noexcept {
+        std::uint32_t slots[kMaxProbeEntries]{};
+        if (snapshot.entries_attempted && !ReadProbe(reader,snapshot.array.value,slots,snapshot.entries_attempted*4)) return false;
+        for (std::uint32_t i=0;i<snapshot.entries_attempted;++i) {
+            const auto& item=snapshot.entries[i];
+            if (item.list_index!=i || !item.address.available || slots[i]!=item.address.value ||
+                (item.address.value && (!item.vtable.available || !item.type.available))) return false;
+        }
+        const auto count=ReadProbeOffset(reader,snapshot.self,0x50), array=ReadProbeOffset(reader,snapshot.self,0x58);
+        return count.available && count.value==snapshot.count.value && array.available && array.value==snapshot.array.value;
+    };
+    if (!list_stable()) return;
+    auto fresh_entry=[](const ProbeEntry& source) noexcept {
+        ProbeEntry value;value.list_index=source.list_index;value.address=source.address;
+        value.vtable=source.vtable;value.type=source.type;value.flags=source.flags;return value;
+    };
+    ProbeSnapshot candidates;candidates.self=snapshot.self;candidates.count=snapshot.count;candidates.array=snapshot.array;
+    for (std::uint32_t i=0;i<snapshot.entries_attempted && candidates.entries_attempted<kMaxMapWitnessCandidates;++i) {
+        const auto& entry=snapshot.entries[i];
+        if (!entry.address.value || entry.vtable.value!=0x10e4e8c0 || entry.type.value!=4) continue;
+        unsigned occurrences=0;
+        for (std::uint32_t j=0;j<snapshot.entries_attempted;++j)
+            if (snapshot.entries[j].address.value==entry.address.value) ++occurrences;
+        if (occurrences==1) candidates.entries[candidates.entries_attempted++]=fresh_entry(entry);
+    }
+    if (!candidates.entries_attempted) return;
+    ReadProbeOwners(reader,candidates);
+    if (!candidates.object_table_complete) return;
+    ProbeArray32 table{};
+    if (!ReadProbe(reader,0x10f3e4a0,&table,sizeof(table)) ||
+        !ValidProbeArray(table,static_cast<std::uint32_t>(kMaxTargetObjects))) return;
+    for (std::uint32_t i=0;i<candidates.entries_attempted;++i) {
+        const auto entry=candidates.entries[i];
+        if (!entry.owner_stable || !entry.owner_table_member || !entry.owner_candidate.available ||
+            !entry.owner_candidate.value || !entry.owner_fname.available || !entry.owner_name_available ||
+            (entry.owner_fname.value>>16)==1521 || std::strcmp(entry.owner_name,"StaticMeshActor")!=0) continue;
+        const auto cls=ReadNamedProbeObject(reader,table,entry.owner_class);
+        const auto owner_outer=ReadProbeOffset(reader,entry.owner_candidate.value,0x18);
+        const auto outer=ReadNamedProbeObject(reader,table,owner_outer);
+        if (!cls.member || !cls.stable || !cls.name_available || !cls.fname.available ||
+            (cls.fname.value>>16)!=0 || std::strcmp(cls.name,"StaticMeshActor")!=0 ||
+            !outer.member || !outer.stable || !outer.name_available || !outer.fname.available ||
+            (outer.fname.value>>16)!=0 || !outer.outer.available || outer.outer.value) continue;
+        // Recheck the selected owner after sampling its class and map. The
+        // object table/list can change despite matching before/after reads (ABA).
+        candidates.entries_attempted=1;candidates.entries[0]=fresh_entry(entry);candidates.object_table_complete=false;
+        ReadProbeOwners(reader,candidates);
+        const auto& later=candidates.entries[0];
+        const auto outer_after=ReadProbeOffset(reader,entry.owner_candidate.value,0x18);
+        const auto cls_after=ReadNamedProbeObject(reader,table,entry.owner_class);
+        const auto map_after=ReadNamedProbeObject(reader,table,owner_outer);
+        if (!candidates.object_table_complete || !later.owner_stable || !later.owner_candidate.available ||
+            later.owner_candidate.value!=entry.owner_candidate.value || !later.owner_fname.available ||
+            later.owner_fname.value!=entry.owner_fname.value || !later.owner_class.available ||
+            later.owner_class.value!=entry.owner_class.value || !outer_after.available ||
+            !owner_outer.available || outer_after.value!=owner_outer.value ||
+            !cls_after.member || !cls_after.stable || !cls_after.name_available ||
+            !cls_after.fname.available || cls_after.fname.value!=cls.fname.value || std::strcmp(cls_after.name,cls.name)!=0 ||
+            !map_after.member || !map_after.stable || !map_after.name_available ||
+            !map_after.fname.available || map_after.fname.value!=outer.fname.value ||
+            !map_after.outer.available || map_after.outer.value || std::strcmp(map_after.name,outer.name)!=0 ||
+            !list_stable()) return;
+        auto& witness=snapshot.map_witness;witness.available=witness.list_stable=witness.object_table_complete=true;
+        witness.entry=entry;witness.owner_outer=owner_outer;witness.owner_class=cls;witness.outer=outer;
+        return;
+    }
+}
+
 inline ProbeSnapshot SampleProbe(const ProbeReader& reader, std::uint32_t thread_id,
                                  std::uint32_t self, std::uint32_t caller) noexcept {
     ProbeSnapshot snapshot;
@@ -792,6 +868,7 @@ inline ProbeSnapshot SampleProbe(const ProbeReader& reader, std::uint32_t thread
     ReadProbeOwners(reader, snapshot);
     ReadTargetProbe(reader, snapshot);
     ReadProbeBsp(reader, snapshot);
+    ReadCurrentMapWitness(reader, snapshot);
     const ProbeValue final_pass = ReadProbeU32(reader, 0x10efef54);
     snapshot.pass_stable = snapshot.pass.available && final_pass.available && snapshot.pass.value == final_pass.value;
     RecheckProbeCamera(reader, 0x10f2c738, snapshot.configured_camera);
@@ -823,6 +900,7 @@ inline ProbeSnapshot SampleLiveProbe(const ProbeReader& reader, std::uint32_t th
     }
     ReadLiveTargetProbe(reader,snapshot);
     ReadProbeBsp(reader,snapshot);
+    ReadCurrentMapWitness(reader,snapshot);
     const auto final_pass=ReadProbeU32(reader,0x10efef54);
     snapshot.pass_stable=snapshot.pass.available && final_pass.available && snapshot.pass.value==final_pass.value;
     RecheckProbeCamera(reader,0x10f2c8c0,snapshot.current_camera);

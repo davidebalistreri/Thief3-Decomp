@@ -99,10 +99,26 @@ and world matrices with `ScopeCameraMatches` / `ScopeWorldMatches`, and passes
 those results to `SceneWindow::EndDraw`; it compares entry/exit samples with
 `ScopeUnchanged` at `EndScope`. The draw check compares arguments and offline indices, not the VB/IB
 bytes actually consumed by the GPU. These functions do not by themselves
-prove callback ordering, visibility or the Present interval. The current map
-check depends on the target bed appearing in the sampled list: when it does
-not, this matcher declines BSP as well. Removing that limitation needs a
-separately observed map/lifetime signal, not reuse of the last seen actor.
+prove callback ordering, visibility or the Present interval. If the target bed
+is absent, a bounded probe may instead sample the owner, class and direct map
+outer of a different current visible `StaticMeshActor`. The candidate must be
+a unique list entry, a stable object-table member with a valid backlink, and
+its outer must match the supplied map name. The probe rereads the selected
+identity, class, outer and complete list; it tries at most eight visible mesh
+elements and never reuses a witness from a prior frame. BSP matches using this
+witness retain `Candidate` and `VisibleList` evidence. No suitable witness,
+an unreadable/truncated list or a different map yields no selection. A bed
+witness with a conflicting map is never bypassed. The witness does not
+independently bind the VBSP to that map or detect every map transition, and
+repeated reads cannot exclude ABA.
+
+In the existing synchronized capture, frame 1243 contains no visible bed but
+does contain other static actors and VBSP index 7. Its metadata uniquely
+matches offline GMP block 5, including counts, bounds and material sections;
+draw 10 is within the observed BSP submission. That old trace did not capture
+the other actors' outers, so it cannot validate the new witness or prove the
+map. The new path and disappearance/reappearance behavior are synthetic-only
+until another TDS test.
 
 The local frames 2864/2865 were revalidated against their common finalized
 trace and fed through the matcher, residency and Present collector: each yielded
@@ -164,9 +180,10 @@ Present boundaries and Reset events to `SceneResidency`. It rejects unsafe
 overlap or reentry and publishes at most a candidate partial snapshot through
 `RuntimeCurrent()`. The adapter
 uses pass 0/stage 1 and supports the researched bed and offline-matched BSP
-only. Map changes and general resource lifetimes are not yet observed; the BSP
-matcher also requires the bed in the sampled list. It must not be presented as
-a general scene bridge or enabled in a game session as a verified feature.
+only. Map changes and general resource lifetimes are not yet observed. The
+separate visible-actor map witness is a candidate, not a map lifecycle hook.
+It must not be presented as a general scene bridge or enabled in a game session
+as a verified feature.
 
 Host fixtures cover catalog round trips and corruption, candidate binding,
 window publication, overlap, Reset and rebind. The Windows loader and driver
@@ -230,7 +247,8 @@ in TDS.
 For non-capture frames, the live probe avoids scanning every UObject by name;
 other passes use a minimal sample. The stronger full probe is still used when
 a capture is active. In a synthetic registry with 1,000 unrelated objects,
-the full and live paths required 1,384 and 322 reads respectively. This is a
+the full, live-bed and live-no-bed paths required 1,409, 346 and 243 reads
+respectively in the updated fixture. This is a
 read-count comparison, not a measured frame-rate improvement. The expensive
 probe and DXGI presentation inside the scene lock are plausible sources of the
 lag reported in the two TDS attempts; their individual costs remain unmeasured.

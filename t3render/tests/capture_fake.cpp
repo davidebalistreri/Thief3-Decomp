@@ -396,6 +396,20 @@ int main(int argc, char** argv) {
         snapshot.entries[0].address = {0x5678, true};
         snapshot.entries[0].owner_name_available = true;
         std::strcpy(snapshot.entries[0].owner_name, "synthetic\"actor");
+        if (scenario == "bridge_map_witness") {
+            auto& entry=snapshot.entries[0];entry.vtable={0x10e4e8c0,true};entry.type={4,true};
+            entry.owner_candidate={0x4000,true};entry.owner_object_index={2,true};entry.owner_fname={(2u<<16)|7,true};
+            entry.owner_class={0x7000,true};entry.owner_backlink=entry.address;entry.owner_table_member=entry.owner_stable=true;
+            std::strcpy(entry.owner_name,"StaticMeshActor");snapshot.array={0x2000,true};
+            auto& witness=snapshot.map_witness;witness.available=witness.list_stable=witness.object_table_complete=true;
+            witness.entry=entry;witness.owner_outer={0xa000,true};
+            witness.owner_class.address=entry.owner_class;witness.owner_class.fname={7,true};
+            witness.owner_class.member=witness.owner_class.stable=witness.owner_class.name_available=true;
+            std::strcpy(witness.owner_class.name,"StaticMeshActor");
+            witness.outer.address=witness.owner_outer;witness.outer.fname={8,true};witness.outer.outer={0,true};
+            witness.outer.member=witness.outer.stable=witness.outer.name_available=true;
+            std::strcpy(witness.outer.name,"LOADGAME:bedroom");
+        }
         if (scenario == "bridge_asset_audit") {
             auto& asset = snapshot.target.asset;
             asset.status = t3render::scene_bridge::AssetStatus::Candidate;

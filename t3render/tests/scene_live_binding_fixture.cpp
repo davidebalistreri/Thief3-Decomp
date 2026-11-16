@@ -76,6 +76,13 @@ ProbeSnapshot probe() {
     p.entries[0].vtable={0x10e4a668,true};p.entries[0].type={5,true};
     return p;
 }
+ProbeSnapshot without_bed() {
+    auto p=probe();auto& witness=p.map_witness;witness.available=witness.list_stable=witness.object_table_complete=true;
+    witness.entry=p.target.entry;witness.entry.list_index=1;witness.entry.owner_fname.value=(2u<<16)|7;
+    witness.owner_class=p.target.owner_class;witness.owner_outer={0xa000,true};
+    witness.outer=p.target.outer[0];witness.outer.address={0xa000,true};witness.outer.fname={8,true};witness.outer.outer={0,true};
+    p.entries[1]=witness.entry;p.entries_attempted=2;p.count.value=2;p.target={};return p;
+}
 SubmissionSample bed_scope() {
     SubmissionSample s;s.valid=true;s.self=0x1000;s.pass=0;s.element=0x3000;s.vtable=0x10e4e8c0;s.type=4;
     matrix(s.matrix);s.owner=0x4000;s.owner_index=2;s.owner_fname=(1521u<<16)|7;s.backlink=0x3000;
@@ -107,6 +114,21 @@ bool matching() {
     mismatch=draw;mismatch.indexed=false;CHECK(!ScopeDrawMatches(*c.bed,0,mismatch));
     CHECK(ResolveBsp(c,p,block,0,bsp));
     CHECK(bsp.resource_id==bsp_id && bsp.binding==BindingEvidence::Candidate);
+    auto no_bed=without_bed();
+    CHECK(ResolveBsp(c,no_bed,block,0,bsp) && bsp.identity_scope==IdentityScope::VisibleList);
+    CHECK(!ResolveBed(c,no_bed,bed,0,1,mesh));
+    auto no_witness=no_bed;no_witness.map_witness={};CHECK(!ResolveBsp(c,no_witness,block,0,bsp));
+    auto wrong_witness=no_bed;text(wrong_witness.map_witness.outer.name,"another");CHECK(!ResolveBsp(c,wrong_witness,block,0,bsp));
+    wrong_witness=no_bed;wrong_witness.map_witness.entry.owner_backlink.value++;CHECK(!ResolveBsp(c,wrong_witness,block,0,bsp));
+    wrong_witness=no_bed;wrong_witness.map_witness.entry.owner_fname.value=(1521u<<16)|7;CHECK(!ResolveBsp(c,wrong_witness,block,0,bsp));
+    wrong_witness=no_bed;wrong_witness.map_witness.outer.outer.value=1;CHECK(!ResolveBsp(c,wrong_witness,block,0,bsp));
+    wrong_witness=no_bed;wrong_witness.map_witness.outer.fname.value|=1u<<16;CHECK(!ResolveBsp(c,wrong_witness,block,0,bsp));
+    wrong_witness=no_bed;wrong_witness.map_witness.object_table_complete=false;CHECK(!ResolveBsp(c,wrong_witness,block,0,bsp));
+    wrong_witness=no_bed;wrong_witness.entries[1].address.value++;CHECK(!ResolveBsp(c,wrong_witness,block,0,bsp));
+    wrong_witness=no_bed;wrong_witness.entries[2]=wrong_witness.entries[1];wrong_witness.entries[2].list_index=2;
+    wrong_witness.entries_attempted=wrong_witness.count.value=3;CHECK(!ResolveBsp(c,wrong_witness,block,0,bsp));
+    wrong_witness=no_bed;wrong_witness.target=probe().target;text(wrong_witness.target.outer[0].name,"another");
+    CHECK(!ResolveBsp(c,wrong_witness,block,0,bsp)); // a conflicting bed witness cannot be bypassed
     CHECK(!ReadProbeCamera(p,18,0,cam));CHECK(!ReadProbeCamera(p,17,1,cam));
     CHECK(!ResolveBed(c,p,bed,1,1,mesh));CHECK(!ResolveBed(c,p,bed,0,0,mesh));
     CHECK(!ResolveBsp(c,p,block,1,bsp));
@@ -205,8 +227,9 @@ bool driver_delivery() {
     CHECK(diagnostics.published==1 && diagnostics.selected_probes==1 && diagnostics.bed_scopes==1 &&
           diagnostics.bsp_scopes==2 && diagnostics.bsp_cache_hits==1 && diagnostics.last_rejection==0);
     CHECK(first->meshes[0].selection.generation==1 && first->provenance.origin==FrameOrigin::Synthetic);
-    CHECK(sample());CHECK(submit(bsp,state));CHECK(present()==WindowResult::Published);
-    CHECK(driver->current()->meshes.empty());
+    p=without_bed();CHECK(sample());CHECK(submit(bsp,state));CHECK(present()==WindowResult::Published);
+    CHECK(driver->current()->meshes.empty() && driver->current()->bsp.size()==1);
+    p=probe();
     CHECK(sample());CHECK(submit(bed,state));CHECK(present()==WindowResult::Published);
     CHECK(driver->current()->meshes[0].selection.generation==2); // gap could hide identity reuse
     CHECK(sample());auto moved=state;moved.world[12]=1;CHECK(submit(bed,moved));

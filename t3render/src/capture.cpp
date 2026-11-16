@@ -330,6 +330,16 @@ void BridgeNamedObject(std::ostream& out, const scene_bridge::ProbeNamedObject& 
     out << '}';
 }
 
+void BridgeMapWitness(std::ostream& out, const scene_bridge::ProbeMapWitness& witness) {
+    if (!witness.available) { out << "null"; return; }
+    out << "{\"list_stable\":" << (witness.list_stable ? "true" : "false")
+        << ",\"object_table_complete\":" << (witness.object_table_complete ? "true" : "false")
+        << ",\"entry\":"; BridgeEntry(out,witness.entry);
+    out << ",\"owner_outer\":"; BridgeValue(out,witness.owner_outer);
+    out << ",\"owner_class\":"; BridgeNamedObject(out,witness.owner_class);
+    out << ",\"outer\":"; BridgeNamedObject(out,witness.outer); out << '}';
+}
+
 const char* BridgeAssetStatusName(scene_bridge::AssetStatus status) noexcept {
     using scene_bridge::AssetStatus;
     switch (status) {
@@ -579,6 +589,7 @@ bool Open(CaptureState& s) {
                                 << ",\"mesh_node\":\"actor_node_v1\""
                                 << ",\"mesh_sections\":\"actor_materials_v1\""
                                 << ",\"bsp_candidates\":\"vbsp_array_v1\""
+                                << ",\"map_witness\":\"visible_static_actor_v1\""
                                 << ",\"synchronization\":\"present_interval_and_thread_only\""
                                 << (s.submission_requested ? ",\"submission_scope\":\"section_call_v1\",\"submission_install_status\":\"" : "")
                                 << (s.submission_requested ? BridgeStatusName(s.submission_install_status) : "")
@@ -1876,6 +1887,7 @@ void CaptureBridgeEnd(std::uint64_t ticket, const scene_bridge::ProbeSnapshot& s
             BridgeEntry(out, snapshot.entries[i]);
         }
         out << "],\"target\":"; BridgeTarget(out, snapshot.target);
+        out << ",\"map_witness\":"; BridgeMapWitness(out,snapshot.map_witness);
         out << ",\"bsp\":"; BridgeBsp(out, snapshot.bsp); out << "}\n";
         if (Write(s, out.str())) ++s.bridge_completed;
     } catch (...) { Fail(); }

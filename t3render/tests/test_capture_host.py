@@ -92,6 +92,18 @@ class CaptureHostTests(unittest.TestCase):
                 self.run_capture(scenario, frame="1", extra={"T3RENDER_SCENE_BRIDGE": "1"})
                 self.assertNotIn("scene_live_frame", next(r for r in self.records() if r["event"] == "frame_end"))
 
+    def test_visible_actor_map_witness_is_recorded_and_validated(self):
+        self.run_capture("bridge_map_witness", frame="1", extra={"T3RENDER_SCENE_BRIDGE": "1"})
+        records = self.records()
+        self.assertEqual(records[0]["scene_bridge"]["map_witness"], "visible_static_actor_v1")
+        observation = next(r for r in records if r["event"] == "scene_bridge_observation")
+        self.assertEqual(observation["map_witness"]["outer"]["name"], "LOADGAME:bedroom")
+        self.assertEqual(trace_summary.summarize(self.path)["frame_count"], 1)
+        observation["map_witness"]["entry"]["owner_backlink"] += 1
+        self.path.write_text("".join(json.dumps(r) + "\n" for r in records))
+        with self.assertRaisesRegex(trace_summary.TraceError, "invalid visible actor map witness"):
+            trace_summary.summarize(self.path)
+
     def test_bridge_asset_audit_records_and_validates_the_property_chain(self):
         self.run_capture("bridge_asset_audit", frame="1", extra={"T3RENDER_SCENE_BRIDGE": "1"})
         records = self.records()

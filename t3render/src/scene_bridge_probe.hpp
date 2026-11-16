@@ -16,6 +16,7 @@ constexpr std::size_t kMaxMeshNodeListEntries = 8192;
 constexpr std::size_t kMaxMeshNodeSections = 16;
 constexpr std::size_t kMaxProbeBspBlocks = 16;
 constexpr std::size_t kMaxProbeBspSections = 16;
+constexpr std::size_t kMaxMapWitnessCandidates = 8;
 
 struct ProbeValue {
     std::uint32_t value = 0;
@@ -144,6 +145,16 @@ struct ProbeTarget {
     ProbeMeshNode mesh_node;
 };
 
+// One current visible StaticMeshActor can witness a map name when the bed is
+// absent. This is a bounded candidate, not proof of the active map or VBSP
+// ownership; it contains transient addresses and is never serialized as IR.
+struct ProbeMapWitness {
+    bool available = false, list_stable = false, object_table_complete = false;
+    ProbeEntry entry;
+    ProbeValue owner_outer;
+    ProbeNamedObject owner_class, outer;
+};
+
 struct ProbeSnapshot {
     std::uint32_t thread_id = 0;
     std::uint32_t self = 0;  // saved ECX at 0x10926800
@@ -161,6 +172,7 @@ struct ProbeSnapshot {
     bool entries_truncated = false;
     ProbeEntry entries[kMaxProbeEntries]{};
     ProbeTarget target;  // targeted search of StaticMeshActor__1520, independently bounded
+    ProbeMapWitness map_witness;
     ProbeBsp bsp;        // candidates proven members of the current VBSP array
 };
 

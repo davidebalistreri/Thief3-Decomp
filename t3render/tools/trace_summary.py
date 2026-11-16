@@ -64,6 +64,36 @@ def _bridge_named(value):
             (name is None or isinstance(name, str) and len(name) < 64 and all(32 <= ord(c) < 127 for c in name)))
 
 
+def _bridge_map_witness(value, observation):
+    if value is None:
+        return True
+    if not isinstance(value, dict) or value.get("list_stable") is not True or value.get("object_table_complete") is not True:
+        return False
+    entry, cls, outer = value.get("entry"), value.get("owner_class"), value.get("outer")
+    entries = observation.get("entries")
+    if (not _bridge_entry(entry) or not _bridge_named(cls) or not _bridge_named(outer) or
+            not isinstance(entries, list) or observation.get("entries_truncated") is not False or
+            observation.get("count") != len(entries) or not observation.get("array") or
+            entry["list_index"] >= len(entries)):
+        return False
+    listed = entries[entry["list_index"]]
+    if (not isinstance(listed, dict) or listed.get("list_index") != entry["list_index"] or
+            not entry.get("address") or listed.get("address") != entry["address"] or
+            entry.get("vtable") != 0x10e4e8c0 or listed.get("vtable") != entry["vtable"] or
+            entry.get("type") != 4 or listed.get("type") != 4 or
+            sum(e.get("address") == entry["address"] for e in entries) != 1 or
+            entry.get("owner_table_member") is not True or entry.get("owner_stable") is not True or
+            not entry.get("owner_candidate") or entry.get("owner_backlink") != entry["address"] or
+            entry.get("owner_name") != "StaticMeshActor" or entry.get("owner_fname") is None or
+            entry["owner_fname"] >> 16 == 1521):
+        return False
+    return (cls.get("member") is True and cls.get("stable") is True and cls.get("name") == "StaticMeshActor" and
+            cls.get("address") == entry.get("owner_class") and cls.get("fname") is not None and cls["fname"] >> 16 == 0 and
+            _uint(value.get("owner_outer")) and value["owner_outer"] != 0 and
+            outer.get("address") == value["owner_outer"] and outer.get("member") is True and outer.get("stable") is True and
+            bool(outer.get("name")) and outer.get("fname") is not None and outer["fname"] >> 16 == 0 and outer.get("outer") == 0)
+
+
 def _bridge_target(value):
     if not isinstance(value, dict):
         return False
@@ -356,7 +386,8 @@ def summarize(path):
                             bridge_capability.get("asset_audit") not in (None, "local_property_v1") or
                             bridge_capability.get("mesh_node") not in (None, "actor_node_v1") or
                             bridge_capability.get("mesh_sections") not in (None, "actor_materials_v1") or
-                            bridge_capability.get("bsp_candidates") not in (None, "vbsp_array_v1")):
+                            bridge_capability.get("bsp_candidates") not in (None, "vbsp_array_v1") or
+                            bridge_capability.get("map_witness") not in (None, "visible_static_actor_v1")):
                             raise TraceError(f"line {lines}: invalid scene bridge capability")
                         scope = bridge_capability.get("submission_scope")
                         scope_status = bridge_capability.get("submission_install_status")
@@ -459,6 +490,9 @@ def summarize(path):
                     if (bridge_capability.get("bsp_candidates") == "vbsp_array_v1" and
                             ("bsp" not in item or not _bridge_bsp(item["bsp"], entries))):
                         raise TraceError(f"line {lines}: invalid VBSP candidate observation")
+                    if (bridge_capability.get("map_witness") == "visible_static_actor_v1" and
+                            ("map_witness" not in item or not _bridge_map_witness(item["map_witness"], item))):
+                        raise TraceError(f"line {lines}: invalid visible actor map witness")
                     if bridge_capability.get("mesh_node") == "actor_node_v1" and "mesh_node" not in target:
                         raise TraceError(f"line {lines}: missing mesh node observation")
                     if (bridge_capability.get("mesh_sections") == "actor_materials_v1" and

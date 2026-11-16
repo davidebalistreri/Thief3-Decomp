@@ -35,6 +35,24 @@ struct Memory {
     }
 };
 
+struct ChangeDuringWitness {
+    enum class Kind { Outer, List, DuplicateObject };
+    Memory* memory;
+    Kind kind = Kind::Outer;
+    bool changed = false;
+    static bool read(void* context, std::uint32_t address, void* output, std::size_t count) noexcept {
+        auto& state=*static_cast<ChangeDuringWitness*>(context);
+        const bool ok=Memory::read(state.memory,address,output,count);
+        if (ok && address==0x4018 && count==4 && !state.changed) {
+            state.changed=true;
+            if (state.kind==Kind::List) state.memory->put<std::uint32_t>(0x2000,0x7000);
+            else if (state.kind==Kind::DuplicateObject) state.memory->put<std::uint32_t>(0x8000,0x4000);
+            else state.memory->put<std::uint32_t>(0x4018,0x7000);
+        }
+        return ok;
+    }
+};
+
 Memory SampleMemory(bool owner_member = true) {
     Memory m;
     m.region(0x1000, 0x100); m.region(0x2000, 512); m.region(0x3000, 0x100);
@@ -117,10 +135,17 @@ int main() {
     complete.region(0x10f2c740, 4); complete.region(0x15000, 32); complete.region(0x16000, 0x58);
     complete.region(0x17000, 4 + 2 * 0x1ac); complete.region(0x18000, 4 + 2 * 36);
     complete.region(0x19000, 32); complete.region(0x19100, 32);
+    complete.region(0x1a000, 64); complete.region(0x1b000, 128);
     complete.region(0x10f3eda4, 4); complete.region(0x10e72e48 + 0xb4, 4);
     complete.region(0x10f7b5c8 + 3 * 8, 8);
-    complete.put<std::uint32_t>(0x10f3e4a4, 4); complete.put<std::uint32_t>(0x10f3e4a8, 4);
+    complete.put<std::uint32_t>(0x10f3e4a4, 5); complete.put<std::uint32_t>(0x10f3e4a8, 5);
     complete.put<std::uint32_t>(0x8004, 0x7000); complete.put<std::uint32_t>(0x800c, 0xc000);
+    complete.put<std::uint32_t>(0x8010, 0x1a000); complete.put<std::uint32_t>(0x4018, 0x1a000);
+    complete.put<std::uint32_t>(0x1a004, 4); complete.put<std::uint32_t>(0x1a020, 8);
+    complete.put<std::uint32_t>(0x10f7af20, 9); complete.put<std::uint32_t>(0x10f7af24, 9);
+    complete.put<std::uint32_t>(0xa020, 0x1b000);
+    const char map_name[] = "LOADGAME:bedroom";
+    for (std::size_t i=0;i<sizeof(map_name);++i) complete.put<std::uint8_t>(0x1b01c+i,map_name[i]);
     complete.put<std::uint32_t>(0x7004, 1); complete.put<std::uint32_t>(0x7020, 7);
     complete.put<std::uint32_t>(0xc004, 3);
     complete.put<std::uint32_t>(0x10f3eda4, 0x6000); complete.put<std::uint32_t>(0x6008, 0x6100);
@@ -205,22 +230,49 @@ int main() {
     assert(bsp.stable && bsp.source_index == 1 && bsp.list_index == 1 &&
            bsp.vertex_count == 60 && bsp.index_count == 114 && bsp.sections_available &&
            bsp.sections_copied == 2 && std::strcmp(bsp.sections[0].material_name, "wall") == 0);
+    // A different visible actor can attest its own outer even when the target
+    // bed is absent. It does not assert ownership of the VBSP.
+    auto no_bed=complete;no_bed.put<std::uint32_t>(0x4020,(2u<<16)|7);no_bed.put<std::uint32_t>(0x10efef54,0);
+    reader.context=&no_bed;
+    auto witness=SampleLiveProbe(reader,42,0x1000,0x109271ae);
+    assert(!witness.target.entry_available && witness.map_witness.available && witness.map_witness.list_stable &&
+           witness.map_witness.object_table_complete && witness.map_witness.entry.owner_stable &&
+           witness.map_witness.entry.list_index==0 && std::strcmp(witness.map_witness.outer.name,map_name)==0 &&
+           witness.bsp.source_stable);
+    witness=SampleProbe(reader,42,0x1000,0x109271ae);
+    assert(!witness.target.entry_available && witness.map_witness.available);
+    no_bed.put<std::uint32_t>(0x1a020,(1u<<16)|8);
+    witness=SampleLiveProbe(reader,42,0x1000,0x109271ae);assert(!witness.map_witness.available);
+    no_bed.put<std::uint32_t>(0x1a020,8);no_bed.put<std::uint32_t>(0x1a018,0x7000);
+    witness=SampleLiveProbe(reader,42,0x1000,0x109271ae);assert(!witness.map_witness.available);
+    no_bed.put<std::uint32_t>(0x1a018,0);no_bed.put<std::uint32_t>(0x40b4,0);
+    witness=SampleLiveProbe(reader,42,0x1000,0x109271ae);assert(!witness.map_witness.available);
+    no_bed.put<std::uint32_t>(0x40b4,0x3000);no_bed.put<std::uint32_t>(0x1050,3);no_bed.put<std::uint32_t>(0x2008,0x3000);
+    witness=SampleLiveProbe(reader,42,0x1000,0x109271ae);assert(!witness.map_witness.available);
+    for (auto kind:{ChangeDuringWitness::Kind::Outer,ChangeDuringWitness::Kind::List,ChangeDuringWitness::Kind::DuplicateObject})
+        for (bool full:{false,true}) {
+            auto changing=complete;changing.put<std::uint32_t>(0x4020,(2u<<16)|7);changing.put<std::uint32_t>(0x10efef54,0);
+            ChangeDuringWitness state{&changing,kind,false};ProbeReader unstable{&state,ChangeDuringWitness::read};
+            witness=full ? SampleProbe(unstable,42,0x1000,0x109271ae) : SampleLiveProbe(unstable,42,0x1000,0x109271ae);
+            assert(state.changed && !witness.map_witness.available);
+        }
+    reader.context=&complete;
     // The live path checks only the visible actor's identity; it must not scan
     // each unrelated UObject by name on every game frame.
     auto large=complete;
     constexpr std::uint32_t extra=1000, table_base=0x200000, object_base=0x300000;
-    large.region(table_base,(extra+4)*4);
-    for (std::uint32_t i=0;i<4;++i) {
+    large.region(table_base,(extra+5)*4);
+    for (std::uint32_t i=0;i<5;++i) {
         std::uint32_t value=0;
         assert(Memory::read(&large,0x8000+i*4,&value,sizeof(value)));
         large.put<std::uint32_t>(table_base+i*4,value);
     }
     for (std::uint32_t i=0;i<extra;++i) {
         const auto object=object_base+i*64;large.region(object,0x24);
-        large.put<std::uint32_t>(table_base+(i+4)*4,object);
+        large.put<std::uint32_t>(table_base+(i+5)*4,object);
     }
     large.put<std::uint32_t>(0x10f3e4a0,table_base);
-    large.put<std::uint32_t>(0x10f3e4a4,extra+4);large.put<std::uint32_t>(0x10f3e4a8,extra+4);
+    large.put<std::uint32_t>(0x10f3e4a4,extra+5);large.put<std::uint32_t>(0x10f3e4a8,extra+5);
     large.put<std::uint32_t>(0x10efef54,0);
     reader.context=&large;large.read_calls=0;
     auto full=SampleProbe(reader,42,0x1000,0x109271ae);const auto full_reads=large.read_calls;
@@ -230,13 +282,17 @@ int main() {
            live.target.list_occurrences==1 && live.target.entry_available && live.target.owner_class.stable &&
            live.target.asset.status==AssetStatus::Candidate && live.target.mesh_node.stable && live.bsp.source_stable);
     assert(live_reads*2<full_reads);
-    std::printf("probe_read_calls full=%u live=%u unrelated_objects=%u\n",full_reads,live_reads,extra);
+    large.put<std::uint32_t>(0x4020,(2u<<16)|7);large.read_calls=0;
+    auto witness_live=SampleLiveProbe(reader,42,0x1000,0x109271ae);const auto witness_reads=large.read_calls;
+    assert(!witness_live.target.entry_available && witness_live.map_witness.available && witness_reads<full_reads);
+    std::printf("probe_read_calls full=%u live=%u no_bed=%u unrelated_objects=%u\n",full_reads,live_reads,witness_reads,extra);
+    large.put<std::uint32_t>(0x4020,(1521u<<16)|7);
     // Another globally named actor outside the visible list is not ruled out
     // by the fast path; its result must explicitly retain the weaker scope.
     large.put<std::uint32_t>(object_base+0x20,(1521u<<16)|7);
     full=SampleProbe(reader,42,0x1000,0x109271ae);
     live=SampleLiveProbe(reader,42,0x1000,0x109271ae);
-    assert(full.target.actors_named_target==2 && !full.target.entry_available);
+    assert(full.target.actors_named_target==2 && !full.target.entry_available && !full.map_witness.available);
     assert(live.target.visible_list_only && live.target.list_occurrences==1 && live.target.entry_available);
     large.put<std::uint32_t>(object_base+0x20,0);
     large.put<std::uint32_t>(0x1050,3);large.put<std::uint32_t>(0x2008,0x3000);

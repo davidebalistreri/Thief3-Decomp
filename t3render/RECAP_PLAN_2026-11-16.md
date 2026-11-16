@@ -240,3 +240,10 @@ con il precedente selettore offline su 16 sezioni e 67 triangoli. Fixture GPU
 e worker con asset offline e camera sintetica hanno verificato texture, UV,
 scomparsa del letto e Reset. Normali, roughness e AO sono nel catalogo ma non
 ancora usati dal viewer: PBR, integrazione TDS e prestazioni rimangono aperti.
+
+Il modello residente ora distingue evidenza e copertura delle luci per singolo
+campo e può associare un campione a una finestra `Present` tramite lettura
+interamente delimitata. Il convertitore accetta per il rendering soltanto una
+raccolta completa e proprietà verificate; i test usano luci sintetiche. Il
+probe TDS non produce ancora questi campioni e le nove luci candidate non sono
+state promosse a misure certe.

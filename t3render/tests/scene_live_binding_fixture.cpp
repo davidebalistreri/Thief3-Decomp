@@ -1,5 +1,6 @@
 #include "../src/scene_live_binding.hpp"
 #include "../src/scene_live_driver.hpp"
+#include "../src/scene_live_lighting.hpp"
 #ifdef T3RENDER_TEST_LIVE_DX12_DRIVER
 #include "../src/scene_live_viewer.hpp"
 #endif
@@ -218,17 +219,24 @@ bool driver_delivery() {
     std::uint64_t live_frame=UINT64_MAX;
     auto live_ticket=driver->BeginPresent(thread,&live_frame);
     CHECK(live_ticket && live_frame==0 && driver->EndPresent(live_ticket,thread,true)==WindowResult::Primed);
-    CHECK(sample());CHECK(submit(bed,state));CHECK(submit(bsp,state));CHECK(submit(bsp,state));
+    VisualLight light;light.id="light:candle";light.generation=1;light.binding=BindingEvidence::Candidate;
+    light.position={Vec3{1,2,3},BindingEvidence::Candidate};
+    CHECK(!driver->BeginLightSample(thread));
+    CHECK(sample());auto light_ticket=driver->BeginLightSample(thread);CHECK(light_ticket);
+    CHECK(driver->EndLightSample(light_ticket,thread,true,LightCoverage::Partial,{light}));
+    CHECK(submit(bed,state));CHECK(submit(bsp,state));CHECK(submit(bsp,state));
     live_ticket=driver->BeginPresent(thread,&live_frame);
     CHECK(live_ticket && live_frame==1 && driver->EndPresent(live_ticket,thread,true)==WindowResult::Published);
     auto first=driver->current();
     CHECK(first && first->frame_id==1 && first->meshes.size()==1 && first->bsp.size()==1);
+    CHECK(first->light_coverage==LightCoverage::Partial && first->lights.size()==1 && first->lights[0]==light);
     auto diagnostics=driver->stats();
     CHECK(diagnostics.published==1 && diagnostics.selected_probes==1 && diagnostics.bed_scopes==1 &&
           diagnostics.bsp_scopes==2 && diagnostics.bsp_cache_hits==1 && diagnostics.last_rejection==0);
     CHECK(first->meshes[0].selection.generation==1 && first->provenance.origin==FrameOrigin::Synthetic);
     p=without_bed();CHECK(sample());CHECK(submit(bsp,state));CHECK(present()==WindowResult::Published);
-    CHECK(driver->current()->meshes.empty() && driver->current()->bsp.size()==1);
+    CHECK(driver->current()->meshes.empty() && driver->current()->bsp.size()==1 &&
+          driver->current()->lights.empty() && driver->current()->light_coverage==LightCoverage::Unknown);
     p=probe();
     CHECK(sample());CHECK(submit(bed,state));CHECK(present()==WindowResult::Published);
     CHECK(driver->current()->meshes[0].selection.generation==2); // gap could hide identity reuse
@@ -263,6 +271,14 @@ bool driver_delivery() {
     scope=driver->BeginScope(thread,1,0);CHECK(scope && !driver->SetScopeSample(scope,thread,replaced));
     driver->EndScope(scope,thread,replaced);CHECK(present()==WindowResult::Primed && !driver->current());
     CHECK(sample());CHECK(submit(bsp,state));CHECK(present()==WindowResult::Published);
+    CHECK(sample());light_ticket=driver->BeginLightSample(thread);CHECK(light_ticket);
+    CHECK(present()==WindowResult::Rejected && !driver->current());
+    CHECK(!driver->EndLightSample(light_ticket,thread,true,LightCoverage::Partial,{light}));
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bsp,state));CHECK(present()==WindowResult::Published);
+    CHECK(sample());light_ticket=driver->BeginLightSample(thread);CHECK(light_ticket);
+    reset=driver->BeginReset(thread);CHECK(reset && !driver->current());driver->EndReset(reset,thread,true);
+    CHECK(!driver->EndLightSample(light_ticket,thread,true,LightCoverage::Partial,{light}));
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bsp,state));CHECK(present()==WindowResult::Published);
     return true;
 }
 #ifdef T3RENDER_TEST_LIVE_DX12_DRIVER
@@ -291,6 +307,7 @@ bool driver_gpu_pipeline() {
     c.bed=memory->FindSceneResource(epoch.map,bed_id);c.bsp[0]=memory->FindSceneResource(epoch.map,bsp_id);
     LoadedCatalog loaded;loaded.residency=memory;loaded.binding=c;
     loaded.conventions.length_unit=LengthUnit::T3Unit;loaded.conventions.axes=Axes::T3Xyz;loaded.conventions.up_axis=UpAxis::Z;
+    loaded.conventions.meters_per_unit=.01905f;
     FrameProvenance source;source.origin=FrameOrigin::Synthetic;source.session_id="driver-gpu-fixture";
     auto state=std::make_shared<PipelineFixture>();state->driver=SceneDriver::Create(std::move(loaded),source,0,1);
     CHECK(state->driver);
@@ -307,20 +324,33 @@ bool driver_gpu_pipeline() {
         const auto draw=driver.BeginDraw(thread,scope,args);if (!draw.ticket || !draw.needs_state)return false;
         driver.EndDraw(draw.ticket,thread,true,draw_state,draw_state);driver.EndScope(scope,thread,value);return true;
     };
-    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bed));CHECK(submit(bsp));
+    CHECK(present()==WindowResult::Primed);CHECK(sample());
+    VisualLight light;light.id="light:fixture";light.generation=1;light.binding=BindingEvidence::Verified;
+    light.kind={LightKind::Point,BindingEvidence::Verified};light.enabled={true,BindingEvidence::Verified};
+    light.position={Vec3{1,2,3},BindingEvidence::Verified};light.color_linear={Vec3{1,.5f,.25f},BindingEvidence::Verified};
+    light.intensity={2,BindingEvidence::Verified};light.influence_radius={100,BindingEvidence::Verified};
+    light.source_radius_m={.05f,BindingEvidence::Verified};
+    const auto light_ticket=driver.BeginLightSample(thread);CHECK(light_ticket);
+    CHECK(driver.EndLightSample(light_ticket,thread,true,LightCoverage::Complete,{light}));
+    CHECK(submit(bed));CHECK(submit(bsp));
     CHECK(present()==WindowResult::Published);viewer->Notify();CHECK(pipeline_wait(*viewer,1));
-    CHECK(viewer->stats().frame_id==1 && driver.current()->meshes.size()==1 && driver.current()->bsp.size()==1);
+    CHECK(viewer->stats().frame_id==1 && driver.current()->meshes.size()==1 && driver.current()->bsp.size()==1 &&
+          driver.current()->light_coverage==LightCoverage::Complete && driver.current()->lights.size()==1 &&
+          driver.current()->lights[0]==light);
+    VerifiedLighting lighting;CHECK(BuildVerifiedLighting(*driver.current(),lighting)==LightingResult::Ready &&
+                                    LightingMatchesSnapshot(*driver.current(),lighting) && lighting.lights.size()==1);
     const auto reset=driver.BeginReset(thread);CHECK(reset);viewer->Notify();CHECK(pipeline_wait(*viewer,1,1));
     driver.EndReset(reset,thread,true);CHECK(present()==WindowResult::Primed);
     p.current_camera.derived_matrix_bits[12]=bits(0.25f);draw_state.view[12]=0.25f;
     CHECK(sample());CHECK(submit(bed));CHECK(submit(bsp));CHECK(present()==WindowResult::Published);
     viewer->Notify();CHECK(pipeline_wait(*viewer,2,1));
-    CHECK(viewer->stats().frame_id==3 && driver.current()->camera.view[12]==0.25f);
+    CHECK(viewer->stats().frame_id==3 && driver.current()->camera.view[12]==0.25f &&
+          driver.current()->light_coverage==LightCoverage::Unknown && driver.current()->lights.empty());
     viewer->Stop();
     const auto deadline=GetTickCount64()+20000;
     while (!viewer->stats().stopped && GetTickCount64()<deadline) Sleep(10);
     CHECK(viewer->stats().stopped && !viewer->stats().failed);
-    std::cout<<"scene_live_driver_dx12_fixture=ok source=synthetic frame_and_reset=ok\n";
+    std::cout<<"scene_live_driver_dx12_fixture=ok source=synthetic light_same_window=ok frame_and_reset=ok\n";
     return true;
 }
 #endif

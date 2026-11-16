@@ -1,5 +1,6 @@
 #include "../ir/scene_live.hpp"
 #include "../src/scene_live_flat.hpp"
+#include "../src/scene_live_lighting.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -191,6 +192,87 @@ bool bedroom_material_selection() {
     return true;
 }
 
+VisualLight point_light() {
+    VisualLight light;light.id="light:candle";light.generation=1;light.binding=BindingEvidence::Verified;
+    light.kind={LightKind::Point,BindingEvidence::Verified};light.enabled={true,BindingEvidence::Verified};
+    light.position={Vec3{1,2,3},BindingEvidence::Verified};light.color_linear={Vec3{1,.5f,.25f},BindingEvidence::Verified};
+    light.intensity={2,BindingEvidence::Verified};light.influence_radius={100,BindingEvidence::Verified};
+    light.source_radius_m={.05f,BindingEvidence::Verified};return light;
+}
+
+bool light_lifecycle_and_evidence() {
+    SceneResidency scene;CHECK(setup(scene));auto f=frame(scene.epochs(),1);auto light=point_light();
+    f.conventions.meters_per_unit=.01905f;
+    f.camera.view={0,2,0,0, -3,0,0,0, 0,0,4,0, 11,-7,9,1};
+    CHECK(ClassifyVisualLight(light)==LightReadiness::Ready);
+    auto incomplete=light;incomplete.color_linear.evidence=BindingEvidence::Candidate;
+    CHECK(ClassifyVisualLight(incomplete)==LightReadiness::Incomplete);
+    auto off=light;off.enabled={false,BindingEvidence::Verified};off.intensity={};
+    CHECK(ClassifyVisualLight(off)==LightReadiness::Disabled);
+    off.enabled.evidence=BindingEvidence::Candidate;CHECK(ClassifyVisualLight(off)==LightReadiness::Incomplete);
+    auto spot=light;spot.kind={LightKind::Spot,BindingEvidence::Verified};
+    CHECK(ClassifyVisualLight(spot)==LightReadiness::Incomplete);
+    spot.direction={Vec3{0,0,-1},BindingEvidence::Verified};spot.cos_inner={.9f,BindingEvidence::Verified};
+    spot.cos_outer={.7f,BindingEvidence::Verified};CHECK(ClassifyVisualLight(spot)==LightReadiness::Ready);
+
+    f.lights={light};CHECK(!scene.Publish(f)); // unknown coverage cannot carry observations
+    f.light_coverage=LightCoverage::Partial;CHECK(scene.Publish(f));auto first=scene.current();
+    CHECK(first->light_coverage==LightCoverage::Partial && first->lights.size()==1 && first->lights[0]==light);
+    VerifiedLighting lighting;lighting.frame_id=999;
+    CHECK(BuildVerifiedLighting(*first,lighting)==LightingResult::UnknownCoverage && lighting.frame_id==999);
+    auto complete=*first;complete.light_coverage=LightCoverage::Complete;
+    spot.id="light:spot";complete.lights.push_back(spot);
+    CHECK(BuildVerifiedLighting(complete,lighting)==LightingResult::Ready && lighting.frame_id==1 && lighting.lights.size()==2);
+    CHECK(LightingMatchesSnapshot(complete,lighting));
+    auto next_snapshot=complete;++next_snapshot.frame_id;CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));
+    next_snapshot=complete;++next_snapshot.continuity;CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));
+    next_snapshot=complete;next_snapshot.provenance.session_id="other";CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));
+    next_snapshot=complete;next_snapshot.camera.view[12]+=1;CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));
+    next_snapshot=complete;next_snapshot.light_coverage=LightCoverage::Partial;CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));
+    next_snapshot=complete;next_snapshot.lights[0].enabled.value=false;CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));
+    next_snapshot=complete;next_snapshot.conventions.axes=Axes::Unknown;CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));
+    CHECK(std::fabs(lighting.camera_position[0]-3.5f)<1e-5f &&
+          std::fabs(lighting.camera_position[1]-11.0f/3)<1e-5f && std::fabs(lighting.camera_position[2]+2.25f)<1e-5f);
+    CHECK(std::fabs(lighting.lights[0].influence_radius_m-1.905f)<1e-5f && lighting.lights[0].generation==1 &&
+          lighting.lights[1].kind==LightKind::Spot);
+    auto invalid=complete;invalid.lights[0].color_linear.evidence=BindingEvidence::Candidate;
+    CHECK(BuildVerifiedLighting(invalid,lighting)==LightingResult::Incomplete && lighting.lights.size()==2);
+    invalid=complete;invalid.lights[0]=off;invalid.lights[0].enabled.evidence=BindingEvidence::Verified;
+    CHECK(BuildVerifiedLighting(invalid,lighting)==LightingResult::Ready && lighting.lights.size()==1);
+    invalid=complete;invalid.lights.resize(17,light);
+    for (std::size_t i=0;i<invalid.lights.size();++i) invalid.lights[i].id="light:"+std::to_string(i);
+    CHECK(BuildVerifiedLighting(invalid,lighting)==LightingResult::TooManyLights && lighting.lights.size()==1);
+    invalid=complete;invalid.lights.push_back(invalid.lights[0]);
+    CHECK(BuildVerifiedLighting(invalid,lighting)==LightingResult::Incomplete);
+    invalid=complete;invalid.camera.view[0]=invalid.camera.view[1]=invalid.camera.view[2]=0;
+    CHECK(BuildVerifiedLighting(invalid,lighting)==LightingResult::InvalidCamera);
+    invalid=complete;invalid.conventions.meters_per_unit.reset();
+    CHECK(BuildVerifiedLighting(invalid,lighting)==LightingResult::InvalidUnits);
+    invalid=complete;invalid.provenance.origin=FrameOrigin::LiveProcess;invalid.provenance.capture_sha256=hash_a;
+    CHECK(BuildVerifiedLighting(invalid,lighting)==LightingResult::InvalidProvenance);
+    f.frame_id=2;f.lights[0].color_linear.evidence=BindingEvidence::Candidate;CHECK(scene.Publish(f));
+    CHECK(ClassifyVisualLight(scene.current()->lights[0])==LightReadiness::Incomplete);
+    CHECK(first->lights[0].color_linear.evidence==BindingEvidence::Verified);
+    auto bad=f;bad.frame_id=3;bad.lights[0].generation=2;bad.lights.push_back(bad.lights[0]);CHECK(!scene.Publish(bad));
+    bad=f;bad.frame_id=3;bad.lights[0].enabled.evidence=BindingEvidence::Unknown;CHECK(!scene.Publish(bad));
+    bad=f;bad.frame_id=3;bad.lights[0].position.value=Vec3{std::numeric_limits<float>::quiet_NaN(),0,0};CHECK(!scene.Publish(bad));
+    bad=f;bad.frame_id=3;bad.lights[0].intensity.value=-1;CHECK(!scene.Publish(bad));
+    bad=f;bad.frame_id=3;bad.lights[0].direction={Vec3{0,0,2},BindingEvidence::Verified};CHECK(!scene.Publish(bad));
+    bad=f;bad.frame_id=3;bad.lights[0]=spot;bad.lights[0].cos_outer.value=.95f;CHECK(!scene.Publish(bad));
+    CHECK(scene.current()->frame_id==2);
+    auto unchanged=f;unchanged.frame_id=3;CHECK(scene.Publish(unchanged)); // rejected generation was not committed
+    f.frame_id=4;f.lights.clear();f.light_coverage=LightCoverage::Complete;CHECK(scene.Publish(f));
+    CHECK(scene.current()->lights.empty() && scene.current()->light_coverage==LightCoverage::Complete);
+    f.frame_id=5;light.generation=2;f.lights={light};CHECK(scene.Publish(f));
+    f.frame_id=6;f.lights[0].generation=1;CHECK(!scene.Publish(f));
+    f.lights.clear();f.light_coverage=LightCoverage::Unknown;CHECK(scene.Publish(f));
+    CHECK(scene.current()->lights.empty() && scene.current()->light_coverage==LightCoverage::Unknown);
+    CHECK(scene.BeginMap(scene.epochs().map,"bedroom",hash_a));
+    auto reset=frame(scene.epochs(),1);reset.meshes.clear();reset.bsp.clear();
+    reset.light_coverage=LightCoverage::Partial;reset.lights={point_light()};CHECK(scene.Publish(reset));
+    return true;
+}
+
 bool atomic_validation_and_generations() {
     SceneResidency scene; CHECK(setup(scene));
     auto f = frame(scene.epochs(), 10); CHECK(scene.Publish(f));
@@ -316,7 +398,7 @@ bool submission_epoch_gate() {
 } // namespace
 
 int main() {
-    if (!updates_and_flat_adapter() || !bedroom_material_selection() || !atomic_validation_and_generations() ||
+    if (!updates_and_flat_adapter() || !bedroom_material_selection() || !light_lifecycle_and_evidence() || !atomic_validation_and_generations() ||
         !reset_and_map_change() || !concurrent_readers() || !submission_epoch_gate()) return 1;
     std::cout << "scene_live_fixture=ok\n";
 }

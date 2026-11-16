@@ -46,6 +46,13 @@ public:
     bool EndProbe(std::uint64_t ticket, ThreadToken thread, bool pass_known, std::uint32_t render_pass,
                   bool stable, const ProbeCamera& camera);
 
+    // Bracket the entire read after the selected probe. Present cannot publish
+    // while a sample is in flight. The adapter attests its stability and
+    // coverage; this collector cannot independently prove either assertion.
+    std::uint64_t BeginLightSample(ThreadToken thread);
+    bool EndLightSample(std::uint64_t ticket, ThreadToken thread, bool stable, LightCoverage coverage,
+                        const std::vector<VisualLight>& lights);
+
     // The adapter has already matched one semantic section to its scope.
     // A successful draw and stable scope end are still required to select it.
     std::uint64_t BeginMesh(ThreadToken thread, std::uint32_t render_pass, std::uint32_t stage,
@@ -86,11 +93,13 @@ private:
     bool rebind_required_ = false, draw_scoped_ = false;
     std::uint32_t last_rejection_ = 0;
     std::uint64_t draw_scope_ticket_ = 0;
-    ThreadToken previous_thread_{}, present_thread_{}, probe_thread_{}, scope_thread_{}, draw_thread_{};
+    ThreadToken previous_thread_{}, present_thread_{}, probe_thread_{}, scope_thread_{}, draw_thread_{}, light_thread_{};
     std::uint64_t previous_frame_ = 0, present_frame_ = 0;
-    std::uint64_t present_ticket_ = 0, probe_ticket_ = 0, scope_ticket_ = 0, draw_ticket_ = 0;
+    std::uint64_t present_ticket_ = 0, probe_ticket_ = 0, scope_ticket_ = 0, draw_ticket_ = 0, light_ticket_ = 0;
     std::optional<ProbeCamera> camera_;
     std::optional<Viewport> viewport_;
+    std::optional<LightCoverage> light_coverage_;
+    std::vector<VisualLight> lights_;
     std::optional<MeshSelection> mesh_;
     std::optional<BspSelection> bsp_;
     std::uint32_t scope_draws_ = 0;

@@ -54,6 +54,34 @@ struct Camera {
 // Producer's binding assessment; Candidate must not be promoted to Verified.
 enum class BindingEvidence { Unknown, Candidate, Verified };
 enum class IdentityScope { Unknown, VisibleList, FullObjectScan };
+// Each value retains its own evidence: observing a light's position does not
+// make its color, intensity or enabled state known. Values are copied data.
+template<class T> struct LightField {
+    std::optional<T> value;
+    BindingEvidence evidence = BindingEvidence::Unknown;
+    bool operator==(const LightField& other) const { return value==other.value && evidence==other.evidence; }
+};
+enum class LightKind { Point, Spot };
+enum class LightCoverage { Unknown, Partial, Complete };
+struct VisualLight {
+    std::string id;
+    std::uint64_t generation = 0;
+    BindingEvidence binding = BindingEvidence::Unknown;
+    LightField<LightKind> kind;
+    LightField<Vec3> position, color_linear, direction;
+    LightField<float> intensity, influence_radius, source_radius_m, cos_inner, cos_outer;
+    LightField<bool> enabled;
+    bool operator==(const VisualLight& other) const {
+        return id==other.id && generation==other.generation && binding==other.binding && kind==other.kind &&
+            position==other.position && color_linear==other.color_linear && direction==other.direction &&
+            intensity==other.intensity && influence_radius==other.influence_radius &&
+            source_radius_m==other.source_radius_m && cos_inner==other.cos_inner &&
+            cos_outer==other.cos_outer && enabled==other.enabled;
+    }
+};
+// Disabled is returned only for a verified enabled=false observation.
+enum class LightReadiness { Incomplete, Disabled, Ready };
+LightReadiness ClassifyVisualLight(const VisualLight& light) noexcept;
 struct MeshSelection {
     std::string instance_id, resource_id;
     // Optional in-memory attestation from a matcher; never serialized.
@@ -113,6 +141,8 @@ struct FrameInput {
     bool synchronized = false;
     std::vector<MeshSelection> meshes;
     std::vector<BspSelection> bsp;
+    LightCoverage light_coverage = LightCoverage::Unknown;
+    std::vector<VisualLight> lights;
 };
 struct ResidentMesh {
     MeshSelection selection;
@@ -134,6 +164,8 @@ struct Snapshot {
     std::unordered_map<std::string, Material> materials;
     std::vector<ResidentMesh> meshes;
     std::vector<ResidentBsp> bsp;
+    LightCoverage light_coverage = LightCoverage::Unknown;
+    std::vector<VisualLight> lights;
 };
 struct Epochs {
     std::uint64_t map = 0, device = 0;
@@ -182,6 +214,7 @@ private:
     std::unordered_map<std::string, Material> materials_;
     std::unordered_map<std::string, std::shared_ptr<const Resource>> resources_;
     std::unordered_map<std::string, Identity> identities_;
+    std::unordered_map<std::string, std::uint64_t> light_generations_;
     std::shared_ptr<const Snapshot> snapshot_;
 };
 

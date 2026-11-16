@@ -51,10 +51,10 @@ bool SceneWindow::Eligible(ThreadToken thread) {
     return !tainted_;
 }
 void SceneWindow::ClearInterval() {
-    camera_.reset(); viewport_.reset(); mesh_.reset(); bsp_.reset();
+    camera_.reset(); viewport_.reset(); mesh_.reset(); bsp_.reset();light_coverage_.reset();lights_.clear();
     meshes_.clear(); blocks_.clear(); mesh_index_.clear(); block_index_.clear();
-    probe_ticket_ = scope_ticket_ = draw_ticket_ = 0;
-    probe_thread_ = scope_thread_ = draw_thread_ = {};
+    probe_ticket_ = scope_ticket_ = draw_ticket_ = light_ticket_ = 0;
+    probe_thread_ = scope_thread_ = draw_thread_ = light_thread_ = {};
     scope_draws_ = 0; draw_scoped_ = false; draw_scope_ticket_ = 0; tainted_ = false; active_probe_matches_ = false;
 }
 
@@ -67,7 +67,7 @@ std::uint64_t SceneWindow::BeginPresent(ThreadToken thread, std::uint64_t frame_
     const auto ticket = NextTicket();
     if (!ticket) return 0;
     present_ticket_ = ticket; present_thread_ = thread; present_frame_ = frame_id;
-    if (probe_ticket_ || scope_ticket_ || draw_ticket_) RequireRebind();
+    if (probe_ticket_ || scope_ticket_ || draw_ticket_ || light_ticket_) RequireRebind();
     if (primed_ && (previous_frame_ == UINT64_MAX || frame_id != previous_frame_+1 ||
                     !SameThread(thread, previous_thread_))) tainted_ = true;
     return ticket;
@@ -82,7 +82,7 @@ WindowResult SceneWindow::EndPresent(std::uint64_t ticket, ThreadToken thread, b
     const auto actual = residency_.epochs();
     const bool epoch_valid = epochs_.ready && actual.ready && actual.map == epochs_.map && actual.device == epochs_.device;
     if (!epoch_valid) RequireRebind();
-    const bool no_pending = !probe_ticket_ && !scope_ticket_ && !draw_ticket_;
+    const bool no_pending = !probe_ticket_ && !scope_ticket_ && !draw_ticket_ && !light_ticket_;
     const bool was_primed = primed_;
     last_rejection_ = (!primed_ ? WindowNotPrimed : 0u) | (!succeeded ? WindowPresentFailed : 0u) |
         (!epoch_valid ? WindowEpochInvalid : 0u) | (tainted_ ? WindowTainted : 0u) |
@@ -100,6 +100,7 @@ WindowResult SceneWindow::EndPresent(std::uint64_t ticket, ThreadToken thread, b
         frame.camera.width = viewport_->width; frame.camera.height = viewport_->height;
         frame.camera.min_depth = viewport_->min_depth; frame.camera.max_depth = viewport_->max_depth;
         frame.meshes = meshes_; frame.bsp = blocks_;
+        frame.light_coverage=light_coverage_.value_or(LightCoverage::Unknown);frame.lights=lights_;
         published = residency_.Publish(frame);
         if (!published) last_rejection_ |= WindowPublishFailed;
     }
@@ -120,7 +121,7 @@ WindowResult SceneWindow::EndPresent(std::uint64_t ticket, ThreadToken thread, b
 std::uint64_t SceneWindow::BeginProbe(ThreadToken thread) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!Eligible(thread)) return 0;
-    if (probe_ticket_ || scope_ticket_ || draw_ticket_) { RequireRebind(); return 0; }
+    if (probe_ticket_ || scope_ticket_ || draw_ticket_ || light_ticket_) { RequireRebind(); return 0; }
     const auto ticket = NextTicket();
     if (!ticket) return 0;
     probe_ticket_ = ticket; probe_thread_ = thread; active_probe_matches_ = false;
@@ -142,11 +143,37 @@ bool SceneWindow::EndProbe(std::uint64_t ticket, ThreadToken thread, bool pass_k
     return true;
 }
 
+std::uint64_t SceneWindow::BeginLightSample(ThreadToken thread) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!Eligible(thread)) return 0;
+    if (probe_ticket_ || scope_ticket_ || draw_ticket_ || light_ticket_) { RequireRebind();return 0; }
+    if (!active_probe_matches_) {tainted_=true;return 0;}
+    const auto ticket=NextTicket();if (!ticket) return 0;
+    light_ticket_=ticket;light_thread_=thread;return ticket;
+}
+bool SceneWindow::EndLightSample(std::uint64_t ticket, ThreadToken thread, bool stable, LightCoverage coverage,
+                                 const std::vector<VisualLight>& lights) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!ticket || ticket!=light_ticket_ || !SameThread(thread,light_thread_) || present_ticket_) {
+        RequireRebind();return false;
+    }
+    light_ticket_=0;light_thread_={};
+    if (rebind_required_ || tainted_) return false;
+    if (!stable || (coverage!=LightCoverage::Partial && coverage!=LightCoverage::Complete) ||
+        lights.size()>1024 || std::any_of(lights.begin(),lights.end(),[](const VisualLight& light){
+            return light.id.empty() || light.id.size()>512;
+        })) { tainted_=true;return false; }
+    auto copy=lights;
+    std::sort(copy.begin(),copy.end(),[](const VisualLight& a,const VisualLight& b){return a.id<b.id;});
+    if (light_coverage_ && (*light_coverage_!=coverage || !(lights_==copy))) { tainted_=true;return false; }
+    light_coverage_=coverage;lights_=std::move(copy);return true;
+}
+
 std::uint64_t SceneWindow::BeginMesh(ThreadToken thread, std::uint32_t pass, std::uint32_t stage,
                                      const MeshSelection& section) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!Eligible(thread)) return 0;
-    if (probe_ticket_ || scope_ticket_ || draw_ticket_) { RequireRebind(); return 0; }
+    if (probe_ticket_ || scope_ticket_ || draw_ticket_ || light_ticket_) { RequireRebind(); return 0; }
     if (pass != pass_ || stage != stage_) return 0;
     if (!active_probe_matches_ || section.sections.size() != 1 || section.material_ids.size() > 1024 ||
         section.matched_material_names.size() > 1024 ||
@@ -163,7 +190,7 @@ std::uint64_t SceneWindow::BeginBsp(ThreadToken thread, std::uint32_t pass, std:
                                     const BspSelection& section) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!Eligible(thread)) return 0;
-    if (probe_ticket_ || scope_ticket_ || draw_ticket_) { RequireRebind(); return 0; }
+    if (probe_ticket_ || scope_ticket_ || draw_ticket_ || light_ticket_) { RequireRebind(); return 0; }
     if (pass != pass_ || stage != stage_) return 0;
     if (!active_probe_matches_ || section.sections.size() != 1 || section.matched_material_names.size() > 1024 ||
         section.resource_id.empty() ||
@@ -176,7 +203,7 @@ std::uint64_t SceneWindow::BeginBsp(ThreadToken thread, std::uint32_t pass, std:
 std::uint64_t SceneWindow::BeginDraw(ThreadToken thread) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!Eligible(thread)) return 0;
-    if (draw_ticket_ || probe_ticket_ || (scope_ticket_ && !SameThread(thread, scope_thread_))) {
+    if (draw_ticket_ || probe_ticket_ || light_ticket_ || (scope_ticket_ && !SameThread(thread, scope_thread_))) {
         RequireRebind(); return 0;
     }
     const auto ticket = NextTicket(); if (!ticket) return 0;

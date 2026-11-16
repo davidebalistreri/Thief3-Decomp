@@ -38,6 +38,11 @@ public:
 
     std::uint64_t BeginProbe(ThreadToken thread) noexcept;
     void EndProbe(std::uint64_t ticket, ThreadToken thread, const scene_bridge::ProbeSnapshot& snapshot) noexcept;
+    // Future adapters must bracket the full sample after the selected probe.
+    // Coverage and stability remain producer attestations.
+    std::uint64_t BeginLightSample(ThreadToken thread) noexcept;
+    bool EndLightSample(std::uint64_t ticket, ThreadToken thread, bool stable, LightCoverage coverage,
+                        const std::vector<VisualLight>& lights) noexcept;
     // Begin the scope before sampling process memory, so Present cannot pass
     // an in-flight sample unnoticed. SetScopeSample must follow exactly once.
     std::uint64_t BeginScope(ThreadToken thread, std::uint32_t stage, std::uint32_t section) noexcept;

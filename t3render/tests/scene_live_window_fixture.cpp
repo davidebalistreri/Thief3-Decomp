@@ -82,6 +82,47 @@ bool valid_sequence() {
     return true;
 }
 
+bool light_windows() {
+    SceneResidency scene;CHECK(setup(scene));SceneWindow window(scene,scene.epochs(),provenance(),conventions(),0,1);
+    VisualLight candle;candle.id="light:candle";candle.generation=1;candle.binding=BindingEvidence::Candidate;
+    candle.position={Vec3{1,2,3},BindingEvidence::Verified};candle.enabled={true,BindingEvidence::Candidate};
+    auto other_light=candle;other_light.id="light:other";
+    auto sample=[&](bool stable,LightCoverage coverage,const std::vector<VisualLight>& lights) {
+        const auto ticket=window.BeginLightSample(thread);
+        return ticket && window.EndLightSample(ticket,thread,stable,coverage,lights);
+    };
+    CHECK(!window.BeginLightSample(thread));
+    CHECK(prime(window,40));CHECK(probe(window));
+    CHECK(sample(true,LightCoverage::Partial,{other_light,candle}));
+    CHECK(sample(true,LightCoverage::Partial,{candle,other_light}));
+    CHECK(submit_bsp(window));CHECK(end(window,41)==WindowResult::Published);
+    auto first=scene.current();CHECK(first && first->light_coverage==LightCoverage::Partial && first->lights.size()==2);
+    CHECK(first->lights[0]==candle && first->lights[0].color_linear.evidence==BindingEvidence::Unknown);
+    CHECK(probe(window));CHECK(submit_bsp(window));CHECK(end(window,42)==WindowResult::Published);
+    CHECK(scene.current()->lights.empty() && scene.current()->light_coverage==LightCoverage::Unknown);
+    CHECK(probe(window));CHECK(sample(true,LightCoverage::Complete,{}));
+    CHECK(submit_mesh(window));CHECK(end(window,43)==WindowResult::Published);
+    CHECK(scene.current()->lights.empty() && scene.current()->light_coverage==LightCoverage::Complete);
+    CHECK(probe(window));CHECK(sample(true,LightCoverage::Partial,{candle}));
+    auto changed=candle;changed.position.value=Vec3{1,2,4};
+    CHECK(!sample(true,LightCoverage::Partial,{changed}));
+    CHECK(end(window,44)==WindowResult::Rejected);CHECK(!scene.current());
+    CHECK(probe(window));CHECK(!sample(false,LightCoverage::Partial,{candle}));
+    CHECK(end(window,45)==WindowResult::Rejected);CHECK(!scene.current());
+    CHECK(probe(window));CHECK(sample(true,LightCoverage::Partial,{candle}));
+    CHECK(submit_mesh(window));CHECK(end(window,46)==WindowResult::Published);
+    CHECK(scene.current()->lights.size()==1 && first->lights.size()==2);
+    CHECK(probe(window));const auto light_ticket=window.BeginLightSample(thread);CHECK(light_ticket);
+    const auto present_ticket=window.BeginPresent(thread,47,true);CHECK(present_ticket);
+    CHECK(window.EndPresent(present_ticket,thread,true)==WindowResult::Rejected);
+    CHECK(window.needs_rebind() && !scene.current());
+    CHECK(!window.EndLightSample(light_ticket,thread,true,LightCoverage::Partial,{candle}));
+    SceneWindow fresh(scene,scene.epochs(),provenance(),conventions(),0,1);
+    CHECK(prime(fresh,48));CHECK(probe(fresh));const auto different=fresh.BeginLightSample(thread);CHECK(different);
+    CHECK(!fresh.EndLightSample(different,other,true,LightCoverage::Partial,{candle}));CHECK(fresh.needs_rebind());
+    return true;
+}
+
 bool invalid_intervals_recover() {
     SceneResidency scene;CHECK(setup(scene));SceneWindow window(scene,scene.epochs(),provenance(),conventions(),0,1);
     CHECK(prime(window,0));CHECK(probe(window));CHECK(submit_mesh(window));CHECK(end(window,1)==WindowResult::Published);
@@ -185,6 +226,6 @@ bool overlaps_and_invalidations() {
 } // namespace
 
 int main() {
-    if (!valid_sequence() || !invalid_intervals_recover() || !overlaps_and_invalidations()) return 1;
+    if (!valid_sequence() || !light_windows() || !invalid_intervals_recover() || !overlaps_and_invalidations()) return 1;
     std::cout << "scene_live_window_fixture=ok\n";
 }

@@ -3,7 +3,7 @@ project(T3Render LANGUAGES C CXX)
 
 # API-neutral in-process scene state and flat diagnostic adapter. The opt-in
 # hook adapter and live D3D12 viewer are experimental and not yet validated in TDS.
-add_library(t3render_scene_live STATIC ir/scene_live.cpp ir/scene_live_window.cpp src/scene_live_flat.cpp src/scene_live_materials.cpp src/scene_live_binding.cpp src/scene_live_catalog.cpp src/scene_live_driver.cpp)
+add_library(t3render_scene_live STATIC ir/scene_live.cpp ir/scene_live_window.cpp src/scene_live_flat.cpp src/scene_live_materials.cpp src/scene_live_lighting.cpp src/scene_live_binding.cpp src/scene_live_catalog.cpp src/scene_live_driver.cpp)
 target_compile_features(t3render_scene_live PUBLIC cxx_std_17)
 if(WIN32)
   target_sources(t3render_scene_live PRIVATE src/scene_live_catalog_win.cpp)

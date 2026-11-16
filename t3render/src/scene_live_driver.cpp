@@ -32,6 +32,7 @@ bool SameIdentity(const Identity& a,const Identity& b) {
 
 struct SceneDriver::Impl {
     struct Probe { ThreadToken thread; std::uint64_t window=0; };
+    struct LightSample { ThreadToken thread; std::uint64_t window=0; };
     struct Scope {
         ThreadToken thread;std::uint64_t window=0;scene_bridge::SubmissionSample before;
         std::shared_ptr<const Resource> resource;ProbeCamera camera;std::uint32_t stage=0,section=0;
@@ -51,6 +52,7 @@ struct SceneDriver::Impl {
     const std::uint32_t pass,stage;
     std::unique_ptr<SceneWindow> window;
     std::unordered_map<std::uint64_t,Probe> probes;
+    std::unordered_map<std::uint64_t,LightSample> light_samples;
     std::unordered_map<std::uint64_t,Scope> scopes;
     std::unordered_map<std::uint64_t,Draw> draws;
     std::unordered_map<std::uint64_t,Present> presents;
@@ -71,7 +73,7 @@ struct SceneDriver::Impl {
         if (!next_ticket || next_ticket==UINT64_MAX) { disabled.store(true);return 0; }
         return next_ticket++;
     }
-    bool Empty() const { return probes.empty() && scopes.empty() && draws.empty() && presents.empty() && resets.empty(); }
+    bool Empty() const { return probes.empty() && light_samples.empty() && scopes.empty() && draws.empty() && presents.empty() && resets.empty(); }
     void Lost() {
         ++diagnostics.losses;
         latest.reset();latest_thread={};bsp_matches.clear();
@@ -115,7 +117,7 @@ std::uint64_t SceneDriver::BeginProbe(ThreadToken thread) noexcept {
         auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
         if (s.disabled.load()) return 0;
         if (s.probes.size()>=kMaxPending) { s.Disable();return 0; }
-        if (!s.probes.empty() || !s.scopes.empty() || !s.draws.empty() || !s.presents.empty() || !s.resets.empty()) s.Lost();
+        if (!s.probes.empty() || !s.light_samples.empty() || !s.scopes.empty() || !s.draws.empty() || !s.presents.empty() || !s.resets.empty()) s.Lost();
         const auto id=s.Ticket();if (!id) { s.Disable();return 0; }
         const auto ticket=s.window ? s.window->BeginProbe(thread) : 0;
         s.latest.reset();s.latest_thread={};s.bsp_matches.clear();s.probes.emplace(id,Impl::Probe{thread,ticket});return id;
@@ -142,12 +144,36 @@ void SceneDriver::EndProbe(std::uint64_t ticket,ThreadToken thread,const scene_b
     } catch (...) { impl_->Disable(); }
 }
 
+std::uint64_t SceneDriver::BeginLightSample(ThreadToken thread) noexcept {
+    try {
+        auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
+        if (s.disabled.load() || !s.window || !s.latest) return 0;
+        if (s.light_samples.size()>=kMaxPending) {s.Disable();return 0;}
+        if (!SameThread(thread,s.latest_thread) || !s.Empty()) {s.Lost();return 0;}
+        const auto id=s.Ticket();if (!id) {s.Disable();return 0;}
+        const auto window=s.window->BeginLightSample(thread);
+        s.light_samples.emplace(id,Impl::LightSample{thread,window});return id;
+    } catch (...) {impl_->Disable();return 0;}
+}
+bool SceneDriver::EndLightSample(std::uint64_t ticket,ThreadToken thread,bool stable,LightCoverage coverage,
+                                 const std::vector<VisualLight>& lights) noexcept {
+    try {
+        auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
+        if (s.disabled.load()) return false;
+        const auto item=s.light_samples.find(ticket);
+        if (!ticket || item==s.light_samples.end()) {s.Lost();return false;}
+        const auto record=item->second;s.light_samples.erase(item);
+        if (!SameThread(thread,record.thread)) {s.Lost();return false;}
+        return record.window && s.window && s.window->EndLightSample(record.window,thread,stable,coverage,lights);
+    } catch (...) {impl_->Disable();return false;}
+}
+
 std::uint64_t SceneDriver::BeginScope(ThreadToken thread,std::uint32_t stage,std::uint32_t section) noexcept {
     try {
         auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
         if (s.disabled.load()) return 0;
         if (s.scopes.size()>=kMaxPending) { s.Disable();return 0; }
-        if (!s.scopes.empty() || !s.probes.empty() || !s.draws.empty() || !s.presents.empty() || !s.resets.empty()) s.Lost();
+        if (!s.scopes.empty() || !s.probes.empty() || !s.light_samples.empty() || !s.draws.empty() || !s.presents.empty() || !s.resets.empty()) s.Lost();
         const auto id=s.Ticket();if (!id) { s.Disable();return 0; }
         Impl::Scope scope;scope.thread=thread;scope.stage=stage;scope.section=section;
         s.scopes.emplace(id,std::move(scope));return id;
@@ -163,7 +189,7 @@ bool SceneDriver::SetScopeSample(std::uint64_t ticket,ThreadToken thread,
             s.Lost();return false;
         }
         auto& scope=item->second;scope.sampled=true;scope.before=before;
-        if (!s.presents.empty() || !s.resets.empty() || !s.probes.empty() || !s.draws.empty() || s.scopes.size()!=1) {
+        if (!s.presents.empty() || !s.resets.empty() || !s.probes.empty() || !s.light_samples.empty() || !s.draws.empty() || s.scopes.size()!=1) {
             s.Lost();return false;
         }
         if (s.window && s.latest && SameThread(thread,s.latest_thread) && scope.stage==s.stage && before.pass==s.pass) {
@@ -229,7 +255,7 @@ DrawStart SceneDriver::BeginDraw(ThreadToken thread,std::uint64_t enclosing_scop
         auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
         if (s.disabled.load()) return {};
         if (s.draws.size()>=kMaxPending) { s.Disable();return {}; }
-        if (!s.draws.empty() || !s.probes.empty() || !s.presents.empty() || !s.resets.empty()) s.Lost();
+        if (!s.draws.empty() || !s.probes.empty() || !s.light_samples.empty() || !s.presents.empty() || !s.resets.empty()) s.Lost();
         const auto id=s.Ticket();if (!id) { s.Disable();return {}; }
         Impl::Draw record;record.thread=thread;record.scope=enclosing_scope;record.arguments=draw;
         if (enclosing_scope) {

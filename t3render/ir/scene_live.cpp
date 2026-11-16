@@ -10,6 +10,7 @@ namespace t3render::live {
 namespace {
 constexpr std::size_t kMaxId = 512, kMaxMaterials = 8192, kMaxResources = 4096;
 constexpr std::size_t kMaxIdentities = 16384, kMaxSelected = 8192, kMaxSections = 1024;
+constexpr std::size_t kMaxLights = 1024;
 constexpr std::size_t kMaxVertices = 1000000, kMaxIndices = 3000000;
 constexpr std::size_t kMaxGeometryBytes = 512u * 1024u * 1024u;
 
@@ -81,6 +82,38 @@ bool ValidCamera(const Camera& camera) {
 bool ValidEvidence(BindingEvidence evidence) {
     return evidence == BindingEvidence::Verified || evidence == BindingEvidence::Candidate;
 }
+template<class T> bool ValidLightField(const LightField<T>& field) {
+    return field.evidence==BindingEvidence::Unknown ? !field.value :
+           ValidEvidence(field.evidence) && field.value.has_value();
+}
+bool ValidLight(const VisualLight& light) {
+    if (!Id(light.id) || !light.generation || !ValidEvidence(light.binding) ||
+        !ValidLightField(light.kind) || !ValidLightField(light.position) || !ValidLightField(light.color_linear) ||
+        !ValidLightField(light.direction) || !ValidLightField(light.intensity) || !ValidLightField(light.influence_radius) ||
+        !ValidLightField(light.source_radius_m) || !ValidLightField(light.cos_inner) || !ValidLightField(light.cos_outer) ||
+        !ValidLightField(light.enabled)) return false;
+    if (light.kind.value && *light.kind.value!=LightKind::Point && *light.kind.value!=LightKind::Spot) return false;
+    if (light.position.value && (!Finite(*light.position.value) ||
+        !std::all_of(light.position.value->begin(),light.position.value->end(),[](float x){return std::fabs(x)<=1000000;}))) return false;
+    if (light.color_linear.value && (!Finite(*light.color_linear.value) ||
+        !std::all_of(light.color_linear.value->begin(),light.color_linear.value->end(),[](float x){return x>=0 && x<=1;}))) return false;
+    if (light.direction.value) {
+        const auto& v=*light.direction.value;
+        if (!Finite(v)) return false;
+        const double length=double(v[0])*v[0]+double(v[1])*v[1]+double(v[2])*v[2];
+        if (length<.98 || length>1.02) return false;
+    }
+    const auto in_range=[](const LightField<float>& field,float low,float high) {
+        return !field.value || (std::isfinite(*field.value) && *field.value>=low && *field.value<=high);
+    };
+    if (!in_range(light.intensity,0,1000000) || !in_range(light.influence_radius,0.00001f,1000000) ||
+        !in_range(light.source_radius_m,0.00001f,20) || !in_range(light.cos_inner,-1,1) || !in_range(light.cos_outer,-1,1) ||
+        (light.cos_inner.value && light.cos_outer.value && *light.cos_inner.value<=*light.cos_outer.value)) return false;
+    return true;
+}
+template<class T> bool Verified(const LightField<T>& field) {
+    return field.value && field.evidence==BindingEvidence::Verified;
+}
 bool ValidIdentityScope(IdentityScope scope) {
     return scope==IdentityScope::Unknown || scope==IdentityScope::VisibleList || scope==IdentityScope::FullObjectScan;
 }
@@ -92,6 +125,16 @@ bool ValidSections(const std::vector<std::uint32_t>& sections, std::size_t avail
 }
 } // namespace
 
+LightReadiness ClassifyVisualLight(const VisualLight& light) noexcept {
+    if (!ValidLight(light) || light.binding!=BindingEvidence::Verified || !Verified(light.enabled)) return LightReadiness::Incomplete;
+    if (!*light.enabled.value) return LightReadiness::Disabled;
+    if (!Verified(light.kind) || !Verified(light.position) || !Verified(light.color_linear) ||
+        !Verified(light.intensity) || !Verified(light.influence_radius) || !Verified(light.source_radius_m)) return LightReadiness::Incomplete;
+    if (*light.kind.value==LightKind::Spot &&
+        (!Verified(light.direction) || !Verified(light.cos_inner) || !Verified(light.cos_outer))) return LightReadiness::Incomplete;
+    return LightReadiness::Ready;
+}
+
 bool SceneResidency::BeginMap(std::uint64_t expected_map_epoch, const std::string& map, const std::string& map_sha256) {
     if (!Text(map) || !Digest(map_sha256)) return false;
     std::lock_guard<std::mutex> lock(mutex_);
@@ -100,7 +143,7 @@ bool SceneResidency::BeginMap(std::uint64_t expected_map_epoch, const std::strin
     auto next_map = map, next_hash = map_sha256;
     map_.swap(next_map); map_sha256_.swap(next_hash);
     ++map_epoch_; ++device_epoch_;
-    materials_.clear(); resources_.clear(); identities_.clear(); geometry_bytes_ = 0;
+    materials_.clear(); resources_.clear(); identities_.clear(); light_generations_.clear(); geometry_bytes_ = 0;
     snapshot_.reset(); provenance_.reset(); conventions_.reset(); has_frame_ = false; last_frame_ = 0;
     return true;
 }
@@ -166,7 +209,10 @@ bool SceneResidency::AddResource(std::uint64_t map_epoch, Resource resource) {
 bool SceneResidency::Publish(const FrameInput& frame) {
     if (!frame.synchronized || !ValidProvenance(frame.provenance) || !ValidConventions(frame.conventions) ||
         !ValidCamera(frame.camera) ||
-        frame.meshes.size() > kMaxSelected || frame.bsp.size() > kMaxSelected ||
+        frame.meshes.size() > kMaxSelected || frame.bsp.size() > kMaxSelected || frame.lights.size()>kMaxLights ||
+        (frame.light_coverage!=LightCoverage::Unknown && frame.light_coverage!=LightCoverage::Partial &&
+         frame.light_coverage!=LightCoverage::Complete) ||
+        (frame.light_coverage==LightCoverage::Unknown && !frame.lights.empty()) ||
         frame.meshes.size() + frame.bsp.size() > kMaxSelected) return false;
     std::lock_guard<std::mutex> lock(mutex_);
     if (!map_epoch_ || !ready_ || resetting_ || frame.map_epoch != map_epoch_ ||
@@ -179,9 +225,11 @@ bool SceneResidency::Publish(const FrameInput& frame) {
     next->continuity = continuity_;
     next->render_pass = frame.render_pass; next->stage = frame.stage; next->camera = frame.camera;
     next->provenance = frame.provenance; next->conventions = frame.conventions;
+    next->light_coverage=frame.light_coverage;
     next->materials = materials_;
     next->meshes.reserve(frame.meshes.size()); next->bsp.reserve(frame.bsp.size());
     auto identities = identities_; // committed only after the entire frame validates
+    auto light_generations=light_generations_;
     std::unordered_set<std::string> mesh_ids, bsp_ids;
     for (const auto& mesh : frame.meshes) {
         const auto resource = resources_.find(mesh.resource_id);
@@ -225,9 +273,24 @@ bool SceneResidency::Publish(const FrameInput& frame) {
         }
         next->bsp.push_back({block, resource->second});
     }
+    std::unordered_set<std::string> light_ids;
+    next->lights.reserve(frame.lights.size());
+    for (const auto& light:frame.lights) {
+        if (!ValidLight(light) || !light_ids.insert(light.id).second) return false;
+        const auto found=light_generations.find(light.id);
+        if (found==light_generations.end()) {
+            if (light_generations.size()>=kMaxIdentities) return false;
+            light_generations.emplace(light.id,light.generation);
+        } else {
+            if (light.generation<found->second) return false;
+            found->second=light.generation;
+        }
+        next->lights.push_back(light);
+    }
     // All allocations are completed before mutating the published state.
     auto provenance = frame.provenance;
-    identities_.swap(identities); provenance_ = std::move(provenance); conventions_ = frame.conventions;
+    identities_.swap(identities);light_generations_.swap(light_generations);
+    provenance_ = std::move(provenance); conventions_ = frame.conventions;
     snapshot_ = std::move(next); last_frame_ = frame.frame_id; has_frame_ = true;
     return true;
 }

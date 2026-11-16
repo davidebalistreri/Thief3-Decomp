@@ -344,3 +344,41 @@ transform and visibility changes. Reset, continuity breaks, budget exhaustion
 and eviction also passed. A worker fixture checked stale-snapshot rejection,
 reset clear and retirement when the first snapshot is invalidated before or
 after submission. Those fixtures are synthetic and do not establish TDS behavior.
+
+## Light observations and frame coherence
+
+The in-process model can carry `VisualLight` values separately from geometry.
+Every field has independent `Unknown`, `Candidate` or `Verified` evidence:
+kind, position, linear color, intensity, influence radius, source radius in
+meters, direction, inner/outer cone cosines and enabled state. A missing value
+is unknown, including enabled. The influence radius uses scene coordinates;
+source radius is a separate emitter-size parameter in meters. Neither an
+intensity nor a radius is automatically physically calibrated. Light IDs are
+semantic values, not engine addresses, and generations must not go backwards
+within a map epoch.
+
+`LightCoverage` distinguishes an unobserved collection from a partial sample
+and a collection asserted complete within the producer's selected scope,
+including an explicitly empty one. `SceneWindow` and `SceneDriver`
+provide `BeginLightSample` / `EndLightSample`: the full read is bracketed on
+the selected probe's thread between consecutive `Present` boundaries. A sample
+that overlaps `Present`, Reset or another in-flight operation invalidates the
+interval. Repeated samples in the same window must agree. Stability, coverage
+and field evidence are still claims supplied by the adapter, not facts the
+collector can independently verify. The current TDS hook supplies no light
+samples, so live snapshots retain `Unknown` coverage.
+
+`BuildVerifiedLighting` accepts only complete coverage and fully verified
+enabled lights, omits only lights whose disabled state is verified, and
+returns no partial result when any selected light is incomplete. It derives
+the camera position from the same row-vector view matrix, converts influence
+radii using the declared unit scale and retains frame, epoch, provenance,
+camera and source observations. `LightingMatchesSnapshot` prevents reuse for
+a different snapshot or changed observations. This is a renderer input, not a
+new runtime light measurement or a PBR implementation. Viewer diagnostics
+record coverage and counts by readiness; they do not promote candidate data.
+
+Host fixtures exercise field evidence, point/spot completeness, disabled and
+unknown states, map generations, radius units, camera inversion, stale frame
+rejection, bracketing and overlap recovery. These tests use synthetic values;
+the nine previously identified candidate lights are not upgraded by them.

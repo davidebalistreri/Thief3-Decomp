@@ -134,6 +134,15 @@ struct Diagnostics {
                          !snapshot.bsp.empty() ? snapshot.bsp[0].selection.identity_scope : IdentityScope::Unknown;
         const char* identity_scope=scope==IdentityScope::VisibleList ? "visible_list" :
                                    scope==IdentityScope::FullObjectScan ? "full_object_scan" : "unknown";
+        const char* light_coverage=snapshot.light_coverage==LightCoverage::Complete ? "complete" :
+                                   snapshot.light_coverage==LightCoverage::Partial ? "partial" : "unknown";
+        std::size_t ready_lights=0,disabled_lights=0,incomplete_lights=0;
+        for (const auto& light:snapshot.lights) {
+            const auto status=ClassifyVisualLight(light);
+            if (status==LightReadiness::Ready) ++ready_lights;
+            else if (status==LightReadiness::Disabled) ++disabled_lights;
+            else ++incomplete_lights;
+        }
         out<<"{\"event\":\"frame\",\"source\":\""<<source<<"\",\"frame\":"<<snapshot.frame_id
            <<",\"identity_scope\":\""<<identity_scope<<"\""
            <<",\"render_pass\":"<<snapshot.render_pass<<",\"stage\":"<<snapshot.stage
@@ -144,6 +153,9 @@ struct Diagnostics {
            <<",\"width\":"<<snapshot.camera.width<<",\"height\":"<<snapshot.camera.height
            <<",\"min_depth\":"<<snapshot.camera.min_depth<<",\"max_depth\":"<<snapshot.camera.max_depth<<'}'
            <<",\"mesh_instances\":"<<snapshot.meshes.size()<<",\"bsp_blocks\":"<<snapshot.bsp.size()
+           <<",\"light_coverage\":\""<<light_coverage<<"\",\"visual_lights\":"<<snapshot.lights.size()
+           <<",\"ready_lights\":"<<ready_lights<<",\"disabled_lights\":"<<disabled_lights
+           <<",\"incomplete_lights\":"<<incomplete_lights
            <<",\"draws\":"<<frame.draws.size()<<",\"resident_resources\":"<<cache.resources
            <<",\"bed_override_instances\":"<<frame.override_instances
            <<",\"bedroom_material_runs\":"<<frame.bedroom_material_runs

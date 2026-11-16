@@ -1,9 +1,11 @@
 // Independent SceneIR material/light preview; no D3D8 render-state replay.
 #include "scene_d3d12_common.hpp"
 #include "scene_pbr_packet.hpp"
+#include "scene_pbr_variants.hpp"
 #include "scene_temporal_history.hpp"
 #include <bcrypt.h>
 #include <cmath>
+#include <iostream>
 #include <string>
 
 namespace {
@@ -34,6 +36,21 @@ bool ReadPacket(const wchar_t* path, Frame& frame, std::uint8_t* digest) {
         if (hash) BCryptDestroyHash(hash);
         if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
         if (!ok) { std::fprintf(stderr, "cannot hash PBR packet\n"); return false; }
+    }
+    return true;
+}
+
+bool ReadVariants(const wchar_t* path, Variants& variants) {
+    FILE* file = _wfopen(path, L"rb");
+    if (!file) { std::fprintf(stderr, "cannot open PBR variants\n"); return false; }
+    bool ok = !_fseeki64(file, 0, SEEK_END);
+    const auto length = ok ? _ftelli64(file) : -1;
+    ok = ok && length > 0 && static_cast<std::uint64_t>(length) <= kMaxVariantBytes && !_fseeki64(file, 0, SEEK_SET);
+    std::vector<std::uint8_t> bytes(ok ? static_cast<std::size_t>(length) : 0);
+    ok = ok && std::fread(bytes.data(), 1, bytes.size(), file) == bytes.size() && std::fgetc(file) == EOF && !std::ferror(file);
+    const bool close_error = std::fclose(file) != 0;
+    if (!ok || close_error || !variants.Parse(bytes.data(), bytes.size())) {
+        std::fprintf(stderr, "invalid PBR variants\n"); return false;
     }
     return true;
 }
@@ -1072,7 +1089,7 @@ Output main(float4 position:SV_Position) {
 
 int wmain(int argc, wchar_t** argv) {
     const auto usage = []() {
-        std::fwprintf(stderr, L"usage: t3render_scene_pbr_d3d12 <pbr.bin> --output <new-image.ppm> [effects] [--temporal-output <new.bin> [--jitter <x> <y>]] [--temporal-input <history.bin> --previous-packet <pbr.bin> [--history-weight <0..0.95>]]\n");
+        std::fwprintf(stderr, L"usage: t3render_scene_pbr_d3d12 <pbr.bin> --output <new-image.ppm> [effects] [--temporal-output <new.bin> [--jitter <x> <y>]] [--temporal-input <history.bin> --previous-packet <pbr.bin> [--history-weight <0..0.95>]] [(--variant-cycle <replacement.ppm> <restored.ppm> | --variant-stream) --resource-key <key>]\n");
         return 2;
     };
     if (argc < 4 || argc > 20 || std::wcscmp(argv[2], L"--output") || !argv[3][0]) return usage();
@@ -1080,6 +1097,8 @@ int wmain(int argc, wchar_t** argv) {
     bool jitter_set = false, weight_set = false; float jitter_x = 0, jitter_y = 0, history_weight = .8f;
     const wchar_t* temporal_output = nullptr;
     const wchar_t* temporal_input = nullptr; const wchar_t* previous_packet = nullptr;
+    const wchar_t* variant_output = nullptr; const wchar_t* restored_output = nullptr; const wchar_t* variant_key = nullptr;
+    bool variant_stream = false;
     for (int i = 4; i < argc; ++i) {
         if (!std::wcscmp(argv[i], L"--indirect") && !indirect) indirect = true;
         else if (!std::wcscmp(argv[i], L"--gtao") && !gtao) gtao = true;
@@ -1092,6 +1111,12 @@ int wmain(int argc, wchar_t** argv) {
             temporal_input = argv[++i];
         else if (!std::wcscmp(argv[i], L"--previous-packet") && !previous_packet && i+1 < argc && argv[i+1][0])
             previous_packet = argv[++i];
+        else if (!std::wcscmp(argv[i], L"--variant-cycle") && !variant_output && i+2 < argc && argv[i+1][0] && argv[i+2][0]) {
+            variant_output = argv[++i]; restored_output = argv[++i];
+        }
+        else if (!std::wcscmp(argv[i], L"--variant-stream") && !variant_stream) variant_stream = true;
+        else if (!std::wcscmp(argv[i], L"--resource-key") && !variant_key && i+1 < argc && argv[i+1][0])
+            variant_key = argv[++i];
         else if (!std::wcscmp(argv[i], L"--history-weight") && !weight_set && i+1 < argc) {
             wchar_t* end = nullptr; const wchar_t* value = argv[++i]; history_weight = std::wcstof(value, &end);
             if (!end || end == value || *end || !std::isfinite(history_weight) || history_weight < 0 || history_weight > .95f) return usage();
@@ -1109,7 +1134,51 @@ int wmain(int argc, wchar_t** argv) {
     }
     if ((jitter_set && !temporal_output) || (temporal_output && !std::wcscmp(temporal_output, argv[3])) ||
         ((temporal_input || previous_packet || weight_set) && !(temporal_input && previous_packet && temporal_output)) ||
-        (temporal_input && temporal_output && !std::wcscmp(temporal_input, temporal_output))) return usage();
+        (temporal_input && temporal_output && !std::wcscmp(temporal_input, temporal_output)) ||
+        ((variant_output != nullptr || variant_stream) != (variant_key != nullptr)) || (variant_output && variant_stream) ||
+        ((variant_output || variant_stream) && (temporal_output || temporal_input || jitter_set || weight_set || previous_packet)) ||
+        (variant_output && (!std::wcscmp(argv[3], variant_output) || !std::wcscmp(argv[3], restored_output) ||
+                            !std::wcscmp(variant_output, restored_output)))) return usage();
+    if (variant_output || variant_stream) {
+        std::string key;
+        for (const wchar_t* p = variant_key; *p; ++p) {
+            if (*p < 33 || *p > 126 || key.size() >= kMaxVariantKeyBytes) return usage();
+            key.push_back(static_cast<char>(*p));
+        }
+        Variants variants;
+        if (!ReadVariants(argv[1], variants) || !variants.Select(key, false)) {
+            std::fprintf(stderr, "variant resource key does not match\n"); return 2;
+        }
+        const auto render = [&](const wchar_t* path) {
+            return Render(variants.Current(), path, indirect, gtao, volumetric, reflections, filmic,
+                          nullptr, 0, 0, nullptr, nullptr, 0);
+        };
+        if (const int result = render(argv[3])) return result;
+        if (variant_stream) {
+            std::printf("variant_stream=ready temporal_history=reset\n");
+            std::fflush(stdout);
+            std::wstring line;
+            while (std::getline(std::wcin, line)) {
+                if (line.size() > 32767) return usage();
+                if (line == L"quit") return 0;
+                const auto split = line.find(L' ');
+                if (split == std::wstring::npos || split + 1 == line.size()) return usage();
+                const auto command = line.substr(0, split);
+                if ((command != L"original" && command != L"replacement") ||
+                    !variants.Select(key, command == L"replacement")) return usage();
+                if (const int result = render(line.c_str()+split+1)) return result;
+                std::printf("variant_selected=%s temporal_history=reset\n", command == L"original" ? "original" : "replacement");
+                std::fflush(stdout);
+            }
+            return std::wcin.eof() ? 0 : 2;
+        }
+        if (!variants.Select(key, true)) return 2;
+        if (const int result = render(variant_output)) return result;
+        if (!variants.Select(key, false)) return 2;
+        if (const int result = render(restored_output)) return result;
+        std::printf("variant_cycle=original,replacement,original temporal_history=reset\n");
+        return 0;
+    }
     Frame frame;
     std::uint8_t digest[32]{};
     if (!ReadPacket(argv[1], frame, temporal_output ? digest : nullptr)) return 2;

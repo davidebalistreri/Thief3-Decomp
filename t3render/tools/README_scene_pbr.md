@@ -138,6 +138,36 @@ fallback triangles. Against the same filmic PBR preview with the original bed,
 scale. The replacement is a visual reconstruction, not proof of geometric
 parity with the original bed.
 
+## In-process semantic bed switch
+
+Add `--bed-variants` together with `--bed-high` to build a local variant
+bundle. The exporter creates the original and replacement packets from the
+same revalidated SceneIR and checks unrelated draw and offline caster records,
+geometry, textures and lighting context against the packet bytes. The bundle contains two complete packets and a qualified
+`INNbed1A1` resource key; its manifest records that key, the actor, the
+individual packet hashes and the replacement GLB hash. It contains game data
+and remains under `build/`. The two-packet prototype duplicates geometry and
+textures; the frame-1001 bundle is approximately 102 MB.
+
+The standalone renderer's `--variant-cycle <replacement.ppm> <restored.ppm>
+--resource-key <key>` renders the original to `--output`, then selects the
+replacement and original again in the same process. Alternatively,
+`--variant-stream --resource-key <key>` renders the original first and accepts
+repeated `replacement <new-output-path>`, `original <new-output-path>` and
+`quit` lines on stdin. Each output is exclusively created. The key must match
+the bundle's exact `variant.resource_key`; no draw number is used.
+
+The fixed snapshot and both variants remain in memory while the process runs.
+Each render currently recreates the D3D12 resources; this is not a real-time
+performance claim or a live TDS bridge. Temporal options cannot be combined
+with either switch mode, so history is reset on every switch. Gameplay,
+collision and the original renderer are untouched. In the local frame-1001
+D3D12 cycle, the restored original is byte-identical to the initial original,
+and the replacement is byte-identical to the earlier high-poly render. The
+variants differ at 259,095 pixels, with mean absolute RGB difference 2.714 on
+a 0–255 scale. Repeated stdin switching produced the same outputs. This does
+not establish dynamic-scene or game-loop integration.
+
 ## Semantic high-poly candlesticks
 
 `--candlestick-high <candlestick_high.glb>` opts into the generated Godot
@@ -405,6 +435,8 @@ to include the generated flame geometry. This requires the existing Godot
 replacement asset and shadows; its packet and manifest remain under `build/`.
 Add `--bed-high build/assets/godot/remaster/garrett_home/highpoly/generated/bed_high.glb`
 to use the generated high-poly bed instead of the original bed sections.
+Add `--bed-variants` alongside it to produce an in-process switch bundle
+instead of a single packet; see the semantic bed switch above.
 Add `--candlestick-high build/assets/godot/remaster/garrett_home/highpoly/generated/candlestick_high.glb`
 to replace the scoped bedroom candlestick metal and wax; optionally use the
 same GLB with `--candle-flames` for emissive flame geometry.

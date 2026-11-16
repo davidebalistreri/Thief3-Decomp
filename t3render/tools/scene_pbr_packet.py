@@ -24,6 +24,7 @@ import scene_pbr_bed as bed
 import scene_pbr_candlestick as candlestick
 import scene_pbr_arch as arch
 import scene_pbr_details as details
+import scene_pbr_variants as variants
 from ibt import IBT
 from scene_ir import SceneSnapshot, transform_point
 from t3common import game_dir, resolve_map
@@ -566,6 +567,7 @@ def main(argv=None):
                         help="add bounded static caster candidates from the offline fixture")
     parser.add_argument("--candle-flames", type=Path, help="generated Godot candlestick GLB for semantic emissive flames")
     parser.add_argument("--bed-high", type=Path, help="generated Godot high-poly bed GLB for the semantic bed anchor")
+    parser.add_argument("--bed-variants", action="store_true", help="package original and high-poly bed for an in-process semantic switch")
     parser.add_argument("--candlestick-high", type=Path, help="generated Godot high-poly candlestick GLB")
     parser.add_argument("--arch-high", type=Path, help="generated Godot rosette and jamb GLB")
     parser.add_argument("--bedroom-details", type=Path, help="generated Godot bed-relative visual details")
@@ -584,6 +586,8 @@ def main(argv=None):
             raise ValueError("--flame-radiance requires --candle-flames")
         if args.bed_high is not None and args.bedroom_remaster_materials is None:
             raise ValueError("--bed-high requires --bedroom-remaster-materials")
+        if args.bed_variants and args.bed_high is None:
+            raise ValueError("--bed-variants requires --bed-high")
         if args.candlestick_high is not None and args.bedroom_remaster_materials is None:
             raise ValueError("--candlestick-high requires --bedroom-remaster-materials")
         if args.arch_high is not None and args.bedroom_remaster_materials is None:
@@ -627,28 +631,35 @@ def main(argv=None):
                        "softness": .5 if args.shadow_softness is None else args.shadow_softness}
                       if args.shadows else None)
             actors = direct.offline_actors(scene, offline, offline_raw, args.offline_actors) if shadow is not None else None
-            body, stats = create_packet(scene, light_scene, calibration, legacy.TextureResolver(bundles), remaster,
-                                        args.render_pass, args.stage, shadows=shadow, actors=actors,
-                                        offline=offline if args.offline_shadow_casters else None,
-                                        offline_raw=offline_raw if args.offline_shadow_casters else None,
-                                        caster_resolve=(lambda name: legacy.TextureResolver(bundles).resolve(name))
-                                        if args.offline_shadow_casters else None,
-                                        flame_glb=preview.read_limited(args.candle_flames, flames.MAX_GLB_BYTES)
-                                        if args.candle_flames is not None else None,
-                                        flame_radiance=8 if args.flame_radiance is None else args.flame_radiance,
-                                        bed_glb=preview.read_limited(args.bed_high, flames.MAX_GLB_BYTES)
-                                        if args.bed_high is not None else None,
-                                        candlestick_glb=preview.read_limited(args.candlestick_high, flames.MAX_GLB_BYTES)
-                                        if args.candlestick_high is not None else None,
-                                        arch_glb=preview.read_limited(args.arch_high, flames.MAX_GLB_BYTES)
-                                        if args.arch_high is not None else None,
-                                        details_glb=preview.read_limited(args.bedroom_details, flames.MAX_GLB_BYTES)
-                                        if args.bedroom_details is not None else None,
-                                        prop_materials=args.bedroom_prop_materials, metallic=args.metallic)
+            resolver = legacy.TextureResolver(bundles)
+            options = {"shadows": shadow, "actors": actors,
+                       "offline": offline if args.offline_shadow_casters else None,
+                       "offline_raw": offline_raw if args.offline_shadow_casters else None,
+                       "caster_resolve": (lambda name: legacy.TextureResolver(bundles).resolve(name))
+                       if args.offline_shadow_casters else None,
+                       "flame_glb": preview.read_limited(args.candle_flames, flames.MAX_GLB_BYTES)
+                       if args.candle_flames is not None else None,
+                       "flame_radiance": 8 if args.flame_radiance is None else args.flame_radiance,
+                       "bed_glb": preview.read_limited(args.bed_high, flames.MAX_GLB_BYTES)
+                       if args.bed_high is not None else None,
+                       "candlestick_glb": preview.read_limited(args.candlestick_high, flames.MAX_GLB_BYTES)
+                       if args.candlestick_high is not None else None,
+                       "arch_glb": preview.read_limited(args.arch_high, flames.MAX_GLB_BYTES)
+                       if args.arch_high is not None else None,
+                       "details_glb": preview.read_limited(args.bedroom_details, flames.MAX_GLB_BYTES)
+                       if args.bedroom_details is not None else None,
+                       "prop_materials": args.bedroom_prop_materials, "metallic": args.metallic}
+            body, stats = create_packet(scene, light_scene, calibration, resolver, remaster,
+                                        args.render_pass, args.stage, **options)
+            original_stats = variant_report = None
+            if args.bed_variants:
+                original, original_stats = create_packet(scene, light_scene, calibration, resolver, remaster,
+                                                         args.render_pass, args.stage, **(options | {"bed_glb": None}))
+                body, variant_report = variants.build(scene, original, original_stats, body, stats)
         finally:
             for bundle in bundles:
                 bundle.close()
-        manifest = {"schema": "t3.scene.pbr-packet", "version": int(chr(body[6])),
+        manifest = {"schema": "t3.scene.pbr-packet", "version": int(chr(body[6])) if variant_report is None else 1,
                     "source_frame": scene.source.frame_id,
                     "scene_sha256": hashlib.sha256(scene_raw).hexdigest(),
                     "light_scene_sha256": hashlib.sha256(light_raw).hexdigest(),
@@ -680,6 +691,11 @@ def main(argv=None):
             manifest["limitations"].append("Bedroom details are offline artistic additions anchored to the submitted bed, not runtime observations; their shadows and materials are preview approximations.")
         if args.bedroom_prop_materials:
             manifest["limitations"].append("Bedroom prop wood materials are offline replacements for scoped candidate actors; UV tangents and material parameters are approximations.")
+        if variant_report is not None:
+            manifest["schema"] = "t3.scene.pbr-variants"
+            manifest["limitations"].append("The in-process switch renders a fixed captured SceneIR snapshot; it is not a live TDS integration.")
+            manifest["variant"] = variant_report
+            manifest["original"] = original_stats
         legacy.write_pair(args.output, body, manifest)
         print(json.dumps(manifest, indent=2, allow_nan=False))
     except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, struct.error) as exc:

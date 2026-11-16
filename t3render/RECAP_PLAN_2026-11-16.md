@@ -336,3 +336,25 @@ preparata e i dati incompleti. Il witness resta un
 candidato: questa protezione non rileva tutti i cambi mappa, non identifica i
 reload della stessa mappa e non carica automaticamente un altro catalogo.
 Non è una verifica nel gioco.
+
+## Aggiornamento: replay catturato e probe luce preparatorio
+
+Il driver è stato esercitato offline con callback ricostruiti dai frame
+2863–2865: ciascun frame ha pubblicato letto e nove BSP, 18 draw e 450
+triangoli, con camera e sezioni confrontate alle fixture. La provenienza è
+`CapturedReplay`: non prova che i callback live TDS siano completi.
+
+L'analisi statica di `T3Main.exe` collega actor `+0xb8` e oggetto luce
+`+0x54` in entrambe le direzioni, e osserva la rimozione dei collegamenti in
+una routine di cleanup. È stato aggiunto un lettore bounded che copia parole
+grezze solo se link, vtable e due letture coincidono. Non enumera luci, non è
+collegato al gioco o a `Present`, e non converte i campioni in luce PBR.
+Identità, durata, visibilità e semantica fisica restano da verificare runtime;
+la doppia lettura non esclude riuso o mutazioni non osservate. Dettagli ed
+evidenze sono nel [probe luci](ir/README_scene_light_probe.md).
+
+Nel controllo host corrente sono passati il test del nuovo probe, 15 test live
+e sei di replay; i due test sulle catture locali, inizialmente saltati, sono
+passati isolatamente dopo avere indicato le fixture. Il nuovo fixture compila
+anche con MinGW x86. Non è stato riavviato TDS e il lag rimane da verificare
+più avanti.

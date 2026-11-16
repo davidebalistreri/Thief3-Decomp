@@ -1,5 +1,6 @@
 #include "../src/scene_live_dx12.hpp"
 #include "../src/scene_live_flat.hpp"
+#include "../src/scene_live_catalog_win.hpp"
 #include "../src/scene_live_viewer.hpp"
 
 #include <algorithm>
@@ -111,6 +112,26 @@ bool run(HWND window) {
     CHECK(limited->RetireResidents() && limited->cache_stats().resources==0 && limited->cache_stats().bytes==0);
     frame=input(scene.epochs(),12);CHECK(scene.Publish(frame));CHECK(BuildResidentFlatFrame(*scene.current(),prepared));
     CHECK(!limited->PrepareResident(prepared)); // both selected resources cannot fit; neither is evictable
+    auto override_gpu=FlatD3D12::Create(nullptr);CHECK(override_gpu);
+    auto original=scene.current();
+    auto high=std::make_shared<const Resource>(quad("mesh:high",ResourceKind::StaticMesh,0.55f,0.2f,"mat:high"));
+    MeshOverride rule{"fixture",fingerprint,"actor:bed",original->meshes[0].resource,high};
+    auto render_override=[&](const MeshOverride* selected,std::vector<std::uint8_t>& pixels) {
+        ResidentFlatFrame current;
+        return BuildResidentFlatFrame(*scene.current(),current,selected) && override_gpu->PrepareResident(current,true) &&
+               override_gpu->Submit() && override_gpu->Finish(&pixels);
+    };
+    std::vector<std::uint8_t> baseline,remastered,restored,changed;
+    CHECK(render_override(nullptr,baseline) && baseline==first);
+    CHECK(render_override(&rule,remastered) && remastered!=baseline && override_gpu->cache_stats().uploads==3);
+    CHECK(render_override(nullptr,restored) && restored==baseline && override_gpu->cache_stats().uploads==3);
+    frame.frame_id=13;frame.meshes[0].transform[12]=0.2f;CHECK(scene.Publish(frame));
+    CHECK(render_override(&rule,changed) && changed!=remastered && override_gpu->cache_stats().uploads==3);
+    frame.frame_id=14;frame.meshes.clear();CHECK(scene.Publish(frame));
+    CHECK(render_override(&rule,changed) && changed==no_bed);
+    const auto override_reset=scene.BeginReset();CHECK(override_reset && scene.EndReset(override_reset,true));
+    frame=input(scene.epochs(),15);CHECK(scene.Publish(frame));
+    CHECK(render_override(&rule,changed) && changed==remastered && override_gpu->cache_stats().uploads==5);
     std::cout << "scene_live_dx12_fixture=ok mode=" << (window ? "swapchain" : "offscreen")
               << " camera=changed visibility=changed empty=cleared resize=ok reset=ok resident_cache=ok\n";
     return true;
@@ -194,14 +215,69 @@ bool viewer_pipeline(const std::wstring& diagnostic_directory) {
     std::cout << "scene_live_viewer_fixture=ok source=synthetic frames=4 stale_drop=ok newer_frame=ok reset_clear=ok invalidated_first_frame_retirement=ok\n";
     return true;
 }
+// The catalog contains real offline assets, but the camera, selection and
+// transforms below are synthetic and do not constitute a TDS observation.
+bool catalog_override(const wchar_t* path) {
+    LoadedCatalog catalog; CHECK(LoadCatalogFile(path,catalog));
+    CHECK(catalog.bed_override && catalog.binding.bed && catalog.residency);
+    const auto& original=catalog.binding.bed->geometry;
+    CHECK(!original.positions.empty() && !original.sections.empty());
+    Vec3 low=original.positions[0], high=low;
+    for (const auto& position:original.positions) for (unsigned axis=0;axis<3;++axis) {
+        low[axis]=std::min(low[axis],position[axis]);high[axis]=std::max(high[axis],position[axis]);
+    }
+    const float dx=high[0]-low[0],dy=high[1]-low[1],dz=high[2]-low[2];
+    CHECK(dx>0 && dy>0 && dz>0);
+    FrameInput frame;auto& scene=*catalog.residency;const auto epoch=scene.epochs();
+    frame.map_epoch=epoch.map;frame.device_epoch=epoch.device;frame.frame_id=1;
+    frame.provenance.origin=FrameOrigin::Synthetic;frame.provenance.session_id="offline-catalog-gpu-fixture";
+    frame.synchronized=true;frame.conventions=catalog.conventions;
+    frame.camera.width=128;frame.camera.height=128;frame.camera.view=identity;
+    // Orthographic X/Z view, looking along Y, with room for movement.
+    frame.camera.projection={1.0f/dx,0,0,0, 0,0,0.8f/dy,0, 0,1.0f/dz,0,0,
+                             -(low[0]+high[0])/(2*dx),-(low[2]+high[2])/(2*dz),
+                             0.1f-0.8f*low[1]/dy,1};
+    MeshSelection mesh;mesh.instance_id=catalog.binding.bed_instance_id;mesh.resource_id=catalog.binding.bed->id;
+    mesh.generation=1;mesh.binding=BindingEvidence::Candidate;mesh.transform=identity;
+    mesh.material_ids=catalog.binding.bed_materials;
+    for (std::uint32_t i=0;i<original.sections.size();++i) mesh.sections.push_back(i);
+    frame.meshes.push_back(mesh);CHECK(scene.Publish(frame));
+    const std::string override_prefix="remaster:material:bed_high:";
+    for (const auto& item:scene.current()->materials)
+        CHECK(item.first.compare(0,override_prefix.size(),override_prefix)!=0);
+    auto gpu=FlatD3D12::Create(nullptr);CHECK(gpu);
+    auto render=[&](const MeshOverride* rule,std::vector<std::uint8_t>& pixels,std::uint32_t overrides) {
+        ResidentFlatFrame resident;
+        return BuildResidentFlatFrame(*scene.current(),resident,rule) && resident.override_instances==overrides &&
+               gpu->PrepareResident(resident,true) && gpu->Submit() && gpu->Finish(&pixels);
+    };
+    std::vector<std::uint8_t> source,replaced,restored,moved,empty,after_reset;
+    CHECK(render(nullptr,source,0));
+    CHECK(render(catalog.bed_override.get(),replaced,1) && replaced!=source);
+    CHECK(render(nullptr,restored,0) && restored==source && gpu->cache_stats().uploads==2);
+    frame.frame_id=2;frame.meshes[0].transform[12]=dx*0.25f;CHECK(scene.Publish(frame));
+    CHECK(render(catalog.bed_override.get(),moved,1) && moved!=replaced && gpu->cache_stats().uploads==2);
+    frame.frame_id=3;frame.meshes.clear();CHECK(scene.Publish(frame));
+    CHECK(render(catalog.bed_override.get(),empty,0));
+    CHECK(empty!=source && empty!=replaced);
+    const auto reset=scene.BeginReset();CHECK(reset && scene.EndReset(reset,true));
+    frame.frame_id=4;frame.device_epoch=scene.epochs().device;frame.meshes.push_back(mesh);CHECK(scene.Publish(frame));
+    CHECK(render(catalog.bed_override.get(),after_reset,1) && after_reset==replaced && gpu->cache_stats().uploads==3);
+    std::cout << "scene_live_catalog_dx12_fixture=ok source=offline camera=synthetic original_override_restore=ok"
+              << " movement=ok visibility=ok reset=ok vertices=" << catalog.bed_override->replacement->geometry.positions.size()
+              << " indices=" << catalog.bed_override->replacement->geometry.indices.size() << "\n";
+    return true;
+}
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
-    bool window=false;std::wstring diagnostic_directory;
+    bool window=false;std::wstring diagnostic_directory,catalog_path;
     for (int i=1;i<argc;++i) {
         if (std::wstring(argv[i])==L"--window" && !window) window=true;
         else if (std::wstring(argv[i])==L"--diagnostics" && i+1<argc && diagnostic_directory.empty())
             diagnostic_directory=argv[++i];
+        else if (std::wstring(argv[i])==L"--catalog" && i+1<argc && catalog_path.empty())
+            catalog_path=argv[++i];
         else return 2;
     }
     HWND hwnd=nullptr;
@@ -213,7 +289,8 @@ int wmain(int argc, wchar_t** argv) {
                              CW_USEDEFAULT,CW_USEDEFAULT,128,128,nullptr,nullptr,cls.hInstance,nullptr);
         if (!hwnd) return 2;
     }
-    const bool ok=run(hwnd) && viewer_pipeline(diagnostic_directory);
+    const bool ok=run(hwnd) && viewer_pipeline(diagnostic_directory) &&
+                  (catalog_path.empty() || catalog_override(catalog_path.c_str()));
     if (hwnd) DestroyWindow(hwnd);
     return ok ? 0 : 1;
 }

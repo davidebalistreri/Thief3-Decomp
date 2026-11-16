@@ -15,7 +15,9 @@ ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / "tools"))
 import export_live_catalog as catalog
+import scene_ir
 import test_scene_ir
+import test_scene_pbr_bed as bed_tests
 
 
 def fixture():
@@ -72,6 +74,60 @@ class LiveCatalogTests(unittest.TestCase):
         body = data[:-32] + b"extra"
         self.assertEqual(self.load(body + hashlib.sha256(body).digest()), "rejected")
         self.assertEqual(self.load(b"short"), "rejected")
+
+    def test_high_poly_override_round_trips_without_replacing_the_source(self):
+        data = fixture()
+        data["conventions"]["meters_per_unit"] = .01905
+        scene = scene_ir.SceneSnapshot.from_dict(data)
+        high = bed_tests.glb(scene)
+        body, manifest = catalog.export(json.dumps(data).encode(), high)
+        result = self.load(body).split()
+        self.assertEqual(body[:8], b"T3LCAT02")
+        self.assertEqual(result[:10], ["accepted", "SouthQuarter1_int1", "1", "1", "3", "3", "3", "3", "3", "1"])
+        self.assertEqual(result[11:15], ["override", "18", "18", "6"])
+        self.assertEqual(result[15], hashlib.sha256(high).hexdigest())
+        self.assertEqual(manifest["bed_override"]["asset_sha256"], result[15])
+        self.assertEqual(manifest["bed_override"]["scope"], "viewer_only_when_semantic_bed_is_selected")
+        _, _, geometry = catalog._bed_override(scene, scene.static_mesh_resources[0], high)
+        # The fixture's glTF triangle is reflected from T3 and uses reversed
+        # indices; conversion must restore coordinates, normals and winding.
+        for actual, expected in zip(geometry.positions[:3], ((0, 0, 0), (1, 0, 0), (0, 1, 0))):
+            for a, b in zip(actual, expected):
+                self.assertAlmostEqual(a, b, places=6)
+        self.assertEqual(geometry.normals[:3], ((0, 0, 1),) * 3)
+        self.assertEqual(geometry.uv0[:3], ((0, 0), (1, 0), (0, 1)))
+        self.assertEqual(geometry.indices[:6], (0, 1, 2, 3, 4, 5))
+        self.assertEqual((geometry.sections[1].first_index, geometry.sections[1].index_count), (3, 3))
+
+        def rebuild(changed):
+            return bytes(changed) + hashlib.sha256(changed).digest()
+
+        raw = bytearray(body[:-32])
+        marker = raw.find(b"remaster:mesh:bed_high:")
+        self.assertGreater(marker, 0)
+        bad = raw.copy();bad[marker + len(b"remaster:mesh:bed_high:")] = ord("0") if bad[marker + len(b"remaster:mesh:bed_high:")] != ord("0") else ord("1")
+        self.assertEqual(self.load(rebuild(bad)), "rejected")
+        geometry = raw.find(struct.pack("<4I", 18, 18, 6, 3), marker)
+        self.assertGreater(geometry, marker)
+        bad = raw.copy();struct.pack_into("<f", bad, geometry + 16, 200.0)
+        self.assertEqual(self.load(rebuild(bad)), "rejected")
+        bad = raw.copy();struct.pack_into("<f", bad, geometry + 16 + 18*12, 100.0)
+        self.assertEqual(self.load(rebuild(bad)), "rejected")
+        material = raw.find(b"remaster:material:bed_high:BedTrimWood")
+        self.assertGreater(material, 0)
+        bad = raw.copy();bad[material + len(b"remaster:material:bed_high:")] = ord("X")
+        self.assertEqual(self.load(rebuild(bad)), "rejected")
+
+    def test_generated_bed_rejects_wrong_geometry_and_unit_scale(self):
+        data = fixture();data["conventions"]["meters_per_unit"] = .01905
+        scene = scene_ir.SceneSnapshot.from_dict(data)
+        for raw, message in ((bed_tests.glb(scene, shift=1), "bounds"),
+                             (bed_tests.glb(scene, names=bed_tests.bed.MATERIALS[:-1]), "materials")):
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                catalog.export(json.dumps(data).encode(), raw)
+        data["conventions"]["meters_per_unit"] = None
+        with self.assertRaisesRegex(ValueError, "unit scale"):
+            catalog.export(json.dumps(data).encode(), bed_tests.glb(scene))
 
     def test_structurally_invalid_count_and_magic_are_rejected_even_with_new_digest(self):
         data, _ = catalog.export(json.dumps(fixture()).encode())

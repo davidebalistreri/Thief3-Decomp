@@ -95,7 +95,7 @@ bool BuildFlatFrame(const Snapshot& snapshot, scene::Frame& output) {
     return true;
 }
 
-bool BuildResidentFlatFrame(const Snapshot& snapshot, ResidentFlatFrame& output) {
+bool BuildResidentFlatFrame(const Snapshot& snapshot, ResidentFlatFrame& output, const MeshOverride* bed_override) {
     const auto& camera=snapshot.camera;
     if (!snapshot.map_epoch || !snapshot.device_epoch || !snapshot.continuity || snapshot.conventions.length_unit!=LengthUnit::T3Unit ||
         snapshot.conventions.axes!=Axes::T3Xyz || snapshot.conventions.up_axis!=UpAxis::Z ||
@@ -127,8 +127,23 @@ bool BuildResidentFlatFrame(const Snapshot& snapshot, ResidentFlatFrame& output)
     for (const auto& mesh:snapshot.meshes) {
         if (!mesh.resource || (!mesh.selection.material_ids.empty() &&
             mesh.selection.material_ids.size()!=mesh.resource->geometry.sections.size())) return false;
-        for (auto index:mesh.selection.sections) {
+        for (auto index:mesh.selection.sections)
             if (index>=mesh.resource->geometry.sections.size()) return false;
+        if (bed_override && snapshot.map==bed_override->map && snapshot.map_sha256==bed_override->map_sha256 &&
+            mesh.selection.instance_id==bed_override->instance_id && !mesh.selection.sections.empty()) {
+            if (!bed_override->source || !bed_override->replacement || mesh.resource!=bed_override->source ||
+                mesh.selection.resource_id!=bed_override->source->id ||
+                bed_override->replacement->kind!=ResourceKind::StaticMesh ||
+                bed_override->replacement->id.empty() || bed_override->replacement->id==bed_override->source->id ||
+                bed_override->replacement->geometry.sections.empty() ||
+                bed_override->replacement->geometry.sections.size()>scene::kMaxDraws) return false;
+            for (std::size_t i=0;i<bed_override->replacement->geometry.sections.size();++i) {
+                const auto& part=bed_override->replacement->geometry.sections[i];
+                if (!append(bed_override->replacement,mesh.selection.transform,static_cast<std::uint32_t>(i),part.material_id)) return false;
+            }
+            ++frame.override_instances;continue;
+        }
+        for (auto index:mesh.selection.sections) {
             const auto material=mesh.selection.material_ids.empty() ? mesh.resource->geometry.sections[index].material_id :
                                                                        mesh.selection.material_ids[index];
             if (!append(mesh.resource,mesh.selection.transform,index,material)) return false;

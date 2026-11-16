@@ -12,6 +12,7 @@ struct LoadedCatalog {
     BindingCatalog binding;
     Conventions conventions;
     std::string offline_scene_sha256;
+    std::shared_ptr<const MeshOverride> bed_override;
 };
 // No state is published on failure. Catalog geometry is offline asset data.
 bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest digest,

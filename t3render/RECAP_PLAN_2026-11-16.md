@@ -5,8 +5,9 @@
 Il lavoro ha portato la bedroom di Thief: Deadly Shadows da una cattura D3D8
 a snapshot semantici parziali e a un renderer D3D12 separato, con materiali
 remaster e prime tecniche moderne. Il percorso letto/BSP del bridge è
-verificato; **il renderer moderno è ancora un consumer standalone di
-catture finalizzate, non è collegato in tempo reale al gioco**.
+verificato nelle catture; **il renderer PBR moderno rimane standalone**.
+Un viewer live flat sperimentale è collegato al bridge, ma non ha ancora
+prodotto frame verificati nel gioco.
 
 L'obiettivo è stato creato il 15 novembre alle 12:28 CET. Alla rilevazione del
 16 novembre il tempo attivo contabilizzato era circa **13 h 37 min**: non è la
@@ -33,8 +34,8 @@ geometria delle pareti; DXR resta opzionale e non prioritario.
 | Replay D3D8 → DX12 | Bedroom riconoscibile e confronti diagnostici; parità legacy completa non dimostrata e non più prioritaria. |
 | Materiali e mesh | Override semantici per pietra, pavimento e letto; altri asset Godot riutilizzati nella preview. |
 | Renderer moderno | PBR/HDR, ombre, GI approssimata e altri effetti funzionano in preview separate, non come renderer di produzione. |
-| Switch letto | Originale/high-poly/originale nello stesso processo, anche su due frame acquisiti; non modifica gameplay o collisioni, ma non è ancora integrato live. |
-| Infrastruttura live | Residency, finestre `Present`, matcher, catalogo offline e adattatore sperimentale sono preparati; l'adattatore non è stato verificato in TDS e non alimenta ancora D3D12. |
+| Switch letto | Originale/high-poly/originale su catture e nel viewer flat con dati sintetici; non modifica gameplay o collisioni e non è verificato live. |
+| Infrastruttura live | Residency, finestre `Present`, matcher e adattatore alimentano un viewer D3D12 flat sperimentale; il percorso non è stato verificato in TDS. |
 
 ## Prove: dal frame D3D8 alla submission semantica
 
@@ -124,14 +125,14 @@ abbia caricato o stia mostrando quelle risorse.
 Il driver può pubblicare una selezione solo attraverso finestre `Present`
 validate, con thread e stato camera/draw controllati; rifiuta sovrapposizioni
 e gestisce il Reset nei casi sintetici testati. I binding del letto e BSP
-rimangono candidati. Il matcher BSP dipende ancora dal letto nella lista
-osservata, il cambio mappa e il lifecycle generale non sono completi, e non
+rimangono candidati. A quel checkpoint il matcher BSP dipendeva dal letto nella
+lista osservata; il cambio mappa e il lifecycle generale non sono completi, e non
 è provata la copertura di tutti i callback nel gioco. I frame 2864/2865 citati
 nel resto del recap sono catture precedenti, non nuove prove dell'adattatore.
 
-Il codice può esporre `RuntimeCurrent()` nello stesso processo, ma nessun
-consumer D3D12 live lo legge ancora. **Non è stato dimostrato che il renderer
-segua Garrett in tempo reale**. La documentazione tecnica e i comandi sono in
+Il codice può esporre `RuntimeCurrent()` nello stesso processo. Il consumer
+D3D12 flat aggiunto successivamente non ha ancora dimostrato di seguire Garrett
+in tempo reale. La documentazione tecnica e i comandi sono in
 [scene live](ir/README_scene_live.md).
 
 ## Renderer, materiali e luce
@@ -199,11 +200,11 @@ che risolva il problema specifico della trave**.
 ## Per riprendere
 
 1. Usare 2864 e 3377 come riferimenti, mantenendo distinti i rispettivi scope.
-2. Collegare `RuntimeCurrent()` a un consumer D3D12 persistente e verificare in
+2. Verificare il consumer D3D12 persistente in
    TDS camera, geometria e movimento; completare lifecycle, Reset e cambio
    mappa prima di considerarlo utilizzabile. Le catture con gioco richiedono
    coordinamento con chi carica il salvataggio.
-3. Portare gli override semantici live e accertare lo stato delle luci runtime,
+3. Estendere gli override semantici live oltre il letto e accertare lo stato delle luci runtime,
    distinguendo i parametri misurati dalle calibrazioni artistiche.
 4. Investire su HDR/PBR, luci fisiche, ombre e GI in tempo reale, poi su
    emissivi, volumetrici, riflessi e pipeline temporale; migliorare la geometria
@@ -215,3 +216,18 @@ Riferimenti: [ricerca bridge](T3SCENEBRIDGE_RESEARCH.md),
 [schema SceneIR](ir/README_scene_ir.md), [import offline](tools/README_scene_ir_import.md),
 [renderer PBR](tools/README_scene_pbr.md), [temporale](tools/README_scene_temporal.md),
 [benchmark sequenza](benchmarks/runtime/2026-11-16-scene-sequence/result.json).
+
+## Aggiornamento successivo: viewer live e letto
+
+Il consumer D3D12 persistente e il catalogo per l'adattatore sperimentale sono
+stati implementati dopo il checkpoint sopra. Due tentativi in TDS hanno
+inizializzato il viewer senza produrre frame verificati; è stato segnalato lag.
+L'ottimizzazione successiva e il nuovo override non sono stati provati nel
+gioco, per scelta dell'utente: prestazioni e integrazione live restano aperte.
+
+Il catalogo offline v2 può includere `bed_high` come sostituzione semantica
+dell'istanza `StaticMeshActor__1520 / INNbed1A1` nel viewer flat, mantenendo
+intatti snapshot e gameplay. La prova GPU Highball con il GLB reale e camera
+sintetica ha verificato sostituzione, ripristino, movimento, visibilità e Reset;
+non dimostra la sincronizzazione in TDS né un rendering PBR live. Dettagli e
+limiti sono documentati nel [README del consumer](ir/README_scene_live.md).

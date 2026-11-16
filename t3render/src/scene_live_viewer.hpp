@@ -14,6 +14,7 @@ struct ViewerProvider {
     bool (*submit_if_current)(void*, const std::shared_ptr<const Snapshot>&,
                               SubmitOperation, void*) noexcept = nullptr;
     DriverStats (*driver_stats)(void*) noexcept = nullptr;
+    std::shared_ptr<const MeshOverride> bed_override;
     // Optional existing local directory; copied matrices and at most two flat
     // images are diagnostic output, not a serialized engine-object trace.
     std::wstring diagnostic_directory;

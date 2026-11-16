@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iterator>
 #include <unordered_set>
 #include <utility>
 
@@ -68,6 +69,42 @@ bool BspKey(const std::string& id, const std::string& prefix) {
         std::all_of(suffix.begin(),suffix.begin()+separator,digit) &&
         std::all_of(suffix.begin()+separator+1,suffix.end(),digit);
 }
+bool ValidBedOverride(const Resource& original, const Resource& replacement, const Conventions& conventions,
+                      const std::unordered_map<std::string,Material>& materials) {
+    static constexpr const char* names[]{"BedTrimWood", "HeadboardWood", "GENiFABRICwoolA2_D",
+                                          "BlanketSeam", "PillowLinen", "PillowSeam"};
+    const auto& g=replacement.geometry;
+    if (!conventions.meters_per_unit || std::fabs(*conventions.meters_per_unit-0.01905f)>1e-9f ||
+        replacement.name!="bed_high" || replacement.id!="remaster:mesh:bed_high:"+replacement.source_sha256 ||
+        g.positions.empty() || g.positions.size()>50000 || g.indices.empty() || g.indices.size()>150000 ||
+        g.normals.size()!=g.positions.size() || g.uv0.size()!=g.positions.size() || !g.tangents.empty() ||
+        g.sections.size()!=std::size(names) || materials.size()!=std::size(names) || original.geometry.positions.empty()) return false;
+    std::uint64_t next=0;
+    for (std::size_t i=0;i<std::size(names);++i) {
+        const auto id=std::string("remaster:material:bed_high:")+names[i];
+        const auto& part=g.sections[i];const auto material=materials.find(id);
+        if (part.name!=std::string("generated:")+names[i] || part.first_index!=next || !part.material_id ||
+            *part.material_id!=id || material==materials.end() || material->second.name!=names[i]) return false;
+        next+=part.index_count;
+    }
+    if (next!=g.indices.size()) return false;
+    for (const auto& normal:g.normals) {
+        const double length=double(normal[0])*normal[0]+double(normal[1])*normal[1]+double(normal[2])*normal[2];
+        if (!std::isfinite(length) || length<0.98 || length>1.02) return false;
+    }
+    for (const auto& uv:g.uv0) if (std::fabs(uv[0])>10000 || std::fabs(uv[1])>10000) return false;
+    for (unsigned axis=0;axis<3;++axis) {
+        auto bounds=[axis](const std::vector<Vec3>& points) {
+            float low=points[0][axis],high=low;
+            for (const auto& p:points) { low=std::min(low,p[axis]);high=std::max(high,p[axis]); }
+            return std::pair<float,float>{low,high};
+        };
+        const auto a=bounds(original.geometry.positions), b=bounds(g.positions);
+        if (std::fabs(double(a.first)-b.first)* *conventions.meters_per_unit>0.30001 ||
+            std::fabs(double(a.second)-b.second)* *conventions.meters_per_unit>0.30001) return false;
+    }
+    return true;
+}
 } // namespace
 
 bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest digest,
@@ -77,8 +114,9 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
     if (!digest(bytes,size-32,computed,digest_context) || std::memcmp(computed,bytes+size-32,32)) return false;
     Reader reader(bytes,size-32);char magic[8];
     LoadedCatalog loaded;std::string map, map_sha, actor;
-    if (!reader.bytes(magic,sizeof(magic)) || std::memcmp(magic,"T3LCAT01",8) ||
-        !Text(reader,map) || map.size()>128 || map.find(':')!=std::string::npos ||
+    if (!reader.bytes(magic,sizeof(magic))) return false;
+    const bool version_two=std::memcmp(magic,"T3LCAT02",8)==0;
+    if ((!version_two && std::memcmp(magic,"T3LCAT01",8)) || !Text(reader,map) || map.size()>128 || map.find(':')!=std::string::npos ||
         !Text(reader,map_sha) || !Digest(map_sha) || !Text(reader,loaded.offline_scene_sha256) ||
         !Digest(loaded.offline_scene_sha256) || !Text(reader,actor) ||
         actor!="actor:"+map+":"+map_sha+":StaticMeshActor__1520") return false;
@@ -96,11 +134,19 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
     if (!residency->BeginMap(0,map,map_sha)) return false;
     const auto epoch=residency->epochs();
     BindingCatalog catalog;catalog.map=map;catalog.map_sha256=map_sha;catalog.bed_instance_id=actor;
+    std::unordered_map<std::string,Material> override_materials;
+    const std::string override_prefix="remaster:material:bed_high:";
     for (std::uint32_t i=0;i<material_count;++i) {
         Material material;
         if (!Text(reader,material.id) || !Text(reader,material.name) || catalog.materials.count(material.id) ||
-            !residency->AddMaterial(epoch.map,material)) return false;
-        const auto id=material.id;catalog.materials.emplace(id,std::move(material));
+            override_materials.count(material.id)) return false;
+        const auto id=material.id;
+        if (version_two && id.compare(0,override_prefix.size(),override_prefix)==0)
+            override_materials.emplace(id,std::move(material));
+        else {
+            if (!residency->AddMaterial(epoch.map,material)) return false;
+            catalog.materials.emplace(id,std::move(material));
+        }
     }
     Resource bed;
     if (!ResourceData(reader,ResourceKind::StaticMesh,bed) ||
@@ -138,6 +184,15 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
         auto resource=residency->FindSceneResource(epoch.map,id);
         if (!resource) return false;
         catalog.bsp.push_back(std::move(resource));
+    }
+    if (version_two) {
+        Resource replacement;
+        if (!ResourceData(reader,ResourceKind::StaticMesh,replacement) ||
+            !ValidBedOverride(*catalog.bed,replacement,loaded.conventions,override_materials)) return false;
+        auto rule=std::make_shared<MeshOverride>();
+        rule->map=map;rule->map_sha256=map_sha;rule->instance_id=actor;
+        rule->source=catalog.bed;rule->replacement=std::make_shared<const Resource>(std::move(replacement));
+        loaded.bed_override=std::move(rule);
     }
     if (!reader.end()) return false;
     catalog.bsp_catalog_complete=true; // complete only relative to the offline exporter

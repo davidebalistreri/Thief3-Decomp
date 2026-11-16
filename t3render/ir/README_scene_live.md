@@ -171,6 +171,36 @@ python3 -B t3render/tools/export_live_catalog.py /path/to/offline-scene.json \
   --output /path/to/new-local-catalog.bin
 ```
 
+To include the generated Godot high-poly bed as an optional viewer override,
+add `--bed-high /path/to/bed_high.glb`. This produces catalog version 2;
+without it the exporter still writes version 1. Both versions remain local
+offline asset catalogs. The exporter checks the SDK unit scale, the six named
+material sections and the local bounds against `INNbed1A1`, converts glTF Y-up
+coordinates to T3 Z-up and reverses triangle winding for that reflection. It
+preserves normals and UVs, but does not establish T3's absolute winding or
+tangent convention. The source GLB's SHA-256 identifies the generated asset in
+the manifest and resource ID; the catalog trailer detects corruption, not
+provenance or deliberate tampering.
+
+The viewer applies the replacement only to the catalog's map fingerprint,
+`StaticMeshActor__1520` and original resident `INNbed1A1` resource, using the
+selected instance transform. The source resource and snapshot are unchanged.
+Replacement geometry and material IDs stay outside semantic residency; they
+are held only by the viewer's override rule.
+If any original bed section is selected, all six replacement sections are
+drawn; selection is partial and does not prove that every part was visible in
+TDS. A stale source handle fails closed, including after a map reload. The
+diagnostic field `bed_override_instances` reports the number of replacements.
+The viewer still uses flat material-ID colors: no PBR materials, textures or
+gameplay changes are applied.
+
+The optional `--catalog <Windows-path-to-v2-catalog>` argument to
+`t3render_live_dx12_fixture.exe` exercises the Windows loader and D3D12 viewer
+backend with local catalog geometry, a synthetic camera and synthetic selection.
+On Highball the real generated GLB (18,548 vertices, 61,260 indices) passed
+original → override → original, movement, visibility and Reset checks. This is
+an offline GPU fixture, not a runtime TDS result or a performance measurement.
+
 The experimental combined proxy can opt in with
 `T3RENDER_EXPERIMENTAL_COMBINED=1`, `T3RENDER_SCENE_LIVE=1` and
 `T3RENDER_LIVE_CATALOG` pointing to the local catalog. Initialization and the

@@ -63,6 +63,24 @@ bool updates_and_flat_adapter() {
     CHECK(resident.draws.size()==3 && resident.draws[0].resource==old->meshes[0].resource &&
           resident.draws[0].transform[12]==10 && resident.camera.view[12]==8 &&
           resident.draws[0].color[0]==flat.draws[0].ambient_color[0]);
+    auto high=std::make_shared<const Resource>(resource("mesh:bed_high",ResourceKind::StaticMesh));
+    MeshOverride replacement{"bedroom",hash_a,"actor:bed",old->meshes[0].resource,high};
+    CHECK(BuildResidentFlatFrame(*old,resident,&replacement));
+    CHECK(resident.override_instances==1 && resident.draws.size()==3 && resident.draws[0].resource==high &&
+          resident.draws[0].transform==old->meshes[0].selection.transform && old->meshes[0].resource!=high);
+    auto partial=*old;partial.meshes[0].selection.sections={1};
+    CHECK(BuildResidentFlatFrame(partial,resident,&replacement) && resident.override_instances==1 && resident.draws.size()==3);
+    auto foreign=replacement;foreign.source=std::make_shared<const Resource>(*replacement.source);
+    CHECK(!BuildResidentFlatFrame(*old,resident,&foreign));
+    CHECK(resident.override_instances==1); // failure does not mutate output
+    foreign=replacement;foreign.instance_id="actor:other";
+    CHECK(BuildResidentFlatFrame(*old,resident,&foreign) && resident.override_instances==0 &&
+          resident.draws[0].resource==old->meshes[0].resource);
+    foreign=replacement;foreign.map="other";
+    CHECK(BuildResidentFlatFrame(*old,resident,&foreign) && resident.override_instances==0);
+    foreign=replacement;foreign.map_sha256=hash_b;
+    CHECK(BuildResidentFlatFrame(*old,resident,&foreign) && resident.override_instances==0 &&
+          resident.draws[0].resource==old->meshes[0].resource);
     CHECK(flat.view[12] == 8 && flat.draws.size() == 3 && flat.vertices.size() == 9);
     CHECK(flat.vertices[0].x == 10 && flat.vertices[1].x == 11 && flat.vertices[6].x == 0);
     CHECK(flat.draws[0].ambient_color[0] != flat.draws[1].ambient_color[0] ||
@@ -76,6 +94,7 @@ bool updates_and_flat_adapter() {
     CHECK(flat.draws.size() == 1 && flat.vertices[0].x == 2 && flat.view[12] == 12);
     CHECK(BuildResidentFlatFrame(*scene.current(),resident));
     CHECK(resident.draws.size()==1 && resident.draws[0].section==1 && resident.camera.view[12]==12);
+    CHECK(BuildResidentFlatFrame(*scene.current(),resident,&replacement) && resident.override_instances==0 && resident.draws.size()==1);
     auto third = frame(scene.epochs(), 3);
     third.meshes[0].transform[12]=20; third.meshes[0].sections={1};
     CHECK(scene.Publish(third));
@@ -94,6 +113,17 @@ bool updates_and_flat_adapter() {
     third.camera.view[0] = std::numeric_limits<float>::quiet_NaN();
     CHECK(!scene.Publish(third));
     CHECK(scene.current()->frame_id == 3);
+    // Reloading even the same map retires its resources; an old override must
+    // never bind to a freshly registered object that happens to share its ID.
+    CHECK(scene.BeginMap(scene.epochs().map,"bedroom",hash_a));
+    const auto epoch=scene.epochs();
+    CHECK(scene.AddMaterial(epoch.map,{"mat:red","red"}));
+    CHECK(scene.AddMaterial(epoch.map,{"mat:blue","blue"}));
+    CHECK(scene.AddResource(epoch.map,resource("mesh:bed",ResourceKind::StaticMesh)));
+    CHECK(scene.AddResource(epoch.map,resource("bsp:wall",ResourceKind::BspBlock)));
+    CHECK(scene.Publish(frame(epoch,1)));
+    CHECK(scene.current()->meshes[0].resource!=replacement.source);
+    CHECK(!BuildResidentFlatFrame(*scene.current(),resident,&replacement));
     return true;
 }
 

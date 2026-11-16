@@ -145,6 +145,7 @@ struct Diagnostics {
            <<",\"min_depth\":"<<snapshot.camera.min_depth<<",\"max_depth\":"<<snapshot.camera.max_depth<<'}'
            <<",\"mesh_instances\":"<<snapshot.meshes.size()<<",\"bsp_blocks\":"<<snapshot.bsp.size()
            <<",\"draws\":"<<frame.draws.size()<<",\"resident_resources\":"<<cache.resources
+           <<",\"bed_override_instances\":"<<frame.override_instances
            <<",\"resident_bytes\":"<<cache.bytes<<",\"resource_uploads\":"<<cache.uploads
            <<",\"resource_evictions\":"<<cache.evictions<<",\"image\":"<<(image?"true":"false")<<",\"view\":[";
         for (unsigned i=0;i<16;++i) { if (i) out<<',';out<<snapshot.camera.view[i]; }
@@ -250,7 +251,7 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
             if (current == last) continue;
             ResidentFlatFrame frame;
             const bool wants_image=diagnostics.WantsImage(*current);
-            if (!BuildResidentFlatFrame(*current, frame) || !gpu->PrepareResident(frame,wants_image)) { failed = true; break; }
+            if (!BuildResidentFlatFrame(*current, frame,state->provider.bed_override.get()) || !gpu->PrepareResident(frame,wants_image)) { failed = true; break; }
             Submission submission{gpu.get()};
             const bool submitted = state->provider.submit_if_current(state->provider.context.get(), current,
                                                                       SubmitPrepared, &submission);

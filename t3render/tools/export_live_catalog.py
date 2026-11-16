@@ -13,9 +13,10 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "ir"))
-from scene_ir import SceneSnapshot  # noqa: E402
+from scene_ir import Geometry, SceneSnapshot, Section  # noqa: E402
 import scene_ir_to_textured_packet as packet  # noqa: E402
 import scene_ir_to_d3d12_packet as preview  # noqa: E402
+import scene_pbr_bed as generated_bed  # noqa: E402
 
 MAX_BYTES = 64 * 1024 * 1024
 MAX_VERTICES = 1_000_000
@@ -76,7 +77,35 @@ def _resource(identifier, name, source_sha, geometry):
     return _text(identifier) + _text(name) + _text(source_sha) + _geometry(geometry)
 
 
-def export(raw):
+def _bed_override(scene, bed, raw):
+    scale = scene.conventions.meters_per_unit
+    if scale is None or not math.isclose(scale, .01905, rel_tol=0, abs_tol=1e-9):
+        raise ValueError("generated bed requires the SDK unit scale")
+    primitives = generated_bed._primitives(raw)
+    source = [(x*scale, z*scale, y*scale) for x, y, z in bed.geometry.positions]
+    generated = [point for positions, _, _, _ in primitives.values() for point in positions]
+    if not source or not generated or any(abs(f(source, key=lambda p:p[axis])[axis]-
+                                             f(generated, key=lambda p:p[axis])[axis]) > .3
+                                         for axis in range(3) for f in (min, max)):
+        raise ValueError("generated bed bounds do not match the source asset")
+    positions, normals, uv, indices, sections = [], [], [], [], []
+    for name in generated_bed.MATERIALS:
+        points, directions, texcoords, part_indices = primitives[name]
+        base, first = len(positions), len(indices)
+        positions.extend((x/scale, z/scale, y/scale) for x, y, z in points)
+        normals.extend((x, z, y) for x, y, z in directions)
+        uv.extend(texcoords)
+        # The glTF-to-T3 Y/Z reflection reverses winding.
+        for at in range(0, len(part_indices), 3):
+            a, b, c = part_indices[at:at+3]
+            indices.extend((base+a, base+c, base+b))
+        sections.append(Section("generated:"+name, first, len(part_indices), "remaster:material:bed_high:"+name))
+    digest = hashlib.sha256(raw).hexdigest()
+    geometry = Geometry(tuple(positions), tuple(normals), tuple(uv), None, tuple(indices), tuple(sections))
+    return "remaster:mesh:bed_high:"+digest, digest, geometry
+
+
+def export(raw, bed_high=None):
     if not isinstance(raw, bytes) or not raw or len(raw) > preview.MAX_INPUT:
         raise ValueError("offline SceneIR input is empty or too large")
     scene = SceneSnapshot.from_json(raw)
@@ -119,7 +148,11 @@ def export(raw):
             not required or any(x not in material_by_id for x in required)):
         raise ValueError("catalog requires known bed skin and BSP materials")
     materials = [m for m in scene.materials if m.id in required]
-    if len(materials) > 8192:
+    replacement = _bed_override(scene, bed, bed_high) if bed_high is not None else None
+    extra_materials = [("remaster:material:bed_high:"+name, name) for name in generated_bed.MATERIALS] if replacement else []
+    if any(identifier in material_by_id for identifier, _ in extra_materials):
+        raise ValueError("generated bed material IDs collide with the offline scene")
+    if len(materials) + len(extra_materials) > 8192:
         raise ValueError("catalog material count exceeds bounds")
     enum = lambda value, choices: choices.index(value)
     c = conventions
@@ -127,31 +160,42 @@ def export(raw):
               enum(c.winding, ("unknown", "normal_aligned", "normal_opposed")),
               enum(c.uv_origin, ("unknown", "top_left", "bottom_left")),
               enum(c.clip_depth, ("unknown", "zero_to_one")))
-    body = bytearray(b"T3LCAT01")
+    body = bytearray(b"T3LCAT02" if replacement else b"T3LCAT01")
     for value in (map_name, map_sha, hashlib.sha256(raw).hexdigest(), actor_id):
         body += _text(value)
     body += struct.pack("<4I", *values)
     body += _u32(int(c.meters_per_unit is not None))
     if c.meters_per_unit is not None:
         body += _float(c.meters_per_unit)
-    body += _u32(len(materials)) + _u32(len(scene.bsp_blocks))
+    body += _u32(len(materials) + len(extra_materials)) + _u32(len(scene.bsp_blocks))
     for material in materials:
         body += _text(material.id) + _text(material.name)
+    for identifier, name in extra_materials:
+        body += _text(identifier) + _text(name)
     body += _resource(bed.id, bed.name, bed_sha, bed.geometry)
     body += _u32(len(instance.material_ids))
     for item in instance.material_ids:
         body += _text(item, optional=True)
     for block in scene.bsp_blocks:
         body += _resource(block.id, f"BSP {block.source_index}", map_sha, block.geometry)
+    if replacement:
+        identifier, digest, geometry = replacement
+        body += _resource(identifier, "bed_high", digest, geometry)
     if len(body) + 32 > MAX_BYTES:
         raise ValueError("catalog exceeds 64 MiB")
     data = bytes(body) + hashlib.sha256(body).digest()
-    manifest = {"schema": "t3.scene.live-catalog", "version": 1, "source": "offline",
+    manifest = {"schema": "t3.scene.live-catalog", "version": 2 if replacement else 1, "source": "offline",
                 "offline_scene_sha256": hashlib.sha256(raw).hexdigest(), "catalog_sha256": hashlib.sha256(data).hexdigest(),
                 "map": map_name, "map_sha256": map_sha, "bed_resource_id": bed.id, "bed_actor_id": actor_id,
-                "bsp_blocks": len(scene.bsp_blocks), "materials": len(materials),
+                "bsp_blocks": len(scene.bsp_blocks), "materials": len(materials) + len(extra_materials),
                 "limitations": ["Offline assets only; no frame, visibility, transform or live binding is claimed.",
                                 "BSP catalog completeness is inherited from the heuristic offline importer."]}
+    if replacement:
+        manifest["limitations"].append("Any selected source bed section causes the whole replacement to be drawn; partial visibility is not established.")
+        manifest["bed_override"] = {"resource_id": replacement[0], "asset_sha256": replacement[1],
+                                    "vertices": len(replacement[2].positions), "indices": len(replacement[2].indices),
+                                    "sections": len(replacement[2].sections),
+                                    "scope": "viewer_only_when_semantic_bed_is_selected"}
     return data, manifest
 
 
@@ -159,10 +203,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("offline_scene", type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--bed-high", type=Path, help="optional generated Godot bed GLB for the live viewer")
     args = parser.parse_args(argv)
     try:
         raw = preview.read_limited(args.offline_scene, preview.MAX_INPUT)
-        body, manifest = export(raw)
+        high = preview.read_limited(args.bed_high, generated_bed.generated.MAX_GLB_BYTES) if args.bed_high else None
+        body, manifest = export(raw, high)
         packet.write_pair(args.output, body, manifest)
     except (OSError, ValueError, UnicodeError) as exc:
         parser.exit(2, f"{exc}\n")

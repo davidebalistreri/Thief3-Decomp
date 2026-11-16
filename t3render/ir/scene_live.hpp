@@ -40,6 +40,12 @@ struct Resource {
     std::string source_sha256;
     Geometry geometry;
 };
+// An in-process, asset-derived visual replacement. The source remains the
+// authoritative semantic binding; this never modifies gameplay or SceneIR.
+struct MeshOverride {
+    std::string map, map_sha256, instance_id;
+    std::shared_ptr<const Resource> source, replacement;
+};
 struct Camera {
     Matrix view{}, projection{};
     std::uint32_t x = 0, y = 0, width = 0, height = 0;

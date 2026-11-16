@@ -39,5 +39,15 @@ int main(int argc,char** argv) {
     std::cout<<"accepted "<<catalog.binding.map<<" "<<catalog.binding.materials.size()<<" "
              <<catalog.binding.bsp.size()<<" "<<bed->geometry.positions.size()<<" "<<bed->geometry.indices.size()<<" "
              <<bed->geometry.normals.size()<<" "<<bed->geometry.uv0.size()<<" "<<bed->geometry.tangents.size()<<" "
-             <<catalog.binding.bed_materials.size()<<" "<<catalog.offline_scene_sha256<<"\n";
+             <<catalog.binding.bed_materials.size()<<" "<<catalog.offline_scene_sha256;
+    if (catalog.bed_override) {
+        const auto& rule=*catalog.bed_override;
+        if (rule.source!=bed || !rule.replacement || rule.map!=catalog.binding.map ||
+            rule.instance_id!=catalog.binding.bed_instance_id ||
+            catalog.residency->FindSceneResource(epoch.map,rule.replacement->id)) return 6;
+        std::cout<<" override "<<rule.replacement->geometry.positions.size()<<" "
+                 <<rule.replacement->geometry.indices.size()<<" "<<rule.replacement->geometry.sections.size()<<" "
+                 <<rule.replacement->source_sha256;
+    }
+    std::cout<<"\n";
 }

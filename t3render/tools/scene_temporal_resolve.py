@@ -53,7 +53,7 @@ def parse(raw, packet):
     magic, width, height, digest = header[:4]
     matrix, camera, scale, exposure, jitter, flags = header[4:36], header[36:39], header[39], header[40], header[41:43], header[43]
     if (magic != b"T3TEMP01" or not 1 <= width <= 2048 or not 1 <= height <= 2048 or
-            len(raw) != HEADER.size+width*height*16 or flags > 31 or
+            len(raw) != HEADER.size+width*height*16 or flags > 63 or
             any(not math.isfinite(x) or abs(x) > 1000000 for x in (*matrix, *camera)) or
             not math.isfinite(scale) or not .00001 <= scale <= 1 or
             not math.isfinite(exposure) or not .01 <= exposure <= 32 or
@@ -64,7 +64,8 @@ def parse(raw, packet):
     packet_header = struct.unpack_from("<8sIIff32f4f4fIII", packet)
     if (packet_header[0] not in (b"T3PBR01\0", b"T3PBR02\0", b"T3PBR03\0", b"T3PBR04\0", b"T3PBR05\0") or
             packet_header[1:3] != (width, height) or packet_header[5:37] != matrix or
-            packet_header[37:40] != camera or packet_header[40] != scale or packet_header[44] != exposure):
+            packet_header[37:40] != camera or packet_header[40] != scale or packet_header[44] != exposure or
+            (flags & 32 and packet_header[0] == b"T3PBR01\0")):
         raise ValueError("temporal camera does not match packet")
     return {"raw": raw, "width": width, "height": height, "digest": digest.hex(), "view": matrix[:16],
             "projection": matrix[16:], "camera": camera, "scale": scale, "exposure": exposure,

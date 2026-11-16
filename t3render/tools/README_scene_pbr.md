@@ -429,6 +429,26 @@ penumbra reconstruction. A receiver-plane approximation from interpolated
 vertex normals and slope- and texel-scaled bias reduce self-shadowing, but
 cannot eliminate all acne or light leaks.
 
+The renderer's optional `--contact-hardening` first searches the cubemap for
+blockers, estimates their average distance, and adjusts the filter radius from
+the light radius and blocker-to-receiver separation. Contact shadows can be
+sharper and shadows farther from their blockers softer. It requires a packet
+with shadow maps; `--shadow-softness 0` remains hard. This is a bounded,
+25-sample blocker search followed by the existing 25 comparisons, not an
+exact area-light solution. The search is sparse, capped at 0.15 radians and
+may miss thin blockers or introduce light leaks and temporal flicker. It adds
+GPU work and has not been optimized for real-time performance. Without the
+flag the original filtering is unchanged. Temporal exports record the filter
+mode and reject history produced with the other mode. The camera-sequence
+runner accepts it as `--effect contact-hardening`.
+
+On the locally captured frames 2864 and 2865, the filmic PBR previews with
+five same-frame candidate lights changed 244,576 and 244,663 pixels,
+respectively, versus the same packets without the flag. Their mean absolute
+RGB-channel changes were 1.145 and 1.144 on a 0–255 scale. The scene is
+partial, light calibration remains artistic, and the effect does not establish
+that the original game's beam-lighting issue is fixed.
+
 Caster geometry comes from the selected, opaque same-frame sections only.
 For mesh instances, the fingerprinted offline actor export supplies the cast
 flag and mesh identity; a light's owner and attached parent are excluded for
@@ -588,6 +608,21 @@ range fallback and an off-axis receiver self-shadow case.
 add `--baseline` to omit that blocker while keeping the visible geometry
 identical. The local GPU test passed with the blocker shadowing the receiver
 and leaving an unoccluded sample unchanged.
+
+For contact hardening, use `--offline-caster --contact-case near` and
+`--offline-caster --contact-case far` to create two shadow-only blockers with
+the same projected silhouette but different distances from the receiver.
+Create a third packet with `--offline-caster --baseline --contact-case near`,
+render all three with `--contact-hardening`, and verify the near image with
+`--reference <baseline.ppm> --far-reference <far.ppm>`. This checks lit and
+occluded points and requires a wider penumbra for the farther blocker; it is
+a synthetic test, not proof of the bedroom's runtime light or caster state.
+On the local D3D12 runtime, the near and far cases had zero and four
+intermediate samples along the tested edge. The prior fixed-radius filter
+failed the same check, with three intermediate samples for each case. The six
+faces, seam, asymmetric blocker, independent lights, blocker behind the
+receiver, and unchanged hard shadow mode also passed the existing fixture
+checks with the new filter.
 
 `scene_pbr_indirect_fixture.py create <new.bin> --kind <kind>` produces a
 synthetic receiver and source. Render each packet both with and without

@@ -16,11 +16,13 @@ IDENTITY = (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
 
 
 def fixture(face, shadow=True, two_lights=False, asymmetric=False, hard=False, short_range=False, behind=False,
-            offline_caster=None):
+            offline_caster=None, contact_case=None):
     if type(face) is not int or not 0 <= face < len(AXES):
         raise ValueError("face must be in 0..6 (6 is a cubemap seam)")
     if offline_caster is not None and (not shadow or type(offline_caster) is not bool):
         raise ValueError("offline caster fixture requires shadow maps")
+    if contact_case not in (None, "near", "far") or (contact_case and offline_caster is None):
+        raise ValueError("contact fixture requires a near or far shadow-only blocker")
     right, up, forward = AXES[face]
     def world(x, y, z):
         return tuple(x*right[i]+y*up[i]+z*forward[i] for i in range(3))
@@ -52,10 +54,16 @@ def fixture(face, shadow=True, two_lights=False, asymmetric=False, hard=False, s
             body.extend(struct.pack("<12f", *world(x, y, z), .5, .5, *world(0, 0, -1), 0, 0, 0, 0))
     if offline_caster:
         left, bottom, right_edge, top = blocker
+        blocker_z = 1.2 if behind else -.1
+        if contact_case:
+            blocker_z = .6 if contact_case == "near" else -.1
+            # Keep the projected silhouette the same while changing separation.
+            half = .35 * (blocker_z+.7)/1.4
+            left, bottom, right_edge, top = -half, -half, half, half
         body.extend(struct.pack("<II", 1, 6))
         for x, y in ((left, bottom), (left, top), (right_edge, top),
                      (left, bottom), (right_edge, top), (right_edge, bottom)):
-            body.extend(struct.pack("<3f", *world(x, y, 1.2 if behind else -.1)))
+            body.extend(struct.pack("<3f", *world(x, y, blocker_z)))
     return bytes(body)
 
 
@@ -123,6 +131,25 @@ def verify_short_range(reference, shadowed, reason="geometry beyond shadow range
     return {"max_channel_difference": max(abs(a-b) for a,b in zip(base,test))}
 
 
+def verify_contact(reference, near, far):
+    base, near_pixels, far_pixels = map(_pixels, (reference, near, far))
+    def ratios(pixels):
+        return [pixels[(32*64+x)*3]/base[(32*64+x)*3]
+                for x in range(32, 55) if base[(32*64+x)*3] > 10]
+    near_ratios, far_ratios = ratios(near_pixels), ratios(far_pixels)
+    if len(near_ratios) != 23 or len(far_ratios) != 23:
+        raise ValueError("contact fixture reference is too dark")
+    if near_ratios[0] >= .5 or far_ratios[0] >= .5:
+        raise ValueError("both blockers must shadow the receiver")
+    if near_ratios[-1] < .95 or far_ratios[-1] < .95:
+        raise ValueError("the receiver away from both blockers must stay lit")
+    near_transition = sum(.55 < ratio < .9 for ratio in near_ratios)
+    far_transition = sum(.55 < ratio < .9 for ratio in far_ratios)
+    if far_transition <= near_transition:
+        raise ValueError(f"distant blocker did not widen the penumbra: near={near_transition}, far={far_transition}")
+    return {"near_intermediate": near_transition, "far_intermediate": far_transition}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("create", "verify"))
@@ -138,17 +165,23 @@ def main():
     parser.add_argument("--offline-caster", action="store_true",
                         help="use packet v3 with a shadow-only blocker; --baseline omits it")
     parser.add_argument("--soft-reference", type=Path)
+    parser.add_argument("--contact-case", choices=("near", "far"),
+                        help="create equal-projection shadow-only blockers at different depths")
+    parser.add_argument("--far-reference", type=Path, help="far-blocker image for contact verification")
     args = parser.parse_args()
     try:
         if args.action == "create":
             with args.path.open("xb") as stream:
                 stream.write(fixture(args.face, not args.baseline or args.offline_caster, args.two_lights, args.asymmetric,
                                      args.hard, args.short_range, args.behind,
-                                     offline_caster=not args.baseline if args.offline_caster else None))
+                                     offline_caster=not args.baseline if args.offline_caster else None,
+                                     contact_case=args.contact_case))
         else:
             if args.reference is None:
                 raise ValueError("--reference is required for verification")
-            if args.hard:
+            if args.far_reference:
+                result = verify_contact(args.reference.read_bytes(), args.path.read_bytes(), args.far_reference.read_bytes())
+            elif args.hard:
                 if args.soft_reference is None:
                     raise ValueError("--soft-reference is required for hard shadow verification")
                 result = verify_hard(args.reference.read_bytes(), args.path.read_bytes(), args.soft_reference.read_bytes())

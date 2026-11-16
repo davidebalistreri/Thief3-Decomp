@@ -64,7 +64,8 @@ inline bool ParseHistory(const std::uint8_t* bytes, std::size_t size, const pbr:
     for (float& x : history.camera) if (!reader.f32(x)) return false;
     if (!reader.f32(history.scale, 1) || history.scale < .00001f || !reader.f32(history.exposure, 32) || history.exposure < .01f ||
         !reader.f32(history.jitter[0], .5f) || !reader.f32(history.jitter[1], .5f) ||
-        !reader.u32(history.flags) || history.flags != expected_flags || history.flags > 31 ||
+        !reader.u32(history.flags) || history.flags != expected_flags || history.flags > 63 ||
+        ((history.flags & 32u) && !previous.shadow_size) ||
         std::memcmp(history.view, previous.view, sizeof(history.view)) ||
         std::memcmp(history.projection, previous.projection, sizeof(history.projection)) ||
         std::memcmp(history.camera, previous.camera, sizeof(history.camera)) || history.scale != previous.meters_per_unit ||

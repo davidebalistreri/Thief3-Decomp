@@ -13,6 +13,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "tools"))
 import scene_temporal_resolve as temporal
 import scene_pbr_metallic_fixture as metallic
+import scene_pbr_shadow_fixture as shadow
 import test_scene_pbr_packet as packet_tests
 from test_scene_temporal_resolve import raw_history
 
@@ -103,6 +104,15 @@ class GpuHistoryParserTests(unittest.TestCase):
         changed = bytearray(packet)
         struct.pack_into("<f", changed, first-12, 1)
         self.assertEqual(self.parse(packet, bytes(changed), history).returncode, 2)
+
+    def test_shadow_filter_cannot_reuse_incompatible_history(self):
+        packet = shadow.fixture(4)
+        history = raw_history(packet, flags=32)
+        self.assertEqual(self.parse(packet, packet, history, flags=32).returncode, 0)
+        self.assertEqual(self.parse(packet, packet, history, flags=0).returncode, 2)
+        no_shadows = packet_tests.gpu_fixture.fixture()
+        self.assertEqual(self.parse(no_shadows, no_shadows, raw_history(no_shadows, flags=32), flags=32).returncode, 2)
+        self.assertEqual(self.parse(packet, packet, raw_history(packet, flags=64), flags=64).returncode, 2)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "tools"))
 import scene_pbr_packet as pbr
+import scene_pbr_shadow_fixture as shadow
 import scene_temporal_resolve as temporal
 import scene_temporal_fixture as fixture
 import test_scene_pbr_packet as packet_tests
@@ -149,10 +150,20 @@ class TemporalResolveTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "effects"):
             temporal.compatible(temporal.parse(ordinary, self.packet), temporal.parse(filmic, self.packet))
 
+    def test_contact_hardening_requires_shadows_and_matching_history(self):
+        packet = shadow.fixture(4)
+        ordinary = temporal.parse(raw_history(packet), packet)
+        contact = temporal.parse(raw_history(packet, flags=32), packet)
+        temporal.compatible(contact, contact)
+        with self.assertRaisesRegex(ValueError, "effects"):
+            temporal.compatible(ordinary, contact)
+        with self.assertRaisesRegex(ValueError, "camera"):
+            temporal.parse(raw_history(self.packet, flags=32), self.packet)
+
     def test_invalid_headers_pixels_and_settings_fail_closed(self):
         for raw in (self.raw[:-1], b"badmagic"+self.raw[8:],
                     self.raw[:16]+bytes(32)+self.raw[48:],
-                    self.raw[:temporal.HEADER.size-4]+struct.pack("<I", 32)+self.raw[temporal.HEADER.size:]):
+                    self.raw[:temporal.HEADER.size-4]+struct.pack("<I", 64)+self.raw[temporal.HEADER.size:]):
             with self.subTest(raw=raw[:8]), self.assertRaises(ValueError):
                 temporal.parse(raw, self.packet)
         for change in ((temporal.HEADER.size, struct.pack("<H", 0x7c00)),

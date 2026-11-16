@@ -325,7 +325,7 @@ def main(argv=None):
     parser.add_argument("--highball-engine", type=Path, help="Highball engine root")
     parser.add_argument("--highball-bottle", type=Path, help="Highball bottle with Z: mapped to the host root")
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--effect", action="append", choices=("indirect", "gtao", "volumetric", "reflections", "filmic"), default=[])
+    parser.add_argument("--effect", action="append", choices=("indirect", "gtao", "volumetric", "reflections", "filmic", "contact-hardening"), default=[])
     parser.add_argument("--timeout", type=float, default=300)
     args = parser.parse_args(argv)
     try:

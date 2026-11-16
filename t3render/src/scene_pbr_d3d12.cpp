@@ -163,6 +163,7 @@ struct VariantRun {
 };
 
 int Render(const Frame& frame, const wchar_t* output, bool indirect, bool gtao, bool volumetric, bool reflections, bool filmic,
+           bool contact_hardening,
            const wchar_t* temporal_output, float jitter_x, float jitter_y, const std::uint8_t* digest,
            const t3render::temporal::History* history, float history_weight, VariantRun* variant = nullptr) {
     if (variant && (!variant->variants || temporal_output || history || variant->draws.size() != frame.draws.size() ||
@@ -229,6 +230,30 @@ float visibility(float3 world, float3 geometric_normal, float3 to_light, uint li
     // Bound its radial error using the receiver slope and cubemap resolution.
     float texel_slope=min(4,sqrt(saturate(1-plane_cos*plane_cos))/max(plane_cos,0.1));
     float texel_bias=distance*(2/shadow_settings.w)*texel_slope;
+#if T3_CONTACT_HARDENING
+    if(radius>0) {
+        // Estimate blocker distance before filtering. The search stays bounded;
+        // it cannot find blockers thinner than its sparse sampling pattern.
+        float blocker_sum=0, blocker_count=0;
+        float search_radius=min(0.15,max(2*radius,2/shadow_settings.w));
+        [loop] for(int y=-2;y<=2;++y) [loop] for(int x=-2;x<=2;++x) {
+            float3 sample_dir=normalize(direction+(tangent*x+bitangent*y)*(search_radius*0.5));
+            float plane_denominator=dot(geometric_normal,sample_dir);
+            float plane_scale=(abs(plane_denominator)>0.05 && plane_numerator*plane_denominator>0)
+                              ? clamp(plane_numerator/plane_denominator,0.5,2) : 1;
+            float receiver=distance*plane_scale-shadow_settings.y*slope-texel_bias;
+            float blocker=shadow_maps.SampleLevel(shadow_sampler,float4(sample_dir,(float)light_index),0).r*shadow_settings.x;
+            if(blocker<receiver) { blocker_sum+=blocker/plane_scale; blocker_count+=1; }
+        }
+        if(blocker_count==0) return 1;
+        float blocker=max(blocker_sum/blocker_count,0.01);
+        // Similar triangles for a finite light: penumbrae narrow to zero as
+        // blocker and receiver meet, and widen as their separation grows.
+        radius=min(0.15,light_position_radius[light_index].w*shadow_settings.z*
+                         max(distance-blocker,0)/(blocker*max(distance,0.01)));
+        if(radius>0) radius=max(radius,1/shadow_settings.w);
+    }
+#endif
     float visible=0;
     [unroll] for(int y=-2;y<=2;++y) [unroll] for(int x=-2;x<=2;++x) {
         float3 sample_dir=normalize(direction+(tangent*x+bitangent*y)*(radius*0.5));
@@ -685,6 +710,7 @@ Output main(float4 position:SV_Position) {
 })";
     ComPtr<ID3DBlob> vs, ps, tone_vs, tone_ps, shadow_vs, shadow_ps, temporal_ps;
     const std::string options = std::string(use_gbuffer ? "#define T3_GBUFFER 1\n" : "#define T3_GBUFFER 0\n") +
+                                (contact_hardening ? "#define T3_CONTACT_HARDENING 1\n" : "#define T3_CONTACT_HARDENING 0\n") +
                                 (indirect ? "#define T3_INDIRECT 1\n" : "#define T3_INDIRECT 0\n") +
                                 (gtao ? "#define T3_GTAO 1\n" : "#define T3_GTAO 0\n") +
                                 (volumetric ? "#define T3_VOLUMETRIC 1\n" : "#define T3_VOLUMETRIC 0\n") +
@@ -1162,7 +1188,8 @@ Output main(float4 position:SV_Position) {
                 temporal_color_readback->Unmap(0, &no_write); return 1;
             }
             const std::uint32_t flags = (indirect ? 1u : 0u) | (gtao ? 2u : 0u) |
-                                        (volumetric ? 4u : 0u) | (reflections ? 8u : 0u) | (filmic ? 16u : 0u);
+                                        (volumetric ? 4u : 0u) | (reflections ? 8u : 0u) | (filmic ? 16u : 0u) |
+                                        (contact_hardening ? 32u : 0u);
             const bool saved = WriteTemporal(temporal_output, frame, digest, jitter_x, jitter_y, flags,
                                              static_cast<const std::uint8_t*>(color), static_cast<const std::uint8_t*>(position), temporal_fp);
             temporal_position_readback->Unmap(0, &no_write); temporal_color_readback->Unmap(0, &no_write);
@@ -1234,11 +1261,11 @@ Output main(float4 position:SV_Position) {
 
 int wmain(int argc, wchar_t** argv) {
     const auto usage = []() {
-        std::fwprintf(stderr, L"usage: t3render_scene_pbr_d3d12 <pbr.bin> --output <new-image.ppm> [effects] [--temporal-output <new.bin> [--jitter <x> <y>]] [--temporal-input <history.bin> --previous-packet <pbr.bin> [--history-weight <0..0.95>]] [(--variant-cycle <replacement.ppm> <restored.ppm> | --variant-stream) --resource-key <key>]\n");
+        std::fwprintf(stderr, L"usage: t3render_scene_pbr_d3d12 <pbr.bin> --output <new-image.ppm> [effects] [--contact-hardening] [--temporal-output <new.bin> [--jitter <x> <y>]] [--temporal-input <history.bin> --previous-packet <pbr.bin> [--history-weight <0..0.95>]] [(--variant-cycle <replacement.ppm> <restored.ppm> | --variant-stream) --resource-key <key>]\n");
         return 2;
     };
-    if (argc < 4 || argc > 20 || std::wcscmp(argv[2], L"--output") || !argv[3][0]) return usage();
-    bool indirect = false, gtao = false, volumetric = false, reflections = false, filmic = false;
+    if (argc < 4 || argc > 21 || std::wcscmp(argv[2], L"--output") || !argv[3][0]) return usage();
+    bool indirect = false, gtao = false, volumetric = false, reflections = false, filmic = false, contact_hardening = false;
     bool jitter_set = false, weight_set = false; float jitter_x = 0, jitter_y = 0, history_weight = .8f;
     const wchar_t* temporal_output = nullptr;
     const wchar_t* temporal_input = nullptr; const wchar_t* previous_packet = nullptr;
@@ -1250,6 +1277,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (!std::wcscmp(argv[i], L"--volumetric") && !volumetric) volumetric = true;
         else if (!std::wcscmp(argv[i], L"--reflections") && !reflections) reflections = true;
         else if (!std::wcscmp(argv[i], L"--filmic") && !filmic) filmic = true;
+        else if (!std::wcscmp(argv[i], L"--contact-hardening") && !contact_hardening) contact_hardening = true;
         else if (!std::wcscmp(argv[i], L"--temporal-output") && !temporal_output && i+1 < argc && argv[i+1][0])
             temporal_output = argv[++i];
         else if (!std::wcscmp(argv[i], L"--temporal-input") && !temporal_input && i+1 < argc && argv[i+1][0])
@@ -1302,12 +1330,14 @@ int wmain(int argc, wchar_t** argv) {
             std::fprintf(stderr, "cannot build bounded combined variants\n"); return 2;
         }
         run.ResetSelection();
-        return Render(combined, argv[3], indirect, gtao, volumetric, reflections, filmic,
+        if (contact_hardening && !combined.shadow_size) return usage();
+        return Render(combined, argv[3], indirect, gtao, volumetric, reflections, filmic, contact_hardening,
                       nullptr, 0, 0, nullptr, nullptr, 0, &run);
     }
     Frame frame;
     std::uint8_t digest[32]{};
     if (!ReadPacket(argv[1], frame, temporal_output ? digest : nullptr)) return 2;
+    if (contact_hardening && !frame.shadow_size) return usage();
     t3render::temporal::History history;
     if (temporal_input) {
         Frame previous; std::uint8_t previous_digest[32]{};
@@ -1325,12 +1355,13 @@ int wmain(int argc, wchar_t** argv) {
         const bool error = size != bytes.size() || std::fgetc(file) != EOF || std::ferror(file) != 0;
         const bool close_error = std::fclose(file) != 0;
         const std::uint32_t flags = (indirect ? 1u : 0u) | (gtao ? 2u : 0u) |
-                                    (volumetric ? 4u : 0u) | (reflections ? 8u : 0u) | (filmic ? 16u : 0u);
+                                    (volumetric ? 4u : 0u) | (reflections ? 8u : 0u) | (filmic ? 16u : 0u) |
+                                    (contact_hardening ? 32u : 0u);
         if (error || close_error || !t3render::temporal::ParseHistory(bytes.data(), size, previous, frame, previous_digest, flags, history)) {
             std::fprintf(stderr, "invalid or incompatible temporal history\n"); return 2;
         }
         std::printf("temporal_frame_order=unverified; validate SceneIR provenance separately\n");
     }
-    return Render(frame, argv[3], indirect, gtao, volumetric, reflections, filmic, temporal_output, jitter_x, jitter_y, digest,
+    return Render(frame, argv[3], indirect, gtao, volumetric, reflections, filmic, contact_hardening, temporal_output, jitter_x, jitter_y, digest,
                   temporal_input ? &history : nullptr, history_weight);
 }

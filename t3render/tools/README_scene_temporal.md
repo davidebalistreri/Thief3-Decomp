@@ -28,6 +28,8 @@ the full bilinear blur that degrades the subpixel fixture. This is a standalone 
 real-time game loop. The CPU reference accepts `--weight` from 0 to 0.95.
 When the exported renderer uses `--filmic`, the resolve applies the same
 filmic curve; frames with different effect or curve flags cannot be combined.
+The optional `--contact-hardening` shadow filter is also recorded as an
+effect; history from the ordinary filter cannot be mixed with it.
 
 `--upscale 2` optionally reconstructs the output image at twice the width and
 height, in linear HDR before tonemapping. It uses bilinear weights while

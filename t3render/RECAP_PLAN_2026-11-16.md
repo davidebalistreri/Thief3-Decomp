@@ -33,7 +33,7 @@ geometria delle pareti; DXR resta opzionale e non prioritario.
 | SceneIR v1 | Schema API-neutral e snapshot runtime parziali; geometria e molte associazioni provengono da asset offline verificati. |
 | Replay D3D8 → DX12 | Bedroom riconoscibile e confronti diagnostici; parità legacy completa non dimostrata e non più prioritaria. |
 | Materiali e mesh | Override semantici per pietra, pavimento e letto; altri asset Godot riutilizzati nella preview. |
-| Renderer moderno | PBR/HDR diretto sperimentale nel consumer persistente; ombre, GI approssimata e altri effetti restano in preview separate, non come renderer di produzione. |
+| Renderer moderno | PBR/HDR diretto e prime ombre sperimentali nel consumer persistente; GI approssimata e altri effetti restano in preview separate, non come renderer di produzione. |
 | Switch letto | Originale/high-poly/originale su catture e nel viewer flat con dati sintetici; non modifica gameplay o collisioni e non è verificato live. |
 | Infrastruttura live | Residency, finestre `Present`, matcher e adattatore alimentano un viewer D3D12 sperimentale; il percorso non è stato verificato in TDS. |
 
@@ -262,8 +262,8 @@ coerenti con lo snapshot sottoposto a `SubmitIfCurrent`; altrimenti il viewer
 rimane flat. Le attestazioni dipendono dal producer e il probe TDS non fornisce
 ancora luci: nessuna delle nove candidate è stata promossa. Le normal map sono
 attive solo nella fixture sintetica perché la convenzione TDS è incerta; l'AO
-non viene applicata alla luce diretta. Ombre, GI, emissivi ed esposizione non
-sono parte di questo passaggio.
+non viene applicata alla luce diretta. GI, emissivi ed esposizione non sono
+parte di questo passaggio.
 
 Le fixture GPU su Highball hanno verificato GGX, HDR, attenuazione e spot,
 normali con scala non uniforme, materiali sintetici, rifiuto dei frame non
@@ -271,3 +271,18 @@ coerenti, fallback del worker, cache, cambio visibilità e Reset. Il catalogo
 reale è stato provato offline con camera sintetica. Non sono prove TDS né una
 misura di prestazioni: il lag segnalato e la correzione della trave restano da
 verificare più avanti, come richiesto. Vedi [consumer live](ir/README_scene_live.md).
+
+## Aggiornamento: shadow map nel consumer persistente
+
+Il passaggio diretto usa ora shadow map cubiche per un massimo di quattro luci
+accettate nello stesso snapshot. Una ricerca delimitata del blocker e il raggio
+della sorgente stimano una penombra, con filtro e bias sulle normali geometriche.
+La fixture GPU sintetica ha verificato blocker, luci point/spot, movimento,
+visibilità, variazione della penombra, più luci, cancellazione e Reset.
+
+Le ombre usano esclusivamente le sezioni selezionate, considerate opache: gli
+occlusori fuori selezione mancano. Le luci oltre quattro rimangono senza ombra;
+oltre 16.384 draw per le shadow map il frame torna interamente senza ombre.
+Questi limiti e i contatori diagnostici non dimostrano prestazioni realtime.
+Il probe TDS non fornisce ancora luci complete: l'effetto e il lag restano da
+verificare nel gioco, senza anticipare che la trave sia stata corretta.

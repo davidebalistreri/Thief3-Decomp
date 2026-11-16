@@ -12,6 +12,8 @@ struct FlatCacheStats {
     std::uint64_t uploads = 0, evictions = 0;
     std::size_t resources = 0, bytes = 0;
     std::uint32_t textured_draws = 0, pbr_draws = 0;
+    std::uint32_t shadowed_lights = 0, shadow_draws = 0;
+    bool shadow_budget_exceeded = false;
 };
 
 // Persistent diagnostic backend. A null window renders offscreen; otherwise
@@ -35,8 +37,10 @@ public:
     // result before command recording leaves the flat path available.
     // synthetic_normal_map enables an explicitly assumed +Y tangent normal
     // convention for synthetic fixtures only; TDS's convention is unknown.
+    // Shadows use only selected opaque geometry, a bounded number of lights
+    // and draw calls; cache_stats() reports their actual per-frame use.
     bool PrepareLit(const Snapshot& snapshot, const ResidentFlatFrame& frame, bool readback = false,
-                    bool synthetic_normal_map = false) noexcept;
+                    bool synthetic_normal_map = false, bool shadows = true) noexcept;
     bool Submit() noexcept;
     bool Finish(std::vector<std::uint8_t>* pixels = nullptr) noexcept;
     // Present is deliberately outside the scene lock: a driver or windowing

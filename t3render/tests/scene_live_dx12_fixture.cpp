@@ -382,9 +382,9 @@ bool synthetic_pbr(HWND window) {
     worker_frame.light_coverage=LightCoverage::Complete;worker_frame.lights={light};CHECK(worker->scene.Publish(worker_frame));
     ViewerProvider provider;provider.context=worker;provider.current=viewer_current;provider.submit_if_current=viewer_submit;
     auto viewer=SceneViewer::Start(std::move(provider),false);CHECK(viewer);viewer->Notify();CHECK(await_viewer(*viewer,1));
-    CHECK(viewer->stats().pbr_draws==1);
+    CHECK(viewer->stats().pbr_draws==1 && viewer->stats().shadowed_lights==1);
     worker_frame.frame_id=2;worker_frame.light_coverage=LightCoverage::Partial;CHECK(worker->scene.Publish(worker_frame));
-    viewer->Notify();CHECK(await_viewer(*viewer,2));CHECK(viewer->stats().pbr_draws==0);
+    viewer->Notify();CHECK(await_viewer(*viewer,2));CHECK(viewer->stats().pbr_draws==0 && viewer->stats().shadowed_lights==0);
     viewer->Stop();const auto deadline=GetTickCount64()+20000;
     while (!viewer->stats().stopped && GetTickCount64()<deadline) Sleep(10);
     CHECK(viewer->stats().stopped && !viewer->stats().failed);
@@ -434,6 +434,99 @@ bool synthetic_pbr_materials() {
     std::cout<<"synthetic_pbr_material_sample="<<unsigned(base[at])<<","<<unsigned(low_roughness[at])<<"\n";
     CHECK(base[at]>=60 && base[at]<=70 && low_roughness[at]>base[at]+40); // sRGB albedo, linear roughness
     std::cout<<"scene_live_pbr_material_fixture=ok source=synthetic srgb=ok roughness=ok normal=fixture_only\n";
+    return true;
+}
+
+bool synthetic_shadows() {
+    SceneResidency scene;CHECK(scene.BeginMap(0,"shadow-fixture",fingerprint));auto epoch=scene.epochs();
+    CHECK(scene.AddMaterial(epoch.map,{"mat:bed","bed"}));CHECK(scene.AddMaterial(epoch.map,{"mat:wall","wall"}));
+    auto blocker=quad("mesh:bed",ResourceKind::StaticMesh,.15f,.25f,"mat:bed");
+    blocker.geometry.normals.assign(4,Vec3{0,0,-1});CHECK(scene.AddResource(epoch.map,std::move(blocker)));
+    auto receiver=quad("bsp:wall",ResourceKind::BspBlock,.9f,.8f,"mat:wall");
+    receiver.geometry.normals.assign(4,Vec3{0,0,-1});CHECK(scene.AddResource(epoch.map,std::move(receiver)));
+    auto frame=input(epoch,1);frame.camera.width=128;frame.camera.height=128;
+    frame.conventions.meters_per_unit=1;frame.light_coverage=LightCoverage::Complete;
+    VisualLight light;light.id="light:a";light.generation=1;light.binding=BindingEvidence::Verified;
+    light.enabled={true,BindingEvidence::Verified};light.kind={LightKind::Point,BindingEvidence::Verified};
+    light.position={Vec3{-.8f,0,-.6f},BindingEvidence::Verified};light.color_linear={Vec3{1,1,1},BindingEvidence::Verified};
+    light.intensity={2,BindingEvidence::Verified};light.influence_radius={10,BindingEvidence::Verified};
+    light.source_radius_m={.01f,BindingEvidence::Verified};frame.lights={light};CHECK(scene.Publish(frame));
+    auto gpu=FlatD3D12::Create(nullptr);CHECK(gpu);
+    auto prepare=[&](ResidentFlatFrame& resident) {
+        if (!BuildResidentFlatFrame(*scene.current(),resident)) return false;
+        for (auto& draw:resident.draws) draw.color={.5f,.5f,.5f,1};
+        return true;
+    };
+    auto render=[&](ResidentFlatFrame& resident,bool enabled,std::vector<std::uint8_t>& output) {
+        return gpu->PrepareLit(*scene.current(),resident,true,false,enabled) && gpu->Submit() && gpu->Finish(&output);
+    };
+    ResidentFlatFrame resident;CHECK(prepare(resident));std::vector<std::uint8_t> unshadowed,shadowed,again;
+    CHECK(render(resident,false,unshadowed));CHECK(!gpu->cache_stats().shadowed_lights);
+    CHECK(render(resident,true,shadowed));CHECK(gpu->cache_stats().shadowed_lights==1 && gpu->cache_stats().shadow_draws==12);
+    const auto shaded=(64u*128+96)*4, lit=(64u*128+32)*4;
+    std::cout<<"synthetic_shadow_samples="<<unsigned(unshadowed[shaded])<<","<<unsigned(shadowed[shaded])
+             <<" lit="<<unsigned(unshadowed[lit])<<","<<unsigned(shadowed[lit])<<"\n";
+    CHECK(int(unshadowed[shaded])-int(shadowed[shaded])>20);
+    CHECK(std::abs(int(unshadowed[lit])-int(shadowed[lit]))<=3);
+    CHECK(gpu->PrepareLit(*scene.current(),resident,true));gpu->Cancel();
+    CHECK(render(resident,true,again) && again==shadowed);
+    frame.frame_id=2;frame.meshes.clear();CHECK(scene.Publish(frame));CHECK(prepare(resident));
+    std::vector<std::uint8_t> hidden;CHECK(render(resident,true,hidden));
+    CHECK(int(hidden[shaded])-int(shadowed[shaded])>20 && gpu->cache_stats().uploads==2);
+    frame.frame_id=3;frame.meshes=input(epoch,1).meshes;frame.meshes[0].transform[12]=-.25f;
+    CHECK(scene.Publish(frame));CHECK(prepare(resident));std::vector<std::uint8_t> moved;
+    CHECK(render(resident,true,moved) && moved!=shadowed);
+    CHECK(int(moved[shaded])-int(shadowed[shaded])>15);
+    frame.frame_id=4;frame.meshes[0].transform=identity;frame.lights[0].source_radius_m.value=.8f;
+    CHECK(scene.Publish(frame));CHECK(prepare(resident));std::vector<std::uint8_t> soft,soft_clear;
+    CHECK(render(resident,true,soft) && soft!=shadowed && render(resident,false,soft_clear));
+    frame.frame_id=5;frame.meshes[0].transform[12]=.33143f;frame.meshes[0].transform[14]=.35f;
+    CHECK(scene.Publish(frame));CHECK(prepare(resident));std::vector<std::uint8_t> contact,contact_clear;
+    CHECK(render(resident,true,contact) && render(resident,false,contact_clear));
+    auto penumbra=[](const std::vector<std::uint8_t>& clear,const std::vector<std::uint8_t>& shaded_image) {
+        unsigned count=0;
+        for (unsigned x=98;x<120;++x) {
+            const auto i=(64u*128+x)*4;const int reference=clear[i], value=shaded_image[i];
+            if (reference>15 && value*10>reference && value*10<reference*9) ++count;
+        }
+        return count;
+    };
+    const auto far_penumbra=penumbra(soft_clear,soft),near_penumbra=penumbra(contact_clear,contact);
+    std::cout<<"synthetic_shadow_penumbra="<<far_penumbra<<","<<near_penumbra<<"\n";
+    CHECK(far_penumbra>=near_penumbra+2);
+    frame.frame_id=6;frame.meshes[0].transform=identity;frame.lights[0]=light;auto second=light;second.id="light:b";
+    second.position.value=Vec3{.8f,0,-.6f};frame.lights.push_back(second);
+    CHECK(scene.Publish(frame));CHECK(prepare(resident));std::vector<std::uint8_t> two;
+    CHECK(render(resident,true,two) && gpu->cache_stats().shadowed_lights==2 && gpu->cache_stats().shadow_draws==24);
+    CHECK(int(two[shaded])-int(shadowed[shaded])>20);
+    auto third=light;third.id="light:c";auto fourth=light;fourth.id="light:d";
+    auto fifth=second;fifth.id="light:e";
+    frame.frame_id=7;frame.lights.push_back(third);frame.lights.push_back(fourth);frame.lights.push_back(fifth);
+    CHECK(scene.Publish(frame));CHECK(prepare(resident));std::vector<std::uint8_t> five;
+    CHECK(render(resident,true,five) && gpu->cache_stats().shadowed_lights==4 && gpu->cache_stats().shadow_draws==48);
+    CHECK(five[shaded]>two[shaded]); // the fifth light still contributes, without a shadow map
+    frame.frame_id=8;CHECK(scene.Publish(frame));CHECK(prepare(resident));
+    const auto draw=resident.draws[0];resident.draws.assign(700,draw);
+    CHECK(render(resident,true,two) && gpu->cache_stats().shadow_budget_exceeded &&
+          gpu->cache_stats().shadowed_lights==0 && gpu->cache_stats().shadow_draws==0);
+    frame.frame_id=9;frame.lights={light};frame.lights[0].kind={LightKind::Spot,BindingEvidence::Verified};
+    frame.lights[0].direction={Vec3{.68045f,0,.73279f},BindingEvidence::Verified};
+    frame.lights[0].cos_inner={.9f,BindingEvidence::Verified};frame.lights[0].cos_outer={.7f,BindingEvidence::Verified};
+    CHECK(scene.Publish(frame));CHECK(prepare(resident));std::vector<std::uint8_t> spot,spot_clear;
+    CHECK(render(resident,true,spot) && render(resident,false,spot_clear));
+    CHECK(int(spot_clear[shaded])-int(spot[shaded])>20);
+    const auto ticket=scene.BeginReset();CHECK(ticket && scene.EndReset(ticket,true));epoch=scene.epochs();
+    frame=input(epoch,10);frame.camera.width=128;frame.camera.height=128;
+    frame.conventions.meters_per_unit=1;frame.light_coverage=LightCoverage::Complete;frame.lights={light};
+    CHECK(scene.Publish(frame));CHECK(prepare(resident));CHECK(render(resident,true,again) && again==shadowed);
+    CHECK(gpu->cache_stats().uploads==4);
+    for (auto& part:resident.draws) {
+        auto no_normals=std::make_shared<Resource>(*part.resource);no_normals->id+="-without-normals";
+        no_normals->geometry.normals.clear();part.resource=std::move(no_normals);
+    }
+    CHECK(render(resident,true,again) && !gpu->cache_stats().pbr_draws && !gpu->cache_stats().shadowed_lights &&
+          !gpu->cache_stats().shadow_draws);
+    std::cout<<"scene_live_shadow_fixture=ok source=synthetic blocker=ok soft=ok visibility=ok motion=ok budget=ok reset=ok\n";
     return true;
 }
 struct CatalogViewerFixture { std::shared_ptr<SceneResidency> scene; };
@@ -568,7 +661,8 @@ int wmain(int argc, wchar_t** argv) {
                              CW_USEDEFAULT,CW_USEDEFAULT,128,128,nullptr,nullptr,cls.hInstance,nullptr);
         if (!hwnd) return 2;
     }
-    const bool ok=run(hwnd) && viewer_pipeline(diagnostic_directory) && synthetic_textures() && synthetic_pbr(hwnd) && synthetic_pbr_materials() &&
+    const bool ok=run(hwnd) && viewer_pipeline(diagnostic_directory) && synthetic_textures() && synthetic_pbr(hwnd) &&
+                  synthetic_pbr_materials() && synthetic_shadows() &&
                   (catalog_path.empty() || catalog_override(catalog_path.c_str()));
     if (hwnd) DestroyWindow(hwnd);
     return ok ? 0 : 1;

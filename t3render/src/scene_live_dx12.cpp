@@ -17,6 +17,8 @@ using scene::Vertex;
 static_assert(sizeof(Vec3)==sizeof(float)*3,"unexpected position layout");
 constexpr DXGI_FORMAT kDepth = DXGI_FORMAT_D32_FLOAT;
 constexpr DXGI_FORMAT kHdr = DXGI_FORMAT_R16G16B16A16_FLOAT;
+constexpr UINT kShadowSize=256, kMaxShadowLights=4, kShadowFaces=kMaxShadowLights*6;
+constexpr std::size_t kMaxShadowDrawCalls=16384;
 constexpr DWORD kFenceTimeoutMs = 10000;
 constexpr std::size_t kMaxMaterialGpuBytes = 128u*1024u*1024u;
 struct PackedVertex { Vec3 position; Vec2 uv; Vec3 normal; };
@@ -94,14 +96,14 @@ struct FlatD3D12::Impl {
     ComPtr<ID3D12GraphicsCommandList> list;
     ComPtr<ID3D12Fence> fence;
     Handle event;
-    ComPtr<ID3D12RootSignature> root;
+    ComPtr<ID3D12RootSignature> root,shadow_root;
     ComPtr<ID3D12PipelineState> pipeline, texture_pipeline, hdr_flat_pipeline, hdr_texture_pipeline;
-    ComPtr<ID3D12PipelineState> pbr_pipeline, pbr_texture_pipeline, pbr_fixture_pipeline, tone_pipeline;
+    ComPtr<ID3D12PipelineState> pbr_pipeline, pbr_texture_pipeline, pbr_fixture_pipeline, tone_pipeline,shadow_pipeline;
     ComPtr<ID3D12DescriptorHeap> rtv_heap, dsv_heap, albedo_heap;
     std::shared_ptr<const BedroomMaterialLibrary> materials;
     std::array<std::array<GpuTexture,4>,2> material_textures;
     UINT albedo_descriptor_size=0;
-    ComPtr<ID3D12Resource> target, hdr, depth, vertices, readback, backbuffer, lighting_buffer;
+    ComPtr<ID3D12Resource> target, hdr, depth, vertices, readback, backbuffer, lighting_buffer,shadow_map,shadow_depth;
     ComPtr<IDXGISwapChain3> swapchain;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     UINT64 readback_bytes = 0, fence_value = 0;
@@ -111,7 +113,8 @@ struct FlatD3D12::Impl {
     std::uint64_t cache_map=0, cache_device=0, cache_continuity=0, cache_serial=0, uploads=0, evictions=0;
     std::unordered_map<std::string,std::unique_ptr<CachedGeometry>> cache;
     UINT width = 0, height = 0;
-    std::uint32_t textured_draws=0,pbr_draws=0;
+    std::uint32_t textured_draws=0,pbr_draws=0,shadowed_lights=0,shadow_draws=0;
+    bool shadow_budget_exceeded=false,shadow_commands=false;
     bool failed = false, pending = false, prepared = false, prepared_readback = false, lit_commands = false;
     bool pbr_materials_ready = false;
 
@@ -166,7 +169,7 @@ struct FlatD3D12::Impl {
         static const char texture_ps_source[] =
             "Texture2D image:register(t0);SamplerState image_sampler:register(s0);"
             "float4 main(float4 uv:TEXCOORD0):SV_Target{return image.Sample(image_sampler,uv.xy);}";
-        ComPtr<ID3DBlob> vs, ps, texture_ps, lit_vs, lit_ps, lit_texture_ps, lit_fixture_ps, tone_vs, tone_ps;
+        ComPtr<ID3DBlob> vs, ps, texture_ps, lit_vs, lit_ps, lit_texture_ps, lit_fixture_ps, tone_vs, tone_ps,shadow_vs,shadow_ps;
         if (!Compile(compile, vs_source, "vs_5_0", vs) || !Compile(compile, ps_source, "ps_5_0", ps)) return false;
         if (materials && (!ValidMaterials(*materials) || !Compile(compile,texture_ps_source,"ps_5_0",texture_ps))) return false;
         const std::string untextured=std::string("#define TEXTURED 0\n#define TEST_NORMAL_MAP 0\n")+shaders::pixel;
@@ -174,6 +177,7 @@ struct FlatD3D12::Impl {
         const std::string fixture=std::string("#define TEXTURED 1\n#define TEST_NORMAL_MAP 1\n")+shaders::pixel;
         if (!Compile(compile,shaders::vertex,"vs_5_0",lit_vs) || !Compile(compile,untextured.c_str(),"ps_5_0",lit_ps) ||
             !Compile(compile,shaders::tone_vertex,"vs_5_0",tone_vs) || !Compile(compile,shaders::tone_pixel,"ps_5_0",tone_ps) ||
+            !Compile(compile,shaders::shadow_vertex,"vs_5_0",shadow_vs) || !Compile(compile,shaders::shadow_pixel,"ps_5_0",shadow_ps) ||
             (materials && (!Compile(compile,textured.c_str(),"ps_5_0",lit_texture_ps) ||
                            !Compile(compile,fixture.c_str(),"ps_5_0",lit_fixture_ps)))) return false;
 
@@ -189,7 +193,10 @@ struct FlatD3D12::Impl {
         D3D12_DESCRIPTOR_RANGE hdr_range{};hdr_range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         hdr_range.NumDescriptors=1;hdr_range.BaseShaderRegister=4;
         hdr_range.OffsetInDescriptorsFromTableStart=D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-        D3D12_ROOT_PARAMETER params[6]{};
+        D3D12_DESCRIPTOR_RANGE shadow_range{};shadow_range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        shadow_range.NumDescriptors=1;shadow_range.BaseShaderRegister=5;
+        shadow_range.OffsetInDescriptorsFromTableStart=D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        D3D12_ROOT_PARAMETER params[7]{};
         params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         params[0].Constants.ShaderRegister = 0; params[0].Constants.Num32BitValues = 34;
         params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
@@ -207,16 +214,35 @@ struct FlatD3D12::Impl {
         params[5].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         params[5].DescriptorTable.NumDescriptorRanges=1;params[5].DescriptorTable.pDescriptorRanges=&hdr_range;
         params[5].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-        D3D12_STATIC_SAMPLER_DESC sampler{};sampler.Filter=D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        params[6].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[6].DescriptorTable.NumDescriptorRanges=1;params[6].DescriptorTable.pDescriptorRanges=&shadow_range;
+        params[6].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_STATIC_SAMPLER_DESC samplers[2]{};auto& sampler=samplers[0];sampler.Filter=D3D12_FILTER_MIN_MAG_MIP_LINEAR;
         sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D12_TEXTURE_ADDRESS_MODE_WRAP;
         sampler.MaxAnisotropy=1;sampler.ComparisonFunc=D3D12_COMPARISON_FUNC_ALWAYS;sampler.MaxLOD=D3D12_FLOAT32_MAX;
         sampler.ShaderRegister=0;sampler.ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-        D3D12_ROOT_SIGNATURE_DESC desc{}; desc.NumParameters = 6; desc.pParameters = params;
-        desc.NumStaticSamplers=1;desc.pStaticSamplers=&sampler;
+        auto& shadow_sampler=samplers[1];shadow_sampler.Filter=D3D12_FILTER_MIN_MAG_MIP_POINT;
+        shadow_sampler.AddressU=shadow_sampler.AddressV=shadow_sampler.AddressW=D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        shadow_sampler.MaxAnisotropy=1;shadow_sampler.ComparisonFunc=D3D12_COMPARISON_FUNC_ALWAYS;
+        shadow_sampler.MaxLOD=D3D12_FLOAT32_MAX;shadow_sampler.ShaderRegister=1;shadow_sampler.ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_ROOT_SIGNATURE_DESC desc{}; desc.NumParameters = 7; desc.pParameters = params;
+        desc.NumStaticSamplers=2;desc.pStaticSamplers=samplers;
         desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
         ComPtr<ID3DBlob> blob, errors;
         if (!Check(serialize_root(&desc, D3D_ROOT_SIGNATURE_VERSION_1, blob.put(), errors.put()), "SerializeRoot") ||
             !Check(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(root.put())), "CreateRoot")) return false;
+        D3D12_ROOT_PARAMETER shadow_params[2]{};
+        shadow_params[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        shadow_params[0].Constants.ShaderRegister=2;shadow_params[0].Constants.Num32BitValues=16;
+        shadow_params[0].ShaderVisibility=D3D12_SHADER_VISIBILITY_VERTEX;
+        shadow_params[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        shadow_params[1].Constants.ShaderRegister=4;shadow_params[1].Constants.Num32BitValues=20;
+        shadow_params[1].ShaderVisibility=D3D12_SHADER_VISIBILITY_ALL;
+        D3D12_ROOT_SIGNATURE_DESC shadow_desc{};shadow_desc.NumParameters=2;shadow_desc.pParameters=shadow_params;
+        shadow_desc.Flags=D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        ComPtr<ID3DBlob> shadow_blob,shadow_errors;
+        if (!Check(serialize_root(&shadow_desc,D3D_ROOT_SIGNATURE_VERSION_1,shadow_blob.put(),shadow_errors.put()),"SerializeShadowRoot") ||
+            !Check(device->CreateRootSignature(0,shadow_blob->GetBufferPointer(),shadow_blob->GetBufferSize(),IID_PPV_ARGS(shadow_root.put())),"CreateShadowRoot")) return false;
         D3D12_INPUT_ELEMENT_DESC input[] = {
             {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
             {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}};
@@ -243,6 +269,11 @@ struct FlatD3D12::Impl {
             pso.PS={texture_ps->GetBufferPointer(),texture_ps->GetBufferSize()};
             if (!Check(device->CreateGraphicsPipelineState(&pso,IID_PPV_ARGS(texture_pipeline.put())),"CreateTexturePipeline")) return false;
         }
+        auto shadow_pso=pso;shadow_pso.pRootSignature=shadow_root.p;
+        shadow_pso.VS={shadow_vs->GetBufferPointer(),shadow_vs->GetBufferSize()};
+        shadow_pso.PS={shadow_ps->GetBufferPointer(),shadow_ps->GetBufferSize()};
+        shadow_pso.RTVFormats[0]=DXGI_FORMAT_R32_FLOAT;
+        if (!Check(device->CreateGraphicsPipelineState(&shadow_pso,IID_PPV_ARGS(shadow_pipeline.put())),"CreateShadowPipeline")) return false;
         pso.RTVFormats[0]=kHdr;pso.PS={ps->GetBufferPointer(),ps->GetBufferSize()};
         if (!Check(device->CreateGraphicsPipelineState(&pso,IID_PPV_ARGS(hdr_flat_pipeline.put())),"CreateHdrFlatPipeline")) return false;
         if (materials) {
@@ -269,11 +300,11 @@ struct FlatD3D12::Impl {
         if (!Check(device->CreateGraphicsPipelineState(&pso,IID_PPV_ARGS(tone_pipeline.put())),"CreateTonePipeline")) return false;
         if (!Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.p, pipeline.p, IID_PPV_ARGS(list.put())), "CreateList") ||
             !Check(list->Close(), "CloseInitialList")) return false;
-        D3D12_DESCRIPTOR_HEAP_DESC heap{}; heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; heap.NumDescriptors = 2;
+        D3D12_DESCRIPTOR_HEAP_DESC heap{}; heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; heap.NumDescriptors = 2+kShadowFaces;
         if (!Check(device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(rtv_heap.put())), "CreateRtvHeap")) return false;
-        heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;heap.NumDescriptors=1;
+        heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;heap.NumDescriptors=2;
         if (!Check(device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(dsv_heap.put())), "CreateDsvHeap")) return false;
-        heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;heap.NumDescriptors=11;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;heap.NumDescriptors=13;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (!Check(device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(albedo_heap.put())),"CreateMaterialHeap")) return false;
         albedo_descriptor_size=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         if (!albedo_descriptor_size) return false;
@@ -284,6 +315,10 @@ struct FlatD3D12::Impl {
         for (unsigned i=0;i<11;++i) {
             device->CreateShaderResourceView(nullptr,&null_srv,null_descriptor);null_descriptor.ptr+=albedo_descriptor_size;
         }
+        null_srv.Format=DXGI_FORMAT_R32_FLOAT;null_srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+        null_srv.TextureCubeArray.MipLevels=1;null_srv.TextureCubeArray.NumCubes=kMaxShadowLights;
+        device->CreateShaderResourceView(nullptr,&null_srv,null_descriptor);
+        null_descriptor.ptr+=albedo_descriptor_size;device->CreateShaderResourceView(nullptr,&null_srv,null_descriptor);
         const auto upload_heap=Heap(D3D12_HEAP_TYPE_UPLOAD);
         const auto lighting_desc=Buffer((sizeof(LightingConstants)+255u)&~std::size_t(255u));
         if (!Check(device->CreateCommittedResource(&upload_heap,D3D12_HEAP_FLAG_NONE,&lighting_desc,
@@ -383,6 +418,39 @@ struct FlatD3D12::Impl {
         return true;
     }
 
+    bool EnsureShadow() {
+        if (shadow_map.p && shadow_depth.p) return true;
+        const auto heap=Heap(D3D12_HEAP_TYPE_DEFAULT);
+        auto map_desc=Image(kShadowSize,kShadowSize,1,DXGI_FORMAT_R32_FLOAT,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+        map_desc.DepthOrArraySize=kShadowFaces;
+        const auto depth_desc=Image(kShadowSize,kShadowSize,1,kDepth,D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+        D3D12_CLEAR_VALUE color{};color.Format=DXGI_FORMAT_R32_FLOAT;color.Color[0]=1;
+        D3D12_CLEAR_VALUE clear_depth{};clear_depth.Format=kDepth;clear_depth.DepthStencil.Depth=1;
+        if (!Check(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&map_desc,D3D12_RESOURCE_STATE_RENDER_TARGET,
+                   &color,IID_PPV_ARGS(shadow_map.put())),"CreateShadowMap") ||
+            !Check(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&depth_desc,D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                   &clear_depth,IID_PPV_ARGS(shadow_depth.put())),"CreateShadowDepth")) return false;
+        auto rtv=rtv_heap->GetCPUDescriptorHandleForHeapStart();
+        const auto rtv_step=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        rtv.ptr+=std::size_t(2)*rtv_step;
+        for (UINT face=0;face<kShadowFaces;++face) {
+            D3D12_RENDER_TARGET_VIEW_DESC view{};view.Format=DXGI_FORMAT_R32_FLOAT;
+            view.ViewDimension=D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+            view.Texture2DArray.FirstArraySlice=face;view.Texture2DArray.ArraySize=1;
+            device->CreateRenderTargetView(shadow_map.p,&view,rtv);rtv.ptr+=rtv_step;
+        }
+        auto dsv=dsv_heap->GetCPUDescriptorHandleForHeapStart();
+        dsv.ptr+=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+        device->CreateDepthStencilView(shadow_depth.p,nullptr,dsv);
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Format=DXGI_FORMAT_R32_FLOAT;
+        srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+        srv.TextureCubeArray.MipLevels=1;srv.TextureCubeArray.NumCubes=kMaxShadowLights;
+        auto descriptor=albedo_heap->GetCPUDescriptorHandleForHeapStart();descriptor.ptr+=std::size_t(11)*albedo_descriptor_size;
+        device->CreateShaderResourceView(shadow_map.p,&srv,descriptor);
+        return true;
+    }
+
     bool EnsureVertices(std::size_t bytes) {
         if (!bytes || bytes <= vertex_capacity) return true;
         Release(vertices); vertex_capacity = 0;
@@ -404,8 +472,7 @@ struct FlatD3D12::Impl {
             D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(readback.put())), "CreateReadback");
     }
 
-    bool BeginCommands(const Frame& f,bool lit=false) {
-        if (!Check(allocator->Reset(), "ResetAllocator") || !Check(list->Reset(allocator.p, pipeline.p), "ResetList")) return false;
+    void SetupMain(const Frame& f,bool lit) {
         list->SetGraphicsRootSignature(root.p);
         list->SetGraphicsRoot32BitConstants(0, 16, f.view, 0);
         list->SetGraphicsRoot32BitConstants(0, 16, f.projection, 16);
@@ -424,7 +491,13 @@ struct FlatD3D12::Impl {
         list->ClearRenderTargetView(rtv, clear, 0, nullptr);
         list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1, 0, 0, nullptr);
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        lit_commands=lit;return true;
+        lit_commands=lit;
+    }
+    bool BeginCommands(const Frame& f,bool lit=false,bool defer_main=false) {
+        if (!Check(allocator->Reset(), "ResetAllocator") || !Check(list->Reset(allocator.p, pipeline.p), "ResetList")) return false;
+        shadow_commands=false;
+        if (!defer_main) SetupMain(f,lit);
+        return true;
     }
     bool EndCommands(bool wants_readback) {
         if (lit_commands) {
@@ -436,6 +509,7 @@ struct FlatD3D12::Impl {
             list->DrawInstanced(3,1,0,0);
             Transition(list.p,hdr.p,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
         }
+        if (shadow_commands) Transition(list.p,shadow_map.p,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
         if (swapchain.p || wants_readback) Transition(list.p, target.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
         if (swapchain.p) {
             if (!Check(swapchain->GetBuffer(swapchain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(backbuffer.put())), "GetBackBuffer")) return false;
@@ -455,6 +529,7 @@ struct FlatD3D12::Impl {
     }
     bool Prepare(const Frame& f, bool wants_readback) {
         if (failed || pending || prepared || !Valid(f) || !Resize(f.width, f.height)) return false;
+        textured_draws=pbr_draws=shadowed_lights=shadow_draws=0;shadow_budget_exceeded=false;
         const auto bytes = f.vertices.size()*sizeof(Vertex);
         if (!EnsureVertices(bytes) || (wants_readback && !EnsureReadback())) return false;
         if (bytes) {
@@ -548,8 +623,59 @@ struct FlatD3D12::Impl {
         }
         return true;
     }
+    bool CanLight(const CachedGeometry& geometry,const Matrix& w) const {
+        if (!geometry.has_normals) return false;
+        const double determinant=double(w[0])*(double(w[5])*w[10]-double(w[6])*w[9])-
+            double(w[1])*(double(w[4])*w[10]-double(w[6])*w[8])+
+            double(w[2])*(double(w[4])*w[9]-double(w[5])*w[8]);
+        return std::isfinite(determinant) && std::fabs(determinant)>1e-10;
+    }
+    void RecordShadows(const ResidentFlatFrame& frame,const LightingConstants& lighting,UINT count) {
+        static constexpr float axes[6][3][3]={
+            {{0,0,-1},{0,1,0},{1,0,0}},{{0,0,1},{0,1,0},{-1,0,0}},
+            {{1,0,0},{0,0,-1},{0,1,0}},{{1,0,0},{0,0,1},{0,-1,0}},
+            {{1,0,0},{0,1,0},{0,0,1}},{{-1,0,0},{0,1,0},{0,0,-1}}};
+        const D3D12_VIEWPORT viewport{0,0,float(kShadowSize),float(kShadowSize),0,1};
+        const D3D12_RECT scissor{0,0,LONG(kShadowSize),LONG(kShadowSize)};
+        list->SetGraphicsRootSignature(shadow_root.p);list->SetPipelineState(shadow_pipeline.p);
+        list->RSSetViewports(1,&viewport);list->RSSetScissorRects(1,&scissor);
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        auto dsv=dsv_heap->GetCPUDescriptorHandleForHeapStart();
+        dsv.ptr+=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+        const auto base=rtv_heap->GetCPUDescriptorHandleForHeapStart();
+        const UINT rtv_step=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        const float clear[]{1,0,0,0};shadow_draws=0;
+        for (UINT light=0;light<count;++light) for (UINT face=0;face<6;++face) {
+            auto rtv=base;rtv.ptr+=std::size_t(2+light*6+face)*rtv_step;
+            list->OMSetRenderTargets(1,&rtv,FALSE,&dsv);
+            list->ClearRenderTargetView(rtv,clear,0,nullptr);
+            list->ClearDepthStencilView(dsv,D3D12_CLEAR_FLAG_DEPTH,1,0,0,nullptr);
+            float constants[20]{};
+            for (UINT axis=0;axis<3;++axis) {
+                constants[axis]=lighting.position_range[light][axis];
+                for (UINT basis=0;basis<3;++basis) constants[4+basis*4+axis]=axes[face][basis][axis];
+            }
+            const float far_m=lighting.position_range[light][3];
+            constants[3]=lighting.camera_scale[3];
+            constants[16]=std::min(std::max(0.002f,far_m/10000.0f),far_m*0.01f);
+            constants[17]=far_m;
+            list->SetGraphicsRoot32BitConstants(1,20,constants,0);
+            for (const auto& draw:frame.draws) {
+                const auto& gpu=*cache.at(draw.resource->id);const auto& geometry=gpu.source->geometry;
+                const D3D12_VERTEX_BUFFER_VIEW vb{gpu.vertices->GetGPUVirtualAddress(),
+                    static_cast<UINT>(geometry.positions.size()*sizeof(PackedVertex)),sizeof(PackedVertex)};
+                const D3D12_INDEX_BUFFER_VIEW ib{gpu.indices->GetGPUVirtualAddress(),
+                    static_cast<UINT>(geometry.indices.size()*sizeof(std::uint32_t)),DXGI_FORMAT_R32_UINT};
+                list->IASetVertexBuffers(0,1,&vb);list->IASetIndexBuffer(&ib);
+                list->SetGraphicsRoot32BitConstants(0,16,draw.transform.data(),0);
+                list->DrawIndexedInstanced(draw.index_count,1,draw.first_index,0,0);++shadow_draws;
+            }
+        }
+        Transition(list.p,shadow_map.p,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        shadow_commands=true;SetupMain(frame.camera,true);
+    }
     bool PrepareResident(const ResidentFlatFrame& f,bool wants_readback,const LightingConstants* lighting=nullptr,
-                         bool synthetic_normal_map=false) {
+                         bool synthetic_normal_map=false,bool budget_exceeded=false) {
         if (failed || pending || prepared || !f.map_epoch || !f.device_epoch || !f.continuity || !Valid(f.camera) ||
             !f.camera.vertices.empty() || !f.camera.draws.empty() || f.draws.size()>scene::kMaxDraws ||
             !Resize(f.camera.width,f.camera.height) || (lighting && !EnsureHdr()) ||
@@ -577,19 +703,36 @@ struct FlatD3D12::Impl {
             total_indices+=draw.index_count;
         }
         for (const auto& draw:f.draws) if (!EnsureCached(draw.resource,required)) return false;
+        for (const auto& draw:f.draws) if (!ValidWorldBounds(*cache.at(draw.resource->id),draw.transform)) return false;
+        LightingConstants effective;
+        bool has_receiver=false;
+        if (lighting) {
+            effective=*lighting;
+            for (const auto& draw:f.draws) if (CanLight(*cache.at(draw.resource->id),draw.transform)) {has_receiver=true;break;}
+            if (!has_receiver) effective.options[2]=0;
+            lighting=&effective;
+        }
+        const UINT shadows=lighting ? static_cast<UINT>(lighting->options[2]) : 0;
+        if (shadows>kMaxShadowLights || (shadows && !EnsureShadow())) return false;
+        shadowed_lights=shadows;shadow_draws=0;shadow_budget_exceeded=budget_exceeded && has_receiver;
         if (lighting) {
             void* mapped=nullptr;const D3D12_RANGE no_read{0,0};
             if (!Check(lighting_buffer->Map(0,&no_read,&mapped),"MapLighting") || !mapped) return false;
             std::memcpy(mapped,lighting,sizeof(*lighting));const D3D12_RANGE written{0,sizeof(*lighting)};
             lighting_buffer->Unmap(0,&written);
         }
-        if (!BeginCommands(f.camera,lighting!=nullptr)) return false;
+        if (!BeginCommands(f.camera,lighting!=nullptr,shadows!=0)) return false;
+        if (shadows) RecordShadows(f,*lighting,shadows);
         if (lighting) list->SetGraphicsRootConstantBufferView(4,lighting_buffer->GetGPUVirtualAddress());
         if (albedo_heap.p) {ID3D12DescriptorHeap* heaps[]{albedo_heap.p};list->SetDescriptorHeaps(1,heaps);}
+        if (lighting) {
+            auto handle=albedo_heap->GetGPUDescriptorHandleForHeapStart();
+            handle.ptr+=std::uint64_t(shadows ? 11 : 12)*albedo_descriptor_size;
+            list->SetGraphicsRootDescriptorTable(6,handle);
+        }
         textured_draws=0;pbr_draws=0;
         for (const auto& draw:f.draws) {
             const auto& gpu=*cache.at(draw.resource->id);
-            if (!ValidWorldBounds(gpu,draw.transform)) return false;
             const auto& geometry=gpu.source->geometry;
             const D3D12_VERTEX_BUFFER_VIEW vb{gpu.vertices->GetGPUVirtualAddress(),
                 static_cast<UINT>(geometry.positions.size()*sizeof(PackedVertex)),sizeof(PackedVertex)};
@@ -601,11 +744,7 @@ struct FlatD3D12::Impl {
             unsigned texture_index=2;
             if (materials && draw.material_id && geometry.uv0.size()==geometry.positions.size())
                 for (unsigned i=0;i<2;++i) if (*draw.material_id==materials->materials[i].id) texture_index=i;
-            const auto& w=draw.transform;
-            const double determinant=double(w[0])*(double(w[5])*w[10]-double(w[6])*w[9])-
-                double(w[1])*(double(w[4])*w[10]-double(w[6])*w[8])+
-                double(w[2])*(double(w[4])*w[9]-double(w[5])*w[8]);
-            const bool can_light=lighting && gpu.has_normals && std::isfinite(determinant) && std::fabs(determinant)>1e-10;
+            const bool can_light=lighting && CanLight(gpu,draw.transform);
             if (can_light) ++pbr_draws;
             if (texture_index<2) {
                 auto handle=albedo_heap->GetGPUDescriptorHandleForHeapStart();
@@ -651,7 +790,8 @@ struct FlatD3D12::Impl {
     void Cancel() noexcept { if (prepared && !pending) { prepared = false; prepared_readback = false; Release(backbuffer); } }
     bool RetireResidents() noexcept {
         if (pending || prepared) return false;
-        cache.clear();cache_bytes=0;cache_map=cache_device=cache_continuity=0;return true;
+        cache.clear();cache_bytes=0;cache_map=cache_device=cache_continuity=0;
+        textured_draws=pbr_draws=shadowed_lights=shadow_draws=0;shadow_budget_exceeded=false;return true;
     }
     FlatPresent Present() {
         if (failed || pending || prepared) return FlatPresent::Failed;
@@ -684,7 +824,7 @@ bool FlatD3D12::PrepareResident(const ResidentFlatFrame& frame, bool readback) n
     } catch (...) { if (impl_) impl_->failed=true;return false; }
 }
 bool FlatD3D12::PrepareLit(const Snapshot& snapshot,const ResidentFlatFrame& frame,bool readback,
-                           bool synthetic_normal_map) noexcept {
+                           bool synthetic_normal_map,bool shadows) noexcept {
     try {
         if (!impl_ || impl_->failed || (synthetic_normal_map && snapshot.provenance.origin!=FrameOrigin::Synthetic) ||
             frame.map_epoch!=snapshot.map_epoch || frame.device_epoch!=snapshot.device_epoch ||
@@ -708,7 +848,11 @@ bool FlatD3D12::PrepareLit(const Snapshot& snapshot,const ResidentFlatFrame& fra
         }
         LightingConstants constants;
         constants.camera_scale={verified.camera_position[0],verified.camera_position[1],verified.camera_position[2],verified.meters_per_unit};
-        constants.options={static_cast<float>(verified.lights.size()),synthetic_normal_map ? 1.0f : 0.0f,0,0};
+        const auto requested=shadows && !frame.draws.empty() ? std::min<std::size_t>(verified.lights.size(),kMaxShadowLights) : 0;
+        const bool budget_exceeded=requested && frame.draws.size()>kMaxShadowDrawCalls/(requested*6);
+        const auto shadow_count=budget_exceeded ? 0 : requested;
+        constants.options={static_cast<float>(verified.lights.size()),synthetic_normal_map ? 1.0f : 0.0f,
+                           static_cast<float>(shadow_count),0};
         for (std::size_t i=0;i<verified.lights.size();++i) {
             const auto& light=verified.lights[i];
             constants.position_range[i]={light.position[0],light.position[1],light.position[2],light.influence_radius_m};
@@ -716,13 +860,14 @@ bool FlatD3D12::PrepareLit(const Snapshot& snapshot,const ResidentFlatFrame& fra
             constants.direction_outer[i]={light.direction[0],light.direction[1],light.direction[2],light.cos_outer};
             constants.params[i]={light.source_radius_m,light.cos_inner,light.kind==LightKind::Spot ? 1.0f : 0.0f,0};
         }
-        if (impl_->PrepareResident(frame,readback,&constants,synthetic_normal_map)) return true;
+        if (impl_->PrepareResident(frame,readback,&constants,synthetic_normal_map,budget_exceeded)) return true;
         impl_->failed=true;return false;
     } catch (...) { if (impl_) impl_->failed=true;return false; }
 }
 FlatCacheStats FlatD3D12::cache_stats() const noexcept {
     if (!impl_) return {};
-    return {impl_->uploads,impl_->evictions,impl_->cache.size(),impl_->cache_bytes,impl_->textured_draws,impl_->pbr_draws};
+    return {impl_->uploads,impl_->evictions,impl_->cache.size(),impl_->cache_bytes,impl_->textured_draws,impl_->pbr_draws,
+            impl_->shadowed_lights,impl_->shadow_draws,impl_->shadow_budget_exceeded};
 }
 bool FlatD3D12::Prepare(const scene::Frame& frame, bool readback) noexcept {
     try {

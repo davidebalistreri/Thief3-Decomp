@@ -404,8 +404,28 @@ smooth influence cutoff, then ACES-like tone mapping and sRGB output. Intensity
 values have not been calibrated to physical units in TDS. Instance normals use
 the inverse transpose. Missing or zero normals and singular transforms fall
 back to diagnostic flat shading within the HDR pass; other untextured materials
-use material-ID colors as placeholders. Culling remains disabled. There are no
-shadows, ambient/indirect term, GI or exposure control in this path.
+use material-ID colors as placeholders. Culling remains disabled. There is no
+ambient/indirect term, GI or exposure control in this path.
+
+The persistent direct-light pass builds radial `R32_FLOAT` cube shadow maps for
+up to the first four accepted lights, in the order supplied by the current
+snapshot; additional lights remain unshadowed. Each map has six 256×256 faces.
+It renders only the selected SceneIR sections using their current transforms;
+those triangles are treated as opaque. A bounded blocker search estimates a
+penumbra from the verified source radius and blocker/receiver distances, then
+a 25-tap filter and geometric-normal bias soften the result. This is an
+approximation: missing or off-screen casters, translucent surfaces, finite map
+resolution, sparse blocker samples and bias can create incorrect shadows. It
+does not establish the game's original shadowing or fix the beam.
+
+To bound preparation, if six face passes for the selected lights would exceed
+16,384 indexed draw calls, shadows are disabled for that entire frame and direct
+lighting continues. The viewer reports `shadowed_lights`, `shadow_draws` and
+`shadow_budget_exceeded`; no missing light is represented as shadowed. Shadow
+resources are allocated on the first eligible frame and the map is cleared for
+each light/face before use. A canceled, superseded or reset snapshot cannot
+contribute a cached shadow image to a later frame. These limits cap work but
+are not a real-time performance guarantee.
 
 Albedo is decoded through an sRGB SRV; roughness is linear. Normal maps use an
 explicit derivative-based +Y convention **only for synthetic fixtures**; TDS's
@@ -424,3 +444,10 @@ existing assets with a synthetic camera. None of these proves TDS light state,
 live frame delivery, physical calibration, a correction to the beam, or that
 the reported lag has improved. The current TDS hook emits no light samples,
 so it cannot yet activate this pass in a real game frame.
+
+The shadow fixture adds a synthetic point and spot light, a movable/hidden
+blocker and a receiver. It checks that shadowed and clear pixels differ as
+expected, that the soft edge changes with source size and blocker distance,
+that multiple lights, the four-light cap, work-budget fallback, cancellation
+and Reset do not reuse stale maps. These checks are offscreen GPU fixtures,
+not observations in TDS.

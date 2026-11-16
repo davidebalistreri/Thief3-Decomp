@@ -12,7 +12,10 @@ struct ResidentFlatDraw {
     std::array<float,4> color{};
 };
 struct ResidentFlatFrame {
-    std::uint64_t map_epoch = 0, device_epoch = 0, continuity = 0;
+    std::uint64_t map_epoch = 0, device_epoch = 0, continuity = 0, frame_id = 0;
+    std::uint32_t render_pass = 0, stage = 0, viewport_x = 0, viewport_y = 0;
+    std::string map, map_sha256;
+    FrameProvenance provenance;
     scene::Frame camera;
     std::vector<ResidentFlatDraw> draws;
     std::uint32_t override_instances = 0;

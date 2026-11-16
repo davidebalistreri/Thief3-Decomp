@@ -1,5 +1,7 @@
 #include "scene_live_dx12.hpp"
 #include "scene_d3d12_common.hpp"
+#include "scene_live_lighting.hpp"
+#include "scene_live_pbr_shaders.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -14,10 +16,15 @@ using scene::Frame;
 using scene::Vertex;
 static_assert(sizeof(Vec3)==sizeof(float)*3,"unexpected position layout");
 constexpr DXGI_FORMAT kDepth = DXGI_FORMAT_D32_FLOAT;
+constexpr DXGI_FORMAT kHdr = DXGI_FORMAT_R16G16B16A16_FLOAT;
 constexpr DWORD kFenceTimeoutMs = 10000;
-constexpr std::size_t kMaxAlbedoGpuBytes = 32u*1024u*1024u;
-struct PackedVertex { Vec3 position; Vec2 uv; };
-static_assert(sizeof(PackedVertex)==sizeof(float)*5,"unexpected resident vertex layout");
+constexpr std::size_t kMaxMaterialGpuBytes = 128u*1024u*1024u;
+struct PackedVertex { Vec3 position; Vec2 uv; Vec3 normal; };
+static_assert(sizeof(PackedVertex)==sizeof(float)*8,"unexpected resident vertex layout");
+struct LightingConstants {
+    std::array<float,4> camera_scale{}, options{};
+    std::array<std::array<float,4>,kMaxRenderLights> position_range{}, color_intensity{}, direction_outer{}, params{};
+};
 
 template<class T> void Release(ComPtr<T>& value) {
     if (value.p) { value.p->Release(); value.p = nullptr; }
@@ -74,6 +81,7 @@ struct FlatD3D12::Impl {
         std::size_t bytes=0;
         std::uint64_t last_use=0;
         Vec3 low{}, high{};
+        bool has_normals=false;
     };
     HWND window = nullptr;
     // Loaded only when the explicitly requested consumer is created. Keep the
@@ -87,22 +95,25 @@ struct FlatD3D12::Impl {
     ComPtr<ID3D12Fence> fence;
     Handle event;
     ComPtr<ID3D12RootSignature> root;
-    ComPtr<ID3D12PipelineState> pipeline, texture_pipeline;
+    ComPtr<ID3D12PipelineState> pipeline, texture_pipeline, hdr_flat_pipeline, hdr_texture_pipeline;
+    ComPtr<ID3D12PipelineState> pbr_pipeline, pbr_texture_pipeline, pbr_fixture_pipeline, tone_pipeline;
     ComPtr<ID3D12DescriptorHeap> rtv_heap, dsv_heap, albedo_heap;
     std::shared_ptr<const BedroomMaterialLibrary> materials;
-    std::array<GpuTexture,2> albedo;
+    std::array<std::array<GpuTexture,4>,2> material_textures;
     UINT albedo_descriptor_size=0;
-    ComPtr<ID3D12Resource> target, depth, vertices, readback, backbuffer;
+    ComPtr<ID3D12Resource> target, hdr, depth, vertices, readback, backbuffer, lighting_buffer;
     ComPtr<IDXGISwapChain3> swapchain;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     UINT64 readback_bytes = 0, fence_value = 0;
     std::size_t vertex_capacity = 0;
+    std::size_t material_bytes = 0;
     std::size_t cache_budget=0, cache_bytes=0;
     std::uint64_t cache_map=0, cache_device=0, cache_continuity=0, cache_serial=0, uploads=0, evictions=0;
     std::unordered_map<std::string,std::unique_ptr<CachedGeometry>> cache;
     UINT width = 0, height = 0;
-    std::uint32_t textured_draws=0;
-    bool failed = false, pending = false, prepared = false, prepared_readback = false;
+    std::uint32_t textured_draws=0,pbr_draws=0;
+    bool failed = false, pending = false, prepared = false, prepared_readback = false, lit_commands = false;
+    bool pbr_materials_ready = false;
 
     bool Initialize() {
         dxgi_module.p = LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -155,9 +166,16 @@ struct FlatD3D12::Impl {
         static const char texture_ps_source[] =
             "Texture2D image:register(t0);SamplerState image_sampler:register(s0);"
             "float4 main(float4 uv:TEXCOORD0):SV_Target{return image.Sample(image_sampler,uv.xy);}";
-        ComPtr<ID3DBlob> vs, ps, texture_ps;
+        ComPtr<ID3DBlob> vs, ps, texture_ps, lit_vs, lit_ps, lit_texture_ps, lit_fixture_ps, tone_vs, tone_ps;
         if (!Compile(compile, vs_source, "vs_5_0", vs) || !Compile(compile, ps_source, "ps_5_0", ps)) return false;
         if (materials && (!ValidMaterials(*materials) || !Compile(compile,texture_ps_source,"ps_5_0",texture_ps))) return false;
+        const std::string untextured=std::string("#define TEXTURED 0\n#define TEST_NORMAL_MAP 0\n")+shaders::pixel;
+        const std::string textured=std::string("#define TEXTURED 1\n#define TEST_NORMAL_MAP 0\n")+shaders::pixel;
+        const std::string fixture=std::string("#define TEXTURED 1\n#define TEST_NORMAL_MAP 1\n")+shaders::pixel;
+        if (!Compile(compile,shaders::vertex,"vs_5_0",lit_vs) || !Compile(compile,untextured.c_str(),"ps_5_0",lit_ps) ||
+            !Compile(compile,shaders::tone_vertex,"vs_5_0",tone_vs) || !Compile(compile,shaders::tone_pixel,"ps_5_0",tone_ps) ||
+            (materials && (!Compile(compile,textured.c_str(),"ps_5_0",lit_texture_ps) ||
+                           !Compile(compile,fixture.c_str(),"ps_5_0",lit_fixture_ps)))) return false;
 
         D3D12_COMMAND_QUEUE_DESC queue_desc{}; queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
         if (!Check(device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(queue.put())), "CreateQueue") ||
@@ -166,9 +184,12 @@ struct FlatD3D12::Impl {
         event.p = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!event.p) return false;
         D3D12_DESCRIPTOR_RANGE albedo_range{};albedo_range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        albedo_range.NumDescriptors=1;albedo_range.BaseShaderRegister=0;
+        albedo_range.NumDescriptors=4;albedo_range.BaseShaderRegister=0;
         albedo_range.OffsetInDescriptorsFromTableStart=D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-        D3D12_ROOT_PARAMETER params[4]{};
+        D3D12_DESCRIPTOR_RANGE hdr_range{};hdr_range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        hdr_range.NumDescriptors=1;hdr_range.BaseShaderRegister=4;
+        hdr_range.OffsetInDescriptorsFromTableStart=D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        D3D12_ROOT_PARAMETER params[6]{};
         params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         params[0].Constants.ShaderRegister = 0; params[0].Constants.Num32BitValues = 34;
         params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
@@ -181,11 +202,16 @@ struct FlatD3D12::Impl {
         params[3].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         params[3].DescriptorTable.NumDescriptorRanges=1;params[3].DescriptorTable.pDescriptorRanges=&albedo_range;
         params[3].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+        params[4].ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;params[4].Descriptor.ShaderRegister=3;
+        params[4].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+        params[5].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[5].DescriptorTable.NumDescriptorRanges=1;params[5].DescriptorTable.pDescriptorRanges=&hdr_range;
+        params[5].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
         D3D12_STATIC_SAMPLER_DESC sampler{};sampler.Filter=D3D12_FILTER_MIN_MAG_MIP_LINEAR;
         sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D12_TEXTURE_ADDRESS_MODE_WRAP;
         sampler.MaxAnisotropy=1;sampler.ComparisonFunc=D3D12_COMPARISON_FUNC_ALWAYS;sampler.MaxLOD=D3D12_FLOAT32_MAX;
         sampler.ShaderRegister=0;sampler.ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-        D3D12_ROOT_SIGNATURE_DESC desc{}; desc.NumParameters = 4; desc.pParameters = params;
+        D3D12_ROOT_SIGNATURE_DESC desc{}; desc.NumParameters = 6; desc.pParameters = params;
         desc.NumStaticSamplers=1;desc.pStaticSamplers=&sampler;
         desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
         ComPtr<ID3DBlob> blob, errors;
@@ -217,39 +243,81 @@ struct FlatD3D12::Impl {
             pso.PS={texture_ps->GetBufferPointer(),texture_ps->GetBufferSize()};
             if (!Check(device->CreateGraphicsPipelineState(&pso,IID_PPV_ARGS(texture_pipeline.put())),"CreateTexturePipeline")) return false;
         }
+        pso.RTVFormats[0]=kHdr;pso.PS={ps->GetBufferPointer(),ps->GetBufferSize()};
+        if (!Check(device->CreateGraphicsPipelineState(&pso,IID_PPV_ARGS(hdr_flat_pipeline.put())),"CreateHdrFlatPipeline")) return false;
+        if (materials) {
+            pso.PS={texture_ps->GetBufferPointer(),texture_ps->GetBufferSize()};
+            if (!Check(device->CreateGraphicsPipelineState(&pso,IID_PPV_ARGS(hdr_texture_pipeline.put())),"CreateHdrTexturePipeline")) return false;
+        }
+        D3D12_INPUT_ELEMENT_DESC lit_input[] = {
+            {"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+            {"TEXCOORD",0,DXGI_FORMAT_R32G32_FLOAT,0,12,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+            {"NORMAL",0,DXGI_FORMAT_R32G32B32_FLOAT,0,20,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0}};
+        pso.InputLayout={lit_input,3};pso.VS={lit_vs->GetBufferPointer(),lit_vs->GetBufferSize()};
+        pso.PS={lit_ps->GetBufferPointer(),lit_ps->GetBufferSize()};
+        if (!Check(device->CreateGraphicsPipelineState(&pso,IID_PPV_ARGS(pbr_pipeline.put())),"CreatePbrPipeline")) return false;
+        if (materials) {
+            pso.PS={lit_texture_ps->GetBufferPointer(),lit_texture_ps->GetBufferSize()};
+            if (!Check(device->CreateGraphicsPipelineState(&pso,IID_PPV_ARGS(pbr_texture_pipeline.put())),"CreatePbrTexturePipeline")) return false;
+            pso.PS={lit_fixture_ps->GetBufferPointer(),lit_fixture_ps->GetBufferSize()};
+            if (!Check(device->CreateGraphicsPipelineState(&pso,IID_PPV_ARGS(pbr_fixture_pipeline.put())),"CreatePbrFixturePipeline")) return false;
+        }
+        pso.InputLayout={nullptr,0};pso.VS={tone_vs->GetBufferPointer(),tone_vs->GetBufferSize()};
+        pso.PS={tone_ps->GetBufferPointer(),tone_ps->GetBufferSize()};pso.RTVFormats[0]=kColor;
+        pso.DepthStencilState.DepthEnable=FALSE;pso.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;
+        pso.DSVFormat=DXGI_FORMAT_UNKNOWN;
+        if (!Check(device->CreateGraphicsPipelineState(&pso,IID_PPV_ARGS(tone_pipeline.put())),"CreateTonePipeline")) return false;
         if (!Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.p, pipeline.p, IID_PPV_ARGS(list.put())), "CreateList") ||
             !Check(list->Close(), "CloseInitialList")) return false;
-        D3D12_DESCRIPTOR_HEAP_DESC heap{}; heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; heap.NumDescriptors = 1;
+        D3D12_DESCRIPTOR_HEAP_DESC heap{}; heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; heap.NumDescriptors = 2;
         if (!Check(device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(rtv_heap.put())), "CreateRtvHeap")) return false;
-        heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+        heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;heap.NumDescriptors=1;
         if (!Check(device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(dsv_heap.put())), "CreateDsvHeap")) return false;
-        return !materials || InitializeMaterials();
-    }
-
-    bool InitializeMaterials() {
-        D3D12_DESCRIPTOR_HEAP_DESC heap{};heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        heap.NumDescriptors=2;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-        if (!Check(device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(albedo_heap.put())),"CreateAlbedoHeap") ||
-            !Check(allocator->Reset(),"ResetMaterialAllocator") ||
-            !Check(list->Reset(allocator.p,pipeline.p),"ResetMaterialList")) return false;
+        heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;heap.NumDescriptors=11;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (!Check(device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(albedo_heap.put())),"CreateMaterialHeap")) return false;
         albedo_descriptor_size=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         if (!albedo_descriptor_size) return false;
-        auto descriptor=albedo_heap->GetCPUDescriptorHandleForHeapStart();
-        std::size_t allocated=0;
+        D3D12_SHADER_RESOURCE_VIEW_DESC null_srv{};null_srv.Format=kColor;
+        null_srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
+        null_srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;null_srv.Texture2D.MipLevels=1;
+        auto null_descriptor=albedo_heap->GetCPUDescriptorHandleForHeapStart();
+        for (unsigned i=0;i<11;++i) {
+            device->CreateShaderResourceView(nullptr,&null_srv,null_descriptor);null_descriptor.ptr+=albedo_descriptor_size;
+        }
+        const auto upload_heap=Heap(D3D12_HEAP_TYPE_UPLOAD);
+        const auto lighting_desc=Buffer((sizeof(LightingConstants)+255u)&~std::size_t(255u));
+        if (!Check(device->CreateCommittedResource(&upload_heap,D3D12_HEAP_FLAG_NONE,&lighting_desc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,IID_PPV_ARGS(lighting_buffer.put())),"CreateLightingBuffer")) return false;
+        return !materials || InitializeMaterials(false);
+    }
+
+    bool InitializeMaterials(bool pbr_channels) {
+        if (!Check(allocator->Reset(),"ResetMaterialAllocator") ||
+            !Check(list->Reset(allocator.p,pipeline.p),"ResetMaterialList")) return false;
         for (unsigned i=0;i<2;++i) {
-            const auto& texture=materials->materials[i].channels[0];
-            const auto desc=Image(texture.mips[0].width,texture.mips[0].height,
-                                  static_cast<UINT16>(texture.mips.size()),kColor,D3D12_RESOURCE_FLAG_NONE);
-            const auto allocation=device->GetResourceAllocationInfo(0,1,&desc);
-            if (!allocation.SizeInBytes || allocation.SizeInBytes==UINT64_MAX ||
-                allocation.SizeInBytes>kMaxAlbedoGpuBytes-allocated) return false;
-            allocated+=static_cast<std::size_t>(allocation.SizeInBytes);
-            if (!UploadTexture(device.p,list.p,texture,albedo[i])) return false;
-            D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Format=kColor;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
-            srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            srv.Texture2D.MipLevels=static_cast<UINT>(texture.mips.size());
-            device->CreateShaderResourceView(albedo[i].texture.p,&srv,descriptor);
-            descriptor.ptr+=albedo_descriptor_size;
+            const unsigned first=pbr_channels ? 1 : 0, end=pbr_channels ? 4 : 1;
+            for (unsigned channel=first;channel<end;++channel) {
+                const auto& texture=materials->materials[i].channels[channel];
+                const auto format=channel==0 ? DXGI_FORMAT_R8G8B8A8_TYPELESS : kColor;
+                const auto desc=Image(texture.mips[0].width,texture.mips[0].height,
+                                      static_cast<UINT16>(texture.mips.size()),format,D3D12_RESOURCE_FLAG_NONE);
+                const auto allocation=device->GetResourceAllocationInfo(0,1,&desc);
+                if (!allocation.SizeInBytes || allocation.SizeInBytes==UINT64_MAX ||
+                    allocation.SizeInBytes>kMaxMaterialGpuBytes-material_bytes) return false;
+                material_bytes+=static_cast<std::size_t>(allocation.SizeInBytes);
+                auto& gpu=material_textures[i][channel];
+                if (!UploadTexture(device.p,list.p,texture,gpu,format)) return false;
+                D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Format=channel==0 ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : kColor;
+                srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                srv.Texture2D.MipLevels=static_cast<UINT>(texture.mips.size());
+                auto descriptor=albedo_heap->GetCPUDescriptorHandleForHeapStart();
+                descriptor.ptr+=std::size_t(i*5+1+channel)*albedo_descriptor_size;
+                device->CreateShaderResourceView(gpu.texture.p,&srv,descriptor);
+                if (!channel) {
+                    descriptor.ptr-=albedo_descriptor_size;srv.Format=kColor;
+                    device->CreateShaderResourceView(gpu.texture.p,&srv,descriptor);
+                }
+            }
         }
         if (!Check(list->Close(),"CloseMaterialList") || fence_value==UINT64_MAX) return false;
         ID3D12CommandList* lists[]{list.p};pending=true;queue->ExecuteCommandLists(1,lists);
@@ -260,13 +328,14 @@ struct FlatD3D12::Impl {
               WaitForSingleObject(event.p,kFenceTimeoutMs)!=WAIT_OBJECT_0)) ||
             fence->GetCompletedValue()==UINT64_MAX || fence->GetCompletedValue()<fence_value) return false;
         pending=false;
-        for (auto& item:albedo) Release(item.upload);
+        for (auto& material:material_textures) for (auto& item:material) Release(item.upload);
+        if (pbr_channels) pbr_materials_ready=true;
         return Check(device->GetDeviceRemovedReason(),"MaterialDeviceStatus");
     }
 
     bool Resize(UINT w, UINT h) {
         if (w == width && h == height && target.p && depth.p) return true;
-        Release(target); Release(depth); Release(readback); Release(backbuffer); readback_bytes = 0;
+        Release(target); Release(hdr); Release(depth); Release(readback); Release(backbuffer); readback_bytes = 0;
         width = height = 0;
         if (window) {
             if (!swapchain.p) {
@@ -290,9 +359,28 @@ struct FlatD3D12::Impl {
                 &color_clear, IID_PPV_ARGS(target.put())), "CreateTarget") ||
             !Check(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &depth_desc, D3D12_RESOURCE_STATE_DEPTH_WRITE,
                 &depth_clear, IID_PPV_ARGS(depth.put())), "CreateDepth")) return false;
-        device->CreateRenderTargetView(target.p, nullptr, rtv_heap->GetCPUDescriptorHandleForHeapStart());
+        auto rtv=rtv_heap->GetCPUDescriptorHandleForHeapStart();
+        device->CreateRenderTargetView(target.p,nullptr,rtv);
         device->CreateDepthStencilView(depth.p, nullptr, dsv_heap->GetCPUDescriptorHandleForHeapStart());
         width = w; height = h; return true;
+    }
+
+    bool EnsureHdr() {
+        if (hdr.p) return true;
+        if (!width || !height) return false;
+        const auto heap=Heap(D3D12_HEAP_TYPE_DEFAULT);
+        const auto desc=Image(width,height,1,kHdr,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+        D3D12_CLEAR_VALUE clear{};clear.Format=kHdr;clear.Color[3]=1;
+        if (!Check(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_RENDER_TARGET,
+                   &clear,IID_PPV_ARGS(hdr.put())),"CreateHdrTarget")) return false;
+        auto rtv=rtv_heap->GetCPUDescriptorHandleForHeapStart();
+        rtv.ptr+=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        device->CreateRenderTargetView(hdr.p,nullptr,rtv);
+        D3D12_SHADER_RESOURCE_VIEW_DESC hdr_srv{};hdr_srv.Format=kHdr;hdr_srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
+        hdr_srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;hdr_srv.Texture2D.MipLevels=1;
+        auto descriptor=albedo_heap->GetCPUDescriptorHandleForHeapStart();descriptor.ptr+=10u*albedo_descriptor_size;
+        device->CreateShaderResourceView(hdr.p,&hdr_srv,descriptor);
+        return true;
     }
 
     bool EnsureVertices(std::size_t bytes) {
@@ -316,7 +404,7 @@ struct FlatD3D12::Impl {
             D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(readback.put())), "CreateReadback");
     }
 
-    bool BeginCommands(const Frame& f) {
+    bool BeginCommands(const Frame& f,bool lit=false) {
         if (!Check(allocator->Reset(), "ResetAllocator") || !Check(list->Reset(allocator.p, pipeline.p), "ResetList")) return false;
         list->SetGraphicsRootSignature(root.p);
         list->SetGraphicsRoot32BitConstants(0, 16, f.view, 0);
@@ -328,16 +416,26 @@ struct FlatD3D12::Impl {
         const D3D12_VIEWPORT viewport{0,0,size[0],size[1],f.min_depth,f.max_depth};
         const D3D12_RECT scissor{0,0,static_cast<LONG>(width),static_cast<LONG>(height)};
         list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &scissor);
-        const auto rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
+        auto rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
+        if (lit) rtv.ptr+=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
         const auto dsv = dsv_heap->GetCPUDescriptorHandleForHeapStart();
         list->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
-        const float clear[]{22.0f/255,24.0f/255,28.0f/255,1};
+        const float clear[]{lit ? 0.0f : 22.0f/255,lit ? 0.0f : 24.0f/255,lit ? 0.0f : 28.0f/255,1};
         list->ClearRenderTargetView(rtv, clear, 0, nullptr);
         list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1, 0, 0, nullptr);
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        return true;
+        lit_commands=lit;return true;
     }
     bool EndCommands(bool wants_readback) {
+        if (lit_commands) {
+            Transition(list.p,hdr.p,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            const auto rtv=rtv_heap->GetCPUDescriptorHandleForHeapStart();list->OMSetRenderTargets(1,&rtv,FALSE,nullptr);
+            ID3D12DescriptorHeap* heaps[]{albedo_heap.p};list->SetDescriptorHeaps(1,heaps);
+            auto handle=albedo_heap->GetGPUDescriptorHandleForHeapStart();handle.ptr+=std::uint64_t(10)*albedo_descriptor_size;
+            list->SetGraphicsRootDescriptorTable(5,handle);list->SetPipelineState(tone_pipeline.p);
+            list->DrawInstanced(3,1,0,0);
+            Transition(list.p,hdr.p,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+        }
         if (swapchain.p || wants_readback) Transition(list.p, target.p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
         if (swapchain.p) {
             if (!Check(swapchain->GetBuffer(swapchain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(backbuffer.put())), "GetBackBuffer")) return false;
@@ -397,6 +495,7 @@ struct FlatD3D12::Impl {
         if (geometry.positions.empty() || geometry.positions.size()>1000000 || geometry.indices.empty() ||
             geometry.indices.size()>3000000 || geometry.positions.size()>UINT_MAX/sizeof(PackedVertex) ||
             (!geometry.uv0.empty() && geometry.uv0.size()!=geometry.positions.size()) ||
+            (!geometry.normals.empty() && geometry.normals.size()!=geometry.positions.size()) ||
             geometry.indices.size()>UINT_MAX/sizeof(std::uint32_t)) return false;
         const auto vertex_bytes=geometry.positions.size()*sizeof(PackedVertex);
         const auto index_bytes=geometry.indices.size()*sizeof(std::uint32_t);
@@ -416,13 +515,18 @@ struct FlatD3D12::Impl {
             cache_bytes-=victim->second->bytes;cache.erase(victim);++evictions;
         }
         auto gpu=std::make_unique<CachedGeometry>();gpu->source=resource;gpu->bytes=bytes;gpu->last_use=cache_serial;
+        gpu->has_normals=geometry.normals.size()==geometry.positions.size();
         gpu->low=gpu->high=geometry.positions[0];
         std::vector<PackedVertex> vertices;vertices.reserve(geometry.positions.size());
         for (std::size_t n=0;n<geometry.positions.size();++n) {
             const auto& p=geometry.positions[n];
             const Vec2 uv=geometry.uv0.empty() ? Vec2{} : geometry.uv0[n];
+            const Vec3 normal=geometry.normals.empty() ? Vec3{} : geometry.normals[n];
             if (!std::isfinite(uv[0]) || !std::isfinite(uv[1])) return false;
-            vertices.push_back({p,uv});
+            float normal_length=0;
+            for (auto v:normal) {if (!std::isfinite(v)) return false;normal_length+=v*v;}
+            if (!std::isfinite(normal_length) || normal_length<1e-12f) gpu->has_normals=false;
+            vertices.push_back({p,uv,normal});
             for (unsigned i=0;i<3;++i) {
                 if (!std::isfinite(p[i])) return false;
                 gpu->low[i]=std::min(gpu->low[i],p[i]);gpu->high[i]=std::max(gpu->high[i],p[i]);
@@ -444,10 +548,12 @@ struct FlatD3D12::Impl {
         }
         return true;
     }
-    bool PrepareResident(const ResidentFlatFrame& f,bool wants_readback) {
+    bool PrepareResident(const ResidentFlatFrame& f,bool wants_readback,const LightingConstants* lighting=nullptr,
+                         bool synthetic_normal_map=false) {
         if (failed || pending || prepared || !f.map_epoch || !f.device_epoch || !f.continuity || !Valid(f.camera) ||
             !f.camera.vertices.empty() || !f.camera.draws.empty() || f.draws.size()>scene::kMaxDraws ||
-            !Resize(f.camera.width,f.camera.height) || (wants_readback && !EnsureReadback())) return false;
+            !Resize(f.camera.width,f.camera.height) || (lighting && !EnsureHdr()) ||
+            (wants_readback && !EnsureReadback())) return false;
         if (cache_map!=f.map_epoch || cache_device!=f.device_epoch || cache_continuity!=f.continuity) {
             cache.clear();cache_bytes=0;cache_map=f.map_epoch;cache_device=f.device_epoch;cache_continuity=f.continuity;
         }
@@ -471,9 +577,16 @@ struct FlatD3D12::Impl {
             total_indices+=draw.index_count;
         }
         for (const auto& draw:f.draws) if (!EnsureCached(draw.resource,required)) return false;
-        if (!BeginCommands(f.camera)) return false;
+        if (lighting) {
+            void* mapped=nullptr;const D3D12_RANGE no_read{0,0};
+            if (!Check(lighting_buffer->Map(0,&no_read,&mapped),"MapLighting") || !mapped) return false;
+            std::memcpy(mapped,lighting,sizeof(*lighting));const D3D12_RANGE written{0,sizeof(*lighting)};
+            lighting_buffer->Unmap(0,&written);
+        }
+        if (!BeginCommands(f.camera,lighting!=nullptr)) return false;
+        if (lighting) list->SetGraphicsRootConstantBufferView(4,lighting_buffer->GetGPUVirtualAddress());
         if (albedo_heap.p) {ID3D12DescriptorHeap* heaps[]{albedo_heap.p};list->SetDescriptorHeaps(1,heaps);}
-        textured_draws=0;
+        textured_draws=0;pbr_draws=0;
         for (const auto& draw:f.draws) {
             const auto& gpu=*cache.at(draw.resource->id);
             if (!ValidWorldBounds(gpu,draw.transform)) return false;
@@ -488,10 +601,19 @@ struct FlatD3D12::Impl {
             unsigned texture_index=2;
             if (materials && draw.material_id && geometry.uv0.size()==geometry.positions.size())
                 for (unsigned i=0;i<2;++i) if (*draw.material_id==materials->materials[i].id) texture_index=i;
+            const auto& w=draw.transform;
+            const double determinant=double(w[0])*(double(w[5])*w[10]-double(w[6])*w[9])-
+                double(w[1])*(double(w[4])*w[10]-double(w[6])*w[8])+
+                double(w[2])*(double(w[4])*w[9]-double(w[5])*w[8]);
+            const bool can_light=lighting && gpu.has_normals && std::isfinite(determinant) && std::fabs(determinant)>1e-10;
+            if (can_light) ++pbr_draws;
             if (texture_index<2) {
-                auto handle=albedo_heap->GetGPUDescriptorHandleForHeapStart();handle.ptr+=std::uint64_t(texture_index)*albedo_descriptor_size;
-                list->SetPipelineState(texture_pipeline.p);list->SetGraphicsRootDescriptorTable(3,handle);++textured_draws;
-            } else list->SetPipelineState(pipeline.p);
+                auto handle=albedo_heap->GetGPUDescriptorHandleForHeapStart();
+                handle.ptr+=std::uint64_t(texture_index*5+(can_light ? 1 : 0))*albedo_descriptor_size;
+                list->SetPipelineState(can_light ? (synthetic_normal_map ? pbr_fixture_pipeline.p : pbr_texture_pipeline.p) :
+                                       lighting ? hdr_texture_pipeline.p : texture_pipeline.p);
+                list->SetGraphicsRootDescriptorTable(3,handle);++textured_draws;
+            } else list->SetPipelineState(can_light ? pbr_pipeline.p : lighting ? hdr_flat_pipeline.p : pipeline.p);
             list->DrawIndexedInstanced(draw.index_count,1,draw.first_index,0,0);
         }
         return EndCommands(wants_readback);
@@ -561,9 +683,46 @@ bool FlatD3D12::PrepareResident(const ResidentFlatFrame& frame, bool readback) n
         impl_->failed=true;return false;
     } catch (...) { if (impl_) impl_->failed=true;return false; }
 }
+bool FlatD3D12::PrepareLit(const Snapshot& snapshot,const ResidentFlatFrame& frame,bool readback,
+                           bool synthetic_normal_map) noexcept {
+    try {
+        if (!impl_ || impl_->failed || (synthetic_normal_map && snapshot.provenance.origin!=FrameOrigin::Synthetic) ||
+            frame.map_epoch!=snapshot.map_epoch || frame.device_epoch!=snapshot.device_epoch ||
+            frame.continuity!=snapshot.continuity || frame.frame_id!=snapshot.frame_id ||
+            frame.render_pass!=snapshot.render_pass || frame.stage!=snapshot.stage ||
+            frame.map!=snapshot.map || frame.map_sha256!=snapshot.map_sha256 ||
+            frame.provenance.origin!=snapshot.provenance.origin || frame.provenance.session_id!=snapshot.provenance.session_id ||
+            frame.provenance.capture_sha256!=snapshot.provenance.capture_sha256 ||
+            frame.viewport_x!=snapshot.camera.x || frame.viewport_y!=snapshot.camera.y ||
+            frame.camera.width!=snapshot.camera.width || frame.camera.height!=snapshot.camera.height ||
+            frame.camera.min_depth!=snapshot.camera.min_depth || frame.camera.max_depth!=snapshot.camera.max_depth ||
+            std::memcmp(frame.camera.view,snapshot.camera.view.data(),sizeof(frame.camera.view)) ||
+            std::memcmp(frame.camera.projection,snapshot.camera.projection.data(),sizeof(frame.camera.projection))) return false;
+        VerifiedLighting verified;
+        if (BuildVerifiedLighting(snapshot,verified)!=LightingResult::Ready || !LightingMatchesSnapshot(snapshot,verified)) return false;
+        if (impl_->pending || impl_->prepared) return false;
+        // Flat-only sessions retain the old two-albedo upload footprint. The
+        // remaining channels are uploaded once, outside the submission lock.
+        if (impl_->materials && !impl_->pbr_materials_ready && !impl_->InitializeMaterials(true)) {
+            impl_->failed=true;return false;
+        }
+        LightingConstants constants;
+        constants.camera_scale={verified.camera_position[0],verified.camera_position[1],verified.camera_position[2],verified.meters_per_unit};
+        constants.options={static_cast<float>(verified.lights.size()),synthetic_normal_map ? 1.0f : 0.0f,0,0};
+        for (std::size_t i=0;i<verified.lights.size();++i) {
+            const auto& light=verified.lights[i];
+            constants.position_range[i]={light.position[0],light.position[1],light.position[2],light.influence_radius_m};
+            constants.color_intensity[i]={light.color_linear[0],light.color_linear[1],light.color_linear[2],light.intensity};
+            constants.direction_outer[i]={light.direction[0],light.direction[1],light.direction[2],light.cos_outer};
+            constants.params[i]={light.source_radius_m,light.cos_inner,light.kind==LightKind::Spot ? 1.0f : 0.0f,0};
+        }
+        if (impl_->PrepareResident(frame,readback,&constants,synthetic_normal_map)) return true;
+        impl_->failed=true;return false;
+    } catch (...) { if (impl_) impl_->failed=true;return false; }
+}
 FlatCacheStats FlatD3D12::cache_stats() const noexcept {
     if (!impl_) return {};
-    return {impl_->uploads,impl_->evictions,impl_->cache.size(),impl_->cache_bytes,impl_->textured_draws};
+    return {impl_->uploads,impl_->evictions,impl_->cache.size(),impl_->cache_bytes,impl_->textured_draws,impl_->pbr_draws};
 }
 bool FlatD3D12::Prepare(const scene::Frame& frame, bool readback) noexcept {
     try {

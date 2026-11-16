@@ -1,6 +1,7 @@
 #include "scene_live_viewer.hpp"
 #include "scene_live_dx12.hpp"
 #include "scene_live_flat.hpp"
+#include "scene_live_lighting.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -160,6 +161,7 @@ struct Diagnostics {
            <<",\"bed_override_instances\":"<<frame.override_instances
            <<",\"bedroom_material_runs\":"<<frame.bedroom_material_runs
            <<",\"textured_draws\":"<<cache.textured_draws
+           <<",\"pbr_draws\":"<<cache.pbr_draws
            <<",\"resident_bytes\":"<<cache.bytes<<",\"resource_uploads\":"<<cache.uploads
            <<",\"resource_evictions\":"<<cache.evictions<<",\"image\":"<<(image?"true":"false")<<",\"view\":[";
         for (unsigned i=0;i<16;++i) { if (i) out<<',';out<<snapshot.camera.view[i]; }
@@ -260,15 +262,22 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
                     last.reset();
                     if (window) SetWindowTextW(window,L"T3Render — in attesa di SceneIR");
                     std::lock_guard<std::mutex> lock(state->mutex); ++state->stats.cleared;
-                    state->stats.bedroom_material_runs=state->stats.textured_draws=0;
+                    state->stats.bedroom_material_runs=state->stats.textured_draws=state->stats.pbr_draws=0;
                 }
                 continue;
             }
             if (current == last) continue;
             ResidentFlatFrame frame;
             const bool wants_image=diagnostics.WantsImage(*current);
-            if (!BuildResidentFlatFrame(*current, frame,state->provider.bed_override.get(),state->provider.bedroom_material_ids) ||
-                !gpu->PrepareResident(frame,wants_image)) { failed = true; break; }
+            if (!BuildResidentFlatFrame(*current, frame,state->provider.bed_override.get(),state->provider.bedroom_material_ids)) {
+                failed=true;break;
+            }
+            VerifiedLighting verified;
+            const bool lit=BuildVerifiedLighting(*current,verified)==LightingResult::Ready &&
+                           LightingMatchesSnapshot(*current,verified);
+            if (!(lit ? gpu->PrepareLit(*current,frame,wants_image) : gpu->PrepareResident(frame,wants_image))) {
+                failed=true;break;
+            }
             Submission submission{gpu.get()};
             const bool submitted = state->provider.submit_if_current(state->provider.context.get(), current,
                                                                       SubmitPrepared, &submission);
@@ -309,6 +318,7 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
                 state->stats.device_epoch = current->device_epoch; state->stats.frame_id = current->frame_id;
                 state->stats.bedroom_material_runs=frame.bedroom_material_runs;
                 state->stats.textured_draws=gpu->cache_stats().textured_draws;
+                state->stats.pbr_draws=gpu->cache_stats().pbr_draws;
             }
         }
     } catch (...) { failed = true; }

@@ -294,6 +294,148 @@ bool synthetic_textures() {
     std::cout<<"scene_live_textures_fixture=ok source=synthetic albedo=sampled uv=varies switch=ok missing_uv=fallback reset=ok\n";
     return true;
 }
+
+// Entirely synthetic light, material, camera and geometry. These fixtures do
+// not claim any measured TDS light state or runtime tangent convention.
+bool synthetic_pbr(HWND window) {
+    SceneResidency scene;CHECK(scene.BeginMap(0,"pbr-fixture",fingerprint));
+    auto epoch=scene.epochs();CHECK(scene.AddMaterial(epoch.map,{"mat:bed","bed"}));
+    auto surface=quad("mesh:bed",ResourceKind::StaticMesh,.8f,.2f,"mat:bed");
+    surface.geometry.normals.assign(4,Vec3{0,0,-1});CHECK(scene.AddResource(epoch.map,std::move(surface)));
+    auto angled=quad("mesh:angled",ResourceKind::StaticMesh,.4f,.2f,"mat:bed");
+    angled.geometry.normals.assign(4,Vec3{.70710678f,0,-.70710678f});CHECK(scene.AddResource(epoch.map,std::move(angled)));
+    auto frame=input(epoch,1);frame.bsp.clear();frame.conventions.meters_per_unit=1;
+    frame.light_coverage=LightCoverage::Complete;
+    VisualLight light;light.id="light:synthetic";light.generation=1;light.binding=BindingEvidence::Verified;
+    light.enabled={true,BindingEvidence::Verified};light.kind={LightKind::Point,BindingEvidence::Verified};
+    light.position={Vec3{0,0,-1},BindingEvidence::Verified};light.color_linear={Vec3{1,1,1},BindingEvidence::Verified};
+    light.intensity={1,BindingEvidence::Verified};light.influence_radius={10,BindingEvidence::Verified};
+    light.source_radius_m={.05f,BindingEvidence::Verified};frame.lights={light};CHECK(scene.Publish(frame));
+    auto snapshot=scene.current();ResidentFlatFrame resident;CHECK(BuildResidentFlatFrame(*snapshot,resident));
+    resident.draws[0].color={.5f,.5f,.5f,1};
+    auto gpu=FlatD3D12::Create(window);CHECK(gpu);
+    auto mismatch=resident;++mismatch.frame_id;CHECK(!gpu->PrepareLit(*snapshot,mismatch));
+    mismatch=resident;mismatch.provenance.session_id="another-session";CHECK(!gpu->PrepareLit(*snapshot,mismatch));
+    mismatch=resident;++mismatch.stage;CHECK(!gpu->PrepareLit(*snapshot,mismatch));
+    auto wrong_camera=resident;wrong_camera.camera.view[12]+=.1f;CHECK(!gpu->PrepareLit(*snapshot,wrong_camera));
+    auto incomplete=*snapshot;incomplete.light_coverage=LightCoverage::Partial;
+    CHECK(!gpu->PrepareLit(incomplete,resident));
+    incomplete=*snapshot;incomplete.lights[0].intensity.evidence=BindingEvidence::Candidate;
+    CHECK(!gpu->PrepareLit(incomplete,resident));
+    incomplete=*snapshot;incomplete.provenance.origin=FrameOrigin::LiveProcess;
+    CHECK(!gpu->PrepareLit(incomplete,resident,false,true));
+    auto render=[&](const Snapshot& current,ResidentFlatFrame& draws,std::vector<std::uint8_t>& pixels) {
+        return gpu->PrepareLit(current,draws,true) && gpu->Submit() && gpu->Finish(&pixels) &&
+               gpu->Present()!=FlatPresent::Failed;
+    };
+    std::vector<std::uint8_t> one,high,off,reset_image;
+    CHECK(render(*snapshot,resident,one));
+    const auto at=(32u*64+32)*4;
+    // Independent estimate for normal incidence, inverse-square point light,
+    // GGX roughness .7 and ACES/sRGB output: about 107/255 at this pixel.
+    CHECK(one[at]>=100 && one[at]<=116 && one[at]==one[at+1] && one[at]==one[at+2]);
+    frame.frame_id=2;frame.lights[0].intensity.value=32;CHECK(scene.Publish(frame));
+    CHECK(BuildResidentFlatFrame(*scene.current(),resident));resident.draws[0].color={.5f,.5f,.5f,1};
+    CHECK(render(*scene.current(),resident,high));
+    CHECK(high[at]>245 && high[at]>one[at]); // values above 1 survived in HDR until tonemapping
+    frame.frame_id=3;frame.lights[0].enabled.value=false;CHECK(scene.Publish(frame));
+    CHECK(BuildResidentFlatFrame(*scene.current(),resident));CHECK(render(*scene.current(),resident,off));
+    CHECK(off[at]==0 && off[at+1]==0 && off[at+2]==0);
+    const auto reset=scene.BeginReset();CHECK(reset && scene.EndReset(reset,true));
+    frame.device_epoch=scene.epochs().device;frame.frame_id=4;frame.lights[0]=light;CHECK(scene.Publish(frame));
+    CHECK(BuildResidentFlatFrame(*scene.current(),resident));resident.draws[0].color={.5f,.5f,.5f,1};
+    CHECK(render(*scene.current(),resident,reset_image) && reset_image==one && gpu->cache_stats().uploads==2);
+    frame.frame_id=5;frame.meshes[0].instance_id="actor:angled";frame.meshes[0].resource_id="mesh:angled";
+    frame.meshes[0].transform[0]=2;CHECK(scene.Publish(frame));
+    CHECK(BuildResidentFlatFrame(*scene.current(),resident));resident.draws[0].color={.5f,.5f,.5f,1};
+    std::vector<std::uint8_t> nonuniform;CHECK(render(*scene.current(),resident,nonuniform));
+    // Inverse-transpose normal gives about 98, whereas multiplying the normal
+    // by the world matrix would give about 56 for this non-uniform scale.
+    CHECK(nonuniform[at]>=90 && nonuniform[at]<=106 && gpu->cache_stats().pbr_draws==1);
+    frame.frame_id=6;frame.meshes[0].transform[0]=0;CHECK(scene.Publish(frame));
+    CHECK(BuildResidentFlatFrame(*scene.current(),resident));CHECK(render(*scene.current(),resident,nonuniform));
+    CHECK(gpu->cache_stats().pbr_draws==0); // singular transforms never reach the normal shader
+    frame.frame_id=7;frame.meshes[0].instance_id="actor:bed";frame.meshes[0].resource_id="mesh:bed";
+    frame.meshes[0].transform=identity;frame.lights[0].position.value=Vec3{0,0,-2.2f};CHECK(scene.Publish(frame));
+    CHECK(BuildResidentFlatFrame(*scene.current(),resident));resident.draws[0].color={.5f,.5f,.5f,1};
+    std::vector<std::uint8_t> farther;CHECK(render(*scene.current(),resident,farther));
+    CHECK(farther[at]>0 && farther[at]+25<one[at]);
+    frame.frame_id=8;frame.lights[0]=light;frame.lights[0].kind={LightKind::Spot,BindingEvidence::Verified};
+    frame.lights[0].direction={Vec3{0,0,1},BindingEvidence::Verified};
+    frame.lights[0].cos_inner={.9f,BindingEvidence::Verified};frame.lights[0].cos_outer={.7f,BindingEvidence::Verified};
+    CHECK(scene.Publish(frame));CHECK(BuildResidentFlatFrame(*scene.current(),resident));resident.draws[0].color={.5f,.5f,.5f,1};
+    std::vector<std::uint8_t> spot_on,spot_off;CHECK(render(*scene.current(),resident,spot_on));
+    CHECK(std::abs(int(spot_on[at])-int(one[at]))<=1);
+    frame.frame_id=9;frame.lights[0].direction.value=Vec3{0,0,-1};CHECK(scene.Publish(frame));
+    CHECK(BuildResidentFlatFrame(*scene.current(),resident));CHECK(render(*scene.current(),resident,spot_off));CHECK(spot_off[at]==0);
+    frame.frame_id=10;frame.lights[0]=light;frame.camera.width=80;frame.camera.height=40;CHECK(scene.Publish(frame));
+    CHECK(BuildResidentFlatFrame(*scene.current(),resident));resident.draws[0].color={.5f,.5f,.5f,1};
+    std::vector<std::uint8_t> resized;CHECK(render(*scene.current(),resident,resized) && resized.size()==80u*40u*4u);
+    frame.frame_id=11;frame.camera.width=64;frame.camera.height=64;CHECK(scene.Publish(frame));
+    CHECK(BuildResidentFlatFrame(*scene.current(),resident));resident.draws[0].color={.5f,.5f,.5f,1};
+    CHECK(render(*scene.current(),resident,resized) && resized==one);
+    auto worker=std::make_shared<ViewerFixture>();CHECK(worker->scene.BeginMap(0,"worker-fixture",fingerprint));
+    const auto worker_epoch=worker->scene.epochs();CHECK(worker->scene.AddMaterial(worker_epoch.map,{"mat:bed","bed"}));
+    auto worker_mesh=quad("mesh:bed",ResourceKind::StaticMesh,.8f,.2f,"mat:bed");
+    worker_mesh.geometry.normals.assign(4,Vec3{0,0,-1});CHECK(worker->scene.AddResource(worker_epoch.map,std::move(worker_mesh)));
+    auto worker_frame=input(worker_epoch,1);worker_frame.bsp.clear();worker_frame.conventions.meters_per_unit=1;
+    worker_frame.light_coverage=LightCoverage::Complete;worker_frame.lights={light};CHECK(worker->scene.Publish(worker_frame));
+    ViewerProvider provider;provider.context=worker;provider.current=viewer_current;provider.submit_if_current=viewer_submit;
+    auto viewer=SceneViewer::Start(std::move(provider),false);CHECK(viewer);viewer->Notify();CHECK(await_viewer(*viewer,1));
+    CHECK(viewer->stats().pbr_draws==1);
+    worker_frame.frame_id=2;worker_frame.light_coverage=LightCoverage::Partial;CHECK(worker->scene.Publish(worker_frame));
+    viewer->Notify();CHECK(await_viewer(*viewer,2));CHECK(viewer->stats().pbr_draws==0);
+    viewer->Stop();const auto deadline=GetTickCount64()+20000;
+    while (!viewer->stats().stopped && GetTickCount64()<deadline) Sleep(10);
+    CHECK(viewer->stats().stopped && !viewer->stats().failed);
+    std::cout<<"scene_live_pbr_fixture=ok source=synthetic ggx=ok hdr=ok normal_inverse_transpose=ok scope=ok disabled=dark reset=ok\n";
+    return true;
+}
+
+bool synthetic_pbr_materials() {
+    auto library=[](std::uint8_t roughness,const std::array<std::uint8_t,4>& normal) {
+        auto out=std::make_shared<BedroomMaterialLibrary>();
+        const char* ids[]{"remaster:material:stone_wall_v2","remaster:material:wood_floor_v2"};
+        for (unsigned i=0;i<2;++i) {
+            auto& m=out->materials[i];m.id=ids[i];
+            const std::array<std::array<std::uint8_t,4>,4> channels{{{128,128,128,255},normal,
+                                                                      {roughness,roughness,roughness,255},{255,255,255,255}}};
+            for (unsigned channel=0;channel<4;++channel) {
+                m.source_sha256[channel]=fingerprint;
+                m.channels[channel].mips.push_back({1,1,std::vector<std::uint8_t>(channels[channel].begin(),channels[channel].end())});
+            }
+        }
+        return out;
+    };
+    SceneResidency scene;CHECK(scene.BeginMap(0,"material-fixture",fingerprint));const auto epoch=scene.epochs();
+    CHECK(scene.AddMaterial(epoch.map,{"mat:bed","bed"}));
+    auto mesh=quad("mesh:bed",ResourceKind::StaticMesh,.8f,.2f,"mat:bed");
+    mesh.geometry.normals.assign(4,Vec3{0,0,-1});CHECK(scene.AddResource(epoch.map,std::move(mesh)));
+    auto frame=input(epoch,1);frame.bsp.clear();frame.conventions.meters_per_unit=1;frame.light_coverage=LightCoverage::Complete;
+    VisualLight light;light.id="light:synthetic";light.generation=1;light.binding=BindingEvidence::Verified;
+    light.enabled={true,BindingEvidence::Verified};light.kind={LightKind::Point,BindingEvidence::Verified};
+    light.position={Vec3{0,0,-1},BindingEvidence::Verified};light.color_linear={Vec3{1,1,1},BindingEvidence::Verified};
+    light.intensity={1,BindingEvidence::Verified};light.influence_radius={10,BindingEvidence::Verified};
+    light.source_radius_m={.05f,BindingEvidence::Verified};frame.lights={light};CHECK(scene.Publish(frame));
+    ResidentFlatFrame resident;CHECK(BuildResidentFlatFrame(*scene.current(),resident));
+    resident.draws[0].material_id="remaster:material:stone_wall_v2";
+    auto a=FlatD3D12::Create(nullptr,128u*1024u*1024u,library(179,{128,128,255,255}));
+    auto b=FlatD3D12::Create(nullptr,128u*1024u*1024u,library(179,{218,128,218,255}));
+    auto glossy=FlatD3D12::Create(nullptr,128u*1024u*1024u,library(51,{128,128,255,255}));
+    CHECK(a && b && glossy);
+    auto render=[&](FlatD3D12& gpu,bool normal,std::vector<std::uint8_t>& image) {
+        return gpu.PrepareLit(*scene.current(),resident,true,normal) && gpu.Submit() && gpu.Finish(&image) &&
+               gpu.cache_stats().textured_draws==1 && gpu.cache_stats().pbr_draws==1;
+    };
+    std::vector<std::uint8_t> base,unknown_normal,mapped,low_roughness;
+    CHECK(render(*a,false,base) && render(*b,false,unknown_normal) && base==unknown_normal);
+    CHECK(render(*b,true,mapped) && mapped!=base);
+    CHECK(render(*glossy,false,low_roughness));const auto at=(32u*64+32)*4;
+    std::cout<<"synthetic_pbr_material_sample="<<unsigned(base[at])<<","<<unsigned(low_roughness[at])<<"\n";
+    CHECK(base[at]>=60 && base[at]<=70 && low_roughness[at]>base[at]+40); // sRGB albedo, linear roughness
+    std::cout<<"scene_live_pbr_material_fixture=ok source=synthetic srgb=ok roughness=ok normal=fixture_only\n";
+    return true;
+}
 struct CatalogViewerFixture { std::shared_ptr<SceneResidency> scene; };
 std::shared_ptr<const Snapshot> catalog_viewer_current(void* context) noexcept {
     try {return static_cast<CatalogViewerFixture*>(context)->scene->current();} catch (...) {return {};}
@@ -426,7 +568,7 @@ int wmain(int argc, wchar_t** argv) {
                              CW_USEDEFAULT,CW_USEDEFAULT,128,128,nullptr,nullptr,cls.hInstance,nullptr);
         if (!hwnd) return 2;
     }
-    const bool ok=run(hwnd) && viewer_pipeline(diagnostic_directory) && synthetic_textures() &&
+    const bool ok=run(hwnd) && viewer_pipeline(diagnostic_directory) && synthetic_textures() && synthetic_pbr(hwnd) && synthetic_pbr_materials() &&
                   (catalog_path.empty() || catalog_override(catalog_path.c_str()));
     if (hwnd) DestroyWindow(hwnd);
     return ok ? 0 : 1;

@@ -192,7 +192,8 @@ drawn; selection is partial and does not prove that every part was visible in
 TDS. A stale source handle fails closed, including after a map reload. The
 diagnostic field `bed_override_instances` reports the number of replacements.
 Without the optional material library the viewer uses flat material-ID colors;
-no PBR lighting or gameplay changes are applied.
+if complete verified lights are available, those ID colors are instead used as
+placeholder albedos in the experimental direct-light pass. Gameplay is unchanged.
 
 The optional `--catalog <Windows-path-to-v2-catalog>` argument to
 `t3render_live_dx12_fixture.exe` exercises the Windows loader and D3D12 viewer
@@ -231,11 +232,13 @@ region heuristic, not proof of room membership or total visibility.
 
 The D3D12 viewer uploads albedo mips once and samples them with UV0 and wrap
 addressing. Sections with missing UVs fall back to material-ID colors. Other
-materials also remain ID colors. Normal, roughness and AO are included for a
-future PBR consumer but are not sampled yet; this is an **unlit** albedo
-preview, not HDR lighting, PBR or a measurement of the game's materials.
-Diagnostics report `bedroom_material_runs` and `textured_draws`; a difference
-can indicate missing UVs. The separate `T3RENDER_SCENE_LIVE_BEDROOM_MATERIAL_IDS=1`
+materials also remain ID colors. With unknown or incomplete lighting this is
+an **unlit** preview. The verified-light path below uses sRGB albedo and linear
+roughness; its normal map is enabled only in a synthetic fixture, and AO is
+not applied without an indirect-light term. These textures are remaster assets,
+not measurements of the game's materials. Diagnostics report
+`bedroom_material_runs`, `textured_draws` and `pbr_draws`; a difference in the
+first two can indicate missing UVs. The separate `T3RENDER_SCENE_LIVE_BEDROOM_MATERIAL_IDS=1`
 flag enables only the partition/ID diagnostic with an older catalog. A v3
 catalog enables the material selection in the viewer automatically.
 
@@ -335,8 +338,8 @@ current selection are evicted after prior GPU work completes; if the current
 selection itself exceeds the budget, the viewer fails closed. Resources are
 retired on loss, including a missed empty interval, and recreated for a new
 map/device epoch or continuity. No engine or D3D8
-pointer is used as a cache key. This is a flat diagnostic backend: texture,
-material and GPU upload residency for the PBR renderer remain separate work.
+pointer is used as a cache key. The persistent backend supports both the flat
+diagnostic path and the limited direct-light HDR pass described below.
 
 The x86 Highball fixture exercised an offscreen target and a hidden swapchain:
 the resident path matched the expanded path pixel-for-pixel for synthetic camera,
@@ -375,10 +378,49 @@ the camera position from the same row-vector view matrix, converts influence
 radii using the declared unit scale and retains frame, epoch, provenance,
 camera and source observations. `LightingMatchesSnapshot` prevents reuse for
 a different snapshot or changed observations. This is a renderer input, not a
-new runtime light measurement or a PBR implementation. Viewer diagnostics
-record coverage and counts by readiness; they do not promote candidate data.
+new runtime light measurement. Viewer diagnostics record coverage and counts
+by readiness; they do not promote candidate data.
 
 Host fixtures exercise field evidence, point/spot completeness, disabled and
 unknown states, map generations, radius units, camera inversion, stale frame
 rejection, bracketing and overlap recovery. These tests use synthetic values;
 the nine previously identified candidate lights are not upgraded by them.
+
+## Persistent direct-light PBR/HDR experiment
+
+When `BuildVerifiedLighting` accepts the current snapshot, the worker builds a
+resident frame with the same session, map, frame ID, epochs, pass/stage, view,
+projection and viewport (the output is cropped to that viewport),
+then prepares a direct-light pass. The backend repeats the evidence and camera
+checks before recording commands. Submission still uses `SubmitIfCurrent`, so
+the exact snapshot must remain current at enqueue. Unknown, partial or
+incomplete lighting leaves the existing flat/albedo path selected. A complete
+empty light set produces no direct light. A producer's `Verified` and
+`Complete` flags remain attestations, not independent proof.
+
+The pass uses an `RGBA16F` scene-linear target, dielectric GGX/Schlick shading,
+point and spot lights, inverse-square falloff with finite source radius and a
+smooth influence cutoff, then ACES-like tone mapping and sRGB output. Intensity
+values have not been calibrated to physical units in TDS. Instance normals use
+the inverse transpose. Missing or zero normals and singular transforms fall
+back to diagnostic flat shading within the HDR pass; other untextured materials
+use material-ID colors as placeholders. Culling remains disabled. There are no
+shadows, ambient/indirect term, GI or exposure control in this path.
+
+Albedo is decoded through an sRGB SRV; roughness is linear. Normal maps use an
+explicit derivative-based +Y convention **only for synthetic fixtures**; TDS's
+tangent convention is unverified. AO is uploaded but does not darken direct
+light: it needs an indirect term first. Extra material channels and the HDR
+target are created on first accepted PBR frame rather than on a flat-only
+session. Shader and pipeline setup still occurs during viewer initialization;
+neither its startup cost nor runtime performance has been measured in TDS.
+
+The x86 Highball fixture uses synthetic camera, geometry and lights to check a
+numeric GGX sample, HDR values above one, point attenuation, spot direction,
+normal inverse transpose under non-uniform scale, material sRGB/roughness,
+fixture-only normal maps, stale and partial rejection, worker fallback,
+visibility, resize and Reset. The offline catalog fixture also exercises the
+existing assets with a synthetic camera. None of these proves TDS light state,
+live frame delivery, physical calibration, a correction to the beam, or that
+the reported lag has improved. The current TDS hook emits no light samples,
+so it cannot yet activate this pass in a real game frame.

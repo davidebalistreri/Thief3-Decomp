@@ -5,9 +5,9 @@
 Il lavoro ha portato la bedroom di Thief: Deadly Shadows da una cattura D3D8
 a snapshot semantici parziali e a un renderer D3D12 separato, con materiali
 remaster e prime tecniche moderne. Il percorso letto/BSP del bridge è
-verificato nelle catture; **il renderer PBR moderno rimane standalone**.
-Un viewer live flat sperimentale è collegato al bridge, ma non ha ancora
-prodotto frame verificati nel gioco.
+verificato nelle catture. Il renderer PBR completo con effetti resta standalone;
+un primo passaggio PBR/HDR diretto è ora presente anche nel viewer persistente,
+ma è verificato solo con fixture sintetiche e non ha prodotto frame TDS verificati.
 
 L'obiettivo è stato creato il 15 novembre alle 12:28 CET. Alla rilevazione del
 16 novembre il tempo attivo contabilizzato era circa **13 h 37 min**: non è la
@@ -33,9 +33,9 @@ geometria delle pareti; DXR resta opzionale e non prioritario.
 | SceneIR v1 | Schema API-neutral e snapshot runtime parziali; geometria e molte associazioni provengono da asset offline verificati. |
 | Replay D3D8 → DX12 | Bedroom riconoscibile e confronti diagnostici; parità legacy completa non dimostrata e non più prioritaria. |
 | Materiali e mesh | Override semantici per pietra, pavimento e letto; altri asset Godot riutilizzati nella preview. |
-| Renderer moderno | PBR/HDR, ombre, GI approssimata e altri effetti funzionano in preview separate, non come renderer di produzione. |
+| Renderer moderno | PBR/HDR diretto sperimentale nel consumer persistente; ombre, GI approssimata e altri effetti restano in preview separate, non come renderer di produzione. |
 | Switch letto | Originale/high-poly/originale su catture e nel viewer flat con dati sintetici; non modifica gameplay o collisioni e non è verificato live. |
-| Infrastruttura live | Residency, finestre `Present`, matcher e adattatore alimentano un viewer D3D12 flat sperimentale; il percorso non è stato verificato in TDS. |
+| Infrastruttura live | Residency, finestre `Present`, matcher e adattatore alimentano un viewer D3D12 sperimentale; il percorso non è stato verificato in TDS. |
 
 ## Prove: dal frame D3D8 alla submission semantica
 
@@ -247,3 +247,27 @@ interamente delimitata. Il convertitore accetta per il rendering soltanto una
 raccolta completa e proprietà verificate; i test usano luci sintetiche. Il
 probe TDS non produce ancora questi campioni e le nove luci candidate non sono
 state promosse a misure certe.
+
+## Aggiornamento: base PBR/HDR persistente
+
+Il consumer persistente ora ha un passaggio diretto con target lineare
+`RGBA16F`, GGX/Schlick, luci puntiformi e spot con attenuazione, e tonemapping
+verso sRGB. Usa albedo sRGB e roughness del catalogo; la trasformazione delle
+normali impiega l'inversa trasposta. I materiali senza associazione rimangono
+colori diagnostici. I canali aggiuntivi e il target HDR vengono allocati solo
+al primo frame con luci accettate.
+
+L'attivazione richiede copertura completa, proprietà verificate e camera/frame
+coerenti con lo snapshot sottoposto a `SubmitIfCurrent`; altrimenti il viewer
+rimane flat. Le attestazioni dipendono dal producer e il probe TDS non fornisce
+ancora luci: nessuna delle nove candidate è stata promossa. Le normal map sono
+attive solo nella fixture sintetica perché la convenzione TDS è incerta; l'AO
+non viene applicata alla luce diretta. Ombre, GI, emissivi ed esposizione non
+sono parte di questo passaggio.
+
+Le fixture GPU su Highball hanno verificato GGX, HDR, attenuazione e spot,
+normali con scala non uniforme, materiali sintetici, rifiuto dei frame non
+coerenti, fallback del worker, cache, cambio visibilità e Reset. Il catalogo
+reale è stato provato offline con camera sintetica. Non sono prove TDS né una
+misura di prestazioni: il lag segnalato e la correzione della trave restano da
+verificare più avanti, come richiesto. Vedi [consumer live](ir/README_scene_live.md).

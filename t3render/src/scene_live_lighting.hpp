@@ -13,6 +13,7 @@ struct RenderLight {
 };
 struct VerifiedLighting {
     std::uint64_t map_epoch=0,device_epoch=0,continuity=0,frame_id=0;
+    std::uint32_t render_pass=0,stage=0;
     std::string map,map_sha256;
     FrameProvenance provenance;
     Conventions conventions;

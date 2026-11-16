@@ -226,6 +226,8 @@ bool light_lifecycle_and_evidence() {
     CHECK(LightingMatchesSnapshot(complete,lighting));
     auto next_snapshot=complete;++next_snapshot.frame_id;CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));
     next_snapshot=complete;++next_snapshot.continuity;CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));
+    next_snapshot=complete;++next_snapshot.render_pass;CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));
+    next_snapshot=complete;++next_snapshot.stage;CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));
     next_snapshot=complete;next_snapshot.provenance.session_id="other";CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));
     next_snapshot=complete;next_snapshot.camera.view[12]+=1;CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));
     next_snapshot=complete;next_snapshot.light_coverage=LightCoverage::Partial;CHECK(!LightingMatchesSnapshot(next_snapshot,lighting));

@@ -11,7 +11,7 @@ enum class FlatPresent { Presented, Busy, Failed };
 struct FlatCacheStats {
     std::uint64_t uploads = 0, evictions = 0;
     std::size_t resources = 0, bytes = 0;
-    std::uint32_t textured_draws = 0;
+    std::uint32_t textured_draws = 0, pbr_draws = 0;
 };
 
 // Persistent diagnostic backend. A null window renders offscreen; otherwise
@@ -31,6 +31,12 @@ public:
     // tightly packed RGBA8 for fixture verification. Calls must be paired.
     bool Prepare(const scene::Frame& frame, bool readback = false) noexcept;
     bool PrepareResident(const ResidentFlatFrame& frame, bool readback = false) noexcept;
+    // Requires complete, verified lighting from this exact snapshot. A false
+    // result before command recording leaves the flat path available.
+    // synthetic_normal_map enables an explicitly assumed +Y tangent normal
+    // convention for synthetic fixtures only; TDS's convention is unknown.
+    bool PrepareLit(const Snapshot& snapshot, const ResidentFlatFrame& frame, bool readback = false,
+                    bool synthetic_normal_map = false) noexcept;
     bool Submit() noexcept;
     bool Finish(std::vector<std::uint8_t>* pixels = nullptr) noexcept;
     // Present is deliberately outside the scene lock: a driver or windowing

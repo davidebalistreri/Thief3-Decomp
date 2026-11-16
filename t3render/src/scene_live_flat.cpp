@@ -107,7 +107,10 @@ bool BuildResidentFlatFrame(const Snapshot& snapshot, ResidentFlatFrame& output,
         !std::isfinite(camera.min_depth) || !std::isfinite(camera.max_depth) || !camera.width || !camera.height ||
         camera.width>2048 || camera.height>2048 || camera.min_depth<0 || camera.max_depth>1 || camera.min_depth>camera.max_depth) return false;
     ResidentFlatFrame frame;frame.map_epoch=snapshot.map_epoch;frame.device_epoch=snapshot.device_epoch;
-    frame.continuity=snapshot.continuity;
+    frame.continuity=snapshot.continuity;frame.frame_id=snapshot.frame_id;
+    frame.render_pass=snapshot.render_pass;frame.stage=snapshot.stage;frame.map=snapshot.map;
+    frame.map_sha256=snapshot.map_sha256;frame.provenance=snapshot.provenance;
+    frame.viewport_x=camera.x;frame.viewport_y=camera.y;
     frame.camera.width=camera.width;frame.camera.height=camera.height;
     frame.camera.min_depth=camera.min_depth;frame.camera.max_depth=camera.max_depth;
     std::copy(camera.view.begin(),camera.view.end(),frame.camera.view);

@@ -54,6 +54,7 @@ LightingResult BuildVerifiedLighting(const Snapshot& snapshot,VerifiedLighting& 
         (conventions.length_unit==LengthUnit::Meter && *conventions.meters_per_unit!=1)) return LightingResult::InvalidUnits;
     VerifiedLighting result;result.map_epoch=snapshot.map_epoch;result.device_epoch=snapshot.device_epoch;
     result.continuity=snapshot.continuity;result.frame_id=snapshot.frame_id;result.provenance=snapshot.provenance;
+    result.render_pass=snapshot.render_pass;result.stage=snapshot.stage;
     result.map=snapshot.map;result.map_sha256=snapshot.map_sha256;result.camera=snapshot.camera;result.conventions=conventions;
     result.meters_per_unit=*conventions.meters_per_unit;
     if (!CameraPosition(snapshot.camera.view,result.camera_position)) return LightingResult::InvalidCamera;
@@ -82,6 +83,7 @@ bool LightingMatchesSnapshot(const Snapshot& snapshot,const VerifiedLighting& li
     const auto& a=snapshot.camera;const auto& b=lighting.camera;
     return snapshot.map_epoch==lighting.map_epoch && snapshot.device_epoch==lighting.device_epoch &&
         snapshot.continuity==lighting.continuity && snapshot.frame_id==lighting.frame_id &&
+        snapshot.render_pass==lighting.render_pass && snapshot.stage==lighting.stage &&
         snapshot.light_coverage==LightCoverage::Complete && snapshot.lights==lighting.observations &&
         snapshot.map==lighting.map && snapshot.map_sha256==lighting.map_sha256 &&
         snapshot.provenance.origin==lighting.provenance.origin && snapshot.provenance.session_id==lighting.provenance.session_id &&

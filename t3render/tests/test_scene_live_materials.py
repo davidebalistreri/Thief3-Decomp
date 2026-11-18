@@ -77,6 +77,23 @@ class LiveMaterialSelectionTests(unittest.TestCase):
         sections, replacements = self.compare(scene_fixture())
         self.assertEqual((sections, replacements), (2, 2))
 
+    def test_head_wall_is_separate_from_side_wall_and_outside(self):
+        matrix = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+        # T3 local metres: the first plane is behind the headboard, the
+        # second is the side wall, and the last is outside the bedroom bounds.
+        points = [(-.11, -.5, .2), (-.11, .5, .2), (-.11, -.5, 1.8),
+                  (.5, -2, .2), (1.5, -2, .2), (.5, -2, 1.8),
+                  (-.5, -.5, .2), (-.5, .5, .2), (-.5, -.5, 1.8)]
+        values = [*matrix, len(points), 9, 0, 9, 'STMwall512D_D']
+        values.extend(value / overrides.SCALE for point in points for value in point)
+        values.extend(range(9))
+        result = subprocess.run([str(self.binary), '--head-wall'], input=' '.join(map(str, values)),
+                                text=True, check=True, capture_output=True, timeout=30)
+        self.assertEqual(result.stdout.splitlines(), [
+            '0 3 remaster:material:stone_wall_v2 1',
+            '3 3 remaster:material:stone_wall_v2 0',
+            '6 3 - 0'])
+
     @unittest.skipUnless(os.environ.get("T3RENDER_CAPTURED_SCENE"), "local captured SceneIR not supplied")
     def test_local_capture_matches_previous_sceneir_selector(self):
         path = Path(os.environ["T3RENDER_CAPTURED_SCENE"])

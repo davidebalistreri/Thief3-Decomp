@@ -25,7 +25,7 @@ struct RuntimeDraw {
     bool needs_state=false,needs_world=false;
     DrawObservation before;
 };
-RuntimeDraw RuntimeDrawBegin(IDirect3DDevice8* device, const DrawCall& call) noexcept;
+RuntimeDraw RuntimeDrawBegin(IDirect3DDevice8* device, const DrawCall& call, bool clear = false) noexcept;
 void RuntimeDrawEnd(IDirect3DDevice8* device, const RuntimeDraw& draw, HRESULT result) noexcept;
 struct RuntimePresent { std::uint64_t ticket=0, frame_id=UINT64_MAX; };
 RuntimePresent RuntimePresentBegin(IDirect3DDevice8* device) noexcept;

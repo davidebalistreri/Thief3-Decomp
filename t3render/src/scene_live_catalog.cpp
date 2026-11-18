@@ -243,7 +243,10 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
     const bool version_two=std::memcmp(magic,"T3LCAT02",8)==0;
     const bool version_three=std::memcmp(magic,"T3LCAT03",8)==0;
     const bool version_four=std::memcmp(magic,"T3LCAT04",8)==0;
-    if ((!version_two && !version_three && !version_four && std::memcmp(magic,"T3LCAT01",8)) || !Text(reader,map) || map.size()>128 || map.find(':')!=std::string::npos ||
+    const bool version_six=std::memcmp(magic,"T3LCAT06",8)==0;
+    std::uint32_t has_static=version_four ? 1u : 0u;
+    if (version_six && (!reader.u32(has_static) || has_static>1)) return false;
+    if ((!version_two && !version_three && !version_four && !version_six && std::memcmp(magic,"T3LCAT01",8)) || !Text(reader,map) || map.size()>128 || map.find(':')!=std::string::npos ||
         !Text(reader,map_sha) || !Digest(map_sha) || !Text(reader,loaded.offline_scene_sha256) ||
         !Digest(loaded.offline_scene_sha256) || !Text(reader,actor) ||
         actor!="actor:"+map+":"+map_sha+":StaticMeshActor__1520") return false;
@@ -270,8 +273,8 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
         if (!Text(reader,material.id) || !Text(reader,material.name) || catalog.materials.count(material.id) ||
             override_materials.count(material.id)) return false;
         const auto id=material.id;
-        if ((version_three || version_four) && (id=="remaster:material:stone_wall_v2" || id=="remaster:material:wood_floor_v2")) return false;
-        if ((version_two || version_three || version_four) && id.compare(0,override_prefix.size(),override_prefix)==0)
+        if ((version_three || version_four || version_six) && (id=="remaster:material:stone_wall_v2" || id=="remaster:material:wood_floor_v2")) return false;
+        if ((version_two || version_three || version_four || version_six) && id.compare(0,override_prefix.size(),override_prefix)==0)
             override_materials.emplace(id,std::move(material));
         else {
             if (!residency->AddMaterial(epoch.map,material)) return false;
@@ -316,9 +319,10 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
         catalog.bsp.push_back(std::move(resource));
     }
     std::uint32_t has_override=version_two ? 1u : 0u;
-    if ((version_three || version_four) && (!reader.u32(has_override) || has_override>1)) return false;
+    if ((version_three || version_four || version_six) && (!reader.u32(has_override) || has_override>1)) return false;
     std::uint32_t has_materials=version_three ? 1u : 0u;
-    if (version_four && (!reader.u32(has_materials) || has_materials>1)) return false;
+    if ((version_four || version_six) && (!reader.u32(has_materials) || has_materials>1)) return false;
+    if (version_six && !has_materials) return false;
     if (has_materials && (map!="SouthQuarter1_int1" || !loaded.conventions.meters_per_unit ||
                           std::fabs(*loaded.conventions.meters_per_unit-0.01905f)>1e-9f)) return false;
     if (has_override) {
@@ -346,9 +350,15 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
                 if (mip.width!=size || mip.height!=size) return false;
             }
         }
+        if (version_six) {
+            scene::Texture height;
+            if (!MaterialTextureData(reader,false,library->wall_height_source_sha256,height) ||
+                height.mips.front().width!=size || height.mips.front().height!=size) return false;
+            library->wall_height=std::move(height);
+        }
         loaded.bedroom_materials=std::move(library);
     }
-    if (version_four) {
+    if (has_static) {
         if (catalog.bed->geometry.positions.size()>65536 || catalog.bed->geometry.indices.size()>65536 ||
             catalog.bed->geometry.sections.size()>scene_bridge::kMaxMeshNodeSections) return false;
         std::uint32_t fingerprint_count=0;

@@ -21,9 +21,22 @@ struct ViewerProvider {
     std::shared_ptr<const MeshOverride> bed_override;
     std::shared_ptr<const BedroomMaterialLibrary> bedroom_materials;
     bool bedroom_material_ids = false;
+    // Explicit viewer-only PBR preview; never used as game light evidence.
+    bool preview_pbr = false;
+    bool preview_candle = false; // explicit candidate-only, artistic preview
+    bool wall_displacement = false; // opt-in viewer-only head-wall geometry
+    bool preview_gi = false; // experimental screen-space head-wall-to-bed bounce
     // Optional existing local directory; copied matrices, candidate light
-    // words and at most two flat images contain no engine-object addresses.
+    // words and flat images contain no engine-object addresses.
     std::wstring diagnostic_directory;
+    // When the D3D8 capture marker appears, take a bounded series of viewer
+    // images so a shared Present can be checked after the run.
+    std::wstring diagnostic_capture_trigger;
+    // Capture mode retains initial images; timed live-only runs can disable
+    // these readbacks without disabling a later explicit capture trigger.
+    bool diagnostic_initial_images = true;
+    // GPU timing and DXGI memory queries are separate opt-in diagnostics.
+    bool diagnostic_gpu_metrics = false;
     // Process-session identity shared with the trace, never an engine pointer.
     // Required when diagnostics are requested.
     std::string diagnostic_session_id;
@@ -33,6 +46,9 @@ struct ViewerStats {
     std::uint64_t frames = 0, dropped = 0, cleared = 0, resident_retirements = 0, renderer_rebuilds = 0;
     std::uint64_t map_epoch = 0, device_epoch = 0, frame_id = 0;
     std::uint32_t bedroom_material_runs = 0, textured_draws = 0, pbr_draws = 0, shadowed_lights = 0;
+    std::uint32_t wall_displaced_triangles = 0;
+    bool wall_displacement_failed = false;
+    bool preview_gi_active = false;
 };
 
 // Dedicated worker for the experimental flat/albedo or verified-light preview. It consumes the latest

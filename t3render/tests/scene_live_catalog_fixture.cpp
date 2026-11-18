@@ -61,6 +61,12 @@ int main(int argc,char** argv) {
         const auto& wall=catalog.bedroom_materials->materials[0];
         std::cout<<" bedroom_materials "<<catalog.bedroom_materials->materials.size()<<" "
                  <<wall.channels[0].mips[0].width<<" "<<wall.channels[0].mips.size();
+        if (catalog.bedroom_materials->wall_height) {
+            const auto& height=*catalog.bedroom_materials->wall_height;
+            if (height.mips.empty() || height.mips[0].rgba.empty()) return 7;
+            std::cout<<" wall_height "<<height.mips[0].width<<" "<<height.mips.size()<<" "
+                     <<unsigned(height.mips[0].rgba[0])<<" "<<catalog.bedroom_materials->wall_height_source_sha256;
+        }
     }
     if (!catalog.binding.static_mesh_actors.empty()) {
         std::unordered_set<std::string> resources;

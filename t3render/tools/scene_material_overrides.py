@@ -117,7 +117,8 @@ class GodotTextures:
         self.cache = {}
 
     def resolve(self, name, kind):
-        if name not in SOURCE_SIZES or kind not in ("albedo", "normal", "roughness", "ao"):
+        if (name not in SOURCE_SIZES or kind not in ("albedo", "normal", "roughness", "ao", "height") or
+                (kind == "height" and name != "stone_wall_v2")):
             raise ValueError("unknown bedroom override texture")
         key = (name, kind)
         if key in self.cache:

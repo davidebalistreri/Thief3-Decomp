@@ -65,7 +65,7 @@ bool FindBedroomAnchor(const Snapshot& snapshot, BedroomAnchor& output) {
 
 bool PartitionBedroomMaterial(const BedroomAnchor& anchor, const Resource& bsp,
                               std::uint32_t section_index, const std::string& material_name,
-                              std::vector<BedroomMaterialRun>& output) {
+                              std::vector<BedroomMaterialRun>& output, bool identify_head_wall) {
     if (bsp.kind!=ResourceKind::BspBlock || section_index>=bsp.geometry.sections.size()) return false;
     const auto& g=bsp.geometry;const auto& section=g.sections[section_index];
     if (!section.index_count || section.index_count%3 || section.index_count>scene::kMaxTriangles*3 ||
@@ -98,10 +98,15 @@ bool PartitionBedroomMaterial(const BedroomAnchor& anchor, const Resource& bsp,
         const bool facing=wall ? std::fabs(face[1])<length*.1 : face[1]<-length*.99;
         const std::optional<std::string> replacement=inside && facing ?
             std::optional<std::string>(wall ? "remaster:material:stone_wall_v2" : "remaster:material:wood_floor_v2") : std::nullopt;
-        if (!runs.empty() && runs.back().replacement==replacement) runs.back().index_count+=3;
+        // This plane is the bedroom wall immediately behind the headboard,
+        // expressed in the selected bed's local metres, not world coordinates.
+        const bool head_wall=identify_head_wall && wall && replacement &&
+            std::fabs(face[0])>length*.99 && center[0]>=-.25 && center[0]<.02;
+        if (!runs.empty() && runs.back().replacement==replacement && runs.back().head_wall==head_wall)
+            runs.back().index_count+=3;
         else {
             if (runs.size()>=scene::kMaxDraws) return false;
-            runs.push_back({section.first_index+offset,3,replacement});
+            runs.push_back({section.first_index+offset,3,replacement,head_wall});
         }
     }
     output=std::move(runs);return true;

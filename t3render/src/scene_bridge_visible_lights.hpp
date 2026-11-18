@@ -1,8 +1,10 @@
 #pragma once
 
+#include "scene_bridge_candle_enabled.hpp"
 #include "scene_bridge_light_candidate.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -22,6 +24,22 @@ struct VisibleLightCandidates {
     bool stable = false, truncated = false;
     std::uint32_t listed = 0, skipped = 0, count = 0;
     VisibleLightCandidate items[kMaxVisibleLightCandidates]{};
+};
+
+// A separate diagnostic for the one bedroom actor. Absence, unreadable
+// memory and ambiguity remain Unknown; NoLink does not mean bLightOn=false.
+enum class CandleLinkStatus { Unknown, NoLink, Candidate };
+struct CandleLinkObservation {
+    CandleLinkStatus status = CandleLinkStatus::Unknown;
+    std::uint32_t factor_8c_bits = 0;
+    CandleEnabledObservation enabled;
+    bool transform_available = false;
+    std::array<std::uint32_t,16> transform_bits{};
+    bool operator==(const CandleLinkObservation& other) const noexcept {
+        return status==other.status && factor_8c_bits==other.factor_8c_bits &&
+               enabled.status==other.enabled.status && enabled.inherited==other.enabled.inherited &&
+               transform_available==other.transform_available && transform_bits==other.transform_bits;
+    }
 };
 
 namespace visible_light_detail {
@@ -116,6 +134,89 @@ inline VisibleLightCandidates SampleVisibleLightCandidates(const ProbeReader& re
         !ReadProbe(reader,0x10f3e4a0,&objects_after,sizeof(objects_after)) || !SameProbeArray(objects,objects_after))
         return VisibleLightCandidates{};
     result.stable=true;
+    return result;
+}
+
+// Find D_384__5 through the current visual list rather than the renderer's
+// partial light list. The caller brackets this in the selected Present
+// interval and checks the executable and catalog fingerprint. No pointer is
+// cached or returned. The list and selected identity are rechecked; these
+// checks cannot eliminate ABA or establish global actor-name uniqueness.
+inline CandleLinkObservation SampleBedroomCandleLink(const ProbeReader& reader,
+                                                      const ProbeSnapshot& snapshot,const char* map) noexcept {
+    using namespace visible_light_detail;
+    CandleLinkObservation unknown;
+    if (!reader.read || !map || !EqualAscii(map,"SouthQuarter1_int1") || !snapshot.self ||
+        !snapshot.count.available || !snapshot.array.available || !snapshot.array.value ||
+        snapshot.entries_truncated || snapshot.count.value!=snapshot.entries_attempted ||
+        snapshot.entries_attempted>kMaxProbeEntries) return unknown;
+    std::uint32_t selected=0,owner=0,matches=0;
+    for (std::uint32_t i=0;i<snapshot.entries_attempted;++i) {
+        const auto& entry=snapshot.entries[i];
+        if (entry.list_index!=i || !entry.address.available) return unknown;
+        if (!entry.address.value) continue;
+        if (!entry.vtable.available || !entry.type.available) return unknown;
+        if (entry.vtable.value!=0x10e4e8c0 || entry.type.value!=4) continue;
+        const auto item_owner=ReadProbeOffset(reader,entry.address.value,0x54);
+        if (!item_owner.available || !item_owner.value) return unknown;
+        const auto fname=ReadProbeOffset(reader,item_owner.value,0x20);
+        if (!fname.available) return unknown;
+        if ((fname.value>>16)!=6) continue;
+        char name[64]{};
+        if (!ReadProbeName(reader,fname.value,name)) return unknown;
+        if (std::strcmp(name,"D_384")==0) {selected=i;owner=item_owner.value;++matches;}
+    }
+    if (matches!=1) return unknown;
+    const auto& entry=snapshot.entries[selected];
+    ProbeArray32 table{},after{};
+    if (!ReadProbe(reader,0x10f3e4a0,&table,sizeof(table)) || !ValidProbeArray(table,65536)) return unknown;
+    const auto actor=ReadMember(reader,table,owner);
+    if (!actor.member || !actor.stable || !actor.name_available || std::strcmp(actor.name,"D_384") ||
+        !actor.fname.available || (actor.fname.value>>16)!=6 || !actor.outer.available || !actor.outer.value)
+        return unknown;
+    const auto outer=ReadMember(reader,table,actor.outer.value);
+    if (!outer.member || !outer.stable || !outer.name_available || !outer.fname.available ||
+        (outer.fname.value>>16)!=0 || !outer.outer.available || outer.outer.value || !MapMatches(outer.name,map))
+        return unknown;
+    const auto backlink=ReadProbeOffset(reader,owner,0xb4);
+    if (!backlink.available || backlink.value!=entry.address.value) return unknown;
+    std::array<std::uint32_t,16> transform{},transform_after{};
+    const bool transform_read=ReadProbeBytesOffset(reader,entry.address.value,0x04,transform.data(),sizeof(transform));
+    const auto light=InspectLightCandidate(reader,owner);
+    if (light.status!=LightCandidateStatus::Candidate && light.status!=LightCandidateStatus::NoLight) return unknown;
+    const auto enabled=SampleBedroomCandleEnabled(reader,owner);
+    if (light.status==LightCandidateStatus::NoLight) {
+        const auto link1=ReadProbeOffset(reader,owner,0xb8),link2=ReadProbeOffset(reader,owner,0xb8);
+        if (!link1.available || link1.value || !link2.available || link2.value) return unknown;
+    }
+    const auto actor_after=ReadMember(reader,table,owner),outer_after=ReadMember(reader,table,actor.outer.value);
+    const auto back_after=ReadProbeOffset(reader,owner,0xb4),element_owner=ReadProbeOffset(reader,entry.address.value,0x54);
+    const auto vtable=ReadProbeU32(reader,entry.address.value),type=ReadProbeOffset(reader,entry.address.value,0x44);
+    const auto count=ReadProbeOffset(reader,snapshot.self,0x50),array=ReadProbeOffset(reader,snapshot.self,0x58);
+    std::uint32_t slots[kMaxProbeEntries]{};
+    if (!SameNamedProbeObject(actor,actor_after) || !SameNamedProbeObject(outer,outer_after) ||
+        !back_after.available || back_after.value!=entry.address.value ||
+        !element_owner.available || element_owner.value!=owner || !vtable.available || vtable.value!=entry.vtable.value ||
+        !type.available || type.value!=entry.type.value || !count.available || count.value!=snapshot.count.value ||
+        !array.available || array.value!=snapshot.array.value ||
+        (snapshot.entries_attempted && !ReadProbe(reader,snapshot.array.value,slots,snapshot.entries_attempted*4)) ||
+        !ReadProbe(reader,0x10f3e4a0,&after,sizeof(after)) || !SameProbeArray(table,after)) return unknown;
+    for (std::uint32_t i=0;i<snapshot.entries_attempted;++i)
+        if (slots[i]!=snapshot.entries[i].address.value) return unknown;
+    if (light.status==LightCandidateStatus::NoLight) {
+        const auto link=ReadProbeOffset(reader,owner,0xb8);
+        if (!link.available || link.value) return unknown;
+    }
+    CandleLinkObservation result;
+    result.enabled=enabled;
+    if (light.status==LightCandidateStatus::NoLight) result.status=CandleLinkStatus::NoLink;
+    else {
+        result.status=CandleLinkStatus::Candidate;result.factor_8c_bits=light.words.words_58_to_90[13];
+    }
+    // The visual actor can remain visible without an associated light object.
+    // Preserve its independently stable transform in either known link state.
+    if (transform_read && ReadProbeBytesOffset(reader,entry.address.value,0x04,transform_after.data(),sizeof(transform_after)) &&
+        transform==transform_after) {result.transform_available=true;result.transform_bits=transform;}
     return result;
 }
 } // namespace t3render::scene_bridge

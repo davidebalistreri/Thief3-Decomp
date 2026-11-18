@@ -1,6 +1,8 @@
 #pragma once
 
 #include "../ir/scene_live.hpp"
+#include "scene_live_light_raw.hpp"
+#include "scene_live_flat.hpp"
 
 namespace t3render::live {
 constexpr std::size_t kMaxRenderLights=16;
@@ -24,6 +26,21 @@ struct VerifiedLighting {
     std::vector<VisualLight> observations; // exact same-frame evidence, including disabled lights
 };
 enum class LightingResult { Ready, UnknownCoverage, Incomplete, TooManyLights, InvalidCamera, InvalidUnits, InvalidProvenance };
+// Inverts the view transform without attributing any lighting to the game.
+bool CameraPositionFromView(const Matrix& view, Vec3& output) noexcept;
+// Artistic, single-candle preview from a matching raw sample. It does not
+// upgrade candidate evidence or assert that the source is enabled.
+bool CandlePreviewFromRaw(const Snapshot& snapshot, const RawLightFrame& raw, RenderLight& output) noexcept;
+// A same-frame visual-actor sample can show a zero modulation after the
+// light leaves the partial list. This does not prove the enabled property.
+bool CandlePreviewDirectZero(const Snapshot& snapshot, const RawLightFrame& raw) noexcept;
+// Generated metal and wax use the independently sampled visual-actor pose.
+// They are viewer-only replacements and do not change the source scene.
+bool CandlePreviewCandlestick(const Snapshot& snapshot, const RawLightFrame& raw,
+                              std::array<ResidentFlatDraw,2>& output) noexcept;
+// Uses the generated two-flame mesh only with matching same-frame light and
+// visual-actor samples; the geometry and radiance are artistic preview data.
+bool CandlePreviewFlame(const Snapshot& snapshot, const RawLightFrame& raw, ResidentFlatDraw& output) noexcept;
 // A producer's Verified flags and Complete coverage are attestations, not
 // independent runtime measurements. Failure leaves output untouched.
 LightingResult BuildVerifiedLighting(const Snapshot& snapshot, VerifiedLighting& output);

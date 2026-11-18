@@ -56,7 +56,35 @@ may also omit it when a newer snapshot supersedes that frame. A false
 `light_raw_available` is therefore unknown, not evidence of zero lights.
 The sample occurred within the Present interval, not necessarily at its end.
 This path performs bounded copying and optional worker-thread file output; its
-runtime cost has not been measured.
+individual runtime cost has not been isolated.
+
+The opt-in `--candle-link-diagnostics` also follows the current visible
+`D_384:6` actor's `+0xb8` link, independently of the renderer's partial light
+list. It is restricted to the bedroom catalog fingerprint and reports
+`light_raw.candle_link` in the same validated frame record. `candidate` includes
+the raw `+0x8c` bits; `no_link` means repeated reads saw a null link;
+`unknown` includes absence from the visual list, incomplete reads, changed
+identity or ambiguity. Neither `no_link` nor `unknown` establishes the
+`bLightOn` property. When the partial light list omits the candidate and the
+same-frame actor sample reports a zero factor, the viewer retains the dim
+ambient fallback but labels it `preview_candle_zero_candidate`. This is not a
+verified disabled state. The new label has only been checked in host tests.
+The optional double-read visual-element transform is recorded as raw float
+bits. A missing or changed transform suppresses the replacement candlestick
+and flame but does not turn a valid factor into a guessed transform. This
+transform is also retained for `no_link` when the visual actor remains stable,
+so the replacement candlestick can remain visible without asserting that the
+light is disabled. The transform and this case are not yet verified in TDS.
+No actor address is retained across frames; matching reads cannot exclude ABA.
+
+In a [subsequent TDS run](../../build/t3render-captures/scene-live-m3-candle-link-20261118-mac-v1/M3-link-report.md),
+the direct actor sample matched the listed light's `+0x8c` in all 93 frames
+where both were observed. After the user extinguished the candle, it read
+zero in 153 frames even though the light was no longer in that partial list.
+The observed zero is consistent with the interaction, but does not by itself
+distinguish disabled from fully damped. The user reported slowdown and noted
+that macOS Low Power Mode was active; this run does not isolate the cost of
+the sampler or viewer.
 
 After a future capture, `tools/compare_live_light_diagnostics.py` selects
 exactly one viewer record by `--session` and `--frame`, verifies the raw bits
@@ -83,7 +111,89 @@ identity is checked by the existing hook before it can call the adapter. The
 adapter does not establish physical units, RGB encoding, enabled state or cone.
 The names for `+0x24` and `+0x34` are candidates, not a calibrated coordinate
 contract. It cannot enable the PBR path, which requires verified fields and
-complete coverage. No TDS run has verified this adapter or its cost.
+complete coverage. A TDS run has exercised the adapter, but has not verified
+its physical interpretation or isolated its cost.
+
+In a [live bedroom capture](../../build/t3render-captures/scene-live-m3-candle-20261117-mac-v1/M3-report.md),
+the selected candidate `D_384:6` matched the offline `D_384__5` name and
+position within 0.000287 T3 units. The same-frame shader candidate position
+matched the raw sample. The `+0x68` floats agree with an HSV-to-RGB conversion
+of the offline actor's color bytes, and `+0x78` is 96 versus its offline radius
+byte of 12; these associations, color space and radius semantics remain
+candidates. `+0x8c` varied from 0.8 to 1.0. Neither the runtime enabled state
+nor physical intensity or cone was verified. The user reported no evident lag;
+an 18.28-second interval measured 33.64 game Present entries per second with
+proxy, viewer and light sampling. This does not isolate sampling overhead.
+
+Across four saved bedroom sessions, 2,059 viewer frames contain exactly one
+listed `D_384:6` sample. All report the same `+0x68` RGB values
+`(0.4392157, 0.3242598, 0.1240138)`, `+0x78` value `96`, and raw type `3`.
+These samples do not cover frames where the light was absent from the partial
+list and do not establish color space, light intensity, radius units or a
+cutoff function. The preview's 3 m range and 1 cd maximum remain artistic.
+Using the project scale, the 96-unit field would be 1.8288 m if it is the
+outer radius. For the captured pose, the preview cutoff averaged over the
+generated bed's triangle areas is 0.302 at that candidate radius versus 0.792
+at 3 m. This is not an image or a measurement of the game's attenuation; the
+[radius analysis](../../build/t3render-captures/scene-live-m3-radius-analysis-20261118-v1/M3-radius-report.md)
+records the assumptions and remains inconclusive about the correct radius.
+
+In frame 1530, all 12 scoped draws associated with the candle and all 119
+selected draws across nine candidate lights have `c21.y/z` bitwise equal to
+`float32(1 / +0x78)` and `c20.xyz` equal to the sampled `+0x34` position.
+The two application-memory vertex-program candidates associated with the
+candle multiply the vertex-to-light displacement by `c21.y` before writing
+texture coordinates. The [draw analysis](../../build/t3render-captures/scene-live-m3-radius-draw-analysis-20261118-v1/M3-radius-draw-report.md)
+revalidates the source, successful draws and frame budgets, and checks Present
+and camera. These samples are not GPU readback, may have been taken at
+different times within the Present interval, and do not verify the original
+cutoff or outer radius. The preview retains its artistic 3 m range.
+
+Static analysis provides a narrower interpretation of `+0x8c`: in the analyzed
+build `0x10979670` responds to the property IDs for `bLightOn` and
+`LightDamping`, calls `0x109907e0`, and passes its return to the `0x200`
+descriptor setter, which writes `+0x8c`. The getter returns zero when the
+`bLightOn` property is found and false, otherwise it uses the damping value
+and a clamp before subtraction from one. Relevant evidence is retained in
+[rea-modulation-evidence.json](../../build/t3render-captures/scene-live-m3-candle-20261117-mac-v1/rea-modulation-evidence.json)
+(`ev_e92b232e284230a6784aa21c9c94f11f95d74721fa71379d78459c4f087d1bdb`,
+`ev_d4bebeed154e63e93e029417090de18e93cbd69f4922ff8566e9da95d1dc2111`).
+This is static control-flow evidence, not a runtime on/off experiment. The
+opt-in preview uses finite `+0x8c` values in `[0,1]` as a relative artistic
+brightness factor; zero does not establish whether the actor is disabled or
+fully damped. Across 903 preview frames in the later TDS run, the sampled factor
+ranged from 0.8 to 1.0 (mean 0.907); that run used a constant preview intensity.
+
+The local script-property table identifies `bLightOn` as inherited boolean ID
+1487 (`0x5cf`); `LightDamping` is inherited float ID 904 (`0x388`). The offline
+`D_384__5` export has no local `bLightOn` entry, so its initial state can come
+from an inherited default rather than a local slot. In the offline archetype
+chain, `D_2` supplies `bLightOn=true` and `LightDamping=0`; `D_6` supplies a
+slow pulse from 0.8 to 1.0. The saved runtime candidate has the same range
+in 903 samples, and nine selected peak intervals have a median of 2.873 s;
+the four configured pulse durations sum to 2.79 s. This comparison does not
+observe the flag or prove the runtime pulse parameters. The [analysis and
+graph](../../build/t3render-captures/scene-live-m3-pulse-analysis-20261118-v1/M3-pulse-report.md)
+retain the source hashes and limitations. Static analysis of the
+getter (`ev_cf800960c99d852354cf31dab2d8d069a7e10e61db3b4d2c7e817bd32e8c8753`)
+and resolver (`ev_2367fc2a425b7375649886e01bf35e75864e7fa87ab6237889ece73ba1e4e129`)
+shows lookup through the object's property hash, a possible class/default
+chain and a descriptor-specific copy through vtable `+0xb4`. Thus an absent
+local slot is not proof of an off value, and blindly treating a raw slot as a
+boolean would not reproduce the getter. The focused
+[evidence bundle](../../build/t3render-captures/scene-live-m3-candlestick-replay-20261118-v2/rea-enabled-property-evidence.json)
+contains the shipped-binary observations; it does not observe the live flag or
+prove the runtime descriptor representation.
+
+The opt-in candle-link diagnostic now also attempts a bounded, read-only
+`bLightOn` lookup for that actor. It follows the observed local and class-default
+property path, checks the candidate boolean descriptor and mask, and compares
+two complete traversals. JSON reports `enabled_candidate` and
+`enabled_inherited`; either is null when the lookup is unavailable or unsafe.
+The renderer does not yet use this value. These fields have passed host fixtures
+for local and inherited values, but their descriptor, mask and on/off behavior
+have not been observed in TDS. They are candidate evidence, not a verified
+enabled state. As with other repeated reads, concurrent ABA remains possible.
 
 The synthetic fixture exercises the bounded list, actor identity and map,
 mutations, conversion, and publication through a `Present` window. Separate

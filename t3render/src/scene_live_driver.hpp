@@ -2,6 +2,7 @@
 
 #include "scene_live_catalog.hpp"
 #include "scene_live_light_raw.hpp"
+#include "scene_live_present_timing.hpp"
 
 #include <memory>
 
@@ -18,6 +19,8 @@ struct DrawStart {
     std::uint64_t ticket = 0;
     bool needs_state = false, needs_world = false;
 };
+enum class ObservedDrawKind : std::uint32_t { Unknown, Clear, Primitive, IndexedPrimitive, PrimitiveUP, IndexedPrimitiveUP };
+enum class ThreadRelation : std::uint32_t { Unknown, Same, Different };
 struct DriverStats {
     std::uint64_t probes = 0, selected_probes = 0, selected_probe_bad = 0, bed_scopes = 0, bsp_scopes = 0, bsp_cache_hits = 0;
     std::uint64_t static_mesh_samples = 0, static_mesh_scopes = 0, static_mesh_rejected = 0;
@@ -27,6 +30,15 @@ struct DriverStats {
     std::uint64_t draw_geometry_bad = 0, draw_camera_bad = 0, draw_world_bad = 0, draw_viewport_bad = 0;
     std::uint64_t scope_unstable = 0, scope_rejected = 0, losses = 0, primed = 0, published = 0, rejected = 0;
     std::uint32_t last_rejection = 0;
+    // Outstanding callbacks at the latest Present entry. These counts never
+    // establish that an old callback is safe to discard.
+    std::uint32_t present_pending_probes = 0, present_pending_light_samples = 0, present_pending_scopes = 0;
+    std::uint32_t present_pending_draws = 0, present_pending_presents = 0, present_pending_resets = 0;
+    std::uint64_t loss_invalidations = 0, oldest_pending_draw_presents = 0;
+    ObservedDrawKind oldest_pending_draw_kind = ObservedDrawKind::Unknown;
+    ThreadRelation oldest_pending_draw_thread = ThreadRelation::Unknown;
+    bool oldest_pending_draw_scoped = false;
+    PresentTimingStats present_timing;
 };
 struct VisualAssets {
     std::shared_ptr<const MeshOverride> bed_override;
@@ -40,7 +52,8 @@ struct VisualAssets {
 class SceneDriver {
 public:
     static std::unique_ptr<SceneDriver> Create(LoadedCatalog catalog, FrameProvenance provenance,
-                                               std::uint32_t render_pass, std::uint32_t stage) noexcept;
+                                               std::uint32_t render_pass, std::uint32_t stage,
+                                               std::uint64_t present_clock_hz = 0) noexcept;
     ~SceneDriver();
     SceneDriver(const SceneDriver&) = delete;
     SceneDriver& operator=(const SceneDriver&) = delete;
@@ -68,12 +81,14 @@ public:
                         const scene_bridge::SubmissionSample& before,
                         const scene_bridge::ProbeStaticMesh* generic = nullptr) noexcept;
     void EndScope(std::uint64_t ticket, ThreadToken thread, const scene_bridge::SubmissionSample& after) noexcept;
-    DrawStart BeginDraw(ThreadToken thread, std::uint64_t enclosing_scope, const IndexedDraw& draw) noexcept;
+    DrawStart BeginDraw(ThreadToken thread, std::uint64_t enclosing_scope, const IndexedDraw& draw,
+                        ObservedDrawKind kind = ObservedDrawKind::Unknown) noexcept;
     void EndDraw(std::uint64_t ticket, ThreadToken thread, bool succeeded,
                  const DrawObservation& before, const DrawObservation& after) noexcept;
     // When supplied, frame_id receives the window's ID for this very Present,
     // or UINT64_MAX if it could not be attached to a window.
-    std::uint64_t BeginPresent(ThreadToken thread, std::uint64_t* frame_id = nullptr) noexcept;
+    std::uint64_t BeginPresent(ThreadToken thread, std::uint64_t* frame_id = nullptr,
+                               PresentClockSample clock = {}) noexcept;
     WindowResult EndPresent(std::uint64_t ticket, ThreadToken thread, bool succeeded) noexcept;
     std::uint64_t BeginReset(ThreadToken thread) noexcept;
     void EndReset(std::uint64_t ticket, ThreadToken thread, bool succeeded) noexcept;

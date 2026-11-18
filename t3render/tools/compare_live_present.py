@@ -12,6 +12,12 @@ import sys
 
 import trace_summary
 
+# Match the viewer's diagnostic event cap. Only linked frames are retained, so
+# longer runs do not require keeping the entire log and its matrices in memory.
+MAX_VIEWER_EVENTS = 32768
+MAX_VIEWER_BYTES = 64 * 1024 * 1024
+MAX_VIEWER_LINE_BYTES = 1024 * 1024
+
 
 def _fingerprint(stat):
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
@@ -79,6 +85,47 @@ def _viewport_matches(viewer, draw):
     return True
 
 
+def _viewer_frames(viewer_log, session, linked_ids):
+    before = viewer_log.stat()
+    if before.st_size > MAX_VIEWER_BYTES:
+        raise ValueError("viewer log exceeds the diagnostic limit")
+    starts, count, total, seen, frames = 0, 0, 0, set(), {}
+    with viewer_log.open("rb") as stream:
+        opened = os.fstat(stream.fileno())
+        while True:
+            raw = stream.readline(MAX_VIEWER_LINE_BYTES + 1)
+            if not raw:
+                break
+            count += 1
+            total += len(raw)
+            if (count > MAX_VIEWER_EVENTS or total > MAX_VIEWER_BYTES or len(raw) > MAX_VIEWER_LINE_BYTES or
+                    not raw.endswith(b"\n")):
+                raise ValueError("viewer log is incomplete or exceeds the diagnostic limit")
+            record = json.loads(raw, object_pairs_hook=trace_summary._object,
+                                parse_constant=trace_summary._constant)
+            if not isinstance(record, dict):
+                raise ValueError("invalid viewer event")
+            if record.get("event") == "viewer_started":
+                starts += 1
+                if record.get("session_id") != session:
+                    raise ValueError("trace and viewer session identities differ or are ambiguous")
+            elif record.get("event") == "frame":
+                frame_id = record.get("frame")
+                if not trace_summary._uint(frame_id, 64) or frame_id in seen:
+                    raise ValueError("invalid or duplicate viewer frame")
+                seen.add(frame_id)
+                if frame_id in linked_ids:
+                    frames[frame_id] = record
+        finished = os.fstat(stream.fileno())
+    if len({_fingerprint(s) for s in (before, opened, finished, viewer_log.stat())}) != 1:
+        raise ValueError("viewer log changed while reading")
+    if not count:
+        raise ValueError("viewer log is empty")
+    if starts != 1:
+        raise ValueError("trace and viewer session identities differ or are ambiguous")
+    return frames
+
+
 def compare(trace, viewer_log):
     trace, viewer_log = Path(trace), Path(viewer_log)
     before = trace.stat()
@@ -105,43 +152,17 @@ def compare(trace, viewer_log):
     if len({_fingerprint(s) for s in (before, opened, finished, trace.stat())}) != 1:
         raise ValueError("trace changed while reading")
 
-    log_before = viewer_log.stat()
-    if log_before.st_size > 8 * 1024 * 1024:
-        raise ValueError("viewer log exceeds the diagnostic limit")
-    with viewer_log.open("rb") as stream:
-        log_opened = os.fstat(stream.fileno())
-        raw_log = stream.read(8 * 1024 * 1024 + 1)
-        log_finished = os.fstat(stream.fileno())
-    if len({_fingerprint(s) for s in (log_before, log_opened, log_finished, viewer_log.stat())}) != 1:
-        raise ValueError("viewer log changed while reading")
-    lines = raw_log.splitlines()
-    if not lines or len(lines) > 4096 or not raw_log.endswith(b"\n"):
-        raise ValueError("viewer log is empty, incomplete or too long")
-    records = [json.loads(line, object_pairs_hook=trace_summary._object,
-                          parse_constant=trace_summary._constant) for line in lines]
-    if any(not isinstance(record, dict) for record in records):
-        raise ValueError("invalid viewer event")
-    starts = [record for record in records if record.get("event") == "viewer_started"]
-    if len(starts) != 1 or starts[0].get("session_id") != session:
-        raise ValueError("trace and viewer session identities differ or are ambiguous")
-    frames = {}
-    for record in records:
-        if record.get("event") != "frame":
-            continue
-        frame_id = record.get("frame")
-        if not trace_summary._uint(frame_id, 64) or frame_id in frames:
-            raise ValueError("invalid or duplicate viewer frame")
-        frames[frame_id] = record
-
     linked_ids = [f["scene_live_frame"] for f in summary["frames"] if "scene_live_frame" in f]
     if len(set(linked_ids)) != len(linked_ids):
         raise ValueError("ambiguous live Present link")
+    frames = _viewer_frames(viewer_log, session, set(linked_ids))
     matches = []
     for frame in summary["frames"]:
         live_id = frame.get("scene_live_frame")
         displayed = frames.get(live_id)
         window = bridge.get(frame["frame"], {})
         if (live_id is None or displayed is None or displayed.get("source") != "live_process" or
+                displayed.get("session_id") != session or
                 type(displayed.get("render_pass")) is not int or displayed["render_pass"] != 0 or
                 type(displayed.get("stage")) is not int or displayed["stage"] != 1 or
                 window.get("status") != "synchronized"):

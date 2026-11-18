@@ -97,7 +97,7 @@ bool BuildFlatFrame(const Snapshot& snapshot, scene::Frame& output) {
 }
 
 bool BuildResidentFlatFrame(const Snapshot& snapshot, ResidentFlatFrame& output, const MeshOverride* bed_override,
-                            bool bedroom_materials) {
+                            bool bedroom_materials, bool bedroom_wall_relief) {
     const auto& camera=snapshot.camera;
     if (!snapshot.map_epoch || !snapshot.device_epoch || !snapshot.continuity || snapshot.conventions.length_unit!=LengthUnit::T3Unit ||
         snapshot.conventions.axes!=Axes::T3Xyz || snapshot.conventions.up_axis!=UpAxis::Z ||
@@ -160,6 +160,8 @@ bool BuildResidentFlatFrame(const Snapshot& snapshot, ResidentFlatFrame& output,
     }
     BedroomAnchor anchor;
     const bool have_anchor=bedroom_materials && FindBedroomAnchor(snapshot,anchor);
+    const bool identify_head_wall=have_anchor && bedroom_wall_relief && snapshot.map_sha256==
+        "ed7d475b1efdc713d28b2a978e11fb0f662bdb17c5c2769d77c96e1f74b7ceba";
     for (const auto& block:snapshot.bsp) {
         if (!block.resource) return false;
         for (auto index:block.selection.sections) {
@@ -168,10 +170,11 @@ bool BuildResidentFlatFrame(const Snapshot& snapshot, ResidentFlatFrame& output,
             const auto found=part.material_id ? snapshot.materials.find(*part.material_id) : snapshot.materials.end();
             if (have_anchor && found!=snapshot.materials.end()) {
                 std::vector<BedroomMaterialRun> runs;
-                if (!PartitionBedroomMaterial(anchor,*block.resource,index,found->second.name,runs)) return false;
+                if (!PartitionBedroomMaterial(anchor,*block.resource,index,found->second.name,runs,identify_head_wall)) return false;
                 for (const auto& run:runs) {
                     if (!append(block.resource,kIdentity,index,run.first_index,run.index_count,
                                 run.replacement ? run.replacement : part.material_id)) return false;
+                    if (run.head_wall) frame.draws.back().wall_relief=2;
                     if (run.replacement) ++frame.bedroom_material_runs;
                 }
             } else if (!append(block.resource,kIdentity,index,part.first_index,part.index_count,part.material_id)) return false;

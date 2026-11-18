@@ -42,6 +42,18 @@ Memory Fixture() {
     m.name(0x9000,"Light");m.name(0x9100,"LOADGAME:SouthQuarter1_int1");
     return m;
 }
+ProbeSnapshot CandleFixture(Memory& m) {
+    m=Fixture();m.name(0x9000,"D_384");m.put<std::uint32_t>(0x5020,6u<<16);
+    m.put<std::uint32_t>(0x1050,1);m.put<std::uint32_t>(0x1058,0xa000);
+    m.put<std::uint32_t>(0xa000,0xb000);m.put<std::uint32_t>(0xb000,0x10e4e8c0);
+    m.put<std::uint32_t>(0xb044,4);m.put<std::uint32_t>(0xb054,0x5000);m.put<std::uint32_t>(0x50b4,0xb000);
+    for (unsigned i=0;i<16;++i) m.put<std::uint32_t>(0xb004+4*i,i%5==0 ? 0x3f800000 : 0);
+    m.put<std::uint32_t>(0x408c,0x3f800000);
+    ProbeSnapshot snapshot;snapshot.self=0x1000;snapshot.count={1,true};snapshot.array={0xa000,true};
+    snapshot.entries_attempted=1;snapshot.entries[0].list_index=0;snapshot.entries[0].address={0xb000,true};
+    snapshot.entries[0].vtable={0x10e4e8c0,true};snapshot.entries[0].type={4,true};
+    return snapshot;
+}
 int main() {
     Memory m=Fixture();ProbeReader reader{&m,Memory::read};
     auto s=SampleVisibleLightCandidates(reader,0x1000,"SouthQuarter1_int1");
@@ -88,6 +100,53 @@ int main() {
         m=Fixture();m.trigger=0x4058;m.change=changed;m.value=0x12345678;
         s=SampleVisibleLightCandidates(reader,0x1000,"SouthQuarter1_int1");assert(s.stable && !s.count && s.skipped==1);
     }
+    // The candle is followed from the visual list even when it no longer
+    // appears in the separate renderer light list. Neither absence means off.
+    auto candle_snapshot=CandleFixture(m);
+    m.put<std::uint32_t>(0x1074,0);
+    auto candle=SampleBedroomCandleLink(reader,candle_snapshot,"SouthQuarter1_int1");
+    assert(candle.status==CandleLinkStatus::Candidate && candle.factor_8c_bits==0x3f800000 &&
+           candle.transform_available && candle.transform_bits[0]==0x3f800000);
+    m.put<std::uint32_t>(0x408c,0);
+    candle=SampleBedroomCandleLink(reader,candle_snapshot,"SouthQuarter1_int1");
+    assert(candle.status==CandleLinkStatus::Candidate && candle.factor_8c_bits==0);
+    m.put<std::uint32_t>(0x50b8,0);
+    candle=SampleBedroomCandleLink(reader,candle_snapshot,"SouthQuarter1_int1");
+    assert(candle.status==CandleLinkStatus::NoLink && candle.factor_8c_bits==0 &&
+           candle.transform_available && candle.transform_bits[0]==0x3f800000);
+    assert(SampleBedroomCandleLink(reader,candle_snapshot,"other").status==CandleLinkStatus::Unknown);
+    for (const auto changed:{0x408cu,0x5020u,0x50b8u,0xa000u,0x50b4u}) {
+        candle_snapshot=CandleFixture(m);m.trigger=0x4058;m.change=changed;m.value=0x12345678;
+        assert(SampleBedroomCandleLink(reader,candle_snapshot,"SouthQuarter1_int1").status==CandleLinkStatus::Unknown);
+    }
+    candle_snapshot=CandleFixture(m);m.trigger=0x4058;m.change=0xb004;m.value=0x12345678;
+    candle=SampleBedroomCandleLink(reader,candle_snapshot,"SouthQuarter1_int1");
+    assert(candle.status==CandleLinkStatus::Candidate && !candle.transform_available);
+    candle_snapshot=CandleFixture(m);m.put<std::uint32_t>(0x50b8,0);
+    m.trigger=0x50b8;m.change=0xb004;m.value=0x12345678;
+    candle=SampleBedroomCandleLink(reader,candle_snapshot,"SouthQuarter1_int1");
+    assert(candle.status==CandleLinkStatus::NoLink && !candle.transform_available);
+    candle_snapshot=CandleFixture(m);m.put<std::uint32_t>(0x50b8,0);
+    m.trigger=0x50b8;m.occurrence=2;m.change=0x50b8;m.value=0x4000;
+    assert(SampleBedroomCandleLink(reader,candle_snapshot,"SouthQuarter1_int1").status==CandleLinkStatus::Unknown);
+    candle_snapshot=CandleFixture(m);m.put<std::uint32_t>(0xa004,0xb000);m.put<std::uint32_t>(0x1050,2);
+    candle_snapshot.count.value=2;candle_snapshot.entries_attempted=2;
+    candle_snapshot.entries[1]=candle_snapshot.entries[0];candle_snapshot.entries[1].list_index=1;
+    assert(SampleBedroomCandleLink(reader,candle_snapshot,"SouthQuarter1_int1").status==CandleLinkStatus::Unknown);
+    // Observe the candidate property through the actual actor-link path.
+    candle_snapshot=CandleFixture(m);
+    m.put<std::uint32_t>(0x5000,0x10e40000);m.put<std::uint32_t>(0x501c,0);
+    m.put<std::uint32_t>(0x5028,0xc000);m.put<std::uint16_t>(0xc00e,1);
+    m.put<std::uint64_t>(0x10f7b5d0,(std::uint64_t{4}<<32)|(std::uint64_t{0x85cf}<<16));
+    m.put<std::uint32_t>(0x10f3eda4,0xd000);m.put<std::uint32_t>(0xd008,0xe000);
+    m.put<std::uint32_t>(0xe000+0x5cf*4,0x11000);m.put<std::uint32_t>(0x11000,0x10e4e7e0);
+    m.put<std::uint32_t>(0x10e4e7e0+0xb0,0x10aed570);m.put<std::uint32_t>(0x10e4e7e0+0xb4,0x10aecb20);
+    m.put<std::uint32_t>(0x11034,1);m.put<std::uint32_t>(0x11038,4);m.put<std::uint32_t>(0x11060,4);
+    candle=SampleBedroomCandleLink(reader,candle_snapshot,"SouthQuarter1_int1");
+    assert(candle.enabled.status==CandleEnabledStatus::On && !candle.enabled.inherited);
+    m.put<std::uint32_t>(0x10f7b5d4,0);
+    candle=SampleBedroomCandleLink(reader,candle_snapshot,"SouthQuarter1_int1");
+    assert(candle.enabled.status==CandleEnabledStatus::Off && !candle.enabled.inherited);
     // Exercise the raw collection through conversion and the actual Present
     // window; synthetic values remain candidates and cannot enable lighting.
     using namespace t3render::live;

@@ -3,15 +3,18 @@
 
 This is an experimental observation of one proxy configuration. It cannot
 verify the map or camera, compare vanilla pixels, or replay the room. The
-optional termination affects only a single matching TDS process, never Steam.
+optional termination targets one matching TDS process. Closing an isolated
+prefix also stops its private Steam and Wine processes.
 """
 
 import argparse
 import hashlib
 import json
 import math
+import ntpath
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -19,11 +22,17 @@ import time
 
 import analyze_tds_capture
 from run_synthetic_up_replay import RunError, check_pe32
-from run_winepath_proxy_probe import loaded_d3d8
+from run_winepath_proxy_probe import LOAD_LINE, loaded_d3d8
+from tds_save_sandbox import IsolatedSavePrefix, SandboxError
 
 
 class BatchError(RuntimeError):
     pass
+
+
+# The launcher used this URL when the confirmed bedroom save was loaded.
+# It refers to the game's Current Save, which must be prepared separately.
+BEDROOM_SAVE_URL = "SouthQuarter1_int1.gmp?-LoadSave?-ObjectFilter=1"
 
 
 def digest(path):
@@ -41,6 +50,40 @@ def game_pids():
         if len(fields) == 2 and fields[1].casefold().endswith("\\system\\t3main.exe"):
             result.append(int(fields[0]))
     return result
+
+
+def wine_or_steam_pids():
+    try:
+        listing = subprocess.check_output(["ps", "-A", "-o", "pid=,comm="], text=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise BatchError(f"cannot verify Wine processes: {exc}") from exc
+    result = []
+    for line in listing.splitlines():
+        fields = line.strip().split(None, 1)
+        if len(fields) != 2:
+            continue
+        name = fields[1].casefold().replace("\\", "/")
+        if name.endswith("/wineserver") or name.endswith("/steam.exe"):
+            result.append(int(fields[0]))
+    return result
+
+
+def readonly_save_profile(system):
+    saves = system.parent / "save" / "SaveGames"
+    if saves.is_symlink() or not saves.is_dir():
+        raise BatchError("read-only save guard requires the existing real SaveGames directory")
+    saves = saves.resolve(strict=True)
+    # The profile is passed as one argument, not interpreted by a shell.
+    path = json.dumps(str(saves), ensure_ascii=False)
+    return f"(version 1)(allow default)(deny file-write* (subpath {path}))"
+
+
+def readonly_save_command(command, profile, env):
+    # macOS strips DYLD_* while launching the protected sandbox-exec binary.
+    # Restore the renderer search paths inside the sandbox, before Wine starts.
+    paths = [f"{name}={env[name]}" for name in
+             ("DYLD_FALLBACK_LIBRARY_PATH", "DYLD_FALLBACK_FRAMEWORK_PATH")]
+    return ["/usr/bin/sandbox-exec", "-p", profile, "/usr/bin/env", *paths, *command]
 
 
 def windows_path(path):
@@ -138,7 +181,8 @@ def validate_paths(engine, bottle, system, proxy, output):
 
 
 def env_for(engine, bottle, output, frames, scene_bridge=False, submission_scope=False, live_catalog=None,
-            live_only=False, live_static_meshes=False, live_lights=False):
+            live_only=False, live_static_meshes=False, live_lights=False, gpu_metrics=False, preview_pbr=False,
+            preview_candle=False, candle_link_diagnostics=False, wall_displacement=False, preview_gi=False):
     capture = {"T3RENDER_CAPTURE_PATH": windows_path(output / "bedroom.jsonl"),
                "T3RENDER_CAPTURE_TRIGGER_PATH": windows_path(output / "capture.ready"),
                "T3RENDER_CAPTURE_FRAMES": str(frames), "T3RENDER_CAPTURE_BUFFERS": "1",
@@ -150,7 +194,7 @@ def env_for(engine, bottle, output, frames, scene_bridge=False, submission_scope
     if live_only:
         if live_catalog is None:
             raise BatchError("live-only mode requires an offline catalog")
-        capture = {"T3RENDER_EXPERIMENTAL_COMBINED": "1"}
+        capture = {"T3RENDER_EXPERIMENTAL_COMBINED": "1", "T3RENDER_SCENE_LIVE_INITIAL_IMAGES": "0"}
     if scene_bridge:
         capture["T3RENDER_SCENE_BRIDGE"] = "1"
     if submission_scope:
@@ -165,12 +209,36 @@ def env_for(engine, bottle, output, frames, scene_bridge=False, submission_scope
                         "T3RENDER_SCENE_LIVE_DIAGNOSTIC_DIR": windows_path(output)})
     if live_static_meshes:
         if live_catalog is None:
-                raise BatchError("static mesh sampling requires an offline v4 or v5 live catalog")
+                raise BatchError("static mesh sampling requires an offline v4, v5 or static-enabled v6 live catalog")
         capture["T3RENDER_SCENE_LIVE_STATIC_MESHES"] = "1"
     if live_lights:
         if live_catalog is None:
             raise BatchError("light candidate sampling requires a live catalog")
         capture["T3RENDER_SCENE_LIVE_LIGHTS"] = "1"
+    if gpu_metrics:
+        if live_catalog is None:
+            raise BatchError("GPU metrics require a live viewer catalog")
+        capture["T3RENDER_SCENE_LIVE_GPU_METRICS"] = "1"
+    if preview_pbr:
+        if live_catalog is None:
+            raise BatchError("PBR preview requires a live viewer catalog")
+        capture["T3RENDER_SCENE_LIVE_PREVIEW_PBR"] = "1"
+    if preview_candle:
+        if live_catalog is None or not live_lights or preview_pbr:
+            raise BatchError("candle preview requires the live light sampler and excludes the headlight preview")
+        capture["T3RENDER_SCENE_LIVE_PREVIEW_CANDLE"] = "1"
+    if candle_link_diagnostics:
+        if live_catalog is None or not live_lights:
+            raise BatchError("candle link diagnostics require the live light sampler")
+        capture["T3RENDER_SCENE_LIVE_CANDLE_LINK"] = "1"
+    if wall_displacement:
+        if live_catalog is None:
+            raise BatchError("wall displacement requires a height-enabled live catalog")
+        capture["T3RENDER_SCENE_LIVE_WALL_DISPLACEMENT"] = "1"
+    if preview_gi:
+        if live_catalog is None:
+            raise BatchError("GI preview requires a height-enabled live catalog")
+        capture["T3RENDER_SCENE_LIVE_PREVIEW_GI"] = "1"
     env = {k: v for k, v in os.environ.items() if not k.startswith("T3RENDER_") and
            k not in ("WINEDLLPATH", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH")}
     frameworks = engine / "frameworks"
@@ -183,15 +251,103 @@ def env_for(engine, bottle, output, frames, scene_bridge=False, submission_scope
     return env, capture
 
 
-def wait_for_one_game(deadline):
+class WineMainThreadCrash:
+    """Watch the session log for an exception on T3Main's loader thread.
+
+    Wine's log identifies threads, not host PIDs. Report only an unambiguous
+    native load of the exact executable followed by an exception on that same
+    thread; exceptions on other threads or from other processes remain unknown.
+    """
+    _thread = re.compile(r"^([0-9a-f]{4,8}):", re.I)
+    _exception = re.compile(r"^wine: Unhandled .+ \(thread ([0-9a-f]{4,8})\), starting debugger", re.I)
+    _chunk_limit = 2 * 1024 * 1024
+    _line_limit = 64 * 1024
+
+    def __init__(self, path, executable):
+        self.path = Path(path)
+        self.executable = ntpath.normcase(executable)
+        self.offset = 0
+        self.pending = b""
+        self.discarding = False
+        self.loads = 0
+        self.thread = None
+
+    def check(self):
+        with self.path.open("rb") as stream:
+            stream.seek(self.offset)
+            chunk = stream.read(self._chunk_limit)
+            self.offset = stream.tell()
+        parts = (self.pending + chunk).split(b"\n")
+        remainder = parts.pop()
+        for raw in parts:
+            if self.discarding:
+                self.discarding = False
+                continue
+            if len(raw) > self._line_limit:
+                continue
+            line = raw.decode("utf-8", errors="replace").rstrip("\r")
+            loader, thread = LOAD_LINE.search(line), self._thread.match(line)
+            if loader and thread and loader.group(2).casefold() == "native":
+                name = ntpath.normcase(loader.group(1).replace("\\\\", "\\"))
+                if name == self.executable:
+                    self.loads += 1
+                    self.thread = thread.group(1).casefold()
+            exception = self._exception.match(line)
+            if exception and self.loads == 1 and exception.group(1).casefold() == self.thread:
+                raise BatchError("Wine reported an unhandled exception on the T3Main loader thread")
+        if self.discarding:
+            self.pending = b""
+        elif len(remainder) > self._line_limit:
+            self.pending = b""
+            self.discarding = True
+        else:
+            self.pending = remainder
+
+
+def wait_for_one_game(deadline, crash_monitor=None):
     while time.monotonic() < deadline:
+        if crash_monitor:
+            crash_monitor.check()
         pids = game_pids()
         if len(pids) > 1:
             raise BatchError("multiple TDS processes detected")
         if pids:
-            return
+            return pids[0]
         time.sleep(0.5)
     raise BatchError("TDS did not start before the timeout")
+
+
+def require_same_game(expected_pid, expected_start):
+    pids = game_pids()
+    if not pids:
+        raise BatchError("TDS exited before the capture")
+    if pids != [expected_pid] or not expected_start or process_start(expected_pid) != expected_start:
+        raise BatchError("TDS process changed while waiting")
+
+
+def wait_for_trigger(deadline, crash_monitor, *, request=None, trigger_time=None):
+    """Allow normal level-load restarts before binding a process at capture."""
+    if (request is None) == (trigger_time is None):
+        raise BatchError("capture needs exactly one trigger mode")
+    missing_since = None
+    while time.monotonic() < deadline:
+        crash_monitor.check()
+        now = time.monotonic()
+        pids = game_pids()
+        if pids:
+            missing_since = None
+        elif missing_since is None:
+            missing_since = now
+        elif now - missing_since >= 30:
+            raise BatchError("TDS exited and no successor appeared within 30 seconds")
+        ready = request.is_file() if request is not None else now >= trigger_time
+        if ready and len(pids) == 1:
+            start = process_start(pids[0])
+            if not start:
+                raise BatchError("cannot verify the TDS process start time")
+            return pids[0], start
+        time.sleep(0.5)
+    raise BatchError("capture trigger or an unambiguous TDS process did not arrive before the timeout")
 
 
 def process_start(pid):
@@ -223,16 +379,50 @@ def loader_verified(log, windows_dll):
 
 def execute(engine, bottle, system, proxy, output, delay, timeout, frames, terminate,
             preflight=False, fixture=None, replay=None, scene_bridge=False, submission_scope=False,
-            live_catalog=None, live_only=False, live_static_meshes=False, live_lights=False):
+            live_catalog=None, live_only=False, live_static_meshes=False, live_lights=False,
+            manual_trigger=False, steam_launch=False, resume_bedroom=False, readonly_saves=False,
+            isolated_saves=False, gpu_metrics=False, preview_pbr=False, preview_candle=False,
+            candle_link_diagnostics=False, wall_displacement=False, preview_gi=False):
     if submission_scope and not scene_bridge:
         raise BatchError("submission scope requires the scene bridge probe")
     if live_only and (live_catalog is None or not terminate):
         raise BatchError("live-only mode requires a catalog and termination after the timed test")
+    if manual_trigger and live_only:
+        raise BatchError("manual capture trigger cannot be used in live-only mode")
+    if resume_bedroom and not steam_launch:
+        raise BatchError("bedroom resume requires Steam launch")
+    if readonly_saves and not steam_launch:
+        raise BatchError("read-only save guard requires Steam launch")
+    if isolated_saves and (not steam_launch or not terminate or readonly_saves):
+        raise BatchError("isolated saves require Steam launch and termination, without the read-only option")
     if live_static_meshes and live_catalog is None:
-        raise BatchError("static mesh sampling requires an offline v4 or v5 live catalog")
+        raise BatchError("static mesh sampling requires an offline v4, v5 or static-enabled v6 live catalog")
     if live_lights and live_catalog is None:
         raise BatchError("light candidate sampling requires a live catalog")
+    if gpu_metrics and live_catalog is None:
+        raise BatchError("GPU metrics require a live viewer catalog")
+    if preview_pbr and live_catalog is None:
+        raise BatchError("PBR preview requires a live viewer catalog")
+    if preview_candle and (live_catalog is None or not live_lights or preview_pbr):
+        raise BatchError("candle preview requires the live light sampler and excludes the headlight preview")
+    if candle_link_diagnostics and (live_catalog is None or not live_lights):
+        raise BatchError("candle link diagnostics require the live light sampler")
+    if wall_displacement and live_catalog is None:
+        raise BatchError("wall displacement requires a height-enabled live catalog")
+    if preview_gi and live_catalog is None:
+        raise BatchError("GI preview requires a height-enabled live catalog")
     engine, bottle, system, proxy, output = validate_paths(engine, bottle, system, proxy, output)
+    steam = bottle / "drive_c/Program Files (x86)/Steam/steam.exe"
+    if steam_launch and (not steam.is_file() or system !=
+                         steam.parent / "steamapps/common/Thief Deadly Shadows/System"):
+        raise BatchError("Steam launch requires the installed Thief Steam System directory")
+    if readonly_saves or isolated_saves:
+        if sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file():
+            raise BatchError("save isolation requires macOS sandbox-exec")
+        if readonly_saves:
+            save_profile = readonly_save_profile(system)
+        if wine_or_steam_pids():
+            raise BatchError("close existing Wine and Steam processes before using save isolation")
     if not math.isfinite(delay) or not math.isfinite(timeout) or delay < 0 or timeout <= delay or frames not in (1, 2, 3):
         raise BatchError("require nonnegative delay, a longer finite timeout and 1–3 frames")
     if (fixture is None) != (replay is None):
@@ -245,10 +435,16 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
                 or not live_catalog.is_file()):
             raise BatchError("live catalog must be an existing absolute local file")
         live_catalog = live_catalog.resolve()
+        if wall_displacement or preview_gi:
+            with live_catalog.open("rb") as stream:
+                if stream.read(8)!=b"T3LCAT06":
+                    raise BatchError("wall displacement and GI preview require a v6 height-enabled live catalog")
         if live_static_meshes:
             with live_catalog.open("rb") as stream:
-                if stream.read(8) not in (b"T3LCAT04", b"T3LCAT05"):
-                    raise BatchError("static mesh sampling requires a v4 or v5 live catalog")
+                magic = stream.read(8)
+                if magic not in (b"T3LCAT04", b"T3LCAT05") and not (
+                        magic == b"T3LCAT06" and stream.read(4) == b"\x01\x00\x00\x00"):
+                    raise BatchError("static mesh sampling requires a v4, v5 or static-enabled v6 live catalog")
     if fixture is not None:
         fixture, replay = Path(fixture), Path(replay)
         if not fixture.is_absolute() or not replay.is_absolute():
@@ -267,16 +463,21 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
     target = system / "d3d8.dll"
     env, capture = env_for(engine, bottle, output, frames, scene_bridge=scene_bridge,
                            submission_scope=submission_scope, live_catalog=live_catalog, live_only=live_only,
-                           live_static_meshes=live_static_meshes, live_lights=live_lights)
+                           live_static_meshes=live_static_meshes, live_lights=live_lights, gpu_metrics=gpu_metrics,
+                           preview_pbr=preview_pbr, preview_candle=preview_candle,
+                           candle_link_diagnostics=candle_link_diagnostics, wall_displacement=wall_displacement,
+                           preview_gi=preview_gi)
     executable = "C:\\" + str((system / "T3Main.exe").relative_to((bottle / "drive_c").resolve())).replace("/", "\\")
     deployment = {"schema": 1, "proxy": str(target), "sha256": digest(proxy),
                   "capture_config": capture, "proxy_installed": False, "temporary_proxy_removed": None}
     (output / "deployment.json").write_text(json.dumps(deployment, indent=2) + "\n", encoding="utf-8")
     installed = False
+    sandbox = None
     launcher = None
     game_seen = False
     trigger_pid = None
     trigger_start = None
+    game_restarted = None
     termination_done = False
     status = "FAILED"
     reason = ""
@@ -308,6 +509,11 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
             highball_preflight = "PASS"
         if game_pids():
             raise BatchError("TDS started during preflight; no proxy was installed")
+        if (readonly_saves or isolated_saves) and wine_or_steam_pids():
+            raise BatchError("Wine or Steam started during preflight; no proxy was installed")
+        if isolated_saves:
+            sandbox = IsolatedSavePrefix.prepare(bottle, system)
+            env = sandbox.environment(env)
         expected, identity = install_proxy(proxy, target, deployment["sha256"])
         installed = True
         deployment["proxy_installed"] = True
@@ -316,36 +522,47 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
         if expected != deployment["sha256"]:
             raise BatchError("proxy changed while it was installed")
         with (output / "wine.log").open("xb") as log:
-            launcher = subprocess.Popen([str(engine / "engine/bin/wine"), r"C:\windows\explorer.exe",
-                                         "/desktop=T3RenderTDS,1280x800", executable], cwd=system, env=env,
+            launch_target = [r"C:\Program Files (x86)\Steam\steam.exe", "-silent", "-applaunch", "6980"] if steam_launch else [executable]
+            if resume_bedroom:
+                launch_target.append(BEDROOM_SAVE_URL)
+            command = [str(engine / "engine/bin/wine"), r"C:\windows\explorer.exe",
+                       "/desktop=T3RenderTDS,1280x800", *launch_target]
+            if readonly_saves:
+                command = readonly_save_command(command, save_profile, env)
+            if sandbox:
+                command = sandbox.command(command, env)
+                # Even a failed launch can have started the private wineserver.
+                sandbox.started = True
+            launcher = subprocess.Popen(command, cwd=system, env=env,
                                         stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         deadline = time.monotonic() + timeout
-        wait_for_one_game(deadline)
+        crash_monitor = WineMainThreadCrash(output / "wine.log", executable)
+        game_pid = wait_for_one_game(deadline, crash_monitor)
         game_seen = True
+        game_start = process_start(game_pid)
+        if not game_start:
+            raise BatchError("cannot verify the TDS process start time")
         trigger_time = time.monotonic() + delay
-        message = (f"TDS avviato: prova live per {delay:g} secondi." if live_only else
+        message = ("TDS avviato: cattura in attesa della richiesta." if manual_trigger else
+                   f"TDS avviato: prova live per {delay:g} secondi." if live_only else
                    f"TDS avviato: cattura automatica tra {delay:g} secondi.")
         print(f"{message} Carica il salvataggio e resta nella bedroom.", flush=True)
-        while time.monotonic() < trigger_time:
-            if time.monotonic() >= deadline:
-                raise BatchError("timeout before the scheduled capture")
-            time.sleep(min(0.5, max(0, trigger_time - time.monotonic())))
-        pids = game_pids()
-        if len(pids) != 1:
-            raise BatchError("TDS is absent or ambiguous at trigger time")
-        trigger_pid = pids[0]
-        trigger_start = process_start(trigger_pid)
-        if not trigger_start:
-            raise BatchError("cannot verify the TDS process start time")
+        trigger_pid, trigger_start = wait_for_trigger(
+            deadline, crash_monitor, request=output / "capture.request" if manual_trigger else None,
+            trigger_time=None if manual_trigger else trigger_time)
+        game_restarted = (trigger_pid, trigger_start) != (game_pid, game_start)
+        crash_monitor.check()
+        require_same_game(trigger_pid, trigger_start)
         if not live_only:
             (output / "capture.ready").touch(exist_ok=False)
             trace = output / "bedroom.jsonl"
             while time.monotonic() < deadline and not complete_trace(trace, frames):
-                if not game_pids():
-                    raise BatchError("TDS exited before the complete capture")
+                crash_monitor.check()
+                require_same_game(trigger_pid, trigger_start)
                 time.sleep(0.5)
             if not complete_trace(trace, frames):
                 raise BatchError("capture did not complete before the timeout")
+            crash_monitor.check()
         if not loader_verified(output / "wine.log", executable.rsplit("\\", 1)[0] + r"\d3d8.dll"):
             raise BatchError("Wine log does not establish that the expected proxy and builtin D3D8 were loaded")
         if not live_only:
@@ -356,21 +573,32 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
         print("Prova live terminata." if live_only else
               f"Cattura completata: {frames} frame. Analisi: {output / 'summary.json'}", flush=True)
         if terminate:
-            terminate_game(time.monotonic() + 10, trigger_pid, trigger_start)
+            # Isolated cleanup stops the private wineserver in finally; it
+            # never signals a globally discovered PID of uncertain ownership.
+            if not sandbox:
+                if game_restarted:
+                    raise BatchError("TDS restarted before capture; automatic termination withheld; close TDS and run cleanup")
+                terminate_game(time.monotonic() + 10, trigger_pid, trigger_start)
             termination_done = True
         else:
             print("Chiudi TDS normalmente per rimuovere il proxy temporaneo.", flush=True)
             while game_pids():
                 time.sleep(1)
-    except (BatchError, OSError, ValueError, subprocess.SubprocessError, KeyboardInterrupt) as exc:
+    except (BatchError, SandboxError, OSError, ValueError, subprocess.SubprocessError, KeyboardInterrupt) as exc:
         reason = str(exc) or type(exc).__name__
     finally:
-        if installed and terminate and not termination_done and trigger_pid is not None and trigger_start:
+        if (installed and terminate and not termination_done and not sandbox and trigger_pid is not None and
+                trigger_start and game_restarted is False):
             try:
                 # On a post-trigger failure, close only the same process that
                 # was identified at the trigger. Never terminate a replacement.
                 terminate_game(time.monotonic() + 10, trigger_pid, trigger_start)
             except (BatchError, OSError) as exc:
+                reason = (reason + "; " if reason else "") + str(exc)
+        if sandbox:
+            try:
+                sandbox.close(engine, env)
+            except (SandboxError, OSError) as exc:
                 reason = (reason + "; " if reason else "") + str(exc)
         if installed:
             try:
@@ -383,6 +611,8 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
             except (BatchError, OSError) as exc:
                 reason = (reason + "; " if reason else "") + str(exc)
             (output / "deployment.json").write_text(json.dumps(deployment, indent=2) + "\n", encoding="utf-8")
+        if reason:
+            status = "FAILED"
         result = {"schema": 1, "status": status, "error": reason or None,
                   "scene_confirmation": "unconfirmed", "frames_requested": 0 if live_only else frames,
                   "scene_bridge_requested": scene_bridge,
@@ -390,12 +620,22 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
                   "live_viewer_requested": live_catalog is not None,
                   "live_static_meshes_requested": live_static_meshes,
                   "live_light_candidates_requested": live_lights,
+                  "gpu_metrics_requested": gpu_metrics,
+                  "preview_pbr_requested": preview_pbr,
+                  "preview_candle_requested": preview_candle,
+                  "candle_link_diagnostics_requested": candle_link_diagnostics,
                   "live_only": live_only,
+                  "manual_trigger": manual_trigger, "steam_launch": steam_launch, "resume_bedroom": resume_bedroom,
+                  "game_restarted_before_capture": game_restarted,
+                  "readonly_saves": readonly_saves, "isolated_saves": isolated_saves,
+                  "sandbox_removed": sandbox.removed if sandbox else None,
+                  "sandbox_retained": str(sandbox.root) if sandbox and not sandbox.removed else None,
+                  "original_saves_unchanged": sandbox.saves_unchanged if sandbox else None,
                   "host_preflight": host_preflight, "highball_preflight": highball_preflight,
                   "proxy_installed": deployment["proxy_installed"],
                   "temporary_proxy_removed": deployment["temporary_proxy_removed"],
                   "limitations": ["Live-only mode produces no D3D8 trace." if live_only else
-                                  "Three consecutive frames use one experimental configuration, not an A/B comparison.",
+                                  f"{frames} frame(s) use one experimental configuration, not an A/B comparison.",
                                   "The trace does not prove the map or camera; confirm them separately.",
                                   "Images, if captured, are pre-Present backbuffers; presentation transformations and concurrent Present calls are not validated.",
                                   "No full room replay or pixel parity is produced."]}
@@ -435,8 +675,19 @@ def main(argv=None):
     run.add_argument("--submission-scope", action="store_true", help="tag draws inside the verified section callsite; requires --scene-bridge")
     run.add_argument("--live-catalog", help="enable the experimental D3D12 viewer with this offline catalog; requires bridge and submission scope")
     run.add_argument("--live-only", action="store_true", help="timed viewer test without the heavy D3D8 trace; requires catalog and termination")
-    run.add_argument("--live-static-meshes", action="store_true", help="enable expensive experimental static mesh sampling; requires a v4 or v5 catalog")
+    run.add_argument("--live-static-meshes", action="store_true", help="enable expensive experimental static mesh sampling; requires a v4, v5 or static-enabled v6 catalog")
     run.add_argument("--live-lights", action="store_true", help="sample candidate visible lights; requires a live catalog")
+    run.add_argument("--gpu-metrics", action="store_true", help="sample optional viewer GPU timing and memory; requires a live catalog")
+    run.add_argument("--preview-pbr", action="store_true", help="use a viewer-only headlight for PBR preview; requires a live catalog")
+    run.add_argument("--preview-candle", action="store_true", help="use the sampled candle candidate with artistic lighting; requires --live-lights")
+    run.add_argument("--candle-link-diagnostics", action="store_true", help="sample the bedroom candle's visual actor link; requires --live-lights")
+    run.add_argument("--wall-displacement", action="store_true", help="use experimental displaced head-wall geometry; requires a v6 catalog")
+    run.add_argument("--preview-gi", action="store_true", help="use experimental screen-space wall-to-bed bounce; requires a v6 catalog")
+    run.add_argument("--manual-trigger", action="store_true", help="wait for output-dir/capture.request before recording")
+    run.add_argument("--steam-launch", action="store_true", help="start the installed Steam game (app 6980) in the virtual desktop")
+    run.add_argument("--resume-bedroom", action="store_true", help="pass the observed bedroom Current Save URL through Steam")
+    run.add_argument("--readonly-saves", action="store_true", help="deny writes to SaveGames in the launched macOS Wine session")
+    run.add_argument("--isolated-saves", action="store_true", help="use a temporary writable save copy and offline guarded Wine prefix")
     run.add_argument("--terminate-after-capture", action="store_true", help="close the one TDS test process after capture")
     run.add_argument("--preflight", action="store_true", help="run the host test suite before launching TDS")
     run.add_argument("--fixture", help="synthetic x86 Highball fixture (requires --dx12-replay)")
@@ -452,8 +703,11 @@ def main(argv=None):
             execute(args.engine, args.bottle, args.system, args.proxy, args.output_dir,
                     args.delay, args.timeout, args.frames, args.terminate_after_capture,
                     args.preflight, args.fixture, args.dx12_replay, args.scene_bridge, args.submission_scope,
-                    args.live_catalog, args.live_only, args.live_static_meshes, args.live_lights)
-    except (BatchError, OSError, ValueError, KeyError) as exc:
+                    args.live_catalog, args.live_only, args.live_static_meshes, args.live_lights,
+                    args.manual_trigger, args.steam_launch, args.resume_bedroom, args.readonly_saves, args.isolated_saves,
+                    args.gpu_metrics, args.preview_pbr, args.preview_candle, args.candle_link_diagnostics, args.wall_displacement,
+                    args.preview_gi)
+    except (BatchError, SandboxError, OSError, ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0

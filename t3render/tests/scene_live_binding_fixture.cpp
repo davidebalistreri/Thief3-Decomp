@@ -551,6 +551,74 @@ bool driver_camera_only() {
     return true;
 }
 
+bool driver_pending_draw_diagnostics() {
+    LoadedCatalog loaded;CHECK(prepared_catalog(loaded));
+    FrameProvenance source;source.origin=FrameOrigin::Synthetic;source.session_id="pending-draw-fixture";
+    auto driver=SceneDriver::Create(std::move(loaded),source,0,1);CHECK(driver);
+    const ThreadToken present_thread{17,123},other{18,456};
+    auto present=[&]() {const auto ticket=driver->BeginPresent(present_thread);CHECK(ticket);
+                        (void)driver->EndPresent(ticket,present_thread,true);return true;};
+    CHECK(present());
+    const auto old=driver->BeginDraw(other,0,{},ObservedDrawKind::Clear);CHECK(old.ticket);
+    CHECK(present());CHECK(present());
+    auto stats=driver->stats();
+    CHECK(stats.present_pending_draws==1 && stats.oldest_pending_draw_kind==ObservedDrawKind::Clear &&
+          stats.oldest_pending_draw_thread==ThreadRelation::Different && !stats.oldest_pending_draw_scoped &&
+          stats.oldest_pending_draw_presents==1 && stats.loss_invalidations==1);
+    for (int i=0;i<1000;++i) {
+        const auto draw=driver->BeginDraw(present_thread,0,{},ObservedDrawKind::Primitive);CHECK(draw.ticket);
+        driver->EndDraw(draw.ticket,present_thread,true,{},{});
+    }
+    stats=driver->stats();CHECK(stats.losses>=1002 && stats.loss_invalidations==1 && !driver->current());
+    driver->EndDraw(old.ticket,other,true,{},{});CHECK(present());
+    stats=driver->stats();CHECK(!stats.present_pending_draws && stats.oldest_pending_draw_kind==ObservedDrawKind::Unknown);
+    const auto local=driver->BeginDraw(present_thread,0,{},ObservedDrawKind::IndexedPrimitive);CHECK(local.ticket);
+    CHECK(present());stats=driver->stats();
+    CHECK(stats.present_pending_draws==1 && stats.oldest_pending_draw_thread==ThreadRelation::Same &&
+          stats.oldest_pending_draw_kind==ObservedDrawKind::IndexedPrimitive && stats.loss_invalidations==2);
+    driver->EndDraw(local.ticket,present_thread,true,{},{});CHECK(present());
+    return true;
+}
+
+bool driver_present_timing() {
+    LoadedCatalog loaded;CHECK(prepared_catalog(loaded));
+    FrameProvenance source;source.origin=FrameOrigin::Synthetic;source.session_id="timing-fixture";
+    auto driver=SceneDriver::Create(std::move(loaded),source,0,1,1000);CHECK(driver);
+    const ThreadToken thread{17,123},other{18,456};
+    auto begin=[&](ThreadToken t,std::uint64_t ticks,bool available=true) {
+        return driver->BeginPresent(t,nullptr,{ticks,available});
+    };
+    auto present=[&](ThreadToken t,std::uint64_t ticks,bool success=true,bool available=true) {
+        const auto ticket=begin(t,ticks,available);if (!ticket) return false;
+        (void)driver->EndPresent(ticket,t,success);return true;
+    };
+    CHECK(present(thread,100) && present(thread,116));
+    CHECK(present(thread,150,false) && present(thread,200) && present(thread,220));
+    const auto first=begin(thread,250),second=begin(thread,260);CHECK(first && second);
+    (void)driver->EndPresent(first,thread,true);(void)driver->EndPresent(second,thread,true);
+    CHECK(present(thread,300));
+    const auto reset=driver->BeginReset(thread);CHECK(reset);driver->EndReset(reset,thread,true);
+    CHECK(present(thread,500) && present(thread,530));
+    driver->MarkLost();CHECK(present(thread,600) && present(other,620));
+    const auto wrong_thread=begin(other,640);CHECK(wrong_thread);
+    (void)driver->EndPresent(wrong_thread,thread,true);
+    CHECK(present(thread,0,true,false));
+    CHECK(present(thread,700) && present(thread,690) && present(thread,710));
+    const auto timing=driver->stats().present_timing;
+    CHECK(timing.clock_hz==1000 && timing.successful==16 && timing.failed==1 && timing.overlaps==1 &&
+          timing.resets==1 && timing.clock_errors==2 && timing.intervals==4 && timing.total_ticks==86 &&
+          timing.max_ticks==30 && timing.histogram[8]==1 && timing.histogram[10]==2 && timing.histogram[12]==1);
+    const auto pending=begin(thread,740);CHECK(pending);
+    const auto overlapping_reset=driver->BeginReset(thread);CHECK(overlapping_reset);
+    const auto during_reset=begin(thread,750);CHECK(during_reset);
+    (void)driver->EndPresent(during_reset,thread,true);(void)driver->EndPresent(pending,thread,true);
+    driver->EndReset(overlapping_reset,thread,true);
+    CHECK(present(thread,780) && present(thread,800));
+    const auto after_reset=driver->stats().present_timing;
+    CHECK(after_reset.resets==2 && after_reset.intervals==5 && after_reset.total_ticks==106);
+    return true;
+}
+
 bool driver_delivery() {
     auto c=catalog();auto memory=std::make_shared<SceneResidency>();CHECK(memory->BeginMap(0,c.map,c.map_sha256));
     const auto epoch=memory->epochs();CHECK(memory->AddMaterial(epoch.map,c.materials.at("mat:stone")));
@@ -657,8 +725,10 @@ bool driver_delivery() {
     CHECK(sample());auto outer=driver->BeginScope(thread,1,0);CHECK(outer && driver->SetScopeSample(outer,thread,bed));
     auto inner=driver->BeginScope(thread,1,0);CHECK(inner);CHECK(!driver->SetScopeSample(inner,thread,bsp));
     CHECK(present()==WindowResult::Rejected && !driver->current());
+    CHECK(driver->stats().present_pending_scopes==2 && !driver->stats().present_pending_draws);
     driver->EndScope(inner,thread,bsp);driver->EndScope(outer,thread,bed);
-    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bsp,state));CHECK(present()==WindowResult::Published);
+    CHECK(present()==WindowResult::Primed && !driver->stats().present_pending_scopes);
+    CHECK(sample());CHECK(submit(bsp,state));CHECK(present()==WindowResult::Published);
     // A Present during process-memory sampling must not publish a stale frame.
     CHECK(sample());auto sampling=driver->BeginScope(thread,1,0);CHECK(sampling);
     CHECK(present()==WindowResult::Rejected && !driver->current());
@@ -679,6 +749,7 @@ bool driver_delivery() {
     CHECK(sample());CHECK(submit(bsp,state));CHECK(present()==WindowResult::Published);
     CHECK(sample());light_ticket=driver->BeginLightSample(thread);CHECK(light_ticket);
     CHECK(present()==WindowResult::Rejected && !driver->current());
+    CHECK(driver->stats().present_pending_light_samples==1);
     CHECK(!driver->EndLightSample(light_ticket,thread,true,LightCoverage::Partial,{light}));
     CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(bsp,state));CHECK(present()==WindowResult::Published);
     CHECK(sample());light_ticket=driver->BeginLightSample(thread);CHECK(light_ticket);
@@ -830,7 +901,7 @@ bool driver_gpu_pipeline() {
 #endif
 } // namespace
 int main() {
-    if(!matching() || !static_mesh_matching() || !static_mesh_driver_lifecycle() || !delivery() || !driver_map_transition() || !driver_without_bed() || !driver_camera_only() || !driver_delivery())return 1;
+    if(!matching() || !static_mesh_matching() || !static_mesh_driver_lifecycle() || !delivery() || !driver_map_transition() || !driver_without_bed() || !driver_camera_only() || !driver_pending_draw_diagnostics() || !driver_present_timing() || !driver_delivery())return 1;
 #ifdef T3RENDER_TEST_LIVE_DX12_DRIVER
     if (!driver_gpu_pipeline()) return 1;
 #endif

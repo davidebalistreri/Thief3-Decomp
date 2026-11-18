@@ -30,7 +30,26 @@ its style received `ERROR_ACCESS_DENIED` and left it unchanged. A decorated
 game window remains unverified. Close or restart Steam only when convenient for
 the user.
 
+The user later confirmed that these launches interrupt other work: a Wine
+window stays above other apps and the game may start minimized. The launcher's log
+for the guarded 2026-11-17 run confirms `Full screen mode`, a 1024×768 display
+mode change and an attempt to restore the 1728×1080 mode. This is not evidence
+of why the game starts minimized. Do not assume the virtual desktop prevents
+focus or display-mode changes; avoid starting these interactive tests while the
+user is working. A non-intrusive, decorated game window remains to be tested.
+Its acceptance check must include another app covering the game normally, the
+game remaining visible when brought back, and live rendering continuing for
+30–60 seconds after focus changes. The SDK's `Borderless` setting currently
+sizes the game window to the whole monitor and explicitly brings it forward;
+it is not by itself an implementation of that behavior.
+
 T3SDK also offers `Display.Borderless=1` and `PauseInBackground=0`, but its
 loader is not currently installed in this bottle and compatibility with the
 T3Render proxy on Highball is unverified. Do not assume either option makes the
 game run in the background until a real capture checks it.
+
+A [hidden-window Wine probe](../../build/t3render-diagnostics/M1-sdk-proxy-hook-20261117.md)
+successfully installed SDK-style MinHook detours on the proxy's `CreateDevice`
+and `Reset` methods, created a windowed D3D8 device, reset it, and captured one
+frame. It did not load the actual SDK or scene bridge, activate a window, or
+launch TDS; it does not establish background rendering or live compatibility.

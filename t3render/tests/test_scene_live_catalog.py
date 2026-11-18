@@ -23,7 +23,8 @@ import test_scene_pbr_bed as bed_tests
 
 class TinyTextures:
     def resolve(self, name, kind):
-        pixel = bytes((30, 80, 170, 255)) if kind == "albedo" else bytes((128, 128, 255, 255))
+        pixel = (bytes((30, 80, 170, 255)) if kind == "albedo" else
+                 bytes((85, 85, 85, 255)) if kind == "height" else bytes((128, 128, 255, 255)))
         return {"width": 2, "height": 2, "mips": [pixel * 4, pixel],
                 "source_sha256": hashlib.sha256((name + kind).encode()).hexdigest()}
 
@@ -213,6 +214,26 @@ class LiveCatalogTests(unittest.TestCase):
         data = fixture()
         with self.assertRaisesRegex(ValueError, "unit scale"):
             catalog.export(json.dumps(data).encode(), None, TinyTextures())
+
+    def test_wall_height_round_trips_and_rejects_wrong_dimensions(self):
+        data = static_fixture();data["conventions"]["meters_per_unit"] = .01905
+        raw = json.dumps(data).encode()
+        digest = hashlib.sha256(b"stone_wall_v2height").hexdigest()
+        for static in (False, True):
+            body, manifest = catalog.export(raw, bedroom_materials=TinyTextures(), static_meshes=static, wall_height=True)
+            with self.subTest(static=static):
+                self.assertEqual(body[:8], b"T3LCAT06")
+                result = self.load(body).split()
+                at = result.index("wall_height")
+                self.assertEqual(result[at:at+5], ["wall_height", "2", "2", "85", digest])
+                self.assertEqual(manifest["bedroom_materials"]["wall_height_sha256"], digest)
+                self.assertEqual("static_mesh_candidates" in result, static)
+                changed = bytearray(body[:-32]);offset = changed.find(digest.encode())
+                self.assertGreater(offset, 0)
+                struct.pack_into("<I", changed, offset+64, 4)
+                self.assertEqual(self.load(bytes(changed) + hashlib.sha256(changed).digest()), "rejected")
+        with self.assertRaisesRegex(ValueError, "requires bedroom materials"):
+            catalog.export(raw, wall_height=True)
 
     def test_structurally_invalid_count_and_magic_are_rejected_even_with_new_digest(self):
         data, _ = catalog.export(json.dumps(fixture()).encode())

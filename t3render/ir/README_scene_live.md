@@ -4,9 +4,9 @@
 T3SceneBridge consumer. They are built as `t3render_scene_live` on Win32. An
 experimental opt-in adapter now connects the existing probe and D3D8 facade
 to the window and driver described below. An experimental D3D12 viewer can
-consume its current snapshot in the same process; two TDS attempts initialized
-the viewer but produced no logged viewer frame, and the user reported severe
-lag. A `synchronized` flag alone is an
+consume its current snapshot in the same process. Later TDS captures produced
+partial live frames, including three matched to the same D3D8 Present and
+camera; prolonged synchronized movement is still unverified. A `synchronized` flag alone is an
 assertion supplied by its producer, not proof of a Present window. The existing
 JSON SceneIR schema has not changed.
 
@@ -265,8 +265,8 @@ region heuristic, not proof of room membership or total visibility.
 
 The D3D12 viewer uploads albedo mips once and samples them with UV0 and wrap
 addressing. Sections with missing UVs fall back to material-ID colors. Other
-materials also remain ID colors. With unknown or incomplete lighting this is
-an **unlit** preview. The verified-light path below uses sRGB albedo and linear
+materials also remain ID colors. With unknown or incomplete lighting and no
+explicit preview light this is **unlit**. The verified-light path below uses sRGB albedo and linear
 roughness; its normal map is enabled only in a synthetic fixture, and AO is
 not applied without an indirect-light term. These textures are remaster assets,
 not measurements of the game's materials. Diagnostics report
@@ -274,6 +274,121 @@ not measurements of the game's materials. Diagnostics report
 first two can indicate missing UVs. The separate `T3RENDER_SCENE_LIVE_BEDROOM_MATERIAL_IDS=1`
 flag enables only the partition/ID diagnostic with an older catalog. A v3
 catalog enables the material selection in the viewer automatically.
+
+For the experimental head-wall relief, export the bedroom catalog with
+`--wall-height` as well. This creates version 6, retaining the source PNG's
+hash and mip chain separately; old catalogs do not implicitly enable relief.
+It can also be combined with `--static-meshes`. The viewer packs the height
+into the wall AO texture's alpha at upload, preserving AO RGB, and applies
+the generated normal map and 24-layer POM only to the bed-relative wall
+behind the headboard, on the fingerprinted bedroom map. The selection is a
+triangle-centroid and orientation heuristic tied to the same-frame bed anchor.
+`candidate_head_wall_triangles` reports the selected triangles, not proof
+that textured POM was rendered; missing UVs, normals or lighting fall back.
+
+The preview assumes a 5 cm relief depth and derives its tangent basis from
+the draw's UV derivatives. It changes texture sampling, not geometry, depth,
+silhouettes or shadow casters. Steep angles are bounded and can lose relief;
+the normal convention and appearance have not been verified in TDS. The
+[offscreen comparison](../../build/t3render-captures/scene-live-m4-wall-20261118-v6/M4-wall-report.md)
+uses a captured selection with additional synthetic close cameras. No live
+frame rate or GPU duration has been measured for this effect.
+
+`--wall-displacement` in the bedroom runner selects a separate viewer-only
+geometry experiment instead of POM. It tessellates each selected head-wall
+triangle into 576 triangles and offsets the vertices by the same height map,
+up to 5 cm, with a 12 cm fade at the known room edges. It requires the exact
+bedroom map and the captured bed transform; an incompatible or over-budget
+frame retains POM and sets `wall_displacement_failed`. The generated geometry
+casts shadows and is cached by source range and bed transform, without changing
+the game or SceneIR. Vertex normals use the height-field gradient so triangles
+with matching UV mappings agree at their shared edges. Gaps or seams can still
+occur at incompatible UVs or missing geometry; the mesh
+and its performance have not been verified in TDS. Diagnostics expose source
+and displaced triangle counts.
+
+`--preview-gi` opts into a GPU screen-space one-bounce preview on a lit
+viewer path. It gathers only direct diffuse radiance from the selected head
+wall and applies it only to the generated `bed_high` receiver. Four additional
+half-float targets store camera-relative position, geometric normal, direct
+diffuse and albedo; ambient and earlier bounce are not fed back. The gather
+uses 32 samples within 128 pixels and three metres, with two approximate
+blocker checks. Off-screen and occluded geometry, other receivers, multiple
+bounces and temporal history are absent. Noise, light leaks and flicker are
+possible. `preview_gi_enabled` means the pass was enabled for that frame, not
+that a contribution was observed. It requires the v6 wall-height catalog for
+the wall selection. The [offscreen report](../../build/t3render-captures/scene-live-m5-gi-20261118-v4/M5-gi-report.md)
+records the captured-pose comparison and its controls; TDS runtime behavior
+and reliable GPU timings remain unverified.
+
+For an explicitly artificial material preview, opt in with
+`T3RENDER_SCENE_LIVE_PREVIEW_PBR=1` (or `--preview-pbr` in the bedroom runner).
+When verified lighting is unavailable, the viewer uses a neutral point light
+at the current camera position to exercise the existing GGX/HDR path. The
+window title and diagnostic `lighting_mode=preview_headlight` identify this
+mode. It is not a sampled TDS light, does not alter the scene's light evidence,
+does not cast shadows, and must not be used as the candle verification. The
+light follows the camera, so its brightness is not the original game's
+illumination. If verified lighting is available it takes precedence. This
+preview uses albedo and roughness but retains the fixture-only normal-map and
+missing-indirect-light limits described below.
+
+The separate opt-in `--live-lights --preview-candle` uses a same-frame raw
+candidate for the bedroom `D_384__5` position and normalized color, with
+an artistic 1 cd intensity at factor one and a 3 m range. These are not
+measured game values. It casts one bounded shadow using only selected
+geometry; it does not prove that the game light is enabled. It multiplies the artistic intensity by the candidate
+`+0x8c` factor. A missing or stale sample falls back to a dim artistic ambient,
+labelled `preview_candle_unknown`, rather than reusing another frame's light;
+this does not prove the light is disabled. The [live report](../../build/t3render-captures/scene-live-m3-preview-20261117-mac-v1/M3-live-report.md)
+records the earlier preview and the [toggle report](../../build/t3render-captures/scene-live-m3-toggle-20261118-mac-v1/M3-toggle-report.md)
+records the subsequent experiment and offscreen fallback correction.
+
+With `--candle-link-diagnostics` the viewer can also draw the generated
+metal and wax candlestick (4,328 triangles) at the same-frame visual actor
+transform, including when its sampled factor is zero. The untextured materials
+use artistic colors. A stable actor transform can also retain the candlestick
+when the actor has no light link; this does not establish whether the light is
+disabled. It can also draw the generated `CandleFlame` mesh
+(248 triangles) at the same actor transform.
+The light-list and actor-link samples must both match, including `+0x8c`, and
+the factor must be positive. The warm HDR emission is artistic and scaled by
+that factor; the flame does not cast opaque shadows. A small screen-space
+glow gathers only visible emissive HDR pixels before tonemapping. It is
+limited to the projected bounds of emissive draws plus a margin; if the
+bounds cross the camera plane, it conservatively uses the full viewport.
+Fully occluded emission produces no glow; visible glow can spill over foreground
+edges. This is an artistic approximation, not measured TDS bloom; its live
+cost has not been measured.
+No earlier transform or
+light is reused. A zero actor factor without a listed light keeps the dim
+ambient and is labelled `preview_candle_zero_candidate`, not verified off.
+If an actor-link observation conflicts with a listed light, the viewer uses
+the unknown-light fallback instead of rendering the conflicting light value.
+`preview_flame_draws` and `preview_candlestick_draws` count the additional
+draws. The geometry, shader and zero label were checked offscreen; the new
+candlestick, flame and zero label have not been checked in TDS. The live [link report](../../build/t3render-captures/scene-live-m3-candle-link-20261118-mac-v1/M3-link-report.md)
+records the earlier actor-link experiment and synchronized dim fallback. An
+[offscreen reconstruction](../../build/t3render-captures/scene-live-m3-glow-replay-20261118-v1/M3-glow-report.md)
+uses a captured bedroom pose, showing the generated candlestick and flame;
+it also documents its synthetic link sample, artistic calibration and simulated zero state.
+
+The [same captured pose](../../build/t3render-captures/scene-live-m3-crate-analysis-20261118/analysis.md)
+also contains a submission for `D_1224__21` whose observed transform and
+offline candidate mesh project onto the crate underneath the candlestick.
+The generic live sampler only accepts `StaticMeshActor`, so it does not select
+this object. The projection does not establish the crate's runtime asset binding
+or visibility under occlusion; a stored offline pose cannot track gameplay.
+
+The embedded geometry is derived from the generated project asset, not from
+a game binary. To regenerate both headers after changing that asset:
+
+```sh
+python3 -B t3render/tools/export_live_candle_flame.py \
+  build/assets/godot/remaster/garrett_home/highpoly/generated/candlestick_high.glb \
+  t3render/src/scene_live_candle_flame_geometry.hpp \
+  --candlestick-output t3render/src/scene_live_candlestick_geometry.hpp
+```
 
 Host tests compared 16 BSP sections from captured SceneIR frame 2864 with the
 existing offline selector (67 selected triangles). Highball fixtures tested
@@ -325,7 +440,7 @@ Reset, asset handles and old-snapshot rejection. A synthetic Highball fixture
 checks the worker's same-map reload and material-library replacement. The
 runtime adapter does **not** yet detect or forward a TDS map lifecycle event,
 load a replacement catalog, or update its optional light sampler's map context.
-Versions 1–4 require the researched bed and a BSP catalog; version 5 below
+Versions 1–4 and 6 require the researched bed and a BSP catalog; version 5 below
 supports scenes without either, but the different-map runtime fixture remains
 synthetic and does not demonstrate a TDS map transition.
 Consequently this API is not a live map-change implementation or proof of a
@@ -440,10 +555,40 @@ An optional `T3RENDER_SCENE_LIVE_DIAGNOSTIC_DIR` names an existing local
 directory. Each process generates a random live session ID and uses it in the
 `scene-live-<session>.jsonl` filename, so separate TDS processes cannot silently
 share the first process's log. The log records frame IDs, pass/stage, epochs,
-camera matrices and selection counts; at most two PPM images use the same
-session-qualified prefix. These files contain scene-derived information and
+camera matrices, selection and triangle counts, and elapsed milliseconds after
+the viewer's successful Present. Differences between those timestamps measure
+viewer-frame intervals, not GPU time or the original game's frame time. The
+log is bounded to 32,768 records. Up to two initial PPM images use the same
+session-qualified prefix; when the D3D8 capture marker appears, up to eight
+additional viewer frames are read back. A matching frame still has to be
+verified using the shared Present link below. These files contain scene-derived information and
 must remain local. The diagnostic reads back the viewer's D3D12 output, not
 the original game's GPU buffers.
+
+With `T3RENDER_SCENE_LIVE_GPU_METRICS=1` and an open diagnostic log, the viewer
+also requests D3D12 timestamp queries at most every 250 ms. The bedroom runner
+enables this only with `--gpu-metrics`.
+`gpu_frame_ms` measures the viewer command list, including its image copy when
+`gpu_frame_includes_readback` is true, and excludes DXGI Present and the
+game's D3D8 commands. Three consecutive ordered, nonzero timestamp pairs are
+required before reporting a value; a failed map or invalid pair stops sampling
+and reports null. `gpu_timing_status` records availability or warmup. Separate
+single-entry query heaps are used because the tested Highball runtime returned
+zero for the second query in a shared heap. Even with separate heaps, the
+Highball fixture has intermittently returned a zero end timestamp, so a
+synthetic success is not proof that the live measurement is supported.
+`video_memory_usage_bytes` is one DXGI local-segment usage estimate requested
+about two seconds after the first frame; `video_memory_sample_age_ms` records
+its age. It can be unavailable and is not an isolated measure of the viewer.
+`resident_bytes` and `material_gpu_bytes` are the separately accounted geometry
+and material allocations, not total GPU memory. A live run with GPU diagnostics
+and periodic memory queries was much slower than the previous run, although the
+cause was not isolated. The current single-sample version is not yet tested in
+TDS; keep the feature disabled during normal gameplay.
+
+Driver telemetry also records callback counts pending at the most recent
+Present entry. Nonzero counts identify overlap but do not prove that an old
+callback has ended or is safe to discard.
 
 When capture and live output run together, the trace header records the same
 session ID. The combined observer adds `scene_live_frame` to a successfully
@@ -458,12 +603,92 @@ semantic bindings or pixel parity:
 python3 -B t3render/tools/compare_live_present.py /path/to/trace.jsonl /path/to/scene-live-session.jsonl
 ```
 
+The comparator streams up to 32,768 viewer events and 64 MiB, retaining only
+frames linked from the trace. It rejects incomplete or changing logs, duplicate
+frame IDs and a linked frame whose session differs from the trace.
+
 Earlier logs have neither the session identity nor the direct Present link.
 In the second local TDS attempt, the Wine log records multiple T3Main launches
 and the single old viewer log reports zero probes while the trace reports six;
-the files cannot establish whether they came from the same process. The new
-isolation and comparison have synthetic coverage but have not yet been tested
-in TDS.
+the files cannot establish whether they came from the same process. A later
+[real TDS capture](../../build/t3render-captures/scene-live-m1-20261117-001712/M1-report.md)
+matched three consecutive frames. The recorded camera direction changes by
+5.20° and 8.79° between them, and the [image sequence](../../build/t3render-captures/scene-live-m1-20261117-001712/comparison-frames-967-969.png)
+shows the corresponding partial views. This covers only 775 ms between viewer
+Presents; walking and the required 30–60 seconds of synchronized movement
+remain unverified.
+
+A [subsequent BSP texture comparison](../../build/t3render-captures/scene-live-m1-bsp-texture-20261118-v1/M1-bsp-texture-report.md)
+projects candidate wall and floor geometry and textures on the CPU for those
+same poses. On regions whose material color agrees with the flat viewer, the
+unshifted image gradients correlate with D3D8 more strongly than almost all
+tested shifts; a vertically flipped texture is a negative control. This does
+not identify individual BSP blocks or prove GPU texture bindings.
+
+An earlier [live viewer sequence](../../build/t3render-captures/scene-live-m1-20261116-234934/M1-report.md)
+contains 2,290 consecutive frames with the same continuity and epochs over a
+bounded 47.497–49.504 seconds. The camera changes and the bed candidate is
+selected, then absent, then selected and absent again. Its estimated 46.24–48.19
+viewer presentations per second includes instrumentation. That older sequence
+has no same-pose D3D8 comparison, so it does not establish continuous
+synchronization, actual bed visibility, or that the player remained in the
+bedroom while walking. Its recorded camera crosses an opening in the offline
+BSP geometry after 22.2–24.2 seconds and continues into the adjacent area;
+the offline geometry does not prove the corresponding runtime player path.
+In that sequence the candidate bed is absent from 2,034 viewer frames: its
+offline bounding box is outside the camera frustum in 1,983, while offline BSP
+intersects every in-frustum bed-vertex ray in the other 51. This is consistent
+with possible occlusion, not a verification of runtime visibility or pixels.
+
+In a later [isolated-save manual load](../../build/t3render-captures/scene-live-manual-20261117-mac/M1-report.md),
+the user reached the bedroom but the viewer published no frames: one draw was
+still pending at every sampled Present and the driver remained in
+`WindowNeedsRebind`. The user reported severe stutter; an instrumented D3D8
+interval measured approximately 18.4 FPS. Repeated losses now invalidate an
+already-retired window only once, while still clearing driver state and
+tracking outstanding callbacks. Telemetry records the oldest pending draw's
+kind, thread relation and age in Presents; this does not establish that an
+old callback may be discarded. The optimization and the callback's cause
+remain unverified when that condition recurs.
+
+In the [next isolated live run](../../build/t3render-captures/scene-live-manual-20261117-mac-v2/M1-report.md),
+943 consecutive viewer frames covered 47.112 seconds of requested movement in
+the bedroom, with no recorded losses in that interval. D3D8 Present cadence
+was approximately 20.1 FPS with the proxy and viewer active. The session then
+had two device resets, with viewer-frame gaps of 12.057 and 5.756 seconds; the
+user had switched apps, but the cause is unproven. Three later frames matched
+the D3D8 Present and camera, including a [same-pose comparison](../../build/t3render-captures/scene-live-manual-20261117-mac-v2/confronto-frame-3001.png).
+The viewer was mostly covered, and continuous D3D8 agreement remains unverified.
+
+In the [subsequent M1 capture](../../build/t3render-captures/scene-live-m1-translation-20261118-v1/M1-translation-report.md),
+five consecutive viewer images show the candidate bed changing as the recorded
+camera translates 31.01 T3 units without rotating over 159 ms. Their bed-color
+masks overlap a CPU projection by 99.93–99.95% IoU, assuming the captured bed
+transform remains fixed. Only the first image is paired with D3D8; this does
+not establish continuous synchronization or BSP correspondence.
+
+In the later M1 capture, a [separate projected-bed check](../../build/t3render-captures/scene-live-m1-bed-projection-20261118-v1/M1-bed-projection-report.md)
+covered 48,186 of the 48,209 viewer pixels classified as bed in synchronized
+frame 2730. It uses the same candidate offline mesh and captured camera, with
+no independent depth or runtime asset proof; it does not establish continuous
+agreement during movement.
+
+Offline analysis of that capture's frame 967 matched 28 additional submitted
+actors to offline mesh candidates. Twenty are `StaticMeshActor` entries also
+present in the generated v4 catalog; the remaining eight use other classes and
+are not covered by the current generic live sampler. A local offscreen D3D12
+comparison renders the same captured camera with the bed and nine BSP blocks
+(450 triangles), then adds those 20 candidates (2,401 triangles) or all 28
+(3,447 triangles). The additional actor transforms and scoped submissions were
+observed, but their resource bindings and geometry remain offline candidates.
+The previews use a different diagnostic renderer from the live viewer, with
+its own culling and flat palette; they do not prove live visibility, frame
+rate, or visual parity. The [local comparison](../../build/t3render-offline/m1-frame-967-confronto.png)
+and its scene/packet manifests stay under `build/`. The separately generated
+v4 catalog `SouthQuarter1_int1-m1-static.livecatalog` contains no bed or
+material overrides; its opt-in sampler and potential performance cost still
+require a coordinated game test. The [offline report](../../build/t3render-offline/M1-offline-frame-967.md)
+also records the bounded analysis of the later load crash.
 
 For non-capture frames, the live probe avoids scanning every UObject by name;
 other passes use a minimal sample. The stronger full probe is still used when
@@ -512,8 +737,9 @@ interval. Repeated samples in the same window must agree. Stability, coverage
 and field evidence are still claims supplied by the adapter, not facts the
 collector can independently verify. The opt-in `T3RENDER_SCENE_LIVE_LIGHTS=1`
 adapter can sample candidate actors from the selected renderer list after the
-probe; it publishes only `Partial` coverage and candidate positions. It is
-unverified in TDS. Without opt-in or when the sample is unavailable, live
+probe; it publishes only `Partial` coverage and candidate positions. A
+[bedroom run](README_scene_light_probe.md) exercised it in TDS without
+establishing the physical meanings of its raw fields. Without opt-in or when the sample is unavailable, live
 snapshots retain `Unknown` coverage. The bounded list, identity limitations
 and static evidence are described in [the light probe](README_scene_light_probe.md).
 

@@ -138,6 +138,23 @@ def _material_library(textures):
     return body, manifest
 
 
+def _wall_height(textures):
+    value = textures.resolve("stone_wall_v2", "height")
+    ao = textures.resolve("stone_wall_v2", "ao")
+    width, height, mips, digest = value["width"], value["height"], value["mips"], value["source_sha256"]
+    if (type(width) is not int or width != height or width != ao["width"] or width != ao["height"] or
+            not 1 <= width <= 1024 or width & (width-1) or len(mips) != width.bit_length() or
+            not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)):
+        raise ValueError("invalid bedroom wall height metadata")
+    body = bytearray(_text(digest) + struct.pack("<3I", width, height, len(mips)))
+    for level, mip in enumerate(mips):
+        size = max(1, width >> level)
+        if not isinstance(mip, bytes) or len(mip) != size*size*4:
+            raise ValueError("invalid bedroom wall height mip")
+        body += mip
+    return body, digest
+
+
 def _static_mesh_candidates(scene, bed, materials):
     """Collect eligible offline actors without copying their transforms."""
     map_name = scene.source.map
@@ -252,7 +269,7 @@ def _generic_map_catalog(scene, raw):
     return data, manifest
 
 
-def export(raw, bed_high=None, bedroom_materials=None, static_meshes=False, general_map=False):
+def export(raw, bed_high=None, bedroom_materials=None, static_meshes=False, general_map=False, wall_height=False):
     if not isinstance(raw, bytes) or not raw or len(raw) > preview.MAX_INPUT:
         raise ValueError("offline SceneIR input is empty or too large")
     scene = SceneSnapshot.from_json(raw)
@@ -267,9 +284,11 @@ def export(raw, bed_high=None, bedroom_materials=None, static_meshes=False, gene
     if ":" in map_name or not map_sha:
         raise ValueError("catalog requires a qualified map fingerprint")
     if general_map:
-        if bed_high is not None or bedroom_materials is not None:
+        if bed_high is not None or bedroom_materials is not None or wall_height:
             raise ValueError('general-map catalogs cannot include bedroom-specific overrides')
         return _generic_map_catalog(scene, raw)
+    if type(wall_height) is not bool or (wall_height and bedroom_materials is None):
+        raise ValueError("wall height requires bedroom materials")
     if bedroom_materials is not None and (map_name != material_overrides.MAP or
             conventions.meters_per_unit is None or
             not math.isclose(conventions.meters_per_unit, material_overrides.SCALE, rel_tol=0, abs_tol=1e-9)):
@@ -325,7 +344,9 @@ def export(raw, bed_high=None, bedroom_materials=None, static_meshes=False, gene
               enum(c.winding, ("unknown", "normal_aligned", "normal_opposed")),
               enum(c.uv_origin, ("unknown", "top_left", "bottom_left")),
               enum(c.clip_depth, ("unknown", "zero_to_one")))
-    body = bytearray(b"T3LCAT04" if static_meshes else b"T3LCAT03" if bedroom_materials is not None else b"T3LCAT02" if replacement else b"T3LCAT01")
+    body = bytearray(b"T3LCAT06" if wall_height else b"T3LCAT04" if static_meshes else b"T3LCAT03" if bedroom_materials is not None else b"T3LCAT02" if replacement else b"T3LCAT01")
+    if wall_height:
+        body += _u32(int(static_meshes))
     for value in (map_name, map_sha, hashlib.sha256(raw).hexdigest(), actor_id):
         body += _text(value)
     body += struct.pack("<4I", *values)
@@ -345,7 +366,7 @@ def export(raw, bed_high=None, bedroom_materials=None, static_meshes=False, gene
         body += _resource(block.id, f"BSP {block.source_index}", map_sha, block.geometry)
     if static_meshes or bedroom_materials is not None:
         body += _u32(int(replacement is not None))
-    if static_meshes:
+    if static_meshes or wall_height:
         body += _u32(int(bedroom_materials is not None))
     if replacement:
         identifier, digest, geometry = replacement
@@ -353,6 +374,10 @@ def export(raw, bed_high=None, bedroom_materials=None, static_meshes=False, gene
     material_sources = None
     if bedroom_materials is not None:
         packed, material_sources = _material_library(bedroom_materials)
+        body += packed
+    height_source = None
+    if wall_height:
+        packed, height_source = _wall_height(bedroom_materials)
         body += packed
     if static_meshes:
         fingerprints = sorted(value for value in {source.fingerprints.get('bundle'), source.fingerprints.get('kernel')} if value)
@@ -370,7 +395,7 @@ def export(raw, bed_high=None, bedroom_materials=None, static_meshes=False, gene
     if len(body) + 32 > MAX_BYTES:
         raise ValueError("catalog exceeds 64 MiB")
     data = bytes(body) + hashlib.sha256(body).digest()
-    manifest = {"schema": "t3.scene.live-catalog", "version": 4 if static_meshes else 3 if bedroom_materials is not None else 2 if replacement else 1, "source": "offline",
+    manifest = {"schema": "t3.scene.live-catalog", "version": 6 if wall_height else 4 if static_meshes else 3 if bedroom_materials is not None else 2 if replacement else 1, "source": "offline",
                 "offline_scene_sha256": hashlib.sha256(raw).hexdigest(), "catalog_sha256": hashlib.sha256(data).hexdigest(),
                 "map": map_name, "map_sha256": map_sha, "bed_resource_id": bed.id, "bed_actor_id": actor_id,
                 "bsp_blocks": len(scene.bsp_blocks), "materials": len(materials) + len(extra_materials),
@@ -385,6 +410,8 @@ def export(raw, bed_high=None, bedroom_materials=None, static_meshes=False, gene
     if material_sources is not None:
         manifest["bedroom_materials"] = {"sources_sha256": material_sources,
                                          "scope": "viewer_only_when_same_frame_bed_anchor_is_selected"}
+        if height_source:
+            manifest["bedroom_materials"]["wall_height_sha256"] = height_source
         manifest["limitations"].append("Materials are offline visual assets; the flat viewer does not infer runtime lighting.")
     if static_meshes:
         manifest["static_mesh_candidates"] = {"actors": len(mesh_actors), "extra_resources": len(mesh_resources),
@@ -401,6 +428,7 @@ def main(argv=None):
     parser.add_argument("--bed-high", type=Path, help="optional generated Godot bed GLB for the live viewer")
     parser.add_argument("--bedroom-materials", type=Path, help="optional generated Godot material directory")
     parser.add_argument("--bedroom-texture-size", type=int, default=512, help="power-of-two material texture size, up to 1024")
+    parser.add_argument("--wall-height", action="store_true", help="include the bedroom head-wall height map for the POM preview")
     parser.add_argument("--static-meshes", action="store_true", help="include bounded offline static mesh actor candidates")
     parser.add_argument("--general-map", action="store_true", help="export BSP and static mesh candidates without a bedroom bed")
     args = parser.parse_args(argv)
@@ -409,7 +437,7 @@ def main(argv=None):
         high = preview.read_limited(args.bed_high, generated_bed.generated.MAX_GLB_BYTES) if args.bed_high else None
         textures = (material_overrides.GodotTextures(args.bedroom_materials, args.bedroom_texture_size, True)
                     if args.bedroom_materials else None)
-        body, manifest = export(raw, high, textures, args.static_meshes, args.general_map)
+        body, manifest = export(raw, high, textures, args.static_meshes, args.general_map, args.wall_height)
         packet.write_pair(args.output, body, manifest)
     except (OSError, ValueError, UnicodeError) as exc:
         parser.exit(2, f"{exc}\n")

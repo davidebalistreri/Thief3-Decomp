@@ -268,7 +268,7 @@ public:
             Unsupported(); SetLastError(before); return native_->Clear(count, rectangles, flags, color, depth, stencil);
         }
 #ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
-        DrawCall clear_call{};const auto live_draw=live::RuntimeDrawBegin(native_,clear_call);
+        DrawCall clear_call{};const auto live_draw=live::RuntimeDrawBegin(native_,clear_call,true);
 #endif
         std::uint64_t operation;
         { WriterScope scope; operation = CaptureClear(native_, count, rectangles, flags, color, depth, stencil); }

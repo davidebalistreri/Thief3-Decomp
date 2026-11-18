@@ -14,6 +14,7 @@ struct BedroomAnchor {
 struct BedroomMaterialRun {
     std::uint32_t first_index = 0, index_count = 0;
     std::optional<std::string> replacement;
+    bool head_wall = false;
 };
 // Offline visual assets kept outside semantic residency. Channel order is
 // albedo (sRGB), tangent normal, roughness, ambient occlusion (linear).
@@ -24,6 +25,8 @@ struct BedroomMaterial {
 };
 struct BedroomMaterialLibrary {
     std::array<BedroomMaterial,2> materials;
+    std::optional<scene::Texture> wall_height;
+    std::string wall_height_source_sha256;
 };
 
 bool FindBedroomAnchor(const Snapshot& snapshot, BedroomAnchor& output);
@@ -31,6 +34,6 @@ bool FindBedroomAnchor(const Snapshot& snapshot, BedroomAnchor& output);
 // are semantic asset names, not draw numbers or runtime object addresses.
 bool PartitionBedroomMaterial(const BedroomAnchor& anchor, const Resource& bsp,
                               std::uint32_t section, const std::string& material_name,
-                              std::vector<BedroomMaterialRun>& output);
+                              std::vector<BedroomMaterialRun>& output, bool identify_head_wall = false);
 
 } // namespace t3render::live

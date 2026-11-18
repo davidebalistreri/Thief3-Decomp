@@ -25,7 +25,7 @@ class LivePresentComparisonTests(unittest.TestCase):
         self.events[-2]["scene_live_frame"] = 88
         matrix = self.events[3]["transforms"]["view"]
         self.records = [{"event": "viewer_started", "session_id": self.session},
-                        {"event": "frame", "source": "live_process", "frame": 88,
+                        {"event": "frame", "source": "live_process", "session_id": self.session, "frame": 88,
                          "render_pass": 0, "stage": 1, "view": matrix, "projection": matrix,
                          "viewport": {"x": 0, "y": 0, "width": 640, "height": 480,
                                       "min_depth": 0, "max_depth": 1}}]
@@ -53,7 +53,7 @@ class LivePresentComparisonTests(unittest.TestCase):
             self.compare()
 
     def test_camera_pass_and_synchronization_are_required(self):
-        for variant in ("camera", "viewport", "failed_draw", "pass", "stage", "boolean_pass", "unsynchronized", "source"):
+        for variant in ("camera", "viewport", "failed_draw", "pass", "stage", "boolean_pass", "unsynchronized", "source", "frame_session"):
             with self.subTest(variant=variant):
                 original_events, original_records = copy.deepcopy(self.events), copy.deepcopy(self.records)
                 if variant == "camera":
@@ -70,6 +70,8 @@ class LivePresentComparisonTests(unittest.TestCase):
                     self.records[1]["render_pass"] = False
                 elif variant == "source":
                     self.records[1]["source"] = "synthetic"
+                elif variant == "frame_session":
+                    self.records[1]["session_id"] = "live:" + "b" * 32
                 else:
                     self.events[5]["status"] = "unknown"
                 self.assertEqual(self.compare()["status"], "no_verified_match")
@@ -79,6 +81,23 @@ class LivePresentComparisonTests(unittest.TestCase):
         self.records.append(copy.deepcopy(self.records[1]))
         with self.assertRaisesRegex(ValueError, "duplicate viewer frame"):
             self.compare()
+
+    def test_long_viewer_log_keeps_late_linked_frame(self):
+        start, linked = self.records
+        other = {"event": "frame", "source": "live_process", "session_id": self.session,
+                 "padding": "x" * 2100}
+        self.records = [start] + [dict(other, frame=10000 + n) for n in range(4100)] + [linked]
+        result = self.compare()
+        self.assertGreater(self.viewer.stat().st_size, 8 * 1024 * 1024)
+        self.assertEqual(result["status"], "matched_present_and_camera")
+        self.assertEqual(result["matches"][0]["live_frame"], 88)
+
+    def test_incomplete_viewer_log_is_rejected(self):
+        self.compare()
+        with self.viewer.open("ab") as stream:
+            stream.write(b'{"event":')
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            compare_live_present.compare(self.trace, self.viewer)
 
 
 if __name__ == "__main__":

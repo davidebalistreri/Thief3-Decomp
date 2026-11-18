@@ -24,6 +24,8 @@ struct RuntimeState {
     bool static_meshes_enabled=false; // written before driver publication
     bool light_candidates_enabled=false;
     bool light_raw_diagnostics_enabled=false;
+    bool candle_link_diagnostics_enabled=false;
+    bool present_clock_enabled=false;
     std::string map, map_sha256; // catalog fingerprint, not a runtime package measurement
     std::atomic<SceneDriver*> driver{nullptr};
     std::atomic<IDirect3DDevice8*> device{nullptr};
@@ -160,13 +162,21 @@ bool RuntimeInitialize() noexcept {
             auto bed_override=catalog.bed_override;
             auto bedroom_materials=catalog.bedroom_materials;
             state.map=catalog.binding.map;state.map_sha256=catalog.binding.map_sha256;
-            auto driver=SceneDriver::Create(std::move(catalog),std::move(source),0,1);
-            if (!driver) return;
-            state.static_meshes_enabled=Environment(L"T3RENDER_SCENE_LIVE_STATIC_MESHES")==L"1";
-            state.light_candidates_enabled=Environment(L"T3RENDER_SCENE_LIVE_LIGHTS")==L"1";
             const bool viewer_enabled=Environment(L"T3RENDER_SCENE_LIVE_DX12")==L"1";
             const auto diagnostic_directory=viewer_enabled ? Environment(L"T3RENDER_SCENE_LIVE_DIAGNOSTIC_DIR") : std::wstring{};
+            LARGE_INTEGER frequency{};
+            const bool clock_ready=!diagnostic_directory.empty() && QueryPerformanceFrequency(&frequency) && frequency.QuadPart>0;
+            auto driver=SceneDriver::Create(std::move(catalog),std::move(source),0,1,
+                                            clock_ready ? static_cast<std::uint64_t>(frequency.QuadPart) : 0);
+            if (!driver) return;
+            state.present_clock_enabled=clock_ready;
+            state.static_meshes_enabled=Environment(L"T3RENDER_SCENE_LIVE_STATIC_MESHES")==L"1";
+            state.light_candidates_enabled=Environment(L"T3RENDER_SCENE_LIVE_LIGHTS")==L"1";
             state.light_raw_diagnostics_enabled=state.light_candidates_enabled && !diagnostic_directory.empty();
+            state.candle_link_diagnostics_enabled=state.light_raw_diagnostics_enabled &&
+                Environment(L"T3RENDER_SCENE_LIVE_CANDLE_LINK")==L"1" &&
+                state.map=="SouthQuarter1_int1" &&
+                state.map_sha256=="ed7d475b1efdc713d28b2a978e11fb0f662bdb17c5c2769d77c96e1f74b7ceba";
             state.session_id=std::move(session);
             state.owned=std::move(driver);state.driver.store(state.owned.get(),std::memory_order_release);
             if (viewer_enabled) {
@@ -178,7 +188,14 @@ bool RuntimeInitialize() noexcept {
                 provider.bed_override=std::move(bed_override);
                 provider.bedroom_materials=std::move(bedroom_materials);
                 provider.bedroom_material_ids=Environment(L"T3RENDER_SCENE_LIVE_BEDROOM_MATERIAL_IDS")==L"1";
+                provider.preview_pbr=Environment(L"T3RENDER_SCENE_LIVE_PREVIEW_PBR")==L"1";
+                provider.preview_candle=Environment(L"T3RENDER_SCENE_LIVE_PREVIEW_CANDLE")==L"1";
+                provider.wall_displacement=Environment(L"T3RENDER_SCENE_LIVE_WALL_DISPLACEMENT")==L"1";
+                provider.preview_gi=Environment(L"T3RENDER_SCENE_LIVE_PREVIEW_GI")==L"1";
                 provider.diagnostic_directory=diagnostic_directory;
+                provider.diagnostic_capture_trigger=Environment(L"T3RENDER_CAPTURE_TRIGGER_PATH");
+                provider.diagnostic_initial_images=Environment(L"T3RENDER_SCENE_LIVE_INITIAL_IMAGES")!=L"0";
+                provider.diagnostic_gpu_metrics=Environment(L"T3RENDER_SCENE_LIVE_GPU_METRICS")==L"1";
                 provider.diagnostic_session_id=state.session_id;
                 state.viewer=SceneViewer::Start(std::move(provider),true);
                 if (!state.viewer) OutputDebugStringW(L"T3Render: live DX12 viewer failed to start\n");
@@ -256,8 +273,10 @@ void RuntimeProbeEnd(std::uint64_t ticket,const scene_bridge::ProbeSnapshot& sna
                                       scene_bridge::VisibleLightCandidates{};
         std::vector<VisualLight> lights;
         const bool ready=BuildVisibleLightCandidates(sample,state.map,state.map_sha256,generation,lights);
+        const auto candle_link=ready && state.candle_link_diagnostics_enabled ?
+            scene_bridge::SampleBedroomCandleLink(reader,snapshot,state.map.c_str()) : scene_bridge::CandleLinkObservation{};
         const auto raw=ready && state.light_raw_diagnostics_enabled ?
-            BuildRawLightBatch(sample,state.map,state.map_sha256,generation,lights) : nullptr;
+            BuildRawLightBatch(sample,state.map,state.map_sha256,generation,lights,candle_link) : nullptr;
         // A nested callback may have marked loss while memory was being read.
         driver=Driver(false);if (!driver) return;
         if (ready) (void)driver->EndLightSample(light_ticket,thread,true,LightCoverage::Partial,lights,raw);
@@ -317,7 +336,7 @@ void RuntimeSubmissionLeave() noexcept {
         driver->EndScope(scope.ticket,CurrentThread(),after);
     } catch (...) {RuntimeAbandon();}
 }
-RuntimeDraw RuntimeDrawBegin(IDirect3DDevice8* device,const DrawCall& call) noexcept {
+RuntimeDraw RuntimeDrawBegin(IDirect3DDevice8* device,const DrawCall& call,bool clear) noexcept {
     LastError saved;
     try {
         if (querying) {RuntimeDeferredLoss();return {};}
@@ -331,7 +350,15 @@ RuntimeDraw RuntimeDrawBegin(IDirect3DDevice8* device,const DrawCall& call) noex
         args.triangle_list=call.primitive_type==D3DPT_TRIANGLELIST;
         args.first_index=call.start_index;args.triangle_count=call.primitive_count;
         args.min_vertex=call.min_vertex_index;args.vertex_count=call.num_vertices;
-        const auto start=driver->BeginDraw(CurrentThread(),scope,args);
+        ObservedDrawKind kind=ObservedDrawKind::Unknown;
+        if (clear) kind=ObservedDrawKind::Clear;
+        else switch (call.kind) {
+        case DrawKind::Primitive:kind=ObservedDrawKind::Primitive;break;
+        case DrawKind::IndexedPrimitive:kind=ObservedDrawKind::IndexedPrimitive;break;
+        case DrawKind::PrimitiveUP:kind=ObservedDrawKind::PrimitiveUP;break;
+        case DrawKind::IndexedPrimitiveUP:kind=ObservedDrawKind::IndexedPrimitiveUP;break;
+        }
+        const auto start=driver->BeginDraw(CurrentThread(),scope,args,kind);
         RuntimeDraw result;result.ticket=start.ticket;result.needs_state=start.needs_state;result.needs_world=start.needs_world;
         if (result.needs_state) (void)Query(device,result.before,result.needs_world);
         return result;
@@ -351,7 +378,15 @@ RuntimePresent RuntimePresentBegin(IDirect3DDevice8* device) noexcept {
     try {
         if (querying) {RuntimeDeferredLoss();return {};}
         auto* d=Driver(true);RuntimePresent present;
-        if (d && IsDevice(device)) present.ticket=d->BeginPresent(CurrentThread(),&present.frame_id);
+        if (d && IsDevice(device)) {
+            PresentClockSample clock;
+            if (State().present_clock_enabled) {
+                LARGE_INTEGER value{};
+                clock.available=QueryPerformanceCounter(&value) && value.QuadPart>=0;
+                if (clock.available) clock.ticks=static_cast<std::uint64_t>(value.QuadPart);
+            }
+            present.ticket=d->BeginPresent(CurrentThread(),&present.frame_id,clock);
+        }
         return present;
     } catch (...) {RuntimeAbandon();return {};}
 }

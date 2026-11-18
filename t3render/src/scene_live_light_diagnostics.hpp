@@ -78,7 +78,30 @@ inline void WriteRawLightDetails(std::ostream& out,const Snapshot& snapshot,cons
     if (!raw || !RawLightFrameMatches(*raw,snapshot)) {out<<",\"light_raw_available\":false";return;}
     const auto& batch=*raw->batch;
     out<<",\"light_raw_available\":true,\"light_raw\":{\"listed\":"<<batch.listed
-       <<",\"skipped\":"<<batch.skipped<<",\"truncated\":"<<(batch.truncated ? "true" : "false")<<",\"items\":[";
+       <<",\"skipped\":"<<batch.skipped<<",\"truncated\":"<<(batch.truncated ? "true" : "false")
+       <<",\"candle_link\":{\"status\":\""
+       <<(batch.candle_link.status==scene_bridge::CandleLinkStatus::Candidate ? "candidate" :
+          batch.candle_link.status==scene_bridge::CandleLinkStatus::NoLink ? "no_link" : "unknown")
+       <<"\",\"field_8c_bits\":";
+    if (batch.candle_link.status==scene_bridge::CandleLinkStatus::Candidate) out<<batch.candle_link.factor_8c_bits;
+    else out<<"null";
+    out<<",\"enabled_candidate\":";
+    if (batch.candle_link.enabled.status==scene_bridge::CandleEnabledStatus::On) out<<"true";
+    else if (batch.candle_link.enabled.status==scene_bridge::CandleEnabledStatus::Off) out<<"false";
+    else out<<"null";
+    out<<",\"enabled_inherited\":";
+    if (batch.candle_link.enabled.status==scene_bridge::CandleEnabledStatus::Unknown) out<<"null";
+    else out<<(batch.candle_link.enabled.inherited ? "true" : "false");
+    out<<",\"transform_bits\":";
+    if (batch.candle_link.transform_available) {
+        out<<'[';
+        for (std::size_t i=0;i<batch.candle_link.transform_bits.size();++i) {
+            if (i) out<<',';
+            out<<batch.candle_link.transform_bits[i];
+        }
+        out<<']';
+    } else out<<"null";
+    out<<"},\"items\":[";
     for (std::size_t i=0;i<batch.items.size();++i) {
         if (i) out<<',';
         const auto& item=batch.items[i];out<<"{\"id\":";light_diagnostic_detail::JsonString(out,item.candidate.id);

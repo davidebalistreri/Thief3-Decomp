@@ -33,6 +33,20 @@ int main() {
     s.conventions.meters_per_unit=0.01905f;
     batch->candle_link.status=t3render::scene_bridge::CandleLinkStatus::Candidate;
     batch->candle_link.factor_8c_bits=batch->items[0].field_8c;
+    using t3render::scene_bridge::CandleEnabledStatus;
+    CHECK(RemasterCandleFromRaw(s,raw,out)==RemasterCandleState::On && out.intensity==1);
+    batch->candle_link.enabled.status=CandleEnabledStatus::On;
+    CHECK(RemasterCandleFromRaw(s,raw,out)==RemasterCandleState::On && out.intensity==1);
+    batch->items[0].field_8c=0;batch->candle_link.factor_8c_bits=0;
+    CHECK(RemasterCandleFromRaw(s,raw,out)==RemasterCandleState::Off);
+    batch->items[0]=item;batch->candle_link.factor_8c_bits=item.field_8c;
+    batch->candle_link.enabled.status=CandleEnabledStatus::Off;
+    CHECK(RemasterCandleFromRaw(s,raw,out)==RemasterCandleState::Off);
+    ++raw.frame_id;CHECK(RemasterCandleFromRaw(s,raw,out)==RemasterCandleState::Unknown);--raw.frame_id;
+    batch->candle_link.enabled.status=CandleEnabledStatus::Unknown;
+    batch->items[0].field_8c=0;batch->candle_link.factor_8c_bits=0;
+    CHECK(RemasterCandleFromRaw(s,raw,out)==RemasterCandleState::Off);
+    batch->items[0]=item;batch->candle_link.factor_8c_bits=item.field_8c;
     batch->candle_link.transform_available=true;
     const float identity[]{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
     std::memcpy(batch->candle_link.transform_bits.data(),identity,sizeof(identity));
@@ -80,6 +94,7 @@ int main() {
     batch->candle_link.status=t3render::scene_bridge::CandleLinkStatus::Candidate;
     batch->candle_link.factor_8c_bits=0;
     CHECK(CandlePreviewDirectZero(s,raw));
+    CHECK(RemasterCandleFromRaw(s,raw,out)==RemasterCandleState::Off);
     batch->candle_link.transform_available=true;
     std::memcpy(batch->candle_link.transform_bits.data(),identity,sizeof(identity));
     CHECK(CandlePreviewCandlestick(s,raw,candlestick));CHECK(!CandlePreviewFlame(s,raw,flame));

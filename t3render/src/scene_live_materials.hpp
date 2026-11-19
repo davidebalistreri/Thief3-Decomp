@@ -5,11 +5,20 @@
 
 namespace t3render::live {
 
-// Viewer-only selection; values are computed from the same snapshot as the
-// BSP draw and are never retained as evidence for a later frame.
+// Viewer-only selection. A retained anchor is a visual heuristic, not
+// same-frame evidence about the bed or BSP bindings.
 struct BedroomAnchor {
     std::array<double, 3> origin{};
     std::array<double, 9> inverse{};
+};
+enum class BedroomAnchorSource { None, Current, Retained };
+class BedroomAnchorTracker {
+public:
+    BedroomAnchorSource Select(const std::shared_ptr<const Snapshot>& snapshot, BedroomAnchor& output);
+    void Reset() noexcept;
+private:
+    std::shared_ptr<const Snapshot> witness_;
+    BedroomAnchor anchor_{};
 };
 struct BedroomMaterialRun {
     std::uint32_t first_index = 0, index_count = 0;

@@ -183,6 +183,18 @@ class TraceSummaryTests(unittest.TestCase):
                           dict(CAPTURE_END, frames=2))
         self.assertEqual(trace_summary.summarize(self.trace)["frame_count"], 2)
 
+    def test_sampled_window_requires_valid_capability_and_increasing_frames(self):
+        header = dict(HEADER, requested_frames=2, sampling={"interval_ms": 3000})
+        self.write_events(header, BEGIN, DRAW, END, {"event": "frame_begin", "frame": 30},
+                          {"event": "frame_end", "frame": 30, "present_hr": 0}, dict(CAPTURE_END, frames=2))
+        self.assertEqual([f["frame"] for f in trace_summary.summarize(self.trace)["frames"]], [7, 30])
+        for capability in (None, {}, {"interval_ms": True}, {"interval_ms": 999}, {"interval_ms": 10001}):
+            with self.subTest(capability=capability):
+                self.assert_invalid([dict(header, sampling=capability)], "sampling")
+        for frame in (7, 6):
+            with self.subTest(frame=frame):
+                self.assert_invalid([header, BEGIN, DRAW, END, {"event": "frame_begin", "frame": frame}], "not ordered")
+
     def test_operation_results_are_required_when_advertised(self):
         self.write_events(HEADER_OPS, BEGIN, CLEAR, CLEAR_RESULT, DRAW_OP, DRAW_RESULT, END_OPS, CAPTURE_END)
         result = trace_summary.summarize(self.trace)

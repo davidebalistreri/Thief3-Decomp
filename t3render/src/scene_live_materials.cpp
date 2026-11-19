@@ -23,6 +23,42 @@ std::array<double,3> Local(const BedroomAnchor& anchor, const Vec3& position) {
 }
 } // namespace
 
+void BedroomAnchorTracker::Reset() noexcept {
+    witness_.reset();
+    anchor_={};
+}
+
+BedroomAnchorSource BedroomAnchorTracker::Select(const std::shared_ptr<const Snapshot>& snapshot, BedroomAnchor& output) {
+    if (!snapshot || snapshot->map!="SouthQuarter1_int1" || snapshot->map_sha256.size()!=64 ||
+        !snapshot->map_epoch || !snapshot->device_epoch || !snapshot->continuity ||
+        snapshot->provenance.origin==FrameOrigin::Unknown || snapshot->provenance.session_id.empty() ||
+        snapshot->conventions.length_unit!=LengthUnit::T3Unit || snapshot->conventions.axes!=Axes::T3Xyz ||
+        snapshot->conventions.up_axis!=UpAxis::Z || !snapshot->conventions.meters_per_unit ||
+        !std::isfinite(*snapshot->conventions.meters_per_unit) ||
+        std::fabs(double(*snapshot->conventions.meters_per_unit)-kScale)>1e-9) {
+        Reset();return BedroomAnchorSource::None;
+    }
+    if (witness_ && (witness_->map_epoch!=snapshot->map_epoch || witness_->device_epoch!=snapshot->device_epoch ||
+                     witness_->continuity!=snapshot->continuity || witness_->frame_id>snapshot->frame_id ||
+                     witness_->provenance.origin!=snapshot->provenance.origin ||
+                     witness_->provenance.session_id!=snapshot->provenance.session_id ||
+                     witness_->provenance.capture_sha256!=snapshot->provenance.capture_sha256 ||
+                     witness_->map!=snapshot->map || witness_->map_sha256!=snapshot->map_sha256 ||
+                     witness_->render_pass!=snapshot->render_pass || witness_->stage!=snapshot->stage)) Reset();
+    BedroomAnchor current;
+    if (FindBedroomAnchor(*snapshot,current)) {
+        witness_=snapshot;anchor_=current;output=current;return BedroomAnchorSource::Current;
+    }
+    const auto actor="actor:"+snapshot->map+":"+snapshot->map_sha256+":StaticMeshActor__1520";
+    if (std::any_of(snapshot->meshes.begin(),snapshot->meshes.end(),[&](const auto& mesh) {
+            return mesh.selection.instance_id==actor;
+        })) {
+        Reset();return BedroomAnchorSource::None;
+    }
+    if (!witness_) return BedroomAnchorSource::None;
+    output=anchor_;return BedroomAnchorSource::Retained;
+}
+
 bool FindBedroomAnchor(const Snapshot& snapshot, BedroomAnchor& output) {
     const auto& conventions=snapshot.conventions;
     if (snapshot.map!="SouthQuarter1_int1" || snapshot.map_sha256.size()!=64 ||

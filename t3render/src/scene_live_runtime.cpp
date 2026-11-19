@@ -194,6 +194,11 @@ bool RuntimeInitialize() noexcept {
                 provider.preview_gi=Environment(L"T3RENDER_SCENE_LIVE_PREVIEW_GI")==L"1";
                 provider.diagnostic_directory=diagnostic_directory;
                 provider.diagnostic_capture_trigger=Environment(L"T3RENDER_CAPTURE_TRIGGER_PATH");
+                provider.remaster_toggle_path=Environment(L"T3RENDER_SCENE_LIVE_REMASTER_TOGGLE");
+                if (!Environment(L"T3RENDER_CAPTURE_INTERVAL_MS").empty())
+                    provider.diagnostic_capture_frame=[](void*,std::uint64_t frame) noexcept {
+                        return CaptureSampledLiveFrame(frame);
+                    };
                 provider.diagnostic_initial_images=Environment(L"T3RENDER_SCENE_LIVE_INITIAL_IMAGES")!=L"0";
                 provider.diagnostic_gpu_metrics=Environment(L"T3RENDER_SCENE_LIVE_GPU_METRICS")==L"1";
                 provider.diagnostic_session_id=state.session_id;

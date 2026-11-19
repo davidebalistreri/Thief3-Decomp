@@ -57,6 +57,30 @@ watcher does not launch the game or verify the user's location, input, GPU
 pixels or complete scene. The marker triggers the existing consecutive-frame
 readbacks and, when requested, the runner's normal isolated cleanup.
 
+For M1 movement, run the watcher with `--start-motion` and the runner with
+`--manual-trigger --frames 15 --sample-interval-ms 3000`. The watcher requests
+capture near the start of fresh motion; the writer then records up to 15 D3D8
+frames at least three seconds apart. The viewer requests a readback only for an
+explicitly linked successful Present. Superseded viewer frames may be missing:
+compare the trace, viewer log and both image files for every pair. The interval
+is measured from the end of one recorded frame to arming the next; pauses or
+slow captures can extend the run. This mode requires the live catalog, bridge
+and submission scope. It does not establish the M1 movement or pixel alignment.
+
+After M1, the v0.1 comparison uses the combined bed/material catalog and one
+sampled candle. Start `trigger_live_v01.py --watch "$T3RENDER_OUTPUT"` before
+the runner; use `--manual-trigger --frames 3 --steam-launch --isolated-saves
+--terminate-after-capture --scene-bridge --submission-scope --live-catalog ...
+--live-lights --preview-candle --candle-link-diagnostics --remaster-toggle`.
+The watcher requests original and flat images after a moving-to-stationary
+bedroom pose, enables the viewer-only remaster, and waits for an image with the
+candle on and another after it is switched off. It records the numerical pose
+difference. Run `compare_live_v01.py "$T3RENDER_OUTPUT"` after the runner
+finishes to verify the original/flat Present link and build the three-way
+image. Candle position and enabled/modulation fields are same-frame candidates;
+the user action and images still need inspection. Intensity and range are
+artistic, and missing samples do not establish that the candle is off.
+
 `--replay LOG --start-frame N --end-frame N` evaluates a saved log without
 writing a marker. On the earlier TDS log, frames 1314–2444 met the gate in
 30.001 seconds, with eight bed exits and eight entries. Streaming the longer

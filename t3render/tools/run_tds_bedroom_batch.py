@@ -182,7 +182,8 @@ def validate_paths(engine, bottle, system, proxy, output):
 
 def env_for(engine, bottle, output, frames, scene_bridge=False, submission_scope=False, live_catalog=None,
             live_only=False, live_static_meshes=False, live_lights=False, gpu_metrics=False, preview_pbr=False,
-            preview_candle=False, candle_link_diagnostics=False, wall_displacement=False, preview_gi=False):
+            preview_candle=False, candle_link_diagnostics=False, wall_displacement=False, preview_gi=False,
+            sample_interval_ms=None, remaster_toggle=False):
     capture = {"T3RENDER_CAPTURE_PATH": windows_path(output / "bedroom.jsonl"),
                "T3RENDER_CAPTURE_TRIGGER_PATH": windows_path(output / "capture.ready"),
                "T3RENDER_CAPTURE_FRAMES": str(frames), "T3RENDER_CAPTURE_BUFFERS": "1",
@@ -191,6 +192,12 @@ def env_for(engine, bottle, output, frames, scene_bridge=False, submission_scope
                "T3RENDER_CAPTURE_VERTEX_PROGRAMS": "1", "T3RENDER_CAPTURE_VERTEX_CONSTANTS": "1",
                "T3RENDER_EXPERIMENTAL_COMBINED": "1", "T3RENDER_EXPERIMENTAL_REPEATED_UNLOCK": "1",
                "T3RENDER_EXPERIMENTAL_REPEAT_RECOVERY": "1"}
+    if sample_interval_ms is not None:
+        capture["T3RENDER_CAPTURE_INTERVAL_MS"] = str(sample_interval_ms)
+        capture["T3RENDER_SCENE_LIVE_INITIAL_IMAGES"] = "0"
+    if remaster_toggle:
+        capture["T3RENDER_SCENE_LIVE_REMASTER_TOGGLE"] = windows_path(output / "remaster.enable")
+        capture["T3RENDER_SCENE_LIVE_INITIAL_IMAGES"] = "0"
     if live_only:
         if live_catalog is None:
             raise BatchError("live-only mode requires an offline catalog")
@@ -325,13 +332,15 @@ def require_same_game(expected_pid, expected_start):
         raise BatchError("TDS process changed while waiting")
 
 
-def wait_for_trigger(deadline, crash_monitor, *, request=None, trigger_time=None):
+def wait_for_trigger(deadline, crash_monitor, *, request=None, trigger_time=None, abort=None):
     """Allow normal level-load restarts before binding a process at capture."""
     if (request is None) == (trigger_time is None):
         raise BatchError("capture needs exactly one trigger mode")
     missing_since = None
     while time.monotonic() < deadline:
         crash_monitor.check()
+        if abort is not None and abort.is_file():
+            raise BatchError("remaster comparison watcher reported a failure")
         now = time.monotonic()
         pids = game_pids()
         if pids:
@@ -382,7 +391,8 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
             live_catalog=None, live_only=False, live_static_meshes=False, live_lights=False,
             manual_trigger=False, steam_launch=False, resume_bedroom=False, readonly_saves=False,
             isolated_saves=False, gpu_metrics=False, preview_pbr=False, preview_candle=False,
-            candle_link_diagnostics=False, wall_displacement=False, preview_gi=False):
+            candle_link_diagnostics=False, wall_displacement=False, preview_gi=False, sample_interval_ms=None,
+            remaster_toggle=False):
     if submission_scope and not scene_bridge:
         raise BatchError("submission scope requires the scene bridge probe")
     if live_only and (live_catalog is None or not terminate):
@@ -423,8 +433,17 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
             save_profile = readonly_save_profile(system)
         if wine_or_steam_pids():
             raise BatchError("close existing Wine and Steam processes before using save isolation")
-    if not math.isfinite(delay) or not math.isfinite(timeout) or delay < 0 or timeout <= delay or frames not in (1, 2, 3):
-        raise BatchError("require nonnegative delay, a longer finite timeout and 1–3 frames")
+    if sample_interval_ms is not None and (
+            type(sample_interval_ms) is not int or not 1000 <= sample_interval_ms <= 10000 or
+            live_catalog is None or not scene_bridge or not submission_scope or not manual_trigger or live_only):
+        raise BatchError("distributed sampling requires a 1000–10000 ms interval, live viewer and manual trigger")
+    if remaster_toggle and (not isolated_saves or not manual_trigger or not preview_candle or
+                            not candle_link_diagnostics or sample_interval_ms is not None or live_only or
+                            preview_pbr or wall_displacement or preview_gi or live_static_meshes or frames != 3):
+        raise BatchError("remaster toggle requires isolated saves, manual capture and the candle-link preview only")
+    if (not math.isfinite(delay) or not math.isfinite(timeout) or delay < 0 or timeout <= delay or
+            type(frames) is not int or not (2 if sample_interval_ms else 1) <= frames <= (15 if sample_interval_ms else 3)):
+        raise BatchError("invalid delay, timeout or capture frame count")
     if (fixture is None) != (replay is None):
         raise BatchError("the synthetic fixture and DX12 replay must be supplied together")
     if live_catalog is not None:
@@ -466,7 +485,7 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
                            live_static_meshes=live_static_meshes, live_lights=live_lights, gpu_metrics=gpu_metrics,
                            preview_pbr=preview_pbr, preview_candle=preview_candle,
                            candle_link_diagnostics=candle_link_diagnostics, wall_displacement=wall_displacement,
-                           preview_gi=preview_gi)
+                           preview_gi=preview_gi, sample_interval_ms=sample_interval_ms, remaster_toggle=remaster_toggle)
     executable = "C:\\" + str((system / "T3Main.exe").relative_to((bottle / "drive_c").resolve())).replace("/", "\\")
     deployment = {"schema": 1, "proxy": str(target), "sha256": digest(proxy),
                   "capture_config": capture, "proxy_installed": False, "temporary_proxy_removed": None}
@@ -549,7 +568,8 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
         print(f"{message} Carica il salvataggio e resta nella bedroom.", flush=True)
         trigger_pid, trigger_start = wait_for_trigger(
             deadline, crash_monitor, request=output / "capture.request" if manual_trigger else None,
-            trigger_time=None if manual_trigger else trigger_time)
+            trigger_time=None if manual_trigger else trigger_time,
+            abort=output / "remaster.failed" if remaster_toggle else None)
         game_restarted = (trigger_pid, trigger_start) != (game_pid, game_start)
         crash_monitor.check()
         require_same_game(trigger_pid, trigger_start)
@@ -563,6 +583,20 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
             if not complete_trace(trace, frames):
                 raise BatchError("capture did not complete before the timeout")
             crash_monitor.check()
+            if sample_interval_ms:
+                # The worker presents after the final D3D8 trace record is closed.
+                time.sleep(2)
+                require_same_game(trigger_pid, trigger_start)
+            if remaster_toggle:
+                toggle_deadline = min(deadline, time.monotonic() + 120)
+                while time.monotonic() < toggle_deadline and not (output / "remaster.complete").is_file():
+                    if (output / "remaster.failed").is_file():
+                        raise BatchError("remaster comparison watcher reported a failure")
+                    crash_monitor.check()
+                    require_same_game(trigger_pid, trigger_start)
+                    time.sleep(.5)
+                if not (output / "remaster.complete").is_file():
+                    raise BatchError("remaster comparison did not complete before the timeout")
         if not loader_verified(output / "wine.log", executable.rsplit("\\", 1)[0] + r"\d3d8.dll"):
             raise BatchError("Wine log does not establish that the expected proxy and builtin D3D8 were loaded")
         if not live_only:
@@ -626,6 +660,8 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
                   "candle_link_diagnostics_requested": candle_link_diagnostics,
                   "live_only": live_only,
                   "manual_trigger": manual_trigger, "steam_launch": steam_launch, "resume_bedroom": resume_bedroom,
+                  "sample_interval_ms": sample_interval_ms,
+                  "remaster_toggle": remaster_toggle,
                   "game_restarted_before_capture": game_restarted,
                   "readonly_saves": readonly_saves, "isolated_saves": isolated_saves,
                   "sandbox_removed": sandbox.removed if sandbox else None,
@@ -670,7 +706,9 @@ def main(argv=None):
         run.add_argument("--" + name, required=True)
     run.add_argument("--delay", type=float, default=120, help="seconds after TDS starts before triggering")
     run.add_argument("--timeout", type=float, default=360, help="maximum seconds from launch to complete capture")
-    run.add_argument("--frames", type=int, choices=(1, 2, 3), default=3)
+    run.add_argument("--frames", type=int, default=3, help="1–3 consecutive frames or 2–15 distributed samples")
+    run.add_argument("--sample-interval-ms", type=int, help="opt-in distributed capture interval, 1000–10000 ms")
+    run.add_argument("--remaster-toggle", action="store_true", help="wait for the same-session flat/remaster comparison")
     run.add_argument("--scene-bridge", action="store_true", help="enable the experimental read-only scene bridge probe")
     run.add_argument("--submission-scope", action="store_true", help="tag draws inside the verified section callsite; requires --scene-bridge")
     run.add_argument("--live-catalog", help="enable the experimental D3D12 viewer with this offline catalog; requires bridge and submission scope")
@@ -706,7 +744,7 @@ def main(argv=None):
                     args.live_catalog, args.live_only, args.live_static_meshes, args.live_lights,
                     args.manual_trigger, args.steam_launch, args.resume_bedroom, args.readonly_saves, args.isolated_saves,
                     args.gpu_metrics, args.preview_pbr, args.preview_candle, args.candle_link_diagnostics, args.wall_displacement,
-                    args.preview_gi)
+                    args.preview_gi, args.sample_interval_ms, args.remaster_toggle)
     except (BatchError, SandboxError, OSError, ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

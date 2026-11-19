@@ -72,7 +72,7 @@ struct Diagnostics {
     std::wstring directory, prefix, capture_trigger;
     std::string session_id;
     HANDLE log=INVALID_HANDLE_VALUE;
-    unsigned images=0, capture_images=0, entries=0;
+    unsigned images=0, capture_images=0, remaster_images=0, off_images=0, entries=0;
     bool capture_started=false,initial_images=true;
     ULONGLONG started=0;
     Matrix first_view{};
@@ -157,21 +157,30 @@ struct Diagnostics {
         if (WriteBytes(log,line.data(),line.size())) ++entries;
         else { CloseHandle(log);log=INVALID_HANDLE_VALUE; }
     }
-    bool WantsImage(const Snapshot& snapshot) {
+    bool WantsImage(const Snapshot& snapshot, bool (*selected)(void*,std::uint64_t) noexcept, void* context,
+                    bool toggle_mode, bool remaster, bool off_capture) {
         if (log==INVALID_HANDLE_VALUE) return false;
+        if (selected) {
+            capture_started=true;
+            return selected(context,snapshot.frame_id);
+        }
         if (!capture_started && !capture_trigger.empty() &&
             GetFileAttributesW(capture_trigger.c_str())!=INVALID_FILE_ATTRIBUTES) capture_started=true;
-        if (capture_started) return capture_images<kMaxCaptureImages;
+        if (capture_started) return toggle_mode && remaster ?
+            (off_capture ? off_images<kMaxCaptureImages : remaster_images<kMaxCaptureImages) : capture_images<kMaxCaptureImages;
         if (!initial_images || images>=2) return false;
         if (!images) return true;
         for (std::size_t i=0;i<16;++i)
             if (std::fabs(snapshot.camera.view[i]-first_view[i])>0.001f) return true;
         return false;
     }
-    bool Image(const Snapshot& snapshot, const scene::Frame& frame, const std::vector<std::uint8_t>& rgba) {
+    bool Image(const Snapshot& snapshot, const scene::Frame& frame, const std::vector<std::uint8_t>& rgba,
+               bool toggle_mode, bool remaster, bool off_capture) {
         if (rgba.size()!=std::size_t(frame.width)*frame.height*4) return false;
         wchar_t filename[80]{};
-        std::swprintf(filename,std::size(filename),L"-frame-%llu.ppm",
+        const wchar_t* format=toggle_mode && remaster ? (off_capture ? L"-remaster-off-frame-%llu.ppm" : L"-remaster-frame-%llu.ppm") :
+                                                        L"-frame-%llu.ppm";
+        std::swprintf(filename,std::size(filename),format,
                       static_cast<unsigned long long>(snapshot.frame_id));
         std::vector<std::uint8_t> row(std::size_t(frame.width)*3);
         HANDLE file=CreateFileW((directory+L"\\"+prefix+filename).c_str(),GENERIC_WRITE,FILE_SHARE_READ,
@@ -186,13 +195,16 @@ struct Diagnostics {
         }
         CloseHandle(file);
         if (ok) {
-            if (capture_started) ++capture_images;
+            if (capture_started && toggle_mode && remaster && off_capture) ++off_images;
+            else if (capture_started && toggle_mode && remaster) ++remaster_images;
+            else if (capture_started) ++capture_images;
             else { if (!images) first_view=snapshot.camera.view; ++images; }
         }
         return ok;
     }
     void Frame(const Snapshot& snapshot, const ResidentFlatFrame& frame, const FlatCacheStats& cache, bool image,
-               const RawLightFrame* raw, ULONGLONG presented_at, const char* lighting_mode) {
+               const RawLightFrame* raw, ULONGLONG presented_at, const char* lighting_mode,
+               bool toggle_mode, bool remaster, bool off_capture) {
         if (log==INVALID_HANDLE_VALUE || entries>=kMaxEntries) return;
         if (snapshot.provenance.origin==FrameOrigin::LiveProcess && snapshot.provenance.session_id!=session_id) return;
         std::ostringstream out;out.imbue(std::locale::classic());out<<std::setprecision(9);
@@ -212,12 +224,16 @@ struct Diagnostics {
             else ++incomplete_lights;
         }
         std::uint64_t triangles=0,head_wall_triangles=0;
-        std::size_t flame_draws=0,candlestick_draws=0;
+        std::size_t flame_draws=0,candlestick_draws=0,stone_wall_draws=0,wood_floor_draws=0;
         for (const auto& draw:frame.draws) triangles+=draw.index_count/3;
         for (const auto& draw:frame.draws) if (draw.wall_relief==2) head_wall_triangles+=draw.index_count/3;
         for (const auto& draw:frame.draws) if (draw.emission>0) ++flame_draws;
         for (const auto& draw:frame.draws)
             if (draw.resource && draw.resource->id=="preview:generated-candlestick") ++candlestick_draws;
+        for (const auto& draw:frame.draws) if (draw.material_id) {
+            if (*draw.material_id=="remaster:material:stone_wall_v2") ++stone_wall_draws;
+            else if (*draw.material_id=="remaster:material:wood_floor_v2") ++wood_floor_draws;
+        }
         out<<"{\"event\":\"frame\"";WriteFrameIdentity(out,snapshot);
         out<<",\"elapsed_ms\":"<<(presented_at-started);
         out<<",\"identity_scope\":\""<<identity_scope<<"\""
@@ -244,6 +260,8 @@ struct Diagnostics {
            <<",\"preview_gi_enabled\":"<<(cache.gi_enabled?"true":"false")
            <<",\"bed_override_instances\":"<<frame.override_instances
            <<",\"bedroom_material_runs\":"<<frame.bedroom_material_runs
+           <<",\"bedroom_anchor_retained\":"<<(frame.bedroom_anchor_retained?"true":"false")
+           <<",\"stone_wall_override_draws\":"<<stone_wall_draws<<",\"wood_floor_override_draws\":"<<wood_floor_draws
            <<",\"textured_draws\":"<<cache.textured_draws
            <<",\"pbr_draws\":"<<cache.pbr_draws
            <<",\"shadowed_lights\":"<<cache.shadowed_lights<<",\"shadow_draws\":"<<cache.shadow_draws
@@ -262,7 +280,10 @@ struct Diagnostics {
         if (cache.video_memory_usage_bytes==UINT64_MAX || !cache.video_memory_sampled_ms ||
             presented_at<cache.video_memory_sampled_ms) out<<"null";
         else out<<(presented_at-cache.video_memory_sampled_ms);
-        out<<",\"image\":"<<(image?"true":"false")<<",\"view\":[";
+        out<<",\"image\":"<<(image?"true":"false");
+        if (toggle_mode) out<<",\"remaster_mode\":"<<(remaster?"true":"false")
+                           <<",\"diagnostic_variant\":\""<<(!remaster ? "flat" : off_capture ? "remaster_off" : "remaster")<<"\"";
+        out<<",\"view\":[";
         for (unsigned i=0;i<16;++i) { if (i) out<<',';out<<snapshot.camera.view[i]; }
         out<<"],\"projection\":[";
         for (unsigned i=0;i<16;++i) { if (i) out<<',';out<<snapshot.camera.projection[i]; }
@@ -325,6 +346,8 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
         diagnostics.Event("viewer_started");
         if (state->window) { window = CreateViewerWindow(); if (!window) failed = true; }
         auto active_materials=state->provider.bedroom_materials;
+        const bool toggle_mode=!state->provider.remaster_toggle_path.empty();
+        if (toggle_mode) active_materials.reset();
         const bool gpu_metrics=diagnostics.log!=INVALID_HANDLE_VALUE && state->provider.diagnostic_gpu_metrics;
         auto gpu = failed || state->stop.load() ? nullptr : FlatD3D12::Create(window,128u*1024u*1024u,active_materials,gpu_metrics,state->provider.preview_gi);
         if (!gpu && !state->stop.load()) failed = true;
@@ -335,6 +358,7 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
         std::shared_ptr<const Snapshot> last;
         scene::Frame last_frame;
         WallDisplacementCache displacement_cache;
+        BedroomAnchorTracker bedroom_anchor_tracker;
         ULONGLONG next_telemetry=0;
         while (gpu && !state->stop.load()) {
             (void)WaitForSingleObject(state->wake, 50);
@@ -352,6 +376,7 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
             }
             const auto current = state->provider.current(state->provider.context.get());
             if (!current) {
+                bedroom_anchor_tracker.Reset();
                 displacement_cache.Clear();
                 // A rejected first frame can populate the cache without ever
                 // becoming `last`. Retire it even when nothing was displayed.
@@ -372,12 +397,14 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
                 }
                 continue;
             }
+            const bool remaster=!toggle_mode || GetFileAttributesW(state->provider.remaster_toggle_path.c_str())!=INVALID_FILE_ATTRIBUTES;
             if (current == last) continue;
             VisualAssets assets{state->provider.bed_override,state->provider.bedroom_materials};
             if (state->provider.visual_assets &&
                 !state->provider.visual_assets(state->provider.context.get(),current,assets)) {
                 std::lock_guard<std::mutex> lock(state->mutex);++state->stats.dropped;continue;
             }
+            if (!remaster) {assets.bed_override.reset();assets.bedroom_materials.reset();}
             if (assets.bedroom_materials!=active_materials) {
                 // Texture descriptors are immutable for a backend. Rebuild on
                 // the worker, after prior GPU work has completed.
@@ -387,10 +414,14 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
                 std::lock_guard<std::mutex> lock(state->mutex);++state->stats.renderer_rebuilds;
             }
             ResidentFlatFrame frame;
-            const bool wants_image=diagnostics.WantsImage(*current);
+            BedroomAnchor retained_anchor;
+            const auto anchor_source=toggle_mode ? bedroom_anchor_tracker.Select(current,retained_anchor) : BedroomAnchorSource::None;
+            const bool off_capture=toggle_mode && remaster && !state->provider.diagnostic_directory.empty() &&
+                GetFileAttributesW((state->provider.diagnostic_directory+L"\\remaster.off.capture").c_str())!=INVALID_FILE_ATTRIBUTES;
             if (!BuildResidentFlatFrame(*current,frame,assets.bed_override.get(),
                                         state->provider.bedroom_material_ids || bool(assets.bedroom_materials),
-                                        assets.bedroom_materials && bool(assets.bedroom_materials->wall_height))) {
+                                        assets.bedroom_materials && bool(assets.bedroom_materials->wall_height),
+                                        anchor_source==BedroomAnchorSource::Retained ? &retained_anchor : nullptr)) {
                 failed=true;break;
             }
             if (state->provider.wall_displacement &&
@@ -402,9 +433,10 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
                 } else frame.wall_displacement_failed=true; // retain POM for this frame
             }
             VerifiedLighting verified;
-            const bool lit=BuildVerifiedLighting(*current,verified)==LightingResult::Ready &&
+            const bool candle_requested=remaster && state->provider.preview_candle;
+            const bool lit=remaster && !(toggle_mode && candle_requested) && BuildVerifiedLighting(*current,verified)==LightingResult::Ready &&
                            LightingMatchesSnapshot(*current,verified);
-            const auto candle_raw=state->provider.preview_candle && state->provider.light_diagnostics ?
+            const auto candle_raw=candle_requested && state->provider.light_diagnostics ?
                 state->provider.light_diagnostics(state->provider.context.get(),current) : nullptr;
             RenderLight candle_light;
             Vec3 preview_camera{};
@@ -412,13 +444,16 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
                 std::isfinite(*current->conventions.meters_per_unit) && *current->conventions.meters_per_unit>0 &&
                 current->conventions.length_unit==LengthUnit::T3Unit && current->conventions.axes==Axes::T3Xyz &&
                 current->conventions.up_axis==UpAxis::Z && CameraPositionFromView(current->camera.view,preview_camera);
-            const bool candle=!lit && preview_conventions && state->provider.preview_candle && candle_raw &&
-                CandlePreviewFromRaw(*current,*candle_raw,candle_light);
+            auto candle_state=RemasterCandleState::Unknown;
+            if (toggle_mode && !lit && preview_conventions && candle_requested && candle_raw)
+                candle_state=RemasterCandleFromRaw(*current,*candle_raw,candle_light);
+            const bool candle=!lit && preview_conventions && candle_requested && candle_raw &&
+                (toggle_mode ? candle_state==RemasterCandleState::On : CandlePreviewFromRaw(*current,*candle_raw,candle_light));
             std::size_t triangles=0;
             for (const auto& draw:frame.draws) triangles+=draw.index_count/3;
             std::array<ResidentFlatDraw,2> candlestick;
             bool candlestick_drawn=false;
-            if (!lit && preview_conventions && state->provider.preview_candle && candle_raw &&
+            if (!toggle_mode && !lit && preview_conventions && candle_requested && candle_raw &&
                 frame.draws.size()+candlestick.size()<=scene::kMaxDraws &&
                 CandlePreviewCandlestick(*current,*candle_raw,candlestick)) {
                 const auto added=(candlestick[0].index_count+candlestick[1].index_count)/3;
@@ -432,13 +467,16 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
             if (candle && candlestick_drawn && frame.draws.size()<scene::kMaxDraws &&
                 CandlePreviewFlame(*current,*candle_raw,flame) && triangles<=scene::kMaxTriangles &&
                 flame.index_count/3<=scene::kMaxTriangles-triangles) frame.draws.push_back(std::move(flame));
-            const bool candle_zero=!lit && preview_conventions && state->provider.preview_candle && !candle && candle_raw &&
-                CandlePreviewDirectZero(*current,*candle_raw);
-            const bool candle_unknown=!lit && preview_conventions && state->provider.preview_candle && !candle && !candle_zero;
-            const bool preview=!lit && preview_conventions && !state->provider.preview_candle && state->provider.preview_pbr;
+            const bool candle_zero=!lit && preview_conventions && candle_requested && !candle && candle_raw &&
+                (toggle_mode ? candle_state==RemasterCandleState::Off : CandlePreviewDirectZero(*current,*candle_raw));
+            const bool candle_unknown=!lit && preview_conventions && candle_requested && !candle && !candle_zero;
+            const bool preview=remaster && !lit && preview_conventions && !candle_requested && state->provider.preview_pbr;
             const char* lighting_mode=lit ? "verified" : candle ? "preview_candle_candidate" : candle_zero ?
                                       "preview_candle_zero_candidate" : candle_unknown ?
                                       "preview_candle_unknown" : preview ? "preview_headlight" : "unlit";
+            const bool image_state_ready=!toggle_mode || !remaster || (off_capture ? candle_zero : candle);
+            const bool wants_image=image_state_ready && diagnostics.WantsImage(*current,state->provider.diagnostic_capture_frame,
+                                                          state->provider.context.get(),toggle_mode,remaster,off_capture);
             if (!(lit ? gpu->PrepareLit(*current,frame,wants_image) : candle || candle_zero || candle_unknown ?
                   gpu->PrepareCandlePreview(*current,candle ? candle_raw.get() : nullptr,frame,wants_image) : preview ?
                   gpu->PreparePreviewLit(*current,frame,wants_image) : gpu->PrepareResident(frame,wants_image))) {
@@ -470,11 +508,12 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
                 continue;
             }
             const auto presented_at=GetTickCount64();
-            const bool wrote_image=wants_image && diagnostics.Image(*current,frame.camera,pixels);
+            const bool wrote_image=wants_image && diagnostics.Image(*current,frame.camera,pixels,toggle_mode,remaster,off_capture);
             const auto light_raw=candle_raw ? candle_raw :
                 diagnostics.log!=INVALID_HANDLE_VALUE && state->provider.light_diagnostics ?
                 state->provider.light_diagnostics(state->provider.context.get(),current) : nullptr;
-            diagnostics.Frame(*current,frame,gpu->cache_stats(),wrote_image,light_raw.get(),presented_at,lighting_mode);
+            diagnostics.Frame(*current,frame,gpu->cache_stats(),wrote_image,light_raw.get(),presented_at,lighting_mode,
+                              toggle_mode,remaster,off_capture);
             last = current; last_frame = std::move(frame.camera);
             if (window) {
                 wchar_t title[128]{};

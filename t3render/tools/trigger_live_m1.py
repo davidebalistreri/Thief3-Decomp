@@ -221,7 +221,7 @@ class Tail:
         return events
 
 
-def watch(directory, timeout):
+def watch(directory, timeout, start_motion=False):
     deadline = time.monotonic() + timeout
     tails = {}
     while time.monotonic() < deadline:
@@ -262,7 +262,25 @@ def watch(directory, timeout):
                         active_tail.motion_started = time.monotonic() if active_tail.detector.start is not None else None
                 host_duration = (time.monotonic() - active_tail.motion_started
                                  if active_tail.motion_started is not None else 0)
-                if (result is not None and host_duration >= MIN_DURATION_MS / 1000 and
+                if start_motion and active_tail.detector.start and active_tail.detector.previous and active_tail.detector.recent:
+                    detector = active_tail.detector
+                    first, current, recent = detector.start, detector.previous, detector.recent[0]
+                    recent_distance = math.dist(recent["position"], current["position"])
+                    recent_angle = angle(recent["forward"], current["forward"])
+                    if (current["elapsed_ms"] - first["elapsed_ms"] >= 2000 and
+                            current["elapsed_ms"] - recent["elapsed_ms"] >= 2000 and
+                            (recent_distance >= 2.0 or recent_angle >= 1.0)):
+                        result = {"session_id": detector.session, "first_frame": first["frame"],
+                                  "last_frame": current["frame"], "first_elapsed_ms": first["elapsed_ms"],
+                                  "last_elapsed_ms": current["elapsed_ms"],
+                                  "recent_distance_t3": recent_distance, "recent_rotation_degrees": recent_angle,
+                                  "map_epoch": current["epoch"][0], "device_epoch": current["epoch"][1],
+                                  "continuity": current["epoch"][2],
+                                  "limitations": ["This starts sampling; it does not establish the full M1 movement or pixel alignment."]}
+                    else:
+                        result = None
+                required_host_seconds = 2 if start_motion else MIN_DURATION_MS / 1000
+                if (result is not None and host_duration >= required_host_seconds and
                         0 <= time.time() - active_path.stat().st_mtime <= FRESH_SECONDS):
                     if any((directory / name).exists() for name in ("capture.ready", "batch.json")):
                         raise ValueError("runner finished before capture request")
@@ -285,16 +303,19 @@ def main():
     parser.add_argument("--timeout", type=float, default=360, help="watch timeout in seconds")
     parser.add_argument("--start-frame", type=int, help="replay only: inclusive frame bound")
     parser.add_argument("--end-frame", type=int, help="replay only: inclusive frame bound")
+    parser.add_argument("--start-motion", action="store_true", help="watch only: request sampling near the start of movement")
     args = parser.parse_args()
     try:
         if not math.isfinite(args.timeout) or args.timeout <= 0:
             raise ValueError("invalid timeout")
         if args.watch is not None and (args.start_frame is not None or args.end_frame is not None):
             raise ValueError("frame bounds apply only to replay")
+        if args.replay is not None and args.start_motion:
+            raise ValueError("start-motion applies only to watch")
         if any(x is not None and x < 0 for x in (args.start_frame, args.end_frame)) or (
                 args.start_frame is not None and args.end_frame is not None and args.start_frame > args.end_frame):
             raise ValueError("invalid replay frame bounds")
-        result = watch(args.watch, args.timeout) if args.watch is not None else replay(args.replay, args.start_frame, args.end_frame)
+        result = watch(args.watch, args.timeout, args.start_motion) if args.watch is not None else replay(args.replay, args.start_frame, args.end_frame)
         print(json.dumps({"status": "requested" if args.watch is not None and result else "would_request" if result else "not_requested",
                           "observation": result}, indent=2, allow_nan=False))
     except (OSError, ValueError, TypeError, KeyError, OverflowError) as exc:

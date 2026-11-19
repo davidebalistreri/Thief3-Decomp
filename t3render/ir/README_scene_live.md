@@ -263,6 +263,14 @@ selection, or with an invalid anchor, it retains the source material IDs; it
 does not reuse a transform from an earlier frame. These bounds are an artistic
 region heuristic, not proof of room membership or total visibility.
 
+The opt-in v0.1 file toggle is an exception for visual continuity: after a
+valid bed anchor has appeared, it can retain that anchor while the bed is
+absent from the selected frame. It drops the anchor on a missing snapshot,
+invalid observed bed, session, map, device or continuity change. The log marks
+such frames `bedroom_anchor_retained=true`. This is a room-placement heuristic,
+not a same-frame observation of the bed or proof of an unchanged runtime actor.
+The normal non-toggle path still requires the same-frame anchor.
+
 The D3D12 viewer uploads albedo mips once and samples them with UV0 and wrap
 addressing. Sections with missing UVs fall back to material-ID colors. Other
 materials also remain ID colors. With unknown or incomplete lighting and no

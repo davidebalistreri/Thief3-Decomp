@@ -18,6 +18,7 @@ bool key_down = false;
 unsigned writes = 0;
 unsigned opens = 0;
 bool bad_create_options = false;
+std::uint64_t fake_tick = 0;
 constexpr uintptr_t kVertexAddress = 0x01000000;
 constexpr uintptr_t kIndexAddress = 0x02000000;
 constexpr uintptr_t kGuardAddress = 0x03000000;
@@ -226,6 +227,7 @@ thread_local DWORD fake_thread_id = 11;
 thread_local DWORD fake_thread_birth = 1234;
 DWORD GetLastError() { return fake_last_error; }
 DWORD GetCurrentThreadId() { return fake_thread_id; }
+std::uint64_t GetTickCount64() { return fake_tick; }
 HANDLE GetCurrentThread() { return 456; }
 BOOL GetThreadTimes(HANDLE thread, FILETIME* created, FILETIME*, FILETIME*, FILETIME*) {
     if (thread != 456 || !fake_thread_birth) return FALSE;
@@ -511,6 +513,19 @@ int main(int argc, char** argv) {
                 }
             }
         }
+    } else if (scenario == "sampled_series") {
+        t3render::CaptureBridgeInstallResult(t3render::scene_bridge::ProbeStatus::Installed);
+        for (std::uint64_t i = 0; i <= 7; ++i) {
+            fake_tick = i * 500;
+            const bool selected = t3render::CaptureWantsDraw(&device);
+            if (selected != (i == 1 || i == 4 || i == 7)) return 8;
+            if (selected) SimulatedDraw(&device, draw);
+            const auto ticket = t3render::CapturePresentBegin(&device, fake_thread_id);
+            const std::uint64_t live = 1000 + i;
+            t3render::CapturePresentEnd(&device, ticket, S_OK, &live);
+            if (t3render::CaptureSampledLiveFrame(live) != selected) return 8;
+        }
+        if (!t3render::CaptureSampledLiveFrame(1001) || !t3render::CaptureSampledLiveFrame(1007)) return 8;
     } else if (scenario == "frame_image") {
         t3render::CaptureFrameImage(&unrelated, FakeFrameImage, false, false);
         t3render::CaptureFrameImage(&device, FakeFrameImage, false, false); // frame 0 is not selected

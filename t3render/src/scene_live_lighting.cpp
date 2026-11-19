@@ -102,6 +102,30 @@ bool CandlePreviewDirectZero(const Snapshot& snapshot,const RawLightFrame& raw) 
     } catch (...) {return false;}
 }
 
+RemasterCandleState RemasterCandleFromRaw(const Snapshot& snapshot,const RawLightFrame& raw,RenderLight& output) noexcept {
+    try {
+        using scene_bridge::CandleEnabledStatus;
+        using scene_bridge::CandleLinkStatus;
+        if (snapshot.map!="SouthQuarter1_int1" ||
+            snapshot.map_sha256!="ed7d475b1efdc713d28b2a978e11fb0f662bdb17c5c2769d77c96e1f74b7ceba" ||
+            !RawLightFrameMatches(raw,snapshot) || !raw.batch ||
+            raw.batch->candle_link.status==CandleLinkStatus::Unknown) return RemasterCandleState::Unknown;
+        const auto enabled=raw.batch->candle_link.enabled.status;
+        if (enabled==CandleEnabledStatus::Off) return RemasterCandleState::Off;
+        if (enabled==CandleEnabledStatus::On) {
+            if (CandlePreviewFromRaw(snapshot,raw,output))
+                return output.intensity>0 ? RemasterCandleState::On : RemasterCandleState::Off;
+            if (CandlePreviewDirectZero(snapshot,raw)) return RemasterCandleState::Off;
+        }
+        if (enabled==CandleEnabledStatus::Unknown) {
+            if (CandlePreviewFromRaw(snapshot,raw,output))
+                return output.intensity>0 ? RemasterCandleState::On : RemasterCandleState::Off;
+            if (CandlePreviewDirectZero(snapshot,raw)) return RemasterCandleState::Off;
+        }
+        return RemasterCandleState::Unknown;
+    } catch (...) {return RemasterCandleState::Unknown;}
+}
+
 namespace {
 bool CandleActorTransform(const Snapshot& snapshot,const RawLightFrame& raw,Matrix& output) {
         constexpr char map[]="SouthQuarter1_int1";

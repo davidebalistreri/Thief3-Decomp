@@ -4,6 +4,8 @@
 #include "scene_packet.hpp"
 
 namespace t3render::live {
+struct BedroomAnchor;
+enum class BedroomAnchorSource;
 struct ResidentFlatDraw {
     std::shared_ptr<const Resource> resource;
     std::uint32_t section = 0, first_index = 0, index_count = 0;
@@ -23,6 +25,7 @@ struct ResidentFlatFrame {
     std::vector<ResidentFlatDraw> draws;
     std::uint32_t override_instances = 0;
     std::uint32_t bedroom_material_runs = 0;
+    bool bedroom_anchor_retained = false;
     std::uint32_t wall_source_triangles = 0, wall_displaced_triangles = 0;
     bool wall_displacement_failed = false;
 };
@@ -30,7 +33,7 @@ struct ResidentFlatFrame {
 // Optional overrides affect only this consumer, never the source snapshot.
 bool BuildResidentFlatFrame(const Snapshot& snapshot, ResidentFlatFrame& output,
                             const MeshOverride* bed_override = nullptr, bool bedroom_materials = false,
-                            bool bedroom_wall_relief = false);
+                            bool bedroom_wall_relief = false, const BedroomAnchor* retained_anchor = nullptr);
 // Expand a partial resident selection into the existing flat D3D12 input.
 // Colors identify material IDs; they are not a lighting or material model.
 // The output is a viewport-sized crop. This performs CPU expansion each frame;

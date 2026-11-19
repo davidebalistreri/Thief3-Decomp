@@ -314,6 +314,11 @@ class CaptureBatchTests(unittest.TestCase):
         self.assertNotIn("T3RENDER_SCENE_LIVE_INITIAL_IMAGES", selected)
         self.assertNotIn("T3RENDER_SCENE_LIVE_STATIC_MESHES", selected)
         self.assertNotIn("T3RENDER_SCENE_LIVE_GPU_METRICS", selected)
+        _, sampled = batch.env_for(self.root / "engine", self.root / "bottle", self.root / "output", 15,
+                                   scene_bridge=True, submission_scope=True, live_catalog=catalog,
+                                   sample_interval_ms=3000)
+        self.assertEqual(sampled["T3RENDER_CAPTURE_INTERVAL_MS"], "3000")
+        self.assertEqual(sampled["T3RENDER_SCENE_LIVE_INITIAL_IMAGES"], "0")
         with self.assertRaises(batch.BatchError):
             batch.env_for(self.root / "engine", self.root / "bottle", self.root / "output", 3, gpu_metrics=True)
         _, metrics = batch.env_for(self.root / "engine", self.root / "bottle", self.root / "output", 3,

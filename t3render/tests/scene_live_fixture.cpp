@@ -1,6 +1,7 @@
 #include "../ir/scene_live.hpp"
 #include "../src/scene_live_flat.hpp"
 #include "../src/scene_live_lighting.hpp"
+#include "../src/scene_live_materials.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -165,6 +166,44 @@ bool bedroom_material_selection() {
     CHECK(flat.draws[3].first_index==9 && flat.draws[3].index_count==3 &&
           flat.draws[3].material_id=="remaster:material:stone_wall_v2");
     CHECK(current->bsp[0].resource->geometry.sections[0].index_count==9 && current->materials.size()==4);
+
+    // v0.1 keeps the room's visual region when the bed leaves the selected
+    // set, but never carries it into another map/device/session continuity.
+    BedroomAnchorTracker tracker;BedroomAnchor anchor;
+    CHECK(tracker.Select(current,anchor)==BedroomAnchorSource::Current);
+    auto without_bed=std::make_shared<Snapshot>(*current);
+    ++without_bed->frame_id;without_bed->meshes.clear();
+    CHECK(tracker.Select(without_bed,anchor)==BedroomAnchorSource::Retained);
+    CHECK(BuildResidentFlatFrame(*without_bed,flat,nullptr,true,false,&anchor));
+    CHECK(flat.bedroom_anchor_retained && flat.bedroom_material_runs==2 && flat.draws.size()==3);
+    CHECK(flat.draws[0].material_id=="remaster:material:wood_floor_v2" &&
+          flat.draws[2].material_id=="remaster:material:stone_wall_v2");
+    auto broken=std::make_shared<Snapshot>(*without_bed);++broken->continuity;
+    CHECK(tracker.Select(broken,anchor)==BedroomAnchorSource::None);
+    CHECK(BuildResidentFlatFrame(*broken,flat,nullptr,true) && !flat.bedroom_material_runs);
+    CHECK(tracker.Select(current,anchor)==BedroomAnchorSource::Current);
+    broken=std::make_shared<Snapshot>(*without_bed);broken->provenance.session_id="another-session";
+    CHECK(tracker.Select(broken,anchor)==BedroomAnchorSource::None);
+    CHECK(tracker.Select(current,anchor)==BedroomAnchorSource::Current);
+    broken=std::make_shared<Snapshot>(*without_bed);++broken->device_epoch;
+    CHECK(tracker.Select(broken,anchor)==BedroomAnchorSource::None);
+    CHECK(tracker.Select(current,anchor)==BedroomAnchorSource::Current);
+    broken=std::make_shared<Snapshot>(*without_bed);broken->map_sha256=hash_b;
+    CHECK(tracker.Select(broken,anchor)==BedroomAnchorSource::None);
+    CHECK(tracker.Select(current,anchor)==BedroomAnchorSource::Current);
+    broken=std::make_shared<Snapshot>(*without_bed);broken->frame_id=0;
+    CHECK(tracker.Select(broken,anchor)==BedroomAnchorSource::None);
+    CHECK(tracker.Select(current,anchor)==BedroomAnchorSource::Current);
+    broken=std::make_shared<Snapshot>(*current);++broken->frame_id;broken->meshes[0].selection.transform[0]=0;
+    CHECK(tracker.Select(broken,anchor)==BedroomAnchorSource::None);
+    CHECK(tracker.Select(without_bed,anchor)==BedroomAnchorSource::None);
+    CHECK(tracker.Select(current,anchor)==BedroomAnchorSource::Current);
+    broken=std::make_shared<Snapshot>(*current);++broken->frame_id;broken->meshes[0].selection.transform[12]+=1000;
+    CHECK(tracker.Select(broken,anchor)==BedroomAnchorSource::Current);
+    auto after_move=std::make_shared<Snapshot>(*broken);++after_move->frame_id;after_move->meshes.clear();
+    CHECK(tracker.Select(after_move,anchor)==BedroomAnchorSource::Retained);
+    CHECK(BuildResidentFlatFrame(*after_move,flat,nullptr,true,false,&anchor) && !flat.bedroom_material_runs);
+    CHECK(tracker.Select(nullptr,anchor)==BedroomAnchorSource::None);
 
     // Inverse transform handles nonuniform scale, rotation and translation;
     // the indexed triangles remain in their original order.

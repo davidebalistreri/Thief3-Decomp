@@ -317,6 +317,7 @@ def summarize(path):
     submission_tickets = set()
     clear_rect_limit = None
     requested_frames = None
+    sampled = False
     live_session_id = None
     lines = 0
 
@@ -350,10 +351,19 @@ def summarize(path):
                                 not live_session_id.startswith("live:") or
                                 any(c not in "0123456789abcdef" for c in live_session_id[5:])):
                             raise TraceError(f"line {lines}: invalid live session ID")
+                    if "sampling" in item:
+                        sampling = item["sampling"]
+                        if (not isinstance(sampling, dict) or set(sampling) != {"interval_ms"} or
+                                not _is_int(sampling["interval_ms"]) or not 1000 <= sampling["interval_ms"] <= 10000):
+                            raise TraceError(f"line {lines}: invalid sampling capability")
+                        sampled = True
                     if "requested_frames" in item:
                         requested_frames = item["requested_frames"]
-                        if not _is_int(requested_frames) or not 1 <= requested_frames <= 3:
-                            raise TraceError(f"line {lines}: requested_frames must be an integer from 1 through 3")
+                        if (not _is_int(requested_frames) or
+                                not (2 if sampled else 1) <= requested_frames <= (15 if sampled else 3)):
+                            raise TraceError(f"line {lines}: invalid requested_frames")
+                    elif sampled:
+                        raise TraceError(f"line {lines}: sampling requires requested_frames")
                     if "operation_results" in item:
                         if not _is_int(item["operation_results"]) or item["operation_results"] != 1:
                             raise TraceError(f"line {lines}: unsupported operation result capability")
@@ -420,8 +430,9 @@ def summarize(path):
                     if requested_frames is not None:
                         if frame < 0 or frame >= (1 << 64) - 1:
                             raise TraceError(f"line {lines}: frame outside requested window range")
-                        if frames and frame != frames[-1]["frame"] + 1:
-                            raise TraceError(f"line {lines}: requested capture frames are not consecutive")
+                        if frames and (frame <= frames[-1]["frame"] if sampled else frame != frames[-1]["frame"] + 1):
+                            raise TraceError(f"line {lines}: requested capture frames are not ordered" if sampled else
+                                             f"line {lines}: requested capture frames are not consecutive")
                     current = {"frame": frame, "draws": 0, "calls": Counter(), "pending": {},
                                "last_op": 0, "overlap": False, "image_seen": False,
                                "bridge_finished": False, "bridge_frame": None, "bridge_count": 0,

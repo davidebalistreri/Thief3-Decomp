@@ -54,6 +54,7 @@ DWORD GetEnvironmentVariableW(const wchar_t*, wchar_t*, DWORD);
 DWORD GetFileAttributesW(const wchar_t*);
 DWORD GetLastError();
 DWORD GetCurrentThreadId();
+std::uint64_t GetTickCount64();
 HANDLE GetCurrentThread();
 BOOL GetThreadTimes(HANDLE, FILETIME*, FILETIME*, FILETIME*, FILETIME*);
 void SetLastError(DWORD);

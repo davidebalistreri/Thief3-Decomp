@@ -488,6 +488,24 @@ class CaptureHostTests(unittest.TestCase):
         self.assertEqual(records[-2]["present_hr"], -1)
         self.assertEqual(trace_summary.summarize(self.path)["frame_count"], 1)
 
+    def test_sampled_series_skips_frames_and_selects_only_linked_live_presents(self):
+        self.run_capture("sampled_series", frame="1", extra={"T3RENDER_SCENE_BRIDGE": "1",
+                         "T3RENDER_CAPTURE_FRAMES": "3", "T3RENDER_CAPTURE_INTERVAL_MS": "1000"})
+        records = self.records()
+        self.assertEqual(records[0]["sampling"], {"interval_ms": 1000})
+        summary = trace_summary.summarize(self.path)
+        self.assertEqual([f["frame"] for f in summary["frames"]], [1, 4, 7])
+        self.assertEqual([f["scene_live_frame"] for f in summary["frames"]], [1001, 1004, 1007])
+
+    def test_invalid_sampling_configuration_fails_closed(self):
+        for interval, count in (("", "3"), ("999", "3"), ("10001", "3"), ("03000", "3"),
+                                ("1000x", "3"), ("3000", "1"), ("3000", "16")):
+            with self.subTest(interval=interval, count=count):
+                output = self.run_capture(frame="1", extra={"T3RENDER_CAPTURE_INTERVAL_MS": interval,
+                                                           "T3RENDER_CAPTURE_FRAMES": count})
+                self.assertIn("configured=0 getters=0", output)
+                self.assertFalse(self.path.exists())
+
     def test_frame_windows_preserve_order_and_reset_frame_local_state(self):
         for count in (2, 3):
             with self.subTest(count=count):

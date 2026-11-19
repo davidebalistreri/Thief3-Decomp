@@ -128,6 +128,8 @@ struct CaptureState {
     uint64_t target = 0;
     unsigned frames_requested = 1;
     unsigned frames_written = 0;
+    uint64_t sample_interval_ms = 0, last_sample_tick = 0;
+    std::vector<uint64_t> sampled_live_frames;
     uint64_t draws = 0;
     uint64_t up_bytes = 0;  // successfully emitted raw bytes, not hex characters
     uint64_t buffer_bytes = 0;
@@ -513,16 +515,32 @@ void Initialize(CaptureState& s) {
     s.bridge_requested = Environment(L"T3RENDER_SCENE_BRIDGE") == L"1";
     // Missing means the legacy single frame; an explicitly empty, truncated,
     // or malformed value must not silently start a capture.
-    wchar_t frames[2]{};
     SetLastError(ERROR_SUCCESS);
-    const DWORD frames_length = GetEnvironmentVariableW(L"T3RENDER_CAPTURE_FRAMES", frames, 2);
+    const DWORD interval_length = GetEnvironmentVariableW(L"T3RENDER_CAPTURE_INTERVAL_MS", nullptr, 0);
+    if ((!interval_length && GetLastError() != ERROR_ENVVAR_NOT_FOUND) || interval_length > 6) return;
+    const std::wstring interval = Environment(L"T3RENDER_CAPTURE_INTERVAL_MS");
+    if (interval_length && interval.empty()) return;
+    if (!interval.empty()) {
+        if (interval[0] == L'0' || interval.size() > 5) return;
+        for (wchar_t c : interval) if (c < L'0' || c > L'9') return;
+        const auto parsed = std::wcstoul(interval.c_str(), nullptr, 10);
+        if (parsed < 1000 || parsed > 10000) return;
+        s.sample_interval_ms = parsed;
+    }
+    wchar_t frames[4]{};
+    SetLastError(ERROR_SUCCESS);
+    const DWORD frames_length = GetEnvironmentVariableW(L"T3RENDER_CAPTURE_FRAMES", frames, 4);
     if (!frames_length) {
         if (GetLastError() != ERROR_ENVVAR_NOT_FOUND) return;
-    } else if (frames_length != 1 || frames[0] < L'1' || frames[0] > L'3') {
+    } else if (frames_length >= 4 || frames[0] < L'1' || frames[0] > L'9') {
         return;
     } else {
-        s.frames_requested = static_cast<unsigned>(frames[0] - L'0');
+        for (DWORD i = 1; i < frames_length; ++i) if (frames[i] < L'0' || frames[i] > L'9') return;
+        const auto parsed = std::wcstoul(frames, nullptr, 10);
+        if (parsed < 1 || parsed > (s.sample_interval_ms ? 15u : 3u)) return;
+        s.frames_requested = static_cast<unsigned>(parsed);
     }
+    if (s.sample_interval_ms && s.frames_requested < 2) return;
     const unsigned triggers = static_cast<unsigned>(!frame.empty()) +
         static_cast<unsigned>(!key.empty()) + static_cast<unsigned>(!trigger_path.empty());
     if (path.empty() || triggers != 1) return;
@@ -578,6 +596,7 @@ bool Open(CaptureState& s) {
     if (s.vertex_constants_requested) out << ",\"vertex_constant_capture\":{\"requested\":true,\"registers_per_observation\":"
         << kVertexConstantRegisters << ",\"words_per_frame\":" << kVertexConstantFrameWords << '}';
     if (s.frame_images_requested) out << ",\"frame_images\":{\"requested\":true,\"timing\":\"before_present\"}";
+    if (s.sample_interval_ms) out << ",\"sampling\":{\"interval_ms\":" << s.sample_interval_ms << '}';
     if (s.bridge_requested) out << ",\"scene_bridge\":{\"requested\":true,\"install_status\":\""
                                 << (s.bridge_install_known ? BridgeStatusName(s.bridge_install_status) : "not_reported")
                                 << "\",\"probe_limit\":" << kBridgeObservationLimit << ",\"entries_per_probe\":"
@@ -2165,6 +2184,15 @@ void CaptureFrameImage(IDirect3DDevice8* device, FrameImageCallback callback, bo
     } catch (...) { Fail(); }
 }
 
+bool CaptureSampledLiveFrame(std::uint64_t frame) noexcept {
+    try {
+        auto& s = State();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        return s.sample_interval_ms && std::find(s.sampled_live_frames.begin(), s.sampled_live_frames.end(), frame)
+            != s.sampled_live_frames.end();
+    } catch (...) { return false; }
+}
+
 void CapturePresentEnd(IDirect3DDevice8* device, uint64_t ticket, HRESULT result, const std::uint64_t* live_frame_id) {
     try {
         auto& s = State();
@@ -2250,6 +2278,8 @@ void CapturePresentEnd(IDirect3DDevice8* device, uint64_t ticket, HRESULT result
             if (live_frame_id && present_tracked && SUCCEEDED(result)) out << ",\"scene_live_frame\":" << *live_frame_id;
             out << ",\"replayable\":false}\n";
             if (!Write(s, out.str())) return;
+            if (s.sample_interval_ms && live_frame_id && present_tracked && SUCCEEDED(result))
+                s.sampled_live_frames.push_back(*live_frame_id);
             ++s.frames_written;
             if (s.frames_written == s.frames_requested) {
                 auto end = Json();
@@ -2286,7 +2316,10 @@ void CapturePresentEnd(IDirect3DDevice8* device, uint64_t ticket, HRESULT result
                 if (present_tracked) { s.bridge_present_ticket = 0; s.bridge_present_thread = 0; s.bridge_present_birth = 0; }
             }
             ++s.frame;
-            s.target = s.frame;
+            if (s.sample_interval_ms) {
+                s.last_sample_tick = GetTickCount64();
+                s.target = std::numeric_limits<uint64_t>::max();
+            } else s.target = s.frame;
             return;
         }
         if (s.bridge_requested) {
@@ -2302,6 +2335,11 @@ void CapturePresentEnd(IDirect3DDevice8* device, uint64_t ticket, HRESULT result
         }
         if (s.key_trigger) CheckKey(s);
         if (s.file_trigger) CheckTriggerFile(s);
+        if (s.sample_interval_ms && s.triggered && s.target == std::numeric_limits<uint64_t>::max() &&
+            GetTickCount64() - s.last_sample_tick >= s.sample_interval_ms) {
+            if (s.frame >= std::numeric_limits<uint64_t>::max() - 1) { Stop(s); return; }
+            s.target = s.frame + 1;
+        }
         if (s.frame != std::numeric_limits<uint64_t>::max()) ++s.frame;
         else Stop(s);
     } catch (...) { Fail(); }

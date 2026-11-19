@@ -31,6 +31,11 @@ bool CameraPositionFromView(const Matrix& view, Vec3& output) noexcept;
 // Artistic, single-candle preview from a matching raw sample. It does not
 // upgrade candidate evidence or assert that the source is enabled.
 bool CandlePreviewFromRaw(const Snapshot& snapshot, const RawLightFrame& raw, RenderLight& output) noexcept;
+// v0.1 uses the same-frame candidate bLightOn lookup when available; an
+// unavailable property can fall back to the game's candidate modulation.
+enum class RemasterCandleState { Unknown, Off, On };
+RemasterCandleState RemasterCandleFromRaw(const Snapshot& snapshot, const RawLightFrame& raw,
+                                         RenderLight& output) noexcept;
 // A same-frame visual-actor sample can show a zero modulation after the
 // light leaves the partial list. This does not prove the enabled property.
 bool CandlePreviewDirectZero(const Snapshot& snapshot, const RawLightFrame& raw) noexcept;

@@ -32,6 +32,10 @@ struct ViewerProvider {
     // When the D3D8 capture marker appears, take a bounded series of viewer
     // images so a shared Present can be checked after the run.
     std::wstring diagnostic_capture_trigger;
+    // Optional exact-Present selection for a distributed diagnostic capture.
+    bool (*diagnostic_capture_frame)(void*, std::uint64_t) noexcept = nullptr;
+    // Optional file-controlled flat/remaster switch, applied only by the viewer.
+    std::wstring remaster_toggle_path;
     // Capture mode retains initial images; timed live-only runs can disable
     // these readbacks without disabling a later explicit capture trigger.
     bool diagnostic_initial_images = true;

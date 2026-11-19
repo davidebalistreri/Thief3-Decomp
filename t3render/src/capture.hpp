@@ -120,6 +120,9 @@ void CaptureShaderDrawResult(IDirect3DDevice8*, std::uint64_t, HRESULT, int buff
 std::uint64_t CaptureClear(IDirect3DDevice8*, DWORD, const D3DRECT*, DWORD, D3DCOLOR, float, DWORD);
 void CaptureClearResult(IDirect3DDevice8*, std::uint64_t, HRESULT);
 void CaptureFrameImage(IDirect3DDevice8*, FrameImageCallback, bool source_rect, bool dest_rect);
+// In sampled mode, only a successfully linked Present can request its exact
+// live viewer frame. This remains readable after the capture closes.
+bool CaptureSampledLiveFrame(std::uint64_t frame) noexcept;
 // Bounded, opt-in scene observations are bracketed independently of Present.
 // All identifiers are diagnostic only, local to this process/capture.
 std::uint64_t CaptureBridgeBegin(std::uint32_t thread_id) noexcept;

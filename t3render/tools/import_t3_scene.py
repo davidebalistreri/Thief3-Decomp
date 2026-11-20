@@ -251,16 +251,19 @@ def make_scene(export, blocks, bundles, fingerprints):
     return scene, counts
 
 
-def import_scene(level, actors_path, game):
+def import_scene(level, actors_path, game, *, bundle=None):
     gmp = resolve_map(game, level, ".gmp")
-    ibt_path = resolve_map(game, level, ".ibt")
+    installed_ibt = resolve_map(game, level, ".ibt")
+    ibt_path = Path(bundle) if bundle is not None else installed_ibt
     with Path(actors_path).open("r", encoding="utf-8") as f:
         export = json.load(f, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"invalid number {value}")))
     validate_actor_export(export, gmp)
     fingerprints = {"map": file_digest(gmp), "bundle": file_digest(ibt_path), "actors": file_digest(actors_path)}
     blocks = find_render_blocks(Package(gmp))
     with IBT(ibt_path) as local:
-        kernel = kernel_bundle(ibt_path)
+        # The optional source bundle may be a verified backup outside the game
+        # directory. Kernel_GFXALL still comes from the game installation.
+        kernel = kernel_bundle(installed_ibt)
         try:
             if kernel:
                 fingerprints["kernel"] = file_digest(kernel.path)
@@ -275,11 +278,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("level", help="map name, for example SouthQuarter1_int1")
     parser.add_argument("--game-dir", help="read-only game installation path or T3_GAME_DIR")
+    parser.add_argument("--bundle", type=Path, help="optional read-only map IBT, for example a verified backup")
     parser.add_argument("--actors", required=True, help="matching offline t3map.py actors.json")
     parser.add_argument("--output", required=True, help="new local SceneIR JSON output file")
     args = parser.parse_args(argv)
     try:
-        snapshot, excluded = import_scene(args.level, args.actors, game_dir(args.game_dir))
+        snapshot, excluded = import_scene(args.level, args.actors, game_dir(args.game_dir), bundle=args.bundle)
         destination = Path(args.output)
         serialized = snapshot.to_json(separators=(",", ":"))
         destination.parent.mkdir(parents=True, exist_ok=True)

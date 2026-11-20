@@ -202,6 +202,8 @@ bool RuntimeInitialize() noexcept {
                 provider.diagnostic_directory=diagnostic_directory;
                 provider.diagnostic_capture_trigger=Environment(L"T3RENDER_CAPTURE_TRIGGER_PATH");
                 provider.remaster_toggle_path=Environment(L"T3RENDER_SCENE_LIVE_REMASTER_TOGGLE");
+                provider.benchmark_package_directory=Environment(L"T3RENDER_T3BENCH_PACKAGE");
+                provider.benchmark_output_directory=Environment(L"T3RENDER_T3BENCH_OUTPUT");
                 if (!Environment(L"T3RENDER_CAPTURE_INTERVAL_MS").empty())
                     provider.diagnostic_capture_frame=[](void*,std::uint64_t frame) noexcept {
                         return CaptureSampledLiveFrame(frame);

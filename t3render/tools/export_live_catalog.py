@@ -595,10 +595,13 @@ def main(argv=None):
     parser.add_argument("--bedroom-props", action="store_true", help="include specific bedroom prop candidates; requires --static-meshes")
     parser.add_argument("--bed-textiles", action="store_true", help="include the generated bed's wool and pillow textures; requires --bedroom-props, --bed-high and --bedroom-materials")
     parser.add_argument("--bedroom-originals-game-dir", type=Path, help="include original diffuse maps for the captured bedroom pose")
+    parser.add_argument("--bedroom-originals-bundle", type=Path, help="read the map IBT from a verified backup instead of the installed bundle")
     parser.add_argument("--candlestick-metal", action="store_true", help="include generated metal and original-derived wax albedos")
     parser.add_argument("--readable-bed-wool", action="store_true", help="lift the existing wool albedo for the candle preview")
     parser.add_argument("--general-map", action="store_true", help="export BSP and static mesh candidates without a bedroom bed")
     args = parser.parse_args(argv)
+    if args.bedroom_originals_bundle and not args.bedroom_originals_game_dir:
+        parser.error("--bedroom-originals-bundle requires --bedroom-originals-game-dir")
     try:
         raw = preview.read_limited(args.offline_scene, preview.MAX_INPUT)
         high = preview.read_limited(args.bed_high, generated_bed.generated.MAX_GLB_BYTES) if args.bed_high else None
@@ -609,8 +612,9 @@ def main(argv=None):
             from t3common import resolve_map
             from ibt import IBT
             scene = SceneSnapshot.from_json(raw)
-            local = resolve_map(args.bedroom_originals_game_dir, scene.source.map, ".ibt")
-            kernel = local.parent / "Kernel_GFXALL.ibt"
+            installed = resolve_map(args.bedroom_originals_game_dir, scene.source.map, ".ibt")
+            local = args.bedroom_originals_bundle or installed
+            kernel = installed.parent / "Kernel_GFXALL.ibt"
             if (packet.digest_file(local) != scene.source.fingerprints.get("bundle") or
                     packet.digest_file(kernel) != scene.source.fingerprints.get("kernel")):
                 raise ValueError("game bundle fingerprints do not match the offline scene")

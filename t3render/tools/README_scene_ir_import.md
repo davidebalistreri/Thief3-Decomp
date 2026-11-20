@@ -23,6 +23,11 @@ from `t3map.py`; and world-space BSP blocks from `t3bsp.py`. BSP discovery is
 heuristic and block-to-zone membership is unknown. Block IDs can repeat, so
 SceneIR IDs also include the source index, offset, and map fingerprint.
 
+Use `--bundle /path/to/SouthQuarter1_int1.ibt` to read a verified map-bundle
+backup without replacing the installed bundle. The kernel bundle still comes
+from the game directory and both fingerprints are recorded; this produces an
+offline scene, not evidence of which bundle a live game loaded.
+
 Geometry remains in native T3 coordinates and units. Left-handed Z-up and the
 row-vector rotation convention follow the SDK. Its scale of 0.01905 meters per
 unit is inferred from a 4x8 asset and is not calibrated at runtime. Winding,

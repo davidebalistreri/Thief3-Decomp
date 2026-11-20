@@ -4,8 +4,10 @@
 #include "scene_live_lighting.hpp"
 #include "scene_live_materials.hpp"
 #include "scene_live_light_diagnostics.hpp"
+#include "scene_live_selection_diagnostics.hpp"
 #include "scene_live_framing.hpp"
 #include "scene_live_wall_displacement.hpp"
+#include "scene_benchmark_win.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -359,6 +361,7 @@ struct Diagnostics {
         out<<"],\"projection\":[";
         for (unsigned i=0;i<16;++i) { if (i) out<<',';out<<snapshot.camera.projection[i]; }
         out<<']';WriteLightDetails(out,snapshot.lights);WriteRawLightDetails(out,snapshot,raw);
+        if (image && toggle_mode) WriteSceneSelection(out,snapshot);
         out<<"}\n";const auto text=out.str();
         if (WriteBytes(log,text.data(),text.size())) ++entries;
         else { CloseHandle(log);log=INVALID_HANDLE_VALUE; }
@@ -415,6 +418,12 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
         diagnostics.Open(state->provider.diagnostic_directory,state->provider.diagnostic_session_id,
                          state->provider.diagnostic_capture_trigger,state->provider.diagnostic_initial_images);
         diagnostics.Event("viewer_started");
+        BenchmarkPackage benchmark;
+        bool benchmark_enabled=!state->provider.benchmark_package_directory.empty() &&
+            !state->provider.benchmark_output_directory.empty();
+        if (benchmark_enabled && !LoadBenchmarkPackage(state->provider.benchmark_package_directory,benchmark)) {
+            benchmark_enabled=false;diagnostics.Event("t3bench_package_invalid");
+        }
         if (state->window) { window = CreateViewerWindow(); if (!window) failed = true; }
         auto active_materials=state->provider.bedroom_materials;
         const bool toggle_mode=!state->provider.remaster_toggle_path.empty();
@@ -467,6 +476,32 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
                     state->stats.preview_gi_active=false;
                 }
                 continue;
+            }
+            if (benchmark_enabled) {
+                BenchmarkScene scene;std::size_t meshes=0,bsp=0;
+                if (BenchmarkFromLive(benchmark.scene,*current,scene,meshes,bsp)) {
+                    diagnostics.Event("t3bench_started");
+                    BenchmarkImages images;
+                    if (!RenderBenchmark(benchmark,scene,images)) {
+                        diagnostics.Event("t3bench_render_failed");benchmark_enabled=false;
+                    } else {
+                        const auto latest=state->provider.current(state->provider.context.get());
+                        if (!latest || !DisplayContinuityMatches(*current,*latest)) {
+                            diagnostics.Event("t3bench_invalidated");
+                        } else {
+                            std::wstring tag;
+                            for (const unsigned char c:state->provider.diagnostic_session_id)
+                                if ((c>='a' && c<='z') || (c>='0' && c<='9')) tag.push_back(static_cast<wchar_t>(c));
+                                else if (c==':') tag.push_back(L'-');
+                                else {tag.clear();break;}
+                            const auto directory=state->provider.benchmark_output_directory+L"\\t3bench-"+tag;
+                            const bool wrote=!tag.empty() && CreateDirectoryW(directory.c_str(),nullptr) &&
+                                WriteBenchmarkImages(directory,benchmark,scene,*current,meshes,bsp,images);
+                            diagnostics.Event(wrote ? "t3bench_completed" : "t3bench_write_failed");
+                            benchmark_enabled=false; // one attempt per session; never overwrite partial output
+                        }
+                    }
+                }
             }
             const bool remaster=!toggle_mode || GetFileAttributesW(state->provider.remaster_toggle_path.c_str())!=INVALID_FILE_ATTRIBUTES;
             if (current == last) continue;
@@ -540,9 +575,12 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
             const bool image_state_ready=!toggle_mode || !remaster || (off_capture ? candle_zero : candle);
             const bool wants_image=image_state_ready && diagnostics.WantsImage(*current,state->provider.diagnostic_capture_frame,
                                                           state->provider.context.get(),toggle_mode,remaster,off_capture);
+            const bool bedroom_v01=toggle_mode && !state->provider.preview_gi;
             if (!(lit ? gpu->PrepareLit(*current,frame,wants_image) : candle || candle_zero || candle_unknown ?
                   gpu->PrepareCandlePreview(*current,candle ? candle_raw.get() : nullptr,frame,wants_image,
-                                            other_state==RemasterCandleState::On ? candle_raw.get() : nullptr) : preview ?
+                                            other_state==RemasterCandleState::On ? candle_raw.get() : nullptr,
+                                            !bedroom_v01,3,bedroom_v01 ? CandlePreviewProfile::BedroomV01 :
+                                                                        CandlePreviewProfile::Current) : preview ?
                   gpu->PreparePreviewLit(*current,frame,wants_image) : gpu->PrepareResident(frame,wants_image))) {
                 failed=true;break;
             }

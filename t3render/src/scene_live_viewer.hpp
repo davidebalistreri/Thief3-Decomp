@@ -36,6 +36,9 @@ struct ViewerProvider {
     bool (*diagnostic_capture_frame)(void*, std::uint64_t) noexcept = nullptr;
     // Optional file-controlled flat/remaster switch, applied only by the viewer.
     std::wstring remaster_toggle_path;
+    // Explicit opt-in. The package and output are local directories; the
+    // viewer never controls the game or its camera.
+    std::wstring benchmark_package_directory, benchmark_output_directory;
     // Capture mode retains initial images; timed live-only runs can disable
     // these readbacks without disabling a later explicit capture trigger.
     bool diagnostic_initial_images = true;

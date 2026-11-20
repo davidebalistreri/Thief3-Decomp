@@ -1,5 +1,9 @@
 # Remaster v0.2 benchmark
 
+For a packaged fixed-camera bedroom v0.1 benchmark and its opt-in live mode,
+see [t3bench](README_t3bench.md). The reconstruction below remains a separate
+historical visual-quality experiment.
+
 The benchmark reconstructs the recorded v0.1 bedroom pose without launching
 TDS. Its inputs are the recorded callback trace, viewer telemetry and the
 unchanged v10 catalog. Actor/resource bindings remain candidates; the OFF

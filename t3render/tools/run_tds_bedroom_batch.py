@@ -183,7 +183,7 @@ def validate_paths(engine, bottle, system, proxy, output):
 def env_for(engine, bottle, output, frames, scene_bridge=False, submission_scope=False, live_catalog=None,
             live_only=False, live_static_meshes=False, live_lights=False, gpu_metrics=False, preview_pbr=False,
             preview_candle=False, candle_link_diagnostics=False, wall_displacement=False, preview_gi=False,
-            sample_interval_ms=None, remaster_toggle=False, candle_left=False):
+            sample_interval_ms=None, remaster_toggle=False, candle_left=False, t3bench_package=None):
     capture = {"T3RENDER_CAPTURE_PATH": windows_path(output / "bedroom.jsonl"),
                "T3RENDER_CAPTURE_TRIGGER_PATH": windows_path(output / "capture.ready"),
                "T3RENDER_CAPTURE_FRAMES": str(frames), "T3RENDER_CAPTURE_BUFFERS": "1",
@@ -214,6 +214,11 @@ def env_for(engine, bottle, output, frames, scene_bridge=False, submission_scope
         capture.update({"T3RENDER_SCENE_LIVE": "1", "T3RENDER_SCENE_LIVE_DX12": "1",
                         "T3RENDER_LIVE_CATALOG": windows_path(live_catalog),
                         "T3RENDER_SCENE_LIVE_DIAGNOSTIC_DIR": windows_path(output)})
+    if t3bench_package is not None:
+        if live_catalog is None or not live_static_meshes:
+            raise BatchError("t3bench requires a live catalog and static mesh sampling")
+        capture["T3RENDER_T3BENCH_PACKAGE"] = windows_path(t3bench_package)
+        capture["T3RENDER_T3BENCH_OUTPUT"] = windows_path(output)
     if live_static_meshes:
         if live_catalog is None:
             raise BatchError("static mesh sampling requires an offline v4, v5, v7 or static-enabled v6 live catalog")
@@ -396,7 +401,21 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
             manual_trigger=False, steam_launch=False, resume_bedroom=False, readonly_saves=False,
             isolated_saves=False, gpu_metrics=False, preview_pbr=False, preview_candle=False,
             candle_link_diagnostics=False, wall_displacement=False, preview_gi=False, sample_interval_ms=None,
-            remaster_toggle=False, candle_left=False):
+            remaster_toggle=False, candle_left=False, t3bench_package=None):
+    if t3bench_package is not None:
+        import t3bench
+        t3bench_package = Path(t3bench_package).expanduser()
+        if (not t3bench_package.is_absolute() or
+                any(c in str(t3bench_package) for c in (":", "\\", "\n", "\r"))):
+            raise BatchError("t3bench package must be an absolute local directory")
+        t3bench_package = t3bench_package.resolve()
+        package_manifest = t3bench.verify(t3bench_package)
+        if live_catalog is not None:
+            if t3bench.sha(Path(live_catalog).expanduser().read_bytes()) != package_manifest['files']['catalog.bin']:
+                raise BatchError("live catalog differs from the t3bench package")
+        else:
+            live_catalog = t3bench_package / 'catalog.bin'
+        scene_bridge = submission_scope = live_static_meshes = True
     if submission_scope and not scene_bridge:
         raise BatchError("submission scope requires the scene bridge probe")
     if live_only and (live_catalog is None or not terminate):
@@ -474,6 +493,7 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
                 if magic not in (b"T3LCAT04", b"T3LCAT05", b"T3LCAT07", b"T3LCAT08", b"T3LCAT09", b"T3LCAT10") and not (
                         magic == b"T3LCAT06" and stream.read(4) == b"\x01\x00\x00\x00"):
                     raise BatchError("static mesh sampling requires a v4, v5, v7–v10 or static-enabled v6 live catalog")
+    live_catalog_sha_before = digest(live_catalog) if live_catalog is not None else None
     if fixture is not None:
         fixture, replay = Path(fixture), Path(replay)
         if not fixture.is_absolute() or not replay.is_absolute():
@@ -496,7 +516,7 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
                            preview_pbr=preview_pbr, preview_candle=preview_candle,
                            candle_link_diagnostics=candle_link_diagnostics, wall_displacement=wall_displacement,
                            preview_gi=preview_gi, sample_interval_ms=sample_interval_ms, remaster_toggle=remaster_toggle,
-                           candle_left=candle_left)
+                           candle_left=candle_left, t3bench_package=t3bench_package)
     executable = "C:\\" + str((system / "T3Main.exe").relative_to((bottle / "drive_c").resolve())).replace("/", "\\")
     deployment = {"schema": 1, "proxy": str(target), "sha256": digest(proxy),
                   "capture_config": capture, "proxy_installed": False, "temporary_proxy_removed": None}
@@ -656,6 +676,14 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
             except (BatchError, OSError) as exc:
                 reason = (reason + "; " if reason else "") + str(exc)
             (output / "deployment.json").write_text(json.dumps(deployment, indent=2) + "\n", encoding="utf-8")
+        live_catalog_sha_after = None
+        if live_catalog is not None:
+            try:
+                live_catalog_sha_after = digest(live_catalog)
+                if live_catalog_sha_after != live_catalog_sha_before:
+                    reason = (reason + "; " if reason else "") + "live catalog changed during the session"
+            except OSError as exc:
+                reason = (reason + "; " if reason else "") + f"cannot verify live catalog: {exc}"
         if reason:
             status = "FAILED"
         result = {"schema": 1, "status": status, "error": reason or None,
@@ -663,6 +691,8 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
                   "scene_bridge_requested": scene_bridge,
                   "submission_scope_requested": submission_scope,
                   "live_viewer_requested": live_catalog is not None,
+                  "live_catalog_sha256_before": live_catalog_sha_before,
+                  "live_catalog_sha256_after": live_catalog_sha_after,
                   "live_static_meshes_requested": live_static_meshes,
                   "live_light_candidates_requested": live_lights,
                   "gpu_metrics_requested": gpu_metrics,
@@ -724,6 +754,7 @@ def main(argv=None):
     run.add_argument("--scene-bridge", action="store_true", help="enable the experimental read-only scene bridge probe")
     run.add_argument("--submission-scope", action="store_true", help="tag draws inside the verified section callsite; requires --scene-bridge")
     run.add_argument("--live-catalog", help="enable the experimental D3D12 viewer with this offline catalog; requires bridge and submission scope")
+    run.add_argument("--t3bench-package", help="enable one automatic fixed-camera benchmark from this verified local package")
     run.add_argument("--live-only", action="store_true", help="timed viewer test without the heavy D3D8 trace; requires catalog and termination")
     run.add_argument("--live-static-meshes", action="store_true", help="enable expensive experimental mesh sampling; requires a v4, v5, v7 or static-enabled v6 catalog")
     run.add_argument("--live-lights", action="store_true", help="sample candidate visible lights; requires a live catalog")
@@ -757,7 +788,7 @@ def main(argv=None):
                     args.live_catalog, args.live_only, args.live_static_meshes, args.live_lights,
                     args.manual_trigger, args.steam_launch, args.resume_bedroom, args.readonly_saves, args.isolated_saves,
                     args.gpu_metrics, args.preview_pbr, args.preview_candle, args.candle_link_diagnostics, args.wall_displacement,
-                    args.preview_gi, args.sample_interval_ms, args.remaster_toggle, args.candle_left)
+                    args.preview_gi, args.sample_interval_ms, args.remaster_toggle, args.candle_left, args.t3bench_package)
     except (BatchError, SandboxError, OSError, ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

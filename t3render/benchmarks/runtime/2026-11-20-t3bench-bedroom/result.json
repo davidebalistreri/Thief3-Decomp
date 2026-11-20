@@ -1,0 +1,186 @@
+{
+  "schema": 1,
+  "test": "t3bench_bedroom_live_and_offline",
+  "date": "2026-11-20",
+  "status": "PASS",
+  "map": "SouthQuarter1_int1",
+  "map_sha256": "ed7d475b1efdc713d28b2a978e11fb0f662bdb17c5c2769d77c96e1f74b7ceba",
+  "capture": {
+    "session": "live:86ec9464c5aa80d3354dc0d877384502",
+    "trace_frame": 808,
+    "on_frame": 816,
+    "off_frame": 853,
+    "trace_sha256": "cfc50ea8b437c2d4c2d620b6f49ec4c437e8a2fce6283738496c4cdffabb596f",
+    "telemetry_sha256": "84897b56c6c04d444b11bb6761adf44a63a4f8fefa98b70a5c5a3a32160b6ca9",
+    "review_sha256": "0d54c0e9fbe8c0d0a91c09e6bb56e9997f4cd97437c2348e6fcfc7ace84ff79c",
+    "user_confirmed_candle_off": true,
+    "original_bundle_sha256": "b6c0b5e2079743f1c5dc74ef02f5514b8ee4f492e4908759d35dd42c62b341b3",
+    "actor_selection": {
+      "source": "viewer_snapshot_on",
+      "observed_candidates": 34,
+      "included_candidates": 34,
+      "excluded_candidates": 0,
+      "excluded_sections": 0,
+      "flat_candidates": 34
+    },
+    "pose_delta": {
+      "distance_t3": 0.43188436850698636,
+      "rotation_degrees": 0.0
+    },
+    "off_pose_delta": {
+      "distance_t3": 0.4954991750215579,
+      "rotation_degrees": 0.0
+    }
+  },
+  "golden": {
+    "files": {
+      "catalog.bin": "2ac1cafbf22959f32a029a99748b4eef9a9bc9232ac36d3ce36ed0cf25fef665",
+      "scene.txt": "ad61301aad2462fe0e302f575f679bd0ac69f98178ae572ad3a2e9174852a929",
+      "d3d8.ppm": "2510954744e285ed44d003f48325fdcd6ec2ab4e6967282819ae101902371c45",
+      "live-flat.ppm": "d877b4d2a4f276ed234f1ee3ba680a4fbcabebae983981572823189181a67210",
+      "live-on.ppm": "370ffbc59fb6ad15d644fe1b61f21a50b8e7a86bf17b4a1c220cb5f62d1f68b6",
+      "live-off.ppm": "d1f412ba7a23722e0ddea48891144404b241fc6dfbaf98041f1b032c9e7efdee",
+      "integrity.txt": "9878c841ae46bf2cb76a247457be7a7fb332e812ba0d6828eff9178b7dd180bd"
+    },
+    "manifest_sha256": "5b890a3a7949c43dd76bee354523d4893b0de7c20622a1e0884a7e7c1286b75c"
+  },
+  "offline": {
+    "environment": "Highball CrossOver 26.3 r32",
+    "images": {
+      "flat.ppm": "df9cbbf26f6d125f9af73ab8f66eb7771b4cd4a187bac0230887f15c9d9568f1",
+      "on.ppm": "53eceb9f1a14bb2dd9a1590f729cfd044b2157a87ca557b94fe8dd39660c2114",
+      "off.ppm": "50439a9cb41bf424898abda2fbdb7165299b0d529167b4f1526cc290b91ba292",
+      "comparison.ppm": "783f606650ecae35280c256d0fc8bf4db892b0439cbf93a200e244edb60b21d4",
+      "comparison.bmp": "08cd9a278c7d5841caf66637f89a8a2a289244105e9f4c4dcea7add4ae1ea739"
+    },
+    "repeated_images_identical": true,
+    "draws": [
+      52,
+      65,
+      64
+    ],
+    "triangles": [
+      3453,
+      32797,
+      32549
+    ],
+    "shadowed_lights": [
+      0,
+      2,
+      1
+    ],
+    "differences": {
+      "flat_vs_on": {
+        "width": 1024,
+        "height": 768,
+        "different_pixels": 786432,
+        "mean_absolute_rgb": 89.93346532185872,
+        "rmse_rgb": 96.2875494501115
+      },
+      "on_vs_off": {
+        "width": 1024,
+        "height": 768,
+        "different_pixels": 268287,
+        "mean_absolute_rgb": 10.439965142144096,
+        "rmse_rgb": 28.586729984118435
+      },
+      "d3d8_vs_flat": {
+        "width": 1024,
+        "height": 768,
+        "different_pixels": 786432,
+        "mean_absolute_rgb": 93.35572391086154,
+        "rmse_rgb": 99.80362431314282
+      },
+      "d3d8_vs_on": {
+        "width": 1024,
+        "height": 768,
+        "different_pixels": 786404,
+        "mean_absolute_rgb": 15.955930497911242,
+        "rmse_rgb": 26.561445139963915
+      },
+      "d3d8_vs_off": {
+        "width": 1024,
+        "height": 768,
+        "different_pixels": 786365,
+        "mean_absolute_rgb": 18.657560136583115,
+        "rmse_rgb": 30.547957823223808
+      },
+      "live_flat_vs_flat": {
+        "width": 1024,
+        "height": 768,
+        "different_pixels": 5100,
+        "mean_absolute_rgb": 0.27615059746636283,
+        "rmse_rgb": 4.355554532896514
+      },
+      "live_on_vs_on": {
+        "width": 1024,
+        "height": 768,
+        "different_pixels": 6,
+        "mean_absolute_rgb": 1.3563368055555555e-05,
+        "rmse_rgb": 0.006510416666666667
+      },
+      "live_off_vs_off": {
+        "width": 1024,
+        "height": 768,
+        "different_pixels": 554930,
+        "mean_absolute_rgb": 1.5050345526801214,
+        "rmse_rgb": 3.622094520964942
+      }
+    }
+  },
+  "live": {
+    "frame": 709,
+    "matched_meshes": 5,
+    "matched_bsp": 4,
+    "golden_camera_and_viewport_match": true,
+    "images_match_offline": true,
+    "shadowed_lights": [
+      0,
+      2,
+      1
+    ],
+    "interaction": "Manual save loading; automatic benchmark without camera positioning or gameplay input.",
+    "isolated_saves_removed": true,
+    "original_saves_unchanged": true,
+    "temporary_proxy_removed": true,
+    "patched_bundle_restored": true,
+    "first_logged_viewer_frame": 720,
+    "nearby_game_view_differs_from_golden": true
+  },
+  "executables_sha256": {
+    "renderer": "48461f5b03911a7c67267f5bb3cc50c86a3be2dbf1f9395bfb47787433abcd07",
+    "proxy": "bb5f22b62d6d6e25ee47ca57858830cd493fb1c5031de512d03129ec491a9465"
+  },
+  "source_sha256": {
+    "t3render/tools/t3bench.py": "2ca60867e38c98e658ac06961a1692877aea3d0b0da0203604bc50441b619a8b",
+    "t3render/tools/t3bench_validate.cpp": "b1f5ce1fb73b17fd1edf3c0ad6786c88dfde73c12e51d029e8c8a5b784c1d736",
+    "t3render/tools/run_tds_bedroom_batch.py": "e114194a7e79f59e17466e2bccc85155dcfb0842f955cefe95f1d8f3a92a6646",
+    "t3render/src/scene_benchmark.cpp": "3ae040ea0e782bdf26ea27549138d587d4bf8a74c618a96848afc8cdef05beec",
+    "t3render/src/scene_benchmark_dx12.cpp": "4d5ba0275ae784e2ff604aed019f9d306e5720909f0999ea69cf05f2fb325a76",
+    "t3render/src/scene_benchmark_win.cpp": "f2c39f0e06fdb1659dfab97a4fd62d8233bb7e485dbca631a3e56c424082829b",
+    "t3render/src/scene_live_dx12.cpp": "a597192f6e166e019cfb517ae1ace0899affe9b47d9341938885684e6da49535",
+    "t3render/src/scene_live_viewer.cpp": "5ea4d4f833df7180af2e3016e8d3c9be1e80cb80d3405f86f0b34e176857b71b",
+    "t3render/src/scene_live_selection_diagnostics.hpp": "037a99e3f62d2fc89b263ea340e656bc344f69ff7c357e9008f66c2e28002a97"
+  },
+  "limitations": [
+    "Flat and remaster images are different frames from the same session and their pose delta is reported.",
+    "The D3D8 image is captured before Present; display color transformations are unknown.",
+    "The viewer is partial; screenshots do not prove GPU resource bindings or total scene parity.",
+    "Projected bounds do not establish visibility, occlusion, interaction range or correct UVs.",
+    "Candle intensity and range are artistic calibration.",
+    "The user confirmed the candle switch; its runtime identity and enabled property remain candidates.",
+    "This replays logged callbacks, not the live TDS process or DX12 viewer.",
+    "Thread birth is synthetic; clear thread is inferred from the recorded Present thread.",
+    "Draw state after the call is assumed equal to the recorded pre-draw state; a stable scope reuses its recorded initial sample.",
+    "JSON float values can lose the sign of zero in recorded draw state.",
+    "Unlogged invalid scopes and generic per-scope asset samples are not reconstructed.",
+    "Offline catalog geometry and fingerprints remain candidate data; GPU inputs and full visibility are not established.",
+    "Geometry and material bindings are offline catalog candidates.",
+    "Actor selections are the viewer snapshot from the ON image, not verified GPU bindings.",
+    "The original D3D8 and OFF observations use different recorded poses from the benchmark camera.",
+    "Frozen ON/OFF light observations are not synchronized with the benchmark camera.",
+    "Automatic --resume-bedroom crashed on this installation; the successful live test loaded the save manually.",
+    "The live scene combines matching live transforms with golden transforms and recorded light states.",
+    "Results and exact pixels are specific to this GPU, driver and renderer build."
+  ]
+}

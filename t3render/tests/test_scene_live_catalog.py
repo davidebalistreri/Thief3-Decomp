@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -19,6 +20,7 @@ import export_live_catalog as catalog
 import scene_ir
 import test_scene_ir
 import test_scene_pbr_bed as bed_tests
+import ibt
 
 
 class TinyTextures:
@@ -110,6 +112,26 @@ class LiveCatalogTests(unittest.TestCase):
         self.assertEqual(result[10], hashlib.sha256(raw).hexdigest())
         self.assertEqual(manifest["source"], "offline")
         self.assertEqual(manifest["catalog_sha256"], hashlib.sha256(data).hexdigest())
+
+    def test_original_texture_export_can_read_verified_backup(self):
+        with tempfile.TemporaryDirectory(prefix='t3render-original-bundle-') as temp:
+            root = Path(temp);maps = root/'game/Content/T3/Maps';maps.mkdir(parents=True)
+            installed = maps/'SouthQuarter1_int1.ibt';installed.write_bytes(b'installed')
+            kernel = maps/'Kernel_GFXALL.ibt';kernel.write_bytes(b'kernel')
+            backup = root/'SouthQuarter1_int1.ibt';backup.write_bytes(b'original backup')
+            data = fixture();data['source']['fingerprints']['bundle'] = hashlib.sha256(backup.read_bytes()).hexdigest()
+            data['source']['fingerprints']['kernel'] = hashlib.sha256(kernel.read_bytes()).hexdigest()
+            scene = root/'scene.json';scene.write_text(json.dumps(data))
+            resolver = object()
+            with mock.patch.object(ibt, 'IBT', side_effect=lambda path: Path(path)) as open_bundle, \
+                 mock.patch.object(catalog.packet, 'TextureResolver', return_value=resolver), \
+                 mock.patch.object(catalog, 'export', return_value=(b'catalog', {'bsp_blocks': 1})) as export, \
+                 mock.patch.object(catalog.packet, 'write_pair'):
+                catalog.main([str(scene), '--output', str(root/'catalog.bin'),
+                              '--bedroom-originals-game-dir', str(root/'game'), '--bedroom-originals-bundle', str(backup)])
+            self.assertEqual([call.args[0] for call in open_bundle.call_args_list], [backup, kernel])
+            self.assertIs(export.call_args.args[8], resolver)
+            self.assertEqual(installed.read_bytes(), b'installed')
 
     def test_integrity_truncation_and_extra_bytes_rejected_atomically(self):
         data, _ = catalog.export(json.dumps(fixture()).encode())

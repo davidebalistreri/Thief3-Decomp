@@ -1,6 +1,7 @@
 """Offline importer contract; no installed game or graphics runtime required."""
 import hashlib
 import importlib.util
+import json
 import math
 from pathlib import Path
 import tempfile
@@ -138,6 +139,36 @@ class OfflineImporterTest(unittest.TestCase):
             source.write_bytes(b"other map")
             with self.assertRaisesRegex(ValueError, "provenance"):
                 importer.validate_actor_export(export, source)
+
+    def test_backup_bundle_keeps_installed_kernel_and_source_fingerprints(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory);game = root/'game';maps = game/'Content/T3/Maps';maps.mkdir(parents=True)
+            gmp = maps/'TestMap.gmp';gmp.write_bytes(b'map')
+            installed = maps/'TestMap.ibt';installed.write_bytes(b'installed')
+            kernel_path = maps/'Kernel_GFXALL.ibt';kernel_path.write_bytes(b'kernel')
+            backup = root/'TestMap.ibt';backup.write_bytes(b'original backup')
+            actors = root/'actors.json';actors.write_text(json.dumps({'level': 'TestMap', 'actors': [], 'actor_count': 0,
+                'source_size': gmp.stat().st_size, 'source_sha1': hashlib.sha1(gmp.read_bytes()).hexdigest(),
+                'units': 'unreal (Z up)'}))
+            class Bundle:
+                def __init__(self, path): self.path = Path(path);self.closed = False
+                def __enter__(self): return self
+                def __exit__(self, *args): self.close()
+                def close(self): self.closed = True
+            kernel = Bundle(kernel_path)
+            with patch.object(importer, 'IBT', Bundle), patch.object(importer, 'kernel_bundle', return_value=kernel) as get_kernel, \
+                 patch.object(importer, 'Package'), patch.object(importer, 'find_render_blocks', return_value=[]), \
+                 patch.object(importer, 'make_scene', return_value=({}, {})) as make_scene, \
+                 patch.object(importer.SceneSnapshot, 'from_dict', return_value='scene'):
+                result, _ = importer.import_scene('TestMap', actors, game, bundle=backup)
+            self.assertEqual(result, 'scene')
+            get_kernel.assert_called_once_with(installed)
+            bundles, fingerprints = make_scene.call_args.args[2:]
+            self.assertEqual(bundles[0].path, backup)
+            self.assertEqual(fingerprints['bundle'], hashlib.sha256(backup.read_bytes()).hexdigest())
+            self.assertEqual(fingerprints['kernel'], hashlib.sha256(kernel_path.read_bytes()).hexdigest())
+            self.assertTrue(kernel.closed)
+            self.assertEqual(installed.read_bytes(), b'installed')
 
     def test_invalid_transform_is_rejected(self):
         for changes in ({"rotation": [0, 0.5, 0]}, {"location": [0, 0, float("nan")]},

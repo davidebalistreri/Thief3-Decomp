@@ -968,7 +968,8 @@ struct FlatD3D12::Impl {
         shadow_commands=true;SetupMain(frame.camera,true);
     }
     bool PrepareResident(const ResidentFlatFrame& f,bool wants_readback,const LightingConstants* lighting=nullptr,
-                         bool synthetic_normal_map=false,bool budget_exceeded=false,bool dark_unlit=false) {
+                         bool synthetic_normal_map=false,bool budget_exceeded=false,bool dark_unlit=false,
+                         bool bedroom_v01=false) {
         if (failed || pending || prepared || !f.map_epoch || !f.device_epoch || !f.continuity || !Valid(f.camera) ||
             !f.camera.vertices.empty() || !f.camera.draws.empty() || f.draws.size()>scene::kMaxDraws ||
             !Resize(f.camera.width,f.camera.height) || (lighting && !EnsureHdr()) ||
@@ -1072,11 +1073,11 @@ struct FlatD3D12::Impl {
             // Only the four generated materials have their own normal maps.
             // Original albedos borrow wood auxiliary channels and must not
             // accidentally inherit its normal map.
-            const bool material_normal=can_light && f.bedroom_original_materials && texture_index<4;
+            const bool material_normal=can_light && !bedroom_v01 && f.bedroom_original_materials && texture_index<4;
             const bool bed_wool=material_normal && texture_index==2;
             const bool gi_wood=preview_gi && material_normal && texture_index==1;
             const bool gi_wall=preview_gi && material_normal && texture_index==0;
-            const bool candlestick_metal=can_light && f.bedroom_original_materials &&
+            const bool candlestick_metal=can_light && !bedroom_v01 && f.bedroom_original_materials &&
                 texture_index==4+kBedroomOriginalNames.size();
             const float alpha=draw.emission>0 ? 1+draw.emission : wall_relief ? -static_cast<float>(draw.wall_relief) :
                               gi_bed ? (bed_wool ? -9.0f : material_normal ? -5.0f : -3.0f) :
@@ -1269,9 +1270,11 @@ bool FlatD3D12::PreparePreviewLit(const Snapshot& snapshot,const ResidentFlatFra
 }
 bool FlatD3D12::PrepareCandlePreview(const Snapshot& snapshot,const RawLightFrame* raw,
                                      const ResidentFlatFrame& frame,bool readback,const RawLightFrame* other_raw,
-                                     bool doorway_fill,unsigned bounce_sources) noexcept {
+                                     bool doorway_fill,unsigned bounce_sources,CandlePreviewProfile profile) noexcept {
     try {
+        const bool bedroom_v01=profile==CandlePreviewProfile::BedroomV01;
         if (!impl_ || impl_->failed || impl_->pending || impl_->prepared || bounce_sources>3 || !FrameMatchesSnapshot(snapshot,frame) ||
+            (bedroom_v01 && (doorway_fill || impl_->preview_gi)) ||
             snapshot.conventions.length_unit!=LengthUnit::T3Unit || snapshot.conventions.axes!=Axes::T3Xyz ||
             snapshot.conventions.up_axis!=UpAxis::Z || !snapshot.conventions.meters_per_unit ||
             !std::isfinite(*snapshot.conventions.meters_per_unit) || *snapshot.conventions.meters_per_unit<=0) return false;
@@ -1290,7 +1293,7 @@ bool FlatD3D12::PrepareCandlePreview(const Snapshot& snapshot,const RawLightFram
         // The two observed bedroom candles have different visual roles in
         // this preview. Keep their runtime positions and modulation, while
         // balancing the nearby table against the candle beside the bed.
-        if (frame.bedroom_original_materials) {
+        if (!bedroom_v01 && frame.bedroom_original_materials) {
             for (std::size_t i=0;i<count;++i) {
                 auto& light=lights[i];
                 if (light.id.size()>=3 && light.id.compare(light.id.size()-3,3,":14")==0)
@@ -1320,7 +1323,7 @@ bool FlatD3D12::PrepareCandlePreview(const Snapshot& snapshot,const RawLightFram
         constants.camera_scale={camera[0],camera[1],camera[2],*snapshot.conventions.meters_per_unit};
         // Exposure is applied to linear HDR after lighting and glow, before
         // tone mapping. Other preview paths retain their existing exposure.
-        if (frame.bedroom_original_materials) {
+        if (!bedroom_v01 && frame.bedroom_original_materials) {
             constants.post_process[0]=1.35f;
             // The first screen-space bounce sees only the captured subset of
             // the room; this preview gain compensates for missing sources.
@@ -1343,7 +1346,7 @@ bool FlatD3D12::PrepareCandlePreview(const Snapshot& snapshot,const RawLightFram
         }
         // A selected section without usable normals cannot respond to the
         // candle. Keep it dark instead of showing diagnostic material colors.
-        if (impl_->PrepareResident(frame,readback,&constants,false,budget_exceeded,true)) return true;
+        if (impl_->PrepareResident(frame,readback,&constants,false,budget_exceeded,true,bedroom_v01)) return true;
         impl_->failed=true;return false;
     } catch (...) {if (impl_) impl_->failed=true;return false;}
 }

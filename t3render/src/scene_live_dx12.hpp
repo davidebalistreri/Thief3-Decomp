@@ -7,6 +7,7 @@
 #include <windows.h>
 
 namespace t3render::live {
+enum class CandlePreviewProfile { Current, BedroomV01 };
 struct RawLightFrame;
 enum class FlatPresent { Presented, Busy, Failed };
 struct FlatCacheStats {
@@ -69,7 +70,8 @@ public:
     bool PrepareCandlePreview(const Snapshot& snapshot, const RawLightFrame* raw,
                               const ResidentFlatFrame& frame, bool readback = false,
                               const RawLightFrame* other_raw = nullptr,
-                              bool doorway_fill = true, unsigned bounce_sources = 3) noexcept;
+                              bool doorway_fill = true, unsigned bounce_sources = 3,
+                              CandlePreviewProfile profile = CandlePreviewProfile::Current) noexcept;
     bool Submit() noexcept;
     bool Finish(std::vector<std::uint8_t>* pixels = nullptr) noexcept;
     // Present is deliberately outside the scene lock: a driver or windowing

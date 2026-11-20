@@ -537,6 +537,18 @@ bool synthetic_candle_preview(const std::wstring& diagnostic_directory) {
         CHECK(gpu->cache_stats().shadowed_lights==1);
         CHECK(gpu->PrepareCandlePreview(both_snapshot,&both_raw,resident,true) && gpu->Submit() && gpu->Finish(&selected_pixels));
         CHECK(selected_pixels==warm_image && both_pixels!=selected_pixels && both_pixels!=other_pixels && other_pixels!=selected_pixels);
+        auto v01_frame=resident;v01_frame.bedroom_original_materials=true;
+        std::vector<std::uint8_t> v01_pixels,v02_pixels;
+        CHECK(gpu->PrepareCandlePreview(both_snapshot,&both_raw,v01_frame,true,&both_raw,false,3,
+                                        CandlePreviewProfile::BedroomV01) && gpu->Submit() && gpu->Finish(&v01_pixels));
+        CHECK(v01_pixels==both_pixels && gpu->cache_stats().shadowed_lights==2);
+        CHECK(gpu->PrepareCandlePreview(both_snapshot,&both_raw,v01_frame,true,&both_raw,false) &&
+              gpu->Submit() && gpu->Finish(&v02_pixels));
+        CHECK(v02_pixels!=v01_pixels && gpu->cache_stats().shadowed_lights==2);
+        auto doorway_snapshot=both_snapshot;doorway_snapshot.conventions.meters_per_unit=.01905f;
+        CHECK(gpu->PrepareCandlePreview(doorway_snapshot,&both_raw,v01_frame,true,&both_raw,true) &&
+              gpu->Submit() && gpu->Finish(&v02_pixels));
+        CHECK(gpu->cache_stats().shadowed_lights==3);
         both_batch->other_candle_link.enabled.status=t3render::scene_bridge::CandleEnabledStatus::Off;
         CHECK(!gpu->PrepareCandlePreview(both_snapshot,&both_raw,resident,true,&both_raw));
     }

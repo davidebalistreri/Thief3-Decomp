@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "test": "t3bench_synthetic_d3d12",
+  "date": "2026-11-20",
+  "status": "PASS",
+  "runtime": {
+    "environment": "Highball",
+    "engine": "CrossOver 26.3 r32",
+    "architecture": "x86",
+    "host_architecture": "arm64"
+  },
+  "source_sha256": {
+    "t3render/CMakeLists.txt": "6157200f3979c67946615da07ae4937809e137cabd3a4e1ccdd313f2484e3ab3",
+    "t3render/tools/t3bench.py": "2ca60867e38c98e658ac06961a1692877aea3d0b0da0203604bc50441b619a8b",
+    "t3render/src/scene_benchmark.cpp": "3ae040ea0e782bdf26ea27549138d587d4bf8a74c618a96848afc8cdef05beec",
+    "t3render/src/scene_benchmark_dx12.cpp": "4d5ba0275ae784e2ff604aed019f9d306e5720909f0999ea69cf05f2fb325a76",
+    "t3render/src/scene_benchmark_win.cpp": "f2c39f0e06fdb1659dfab97a4fd62d8233bb7e485dbca631a3e56c424082829b",
+    "t3render/src/scene_live_viewer.cpp": "5ea4d4f833df7180af2e3016e8d3c9be1e80cb80d3405f86f0b34e176857b71b",
+    "t3render/src/scene_live_dx12.cpp": "a597192f6e166e019cfb517ae1ace0899affe9b47d9341938885684e6da49535",
+    "t3render/tests/scene_benchmark_live_fixture.cpp": "be5caabd71a3577ecb1f8dbc08862648033c1aa8a5afe5e08db7f87764db2ea1",
+    "t3render/tests/test_t3bench_d3d12.py": "7655f5b7e25dbf04c3f46c99d2a568a1a557523abd02d350f37cca335f897399",
+    "t3render/src/scene_live_selection_diagnostics.hpp": "037a99e3f62d2fc89b263ea340e656bc344f69ff7c357e9008f66c2e28002a97",
+    "t3render/tools/t3bench_validate.cpp": "b1f5ce1fb73b17fd1edf3c0ad6786c88dfde73c12e51d029e8c8a5b784c1d736",
+    "t3render/tests/test_t3bench.py": "47eb503e1a1a0a4c26ec76e8798fa662e6a15fd343af78ba7b721f69958520a3",
+    "t3render/tests/scene_live_selection_diagnostics_fixture.cpp": "f565494a69821bb7d941bdcc866253fcca72c41054f398591b44fd755a644bff",
+    "t3render/tests/test_scene_live_selection_diagnostics.py": "74d3485b973afa5aa36317e128e980f13128dcb7b48f86f91f8f515cbe172fbf",
+    "t3render/src/scene_live_dx12.hpp": "ae0b4dcea0fd0dbdde5efadb6c4bc2a0bd3ac66826ab1d82b645ba825e78e374",
+    "t3render/tests/scene_live_dx12_fixture.cpp": "664f511443737e9daedbae7bedf52bf1f4ec87cd1a9034fc06c8bc80f722db38"
+  },
+  "executables_sha256": {
+    "renderer": "48461f5b03911a7c67267f5bb3cc50c86a3be2dbf1f9395bfb47787433abcd07",
+    "live_fixture": "7a63ab94ebb2cb190a7f82f7f6588eb9e52dc3bfd3e7ebe09a579ee05ba50b53"
+  },
+  "checks": {
+    "offline_repeated_images_identical": true,
+    "flat_differs_from_on": true,
+    "on_differs_from_off": true,
+    "live_wrong_map_rejected": true,
+    "live_and_offline_images_identical": true,
+    "golden_camera_and_package_hashes_match": true,
+    "live_image_snapshot_selection_recorded": true
+  },
+  "limitations": [
+    "Synthetic geometry, materials, light candidates and original image only.",
+    "No TDS process, real bedroom capture, gameplay input or real golden package was tested.",
+    "Highball/Wine is a translation layer; native Windows and other drivers are not covered."
+  ],
+  "run_notes": [
+    "Three D3D12 tests passed on the current v0.1 profile, including the local catalog with synthetic scene inputs.",
+    "The catalog viewer fixture and host tests checked profile separation, selection validation and exact transform words.",
+    "Final review-metadata verification was checked by host tests and the real golden render after the synthetic D3D12 run."
+  ],
+  "real_catalog_synthetic": {
+    "status": "PASS",
+    "catalog_sha256": "2ac1cafbf22959f32a029a99748b4eef9a9bc9232ac36d3ce36ed0cf25fef665",
+    "offline_scene_sha256": "2aadc4a0d5511a9a52ecb7e2fd1de0ff7da578524c7128c5eb31131cd6e4f731",
+    "synthetic_scene_sha256": "405b0c0eb8fdf0c82b8dd48f424ffa07c46344bad1345cf8e39399ad5806c892",
+    "repeated_images_identical": true,
+    "catalog_viewer_fixture_source_sha256": "664f511443737e9daedbae7bedf52bf1f4ec87cd1a9034fc06c8bc80f722db38",
+    "catalog_viewer_fixture_executable_sha256": "01c8f7d295db05593877f943c903bdcabd92e284a05b5c1d16940bf17384e0f9",
+    "limitations": [
+      "Camera, selection, light states and D3D8 reference are synthetic.",
+      "This is not a captured bedroom golden or a live TDS verification."
+    ],
+    "shadowed_lights": [
+      0,
+      2,
+      1
+    ],
+    "on_off_images_differ": true
+  }
+}

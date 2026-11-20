@@ -1,4 +1,5 @@
 #include "../src/scene_live_lighting.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -54,6 +55,21 @@ int main() {
     CHECK(CandlePreviewCandlestick(s,raw,candlestick));
     CHECK(candlestick[0].resource && candlestick[0].resource==candlestick[1].resource &&
           candlestick[0].index_count==3952*3 && candlestick[1].index_count==376*3);
+    CHECK(candlestick[0].resource->geometry.uv0.size()==candlestick[0].resource->geometry.positions.size() &&
+          candlestick[0].material_id=="remaster:material:candlestick_metal_v2" &&
+          candlestick[1].material_id=="remaster:material:candlestick_wax_original");
+    // Textured caps must have area, and cylindrical seams must not span
+    // almost the entire texture on a single visible side triangle.
+    const auto& geometry=candlestick[0].resource->geometry;
+    for (std::size_t i=0;i<geometry.indices.size();i+=3) {
+        const auto a=geometry.indices[i],b=geometry.indices[i+1],c=geometry.indices[i+2];
+        const auto& u=geometry.uv0[a];const auto& v=geometry.uv0[b];const auto& w=geometry.uv0[c];
+        CHECK(std::fabs((v[0]-u[0])*(w[1]-u[1])-(v[1]-u[1])*(w[0]-u[0]))>1e-9f);
+        const auto& p=geometry.positions;
+        const float height=std::max({p[a][2],p[b][2],p[c][2]})-std::min({p[a][2],p[b][2],p[c][2]});
+        if (height>0.000525f)
+            CHECK(std::max({u[0],v[0],w[0]})-std::min({u[0],v[0],w[0]})<0.06f);
+    }
     ++raw.frame_id;CHECK(!CandlePreviewCandlestick(s,raw,candlestick));--raw.frame_id;
     s.map_sha256=std::string(64,'a');CHECK(!CandlePreviewCandlestick(s,raw,candlestick));s.map_sha256=hash;
     const float invalid_scale=std::numeric_limits<float>::quiet_NaN();s.conventions.meters_per_unit=invalid_scale;
@@ -63,6 +79,74 @@ int main() {
     std::memcpy(batch->candle_link.transform_bits.data(),identity,sizeof(identity));
     ResidentFlatDraw flame;CHECK(CandlePreviewFlame(s,raw,flame));
     CHECK(flame.resource && flame.index_count==744 && flame.emission==8 && flame.transform[15]==1);
+    ResidentFlatFrame on_frame,off_frame;
+    AppendCandlePreview(s,raw,true,on_frame);AppendCandlePreview(s,raw,false,off_frame);
+    CHECK(on_frame.draws.size()==3 && off_frame.draws.size()==2 &&
+          on_frame.draws[0].resource==off_frame.draws[0].resource &&
+          on_frame.draws[2].resource->name=="CandleFlame" && on_frame.draws[2].emission>0);
+    auto left=light;left.id="light-actor:"+map+":"+hash+":D_384:14";
+    const float left_position[3]={11,22,33};left.position={Vec3{11,22,33},BindingEvidence::Candidate};
+    auto left_item=item;left_item.candidate=left;const float half_left=.5f;
+    std::memcpy(left_item.field_34.data(),left_position,sizeof(left_position));
+    std::memcpy(&left_item.field_8c,&half_left,sizeof(half_left));
+    s.lights.push_back(left);batch->items.push_back(left_item);batch->listed=2;
+    batch->candle_actor_number=14;batch->candle_link.factor_8c_bits=left_item.field_8c;
+    std::memcpy(&batch->candle_link.transform_bits[12],left_position,sizeof(left_position));
+    CHECK(CandlePreviewFromRaw(s,raw,out) && out.id==left.id && out.intensity==.5f && out.position==*left.position.value);
+    CHECK(RemasterCandleFromRaw(s,raw,out)==RemasterCandleState::On);
+    batch->candle_actor_number=15;CHECK(!CandlePreviewFromRaw(s,raw,out));batch->candle_actor_number=14;
+    ResidentFlatFrame left_on;AppendCandlePreview(s,raw,true,left_on);
+    CHECK(left_on.draws.size()==3 && left_on.draws[2].emission==4 &&
+          left_on.draws[0].transform[12]==11 && left_on.draws[2].transform[14]==33);
+    {
+        // Two explicit bedroom actors retain independent observations and poses.
+        auto both=s;auto both_batch=std::make_shared<RawLightBatch>(*batch);auto both_raw=raw;both_raw.batch=both_batch;
+        both_batch->other_candle_link=both_batch->candle_link;
+        both_batch->other_candle_link.factor_8c_bits=item.field_8c;
+        both_batch->other_candle_link.enabled.status=CandleEnabledStatus::On;
+        std::memcpy(both_batch->other_candle_link.transform_bits.data(),identity,sizeof(identity));
+        std::memcpy(&both_batch->other_candle_link.transform_bits[12],position,sizeof(position));
+        RenderLight selected,other;
+        CHECK(RemasterCandleFromRaw(both,both_raw,selected,14)==RemasterCandleState::On && selected.id==left.id);
+        CHECK(RemasterCandleFromRaw(both,both_raw,other,6)==RemasterCandleState::On && other.id==light.id);
+        ResidentFlatFrame both_on;
+        AppendCandlePreview(both,both_raw,true,both_on,14);AppendCandlePreview(both,both_raw,true,both_on,6);
+        CHECK(both_on.draws.size()==6 && both_on.draws[0].preview_candle_actor==14 &&
+              both_on.draws[3].preview_candle_actor==6 && both_on.draws[0].transform[12]==11 &&
+              both_on.draws[3].transform[12]==1);
+        both_batch->other_candle_link.enabled.status=CandleEnabledStatus::Off;
+        CHECK(RemasterCandleFromRaw(both,both_raw,selected,14)==RemasterCandleState::On);
+        CHECK(RemasterCandleFromRaw(both,both_raw,other,6)==RemasterCandleState::Off);
+        ResidentFlatFrame other_off;
+        AppendCandlePreview(both,both_raw,true,other_off,14);AppendCandlePreview(both,both_raw,false,other_off,6);
+        CHECK(other_off.draws.size()==5 && other_off.draws[2].emission>0 &&
+              other_off.draws[3].preview_candle_actor==6);
+        both_batch->other_candle_link.enabled.status=CandleEnabledStatus::On;
+        both_batch->candle_link.enabled.status=CandleEnabledStatus::Off;
+        both_batch->candle_link.factor_8c_bits=0;both_batch->items.pop_back();both.lights.pop_back();both_batch->listed=1;
+        CHECK(RemasterCandleFromRaw(both,both_raw,selected,14)==RemasterCandleState::Off);
+        CHECK(RemasterCandleFromRaw(both,both_raw,other,6)==RemasterCandleState::On);
+        ResidentFlatFrame left_off;
+        AppendCandlePreview(both,both_raw,false,left_off,14);AppendCandlePreview(both,both_raw,true,left_off,6);
+        CHECK(left_off.draws.size()==5 && left_off.draws[0].preview_candle_actor==14 &&
+              left_off.draws[2].preview_candle_actor==6 && left_off.draws[4].emission>0);
+        ++both_raw.frame_id;CHECK(RemasterCandleFromRaw(both,both_raw,other,6)==RemasterCandleState::Unknown);--both_raw.frame_id;
+        both_batch->other_candle_link.status=t3render::scene_bridge::CandleLinkStatus::Unknown;
+        CHECK(RemasterCandleFromRaw(both,both_raw,other,6)==RemasterCandleState::Unknown);
+        CHECK(RemasterCandleFromRaw(both,both_raw,selected,14)==RemasterCandleState::Off);
+        both_batch->other_candle_link={};
+        CHECK(!CandlePreviewFromRaw(both,both_raw,other,6));
+        CHECK(RemasterCandleFromRaw(both,both_raw,selected,14)==RemasterCandleState::Off);
+    }
+    batch->candle_link.enabled.status=CandleEnabledStatus::Off;
+    CHECK(RemasterCandleFromRaw(s,raw,out)==RemasterCandleState::Off);
+    batch->items.pop_back();s.lights.pop_back();batch->listed=1;batch->candle_link.factor_8c_bits=0;
+    CHECK(CandlePreviewDirectZero(s,raw)); // the other candle is still listed
+    batch->candle_actor_number=6;batch->candle_link.factor_8c_bits=item.field_8c;
+    batch->candle_link.enabled.status=CandleEnabledStatus::Unknown;
+    std::memcpy(batch->candle_link.transform_bits.data(),identity,sizeof(identity));
+    ++raw.frame_id;ResidentFlatFrame stale_frame;AppendCandlePreview(s,raw,true,stale_frame);
+    CHECK(stale_frame.draws.empty());--raw.frame_id;
     ++raw.frame_id;CHECK(!CandlePreviewFlame(s,raw,flame));--raw.frame_id;
     batch->candle_link.factor_8c_bits=0;
     CHECK(!CandlePreviewFlame(s,raw,flame) && !CandlePreviewFromRaw(s,raw,out));

@@ -7,6 +7,7 @@
 #include "../src/frame_image.hpp"
 #ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
 #include "../src/scene_live_runtime.hpp"
+#include "../src/scene_live_stack_win.hpp"
 #endif
 #include <algorithm>
 #include <array>
@@ -226,7 +227,8 @@ public:
         }
         const DWORD before = GetLastError();
 #ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
-        const auto live_ticket=live::RuntimePresentBegin(native_);
+        volatile char stack_marker=0;
+        const auto live_ticket=live::RuntimePresentBegin(native_,&stack_marker);
 #endif
         std::uint64_t present_ticket;
         {
@@ -248,6 +250,7 @@ public:
         }
 #ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
         live::RuntimePresentEnd(live_ticket,hr);
+        (void)stack_marker;
         // The hook leaves its pinned thunk/trampoline alive for in-flight
         // calls; disable it only after the capture lock has been released.
         static std::atomic<bool> disabled{false};
@@ -321,6 +324,11 @@ private:
         return limits;
     }
     template<class Forward>
+#if defined(_MSC_VER)
+    __declspec(noinline)
+#elif defined(__GNUC__)
+    __attribute__((noinline))
+#endif
     HRESULT Draw(DrawCall call, Forward forward) noexcept {
         const DWORD before = GetLastError();
         if (writer_active_) {
@@ -330,7 +338,8 @@ private:
             Unsupported(); SetLastError(before); return forward();
         }
 #ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
-        const auto live_draw=live::RuntimeDrawBegin(native_,call);
+        volatile char stack_marker=0;
+        const auto live_draw=live::RuntimeDrawBegin(native_,call,false,&stack_marker);
 #endif
         const bool recovering = reset_recovery_;
 #ifndef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
@@ -346,6 +355,7 @@ private:
             const DWORD after=GetLastError();
 #ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
             live::RuntimeDrawEnd(native_,live_draw,hr);
+            (void)stack_marker;
 #endif
             SetLastError(after);return hr;
         }
@@ -386,6 +396,7 @@ private:
             const DWORD after = GetLastError();
 #ifdef T3RENDER_EXPERIMENTAL_COMBINED_PROXY
             live::RuntimeDrawEnd(native_,live_draw,hr);
+            (void)stack_marker;
 #endif
             const bool buffer_stable = buffer_ticket && buffers_.EndDraw(native_, buffer_ticket);
             const bool shader_stable = shader_ticket && shaders_.End(shader_ticket) && SUCCEEDED(hr) &&

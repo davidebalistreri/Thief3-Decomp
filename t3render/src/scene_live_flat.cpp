@@ -97,7 +97,8 @@ bool BuildFlatFrame(const Snapshot& snapshot, scene::Frame& output) {
 }
 
 bool BuildResidentFlatFrame(const Snapshot& snapshot, ResidentFlatFrame& output, const MeshOverride* bed_override,
-                            bool bedroom_materials, bool bedroom_wall_relief, const BedroomAnchor* retained_anchor) {
+                            bool bedroom_materials, bool bedroom_wall_relief, const BedroomAnchor* retained_anchor,
+                            bool bedroom_originals) {
     const auto& camera=snapshot.camera;
     if (!snapshot.map_epoch || !snapshot.device_epoch || !snapshot.continuity || snapshot.conventions.length_unit!=LengthUnit::T3Unit ||
         snapshot.conventions.axes!=Axes::T3Xyz || snapshot.conventions.up_axis!=UpAxis::Z ||
@@ -131,6 +132,17 @@ bool BuildResidentFlatFrame(const Snapshot& snapshot, ResidentFlatFrame& output,
         indices+=count;
         frame.draws.push_back({resource,section,first,count,transform,material,MaterialColor(material)});return true;
     };
+    BedroomAnchor anchor;
+    bool have_anchor=bedroom_materials && FindBedroomAnchor(snapshot,anchor);
+    if (bedroom_materials && !have_anchor && retained_anchor) {
+        anchor=*retained_anchor;have_anchor=true;frame.bedroom_anchor_retained=true;
+    }
+    const std::string actor_prefix="actor:"+snapshot.map+":"+snapshot.map_sha256+":";
+    const bool bedroom_preview=bed_override && have_anchor && snapshot.map=="SouthQuarter1_int1" &&
+        snapshot.map_sha256=="ed7d475b1efdc713d28b2a978e11fb0f662bdb17c5c2769d77c96e1f74b7ceba" &&
+        bed_override->map==snapshot.map && bed_override->map_sha256==snapshot.map_sha256 &&
+        bed_override->instance_id==actor_prefix+"StaticMeshActor__1520" && bed_override->source && bed_override->replacement;
+    frame.bedroom_original_materials=bedroom_preview;
     for (const auto& mesh:snapshot.meshes) {
         if (!mesh.resource || (!mesh.selection.material_ids.empty() &&
             mesh.selection.material_ids.size()!=mesh.resource->geometry.sections.size())) return false;
@@ -146,22 +158,76 @@ bool BuildResidentFlatFrame(const Snapshot& snapshot, ResidentFlatFrame& output,
                 bed_override->replacement->geometry.sections.size()>scene::kMaxDraws) return false;
             for (std::size_t i=0;i<bed_override->replacement->geometry.sections.size();++i) {
                 const auto& part=bed_override->replacement->geometry.sections[i];
+                auto material=part.material_id;
+                // Match the existing bedroom PBR preview: the generated bed's
+                // two wood sections use the same wood_floor_v2 texture. Keep
+                // this a viewer-only choice, and only when that library is on.
+                if (bedroom_preview && material &&
+                    (*material=="remaster:material:bed_high:BedTrimWood" ||
+                     *material=="remaster:material:bed_high:HeadboardWood"))
+                    material="remaster:material:wood_floor_v2";
+                else if (bedroom_preview && material && *material=="remaster:material:bed_high:GENiFABRICwoolA2_D")
+                    material="remaster:material:bed_high:textured:GENiFABRICwoolA2_D";
+                else if (bedroom_preview && material && *material=="remaster:material:bed_high:PillowLinen")
+                    material="remaster:material:bed_high:textured:PillowLinen";
                 if (!append(bed_override->replacement,mesh.selection.transform,static_cast<std::uint32_t>(i),
-                            part.first_index,part.index_count,part.material_id)) return false;
+                            part.first_index,part.index_count,material)) return false;
+                // These colors are the fallback for catalogs without the two
+                // optional bed textile textures. Textured draws ignore them.
+                if (bedroom_preview && part.material_id) {
+                    const auto& id=*part.material_id;
+                    if (id=="remaster:material:bed_high:GENiFABRICwoolA2_D") frame.draws.back().color={.13f,.15f,.25f,1};
+                    else if (id=="remaster:material:bed_high:BlanketSeam") frame.draws.back().color={.15f,.14f,.16f,1};
+                    else if (id=="remaster:material:bed_high:PillowLinen") frame.draws.back().color={.75f,.70f,.60f,1};
+                    else if (id=="remaster:material:bed_high:PillowSeam") frame.draws.back().color={.46f,.44f,.40f,1};
+                }
             }
             ++frame.override_instances;continue;
         }
         for (auto index:mesh.selection.sections) {
-            const auto material=mesh.selection.material_ids.empty() ? mesh.resource->geometry.sections[index].material_id :
-                                                                       mesh.selection.material_ids[index];
+            auto material=mesh.selection.material_ids.empty() ? mesh.resource->geometry.sections[index].material_id :
+                                                                 mesh.selection.material_ids[index];
             const auto& part=mesh.resource->geometry.sections[index];
+            std::optional<std::array<float,4>> preview_color;
+            if (bedroom_preview && material && mesh.selection.instance_id.compare(0,actor_prefix.size(),actor_prefix)==0) {
+                const auto found=snapshot.materials.find(*material);
+                const auto actor=mesh.selection.instance_id.substr(actor_prefix.size());
+                const auto& name=mesh.resource->name;
+                const auto source=found==snapshot.materials.end() ? std::string{} : found->second.name;
+                const bool has_uv=mesh.resource->geometry.uv0.size()==mesh.resource->geometry.positions.size();
+                const bool furniture=(actor=="D_443__1" && name=="SEAinFURNcabinetC1") ||
+                                     ((actor=="D_1224__21" || actor=="D_1224__0" ||
+                                       actor=="D_1224__22" || actor=="D_1224__23") && name=="GENxGOODScrateB");
+                static constexpr const char* beam_actors[]{"StaticMeshActor__2","StaticMeshActor__16","StaticMeshActor__17",
+                    "StaticMeshActor__19","StaticMeshActor__56","StaticMeshActor__258","StaticMeshActor__603",
+                    "StaticMeshActor__604","StaticMeshActor__610","StaticMeshActor__1037","StaticMeshActor__1306",
+                    "StaticMeshActor__1337","StaticMeshActor__1363","StaticMeshActor__1365","StaticMeshActor__1409",
+                    "StaticMeshActor__1456","StaticMeshActor__2860"};
+                const bool beam=std::any_of(std::begin(beam_actors),std::end(beam_actors),[&](const char* value){return actor==value;}) &&
+                    (name=="Rsupportwood" || name=="Tenxbeamwood1x8" || name=="Tenxbeamwood1x16" ||
+                     name=="TENxBEAMwood1x5" || name=="GENrafters1") &&
+                    (source=="GENbeamA_D" || source=="GENgoodnessA_D");
+                const bool target=actor=="D_548__0" && name=="GENxGOODSarchtarg";
+                // Frame 889 also selects the matching arch at the room's
+                // right edge. Keep this mapping tied to the two known actors.
+                const bool arch=(actor=="StaticMeshActor__58" || actor=="StaticMeshActor__59") &&
+                                name=="GENsknDOORFRMarc4x10half";
+                if (has_uv && !bedroom_originals && ((furniture && source=="HSEGoodnessA_D") || beam || (target && source=="GENgoodnessA_D")))
+                    material="remaster:material:wood_floor_v2";
+                else if (has_uv && ((arch && source=="STMwall512D_D") ||
+                         (actor=="StaticMeshActor__239" && name=="GENwindowFACADE2A1" && source=="CHRwallC_D")))
+                    material="remaster:material:stone_wall_v2";
+                else if (arch && source=="CIVGoodness_D")
+                    preview_color=std::array<float,4>{.30f,.28f,.24f,1};
+                else if (actor=="StaticMeshActor__1" && name=="GENiGOODSbooksA3" && source=="GENgoodnessBOOK1_D")
+                    preview_color=std::array<float,4>{.32f,.20f,.12f,1};
+                else if (actor=="D_125__3" && name=="GENiFOODbreadA1" && source=="GENbreadcrust_D")
+                    preview_color=std::array<float,4>{.62f,.38f,.19f,1};
+                else if (target && source=="GENtarget_D") preview_color=std::array<float,4>{.60f,.15f,.08f,1};
+            }
             if (!append(mesh.resource,mesh.selection.transform,index,part.first_index,part.index_count,material)) return false;
+            if (preview_color) frame.draws.back().color=*preview_color;
         }
-    }
-    BedroomAnchor anchor;
-    bool have_anchor=bedroom_materials && FindBedroomAnchor(snapshot,anchor);
-    if (bedroom_materials && !have_anchor && retained_anchor) {
-        anchor=*retained_anchor;have_anchor=true;frame.bedroom_anchor_retained=true;
     }
     const bool identify_head_wall=have_anchor && bedroom_wall_relief && snapshot.map_sha256==
         "ed7d475b1efdc713d28b2a978e11fb0f662bdb17c5c2769d77c96e1f74b7ceba";
@@ -175,10 +241,19 @@ bool BuildResidentFlatFrame(const Snapshot& snapshot, ResidentFlatFrame& output,
                 std::vector<BedroomMaterialRun> runs;
                 if (!PartitionBedroomMaterial(anchor,*block.resource,index,found->second.name,runs,identify_head_wall)) return false;
                 for (const auto& run:runs) {
+                    // The wall visible through the bedroom doorway was
+                    // submitted in the captured scope, outside the original
+                    // bed-relative room box. Keep this one block explicit.
+                    const bool doorway_wall=bedroom_preview &&
+                        block.resource->id=="bsp:SouthQuarter1_int1:ed7d475b1efdc713d28b2a978e11fb0f662bdb17c5c2769d77c96e1f74b7ceba:19:190995" &&
+                        block.resource->geometry.uv0.size()==block.resource->geometry.positions.size() &&
+                        found->second.name=="STMwall512D_D";
+                    const auto material=doorway_wall ? std::optional<std::string>("remaster:material:stone_wall_v2") :
+                                                       run.replacement ? run.replacement : part.material_id;
                     if (!append(block.resource,kIdentity,index,run.first_index,run.index_count,
-                                run.replacement ? run.replacement : part.material_id)) return false;
+                                material)) return false;
                     if (run.head_wall) frame.draws.back().wall_relief=2;
-                    if (run.replacement) ++frame.bedroom_material_runs;
+                    if (run.replacement || doorway_wall) ++frame.bedroom_material_runs;
                 }
             } else if (!append(block.resource,kIdentity,index,part.first_index,part.index_count,part.material_id)) return false;
         }

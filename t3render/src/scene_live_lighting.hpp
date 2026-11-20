@@ -28,24 +28,30 @@ struct VerifiedLighting {
 enum class LightingResult { Ready, UnknownCoverage, Incomplete, TooManyLights, InvalidCamera, InvalidUnits, InvalidProvenance };
 // Inverts the view transform without attributing any lighting to the game.
 bool CameraPositionFromView(const Matrix& view, Vec3& output) noexcept;
-// Artistic, single-candle preview from a matching raw sample. It does not
-// upgrade candidate evidence or assert that the source is enabled.
-bool CandlePreviewFromRaw(const Snapshot& snapshot, const RawLightFrame& raw, RenderLight& output) noexcept;
+// Artistic preview of one of the two researched bedroom candles. Zero selects
+// the configured candle; 6 or 14 select it explicitly. Evidence stays candidate.
+bool CandlePreviewFromRaw(const Snapshot& snapshot, const RawLightFrame& raw, RenderLight& output,
+                          std::uint32_t actor_number=0) noexcept;
 // v0.1 uses the same-frame candidate bLightOn lookup when available; an
 // unavailable property can fall back to the game's candidate modulation.
 enum class RemasterCandleState { Unknown, Off, On };
 RemasterCandleState RemasterCandleFromRaw(const Snapshot& snapshot, const RawLightFrame& raw,
-                                         RenderLight& output) noexcept;
+                                         RenderLight& output, std::uint32_t actor_number=0) noexcept;
 // A same-frame visual-actor sample can show a zero modulation after the
 // light leaves the partial list. This does not prove the enabled property.
-bool CandlePreviewDirectZero(const Snapshot& snapshot, const RawLightFrame& raw) noexcept;
+bool CandlePreviewDirectZero(const Snapshot& snapshot, const RawLightFrame& raw, std::uint32_t actor_number=0) noexcept;
 // Generated metal and wax use the independently sampled visual-actor pose.
 // They are viewer-only replacements and do not change the source scene.
 bool CandlePreviewCandlestick(const Snapshot& snapshot, const RawLightFrame& raw,
-                              std::array<ResidentFlatDraw,2>& output) noexcept;
+                              std::array<ResidentFlatDraw,2>& output, std::uint32_t actor_number=0) noexcept;
 // Uses the generated two-flame mesh only with matching same-frame light and
 // visual-actor samples; the geometry and radiance are artistic preview data.
-bool CandlePreviewFlame(const Snapshot& snapshot, const RawLightFrame& raw, ResidentFlatDraw& output) noexcept;
+bool CandlePreviewFlame(const Snapshot& snapshot, const RawLightFrame& raw, ResidentFlatDraw& output,
+                        std::uint32_t actor_number=0) noexcept;
+// Keep the holder in both states; add a flame only when the caller's
+// same-frame light state is on and the geometry fits the frame budget.
+void AppendCandlePreview(const Snapshot& snapshot, const RawLightFrame& raw,
+                         bool candle_on, ResidentFlatFrame& frame, std::uint32_t actor_number=0);
 // A producer's Verified flags and Complete coverage are attestations, not
 // independent runtime measurements. Failure leaves output untouched.
 LightingResult BuildVerifiedLighting(const Snapshot& snapshot, VerifiedLighting& output);

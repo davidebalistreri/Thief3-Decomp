@@ -43,6 +43,19 @@ struct Memory {
     }
 };
 
+struct ChangeDuringBreadPrefix {
+    Memory* memory;
+    bool changed=false;
+    static bool read(void* context,std::uint32_t address,void* output,std::size_t count) noexcept {
+        auto& state=*static_cast<ChangeDuringBreadPrefix*>(context);
+        const bool ok=Memory::read(state.memory,address,output,count);
+        if (ok && address==0x1e01e && count==1 && !state.changed) {
+            state.changed=true;state.memory->put<std::uint8_t>(address,'1');
+        }
+        return ok;
+    }
+};
+
 struct ChangeDuringWitness {
     enum class Kind { Outer, List, DuplicateObject };
     Memory* memory;
@@ -569,10 +582,114 @@ int main() {
     assert(generic_submission.valid && generic_submission.asset_available &&
            std::strcmp(generic_submission.asset_name,mesh_name)==0);
     auto generic=SampleVisibleStaticMesh(reader,generic_probe,generic_submission);
-    assert(generic.list_stable && generic.object_table_complete && generic.name_occurrences==1 &&
+    assert(generic.diagnostic_stage==StaticMeshSampleStage::Complete &&
+           generic.list_stable && generic.object_table_complete && generic.name_occurrences==1 &&
            generic.entry.owner_stable && generic.entry.list_index==0 && generic.owner_class.stable &&
            generic.outer.stable && generic.owner_outer.value==0x1a000 &&
            generic.asset.status==AssetStatus::Candidate && generic.mesh_node.stable && generic.mesh_node.sections_available);
+    auto crate_memory=general;crate_memory.region(0x1c000,128);
+    crate_memory.put<std::uint32_t>(0x10f7af20,10);crate_memory.put<std::uint32_t>(0x10f7af24,10);
+    crate_memory.put<std::uint32_t>(0xa024,0x1c000);
+    const char crate_name[]="D_1224";
+    for (std::size_t i=0;i<sizeof(crate_name);++i) crate_memory.put<std::uint8_t>(0x1c01c+i,crate_name[i]);
+    crate_memory.put<std::uint32_t>(0x4020,(22u<<16)|9);
+    crate_memory.put<std::uint32_t>(0x4028,0); // inherited or unavailable local mesh property
+    ProbeReader crate_reader{&crate_memory,Memory::read};
+    const auto crate_probe=SampleLiveProbe(crate_reader,42,0x1000,0x109271ae);
+    const auto crate_submission=SampleSubmission(crate_reader,0x3000);
+    const auto crate=SampleVisibleStaticMesh(crate_reader,crate_probe,crate_submission,BedroomProp::Crate);
+    assert(crate.diagnostic_stage==StaticMeshSampleStage::Complete && crate.list_stable &&
+           crate.asset.status==AssetStatus::LocalPropertyMissing &&
+           crate.mesh_node.stable && std::strcmp(crate.entry.owner_name,"D_1224")==0);
+    assert(!SampleVisibleStaticMesh(crate_reader,crate_probe,crate_submission).list_stable);
+    for (const auto pair:{std::pair{BedroomProp::DoorCrate0,1u},std::pair{BedroomProp::DoorCrate22,23u},
+                          std::pair{BedroomProp::DoorCrate23,24u}}) {
+        auto memory=crate_memory;memory.put<std::uint32_t>(0x4020,(pair.second<<16)|9);
+        ProbeReader reader{&memory,Memory::read};
+        const auto probe=SampleLiveProbe(reader,42,0x1000,0x109271ae);
+        const auto submission=SampleSubmission(reader,0x3000);
+        const auto selected=SampleVisibleStaticMesh(reader,probe,submission,pair.first);
+        assert(selected.list_stable && selected.asset.status==AssetStatus::LocalPropertyMissing &&
+               selected.mesh_node.stable && std::strcmp(selected.entry.owner_name,"D_1224")==0);
+    }
+    auto wrong_crate=crate_submission;wrong_crate.owner_fname=(21u<<16)|9;
+    const auto wrong_sample=SampleVisibleStaticMesh(crate_reader,crate_probe,wrong_crate,BedroomProp::Crate);
+    assert(!wrong_sample.list_stable && wrong_sample.diagnostic_stage==StaticMeshSampleStage::Initial);
+    auto stale_list=crate_probe;++stale_list.entries[0].address.value;
+    const auto stale_sample=SampleVisibleStaticMesh(crate_reader,stale_list,crate_submission,BedroomProp::Crate);
+    assert(!stale_sample.list_stable && stale_sample.diagnostic_stage==StaticMeshSampleStage::Header);
+    auto cabinet_memory=crate_memory;const char cabinet_name[]="D_443";
+    for (std::size_t i=0;i<sizeof(cabinet_name);++i) cabinet_memory.put<std::uint8_t>(0x1c01c+i,cabinet_name[i]);
+    cabinet_memory.put<std::uint32_t>(0x4020,(2u<<16)|9);
+    ProbeReader cabinet_reader{&cabinet_memory,Memory::read};
+    const auto cabinet_probe=SampleLiveProbe(cabinet_reader,42,0x1000,0x109271ae);
+    const auto cabinet_submission=SampleSubmission(cabinet_reader,0x3000);
+    const auto cabinet=SampleVisibleStaticMesh(cabinet_reader,cabinet_probe,cabinet_submission,BedroomProp::Cabinet);
+    assert(cabinet.list_stable && cabinet.asset.status==AssetStatus::LocalPropertyMissing &&
+           cabinet.mesh_node.stable && std::strcmp(cabinet.entry.owner_name,"D_443")==0);
+    assert(!SampleVisibleStaticMesh(cabinet_reader,cabinet_probe,cabinet_submission,BedroomProp::Crate).list_stable);
+    for (const auto prop:{BedroomProp::Bread,BedroomProp::Target}) {
+        auto memory=crate_memory;const auto* name=BedroomPropName(prop);
+        for (std::size_t i=0;i<=std::strlen(name);++i) memory.put<std::uint8_t>(0x1c01c+i,name[i]);
+        memory.put<std::uint32_t>(0x4020,((prop==BedroomProp::Bread ? 4u : 1u)<<16)|9);
+        ProbeReader prop_reader{&memory,Memory::read};
+        const auto prop_probe=SampleLiveProbe(prop_reader,42,0x1000,0x109271ae);
+        const auto submission=SampleSubmission(prop_reader,0x3000);
+        const auto observed=SampleVisibleStaticMesh(prop_reader,prop_probe,submission,prop);
+        assert(observed.list_stable && observed.asset.status==AssetStatus::LocalPropertyMissing &&
+               observed.mesh_node.stable && std::strcmp(observed.entry.owner_name,name)==0);
+        if (prop==BedroomProp::Bread) {
+            // A same-number owner with no readable base-name prefix must stop
+            // the uniqueness check. This reproduces one possible cause of the
+            // observed List checkpoint.
+            auto unreadable=memory;unreadable.region(0x3300,0x100);unreadable.region(0x4200,0x100);
+            unreadable.put<std::uint32_t>(0x1050,3);unreadable.put<std::uint32_t>(0x2008,0x3300);
+            unreadable.put<std::uint32_t>(0x3300,0x10e4e8c0);unreadable.put<std::uint32_t>(0x3344,4);
+            unreadable.put<std::uint32_t>(0x3354,0x4200);unreadable.put<std::uint32_t>(0x4220,(4u<<16)|0xffffu);
+            auto list=prop_probe;list.count.value=list.entries_attempted=3;
+            list.entries[2].list_index=2;list.entries[2].address={0x3300,true};
+            list.entries[2].vtable={0x10e4e8c0,true};list.entries[2].type={4,true};
+            ProbeReader unreadable_reader{&unreadable,Memory::read};
+            const auto rejected=SampleVisibleStaticMesh(unreadable_reader,list,submission,prop);
+            assert(!rejected.list_stable && rejected.diagnostic_stage==StaticMeshSampleStage::List);
+
+            // Only the first three characters of this unrelated name can be
+            // read. They disprove equality, but the full name remains unknown.
+            auto different=unreadable;different.put<std::uint32_t>(0x10f7af20,11);
+            different.put<std::uint32_t>(0x10f7af24,11);different.put<std::uint32_t>(0xa028,0x1e000);
+            different.put<std::uint32_t>(0x4220,(4u<<16)|10u);
+            different.put<std::uint8_t>(0x1e01c,'D');different.put<std::uint8_t>(0x1e01d,'_');
+            different.put<std::uint8_t>(0x1e01e,'4');
+            ProbeReader different_reader{&different,Memory::read};char full_name[64]{};
+            assert(!ReadProbeName(different_reader,(4u<<16)|10u,full_name));
+            assert(BreadNameDefinitelyDifferent(different_reader,(4u<<16)|10u));
+            const auto accepted=SampleVisibleStaticMesh(different_reader,list,submission,prop);
+            assert(accepted.list_stable && accepted.diagnostic_stage==StaticMeshSampleStage::Complete);
+
+            // An incomplete equal prefix, an exact duplicate, and a changing
+            // prefix are never discarded as unrelated.
+            auto equal=different;const char same[]="D_125";
+            for (std::size_t i=0;i<sizeof(same);++i) equal.put<std::uint8_t>(0x1e01c+i,same[i]);
+            ProbeReader equal_reader{&equal,Memory::read};
+            assert(!BreadNameDefinitelyDifferent(equal_reader,(4u<<16)|10u));
+            assert(!SampleVisibleStaticMesh(equal_reader,list,submission,prop).list_stable);
+            auto short_prefix=different;short_prefix.bytes.erase(0x1e01e);
+            ProbeReader short_reader{&short_prefix,Memory::read};
+            assert(!BreadNameDefinitelyDifferent(short_reader,(4u<<16)|10u));
+            auto non_ascii=different;non_ascii.put<std::uint8_t>(0x1e01e,0xff);
+            ProbeReader non_ascii_reader{&non_ascii,Memory::read};
+            assert(!BreadNameDefinitelyDifferent(non_ascii_reader,(4u<<16)|10u));
+            auto empty=different;empty.put<std::uint8_t>(0x1e01c,0);
+            ProbeReader empty_reader{&empty,Memory::read};
+            assert(!BreadNameDefinitelyDifferent(empty_reader,(4u<<16)|10u));
+            auto duplicate=unreadable;duplicate.put<std::uint32_t>(0x4220,(4u<<16)|9u);
+            ProbeReader duplicate_reader{&duplicate,Memory::read};
+            assert(!SampleVisibleStaticMesh(duplicate_reader,list,submission,prop).list_stable);
+            auto changing=different;ChangeDuringBreadPrefix state{&changing,false};
+            ProbeReader unstable{&state,ChangeDuringBreadPrefix::read};
+            assert(!BreadNameDefinitelyDifferent(unstable,(4u<<16)|10u) && state.changed);
+        }
+    }
     for (const auto address:{0x4020u,0x4024u,0x402cu,0x4038u}) {
         auto changing=general;ChangeDuringOwnerFields state{&changing,address,false};
         ProbeReader unstable{&state,ChangeDuringOwnerFields::read};

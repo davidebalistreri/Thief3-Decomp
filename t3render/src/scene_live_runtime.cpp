@@ -2,6 +2,7 @@
 #include "scene_live_catalog_win.hpp"
 #include "scene_live_visible_lights.hpp"
 #include "scene_live_viewer.hpp"
+#include "scene_live_stack_win.hpp"
 
 #include <windows.h>
 #include <wincrypt.h>
@@ -25,6 +26,7 @@ struct RuntimeState {
     bool light_candidates_enabled=false;
     bool light_raw_diagnostics_enabled=false;
     bool candle_link_diagnostics_enabled=false;
+    std::uint32_t candle_actor_number=6; // bounded bedroom choice, FName number
     bool present_clock_enabled=false;
     std::string map, map_sha256; // catalog fingerprint, not a runtime package measurement
     std::atomic<SceneDriver*> driver{nullptr};
@@ -42,6 +44,8 @@ thread_local bool querying=false;
 struct Scope {
     std::uint64_t ticket=0;std::uint32_t element=0;bool sampled=false,generic=false;
     std::unique_ptr<scene_bridge::AssetCandidate> asset;
+    std::shared_ptr<const scene_bridge::ProbeSnapshot> prop_probe;
+    scene_bridge::BedroomProp prop=scene_bridge::BedroomProp::None;
 };
 struct ScopeStack { unsigned depth=0;Scope items[16]{}; };
 thread_local ScopeStack scopes;
@@ -156,6 +160,9 @@ bool RuntimeInitialize() noexcept {
             auto& state=State();
             if (Environment(L"T3RENDER_SCENE_LIVE")!=L"1") return;
             const auto path=Environment(L"T3RENDER_LIVE_CATALOG");
+            const auto candle_number=Environment(L"T3RENDER_SCENE_LIVE_CANDLE_NUMBER");
+            if (!candle_number.empty() && candle_number!=L"6" && candle_number!=L"14") return;
+            state.candle_actor_number=candle_number==L"14" ? 14u : 6u;
             LoadedCatalog catalog;std::string session;
             if (path.empty() || !LoadCatalogFile(path.c_str(),catalog) || !SessionId(session)) return;
             FrameProvenance source;source.origin=FrameOrigin::LiveProcess;source.session_id=session;
@@ -279,9 +286,12 @@ void RuntimeProbeEnd(std::uint64_t ticket,const scene_bridge::ProbeSnapshot& sna
         std::vector<VisualLight> lights;
         const bool ready=BuildVisibleLightCandidates(sample,state.map,state.map_sha256,generation,lights);
         const auto candle_link=ready && state.candle_link_diagnostics_enabled ?
-            scene_bridge::SampleBedroomCandleLink(reader,snapshot,state.map.c_str()) : scene_bridge::CandleLinkObservation{};
+            scene_bridge::SampleBedroomCandleLink(reader,snapshot,state.map.c_str(),state.candle_actor_number) : scene_bridge::CandleLinkObservation{};
+        const auto other_candle_link=ready && state.candle_link_diagnostics_enabled ?
+            scene_bridge::SampleBedroomCandleLink(reader,snapshot,state.map.c_str(),state.candle_actor_number==6 ? 14u : 6u) :
+            scene_bridge::CandleLinkObservation{};
         const auto raw=ready && state.light_raw_diagnostics_enabled ?
-            BuildRawLightBatch(sample,state.map,state.map_sha256,generation,lights,candle_link) : nullptr;
+            BuildRawLightBatch(sample,state.map,state.map_sha256,generation,lights,candle_link,state.candle_actor_number,other_candle_link) : nullptr;
         // A nested callback may have marked loss while memory was being read.
         driver=Driver(false);if (!driver) return;
         if (ready) (void)driver->EndLightSample(light_ticket,thread,true,LightCoverage::Partial,lights,raw);
@@ -303,19 +313,25 @@ void RuntimeSubmissionEnter(std::uint32_t element,std::uint32_t stage,std::uint3
         std::shared_ptr<const scene_bridge::ProbeSnapshot> probe;
         if (State().static_meshes_enabled && sample.valid)
             probe=driver->GenericProbe(scope.ticket,CurrentThread(),sample);
+        auto prop=scene_bridge::BedroomProp::None;
         if (probe) {
             const scene_bridge::ProbeReader reader{nullptr,ReadMemory};
             char name[64]{};
-            if (!scene_bridge::ReadProbeName(reader,sample.owner_fname,name) || std::strcmp(name,"StaticMeshActor")!=0) probe.reset();
+            if (!scene_bridge::ReadProbeName(reader,sample.owner_fname,name)) probe.reset();
+            else {
+                prop=scene_bridge::IdentifyBedroomProp(sample.owner_fname>>16,name);
+                if (prop==scene_bridge::BedroomProp::None && std::strcmp(name,"StaticMeshActor")!=0) probe.reset();
+            }
         }
         if (probe) {
             scope.generic=true;
             const scene_bridge::ProbeReader reader{nullptr,ReadMemory};
-            const auto observed=scene_bridge::SampleVisibleStaticMesh(reader,*probe,sample);
+            const auto observed=scene_bridge::SampleVisibleStaticMesh(reader,*probe,sample,prop);
             if (scene_bridge::AttachAssetCandidate(sample,observed.asset))
                 scope.asset=std::make_unique<scene_bridge::AssetCandidate>(observed.asset);
+            if (prop!=scene_bridge::BedroomProp::None) {scope.prop_probe=probe;scope.prop=prop;}
             scope.element=element;scope.sampled=sample.valid;
-            (void)driver->SetScopeSample(scope.ticket,CurrentThread(),sample,&observed);return;
+            (void)driver->SetScopeSample(scope.ticket,CurrentThread(),sample,&observed,prop);return;
         }
         scope.element=element;scope.sampled=sample.valid;
         (void)driver->SetScopeSample(scope.ticket,CurrentThread(),sample);
@@ -338,10 +354,14 @@ void RuntimeSubmissionLeave() noexcept {
             if (scene_bridge::MatchesAssetCandidate(reader,after.owner,*scope.asset))
                 (void)scene_bridge::AttachAssetCandidate(after,*scope.asset);
         }
-        driver->EndScope(scope.ticket,CurrentThread(),after);
+        if (scope.prop_probe && after.valid) {
+            const scene_bridge::ProbeReader reader{nullptr,ReadMemory};
+            const auto observed=scene_bridge::SampleVisibleStaticMesh(reader,*scope.prop_probe,after,scope.prop);
+            driver->EndScope(scope.ticket,CurrentThread(),after,&observed);
+        } else driver->EndScope(scope.ticket,CurrentThread(),after);
     } catch (...) {RuntimeAbandon();}
 }
-RuntimeDraw RuntimeDrawBegin(IDirect3DDevice8* device,const DrawCall& call,bool clear) noexcept {
+RuntimeDraw RuntimeDrawBegin(IDirect3DDevice8* device,const DrawCall& call,bool clear,const volatile void* stack_marker) noexcept {
     LastError saved;
     try {
         if (querying) {RuntimeDeferredLoss();return {};}
@@ -363,7 +383,7 @@ RuntimeDraw RuntimeDrawBegin(IDirect3DDevice8* device,const DrawCall& call,bool 
         case DrawKind::PrimitiveUP:kind=ObservedDrawKind::PrimitiveUP;break;
         case DrawKind::IndexedPrimitiveUP:kind=ObservedDrawKind::IndexedPrimitiveUP;break;
         }
-        const auto start=driver->BeginDraw(CurrentThread(),scope,args,kind);
+        const auto start=driver->BeginDraw(CurrentThread(),scope,args,kind,CaptureStackCursor(stack_marker));
         RuntimeDraw result;result.ticket=start.ticket;result.needs_state=start.needs_state;result.needs_world=start.needs_world;
         if (result.needs_state) (void)Query(device,result.before,result.needs_world);
         return result;
@@ -378,7 +398,7 @@ void RuntimeDrawEnd(IDirect3DDevice8* device,const RuntimeDraw& draw,HRESULT res
         auto* driver=Driver(false);if (driver) driver->EndDraw(draw.ticket,CurrentThread(),SUCCEEDED(result),draw.before,after);
     } catch (...) {RuntimeAbandon();}
 }
-RuntimePresent RuntimePresentBegin(IDirect3DDevice8* device) noexcept {
+RuntimePresent RuntimePresentBegin(IDirect3DDevice8* device,const volatile void* stack_marker) noexcept {
     LastError saved;
     try {
         if (querying) {RuntimeDeferredLoss();return {};}
@@ -390,7 +410,7 @@ RuntimePresent RuntimePresentBegin(IDirect3DDevice8* device) noexcept {
                 clock.available=QueryPerformanceCounter(&value) && value.QuadPart>=0;
                 if (clock.available) clock.ticks=static_cast<std::uint64_t>(value.QuadPart);
             }
-            present.ticket=d->BeginPresent(CurrentThread(),&present.frame_id,clock);
+            present.ticket=d->BeginPresent(CurrentThread(),&present.frame_id,clock,CaptureStackCursor(stack_marker));
         }
         return present;
     } catch (...) {RuntimeAbandon();return {};}

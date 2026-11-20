@@ -24,7 +24,9 @@ int main() {
     candle.transform_available=true;
     const float identity[]{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
     std::memcpy(candle.transform_bits.data(),identity,sizeof(identity));
-    const auto batch=BuildRawLightBatch(sample,"bedroom",std::string(64,'a'),2,converted,candle);if (!batch) return 1;
+    auto other=candle;other.status=t3render::scene_bridge::CandleLinkStatus::NoLink;other.factor_8c_bits=0;
+    other.enabled={t3render::scene_bridge::CandleEnabledStatus::Off,false};
+    const auto batch=BuildRawLightBatch(sample,"bedroom",std::string(64,'a'),2,converted,candle,6,other);if (!batch) return 1;
     Snapshot snapshot;snapshot.map="bedroom";snapshot.map_sha256=std::string(64,'a');
     snapshot.map_epoch=1;snapshot.device_epoch=2;snapshot.frame_id=3;snapshot.continuity=4;
     snapshot.provenance.origin=FrameOrigin::Synthetic;snapshot.provenance.session_id="test";

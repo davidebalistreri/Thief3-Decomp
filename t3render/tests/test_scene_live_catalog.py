@@ -29,6 +29,13 @@ class TinyTextures:
                 "source_sha256": hashlib.sha256((name + kind).encode()).hexdigest()}
 
 
+class TinyOriginals:
+    def resolve(self, name):
+        pixel = bytes((40, 90, 140, 255))
+        return {"name": name.lower(), "bundle": "fixture.ibt", "width": 2, "height": 1,
+                "mips": [pixel * 2, pixel]}
+
+
 def fixture():
     data = test_scene_ir.example()
     source = data["source"]
@@ -281,6 +288,181 @@ class LiveCatalogTests(unittest.TestCase):
         data['static_mesh_resources'].append(collision)
         with self.assertRaisesRegex(ValueError, 'target bed'):
             catalog.export(json.dumps(data).encode(), static_meshes=True)
+
+    def test_bedroom_crate_is_explicit_and_old_catalogs_reject_it(self):
+        data = static_fixture()
+        source = data['source']
+        map_name, map_hash, bundle_hash = source['map'], source['fingerprints']['map'], source['fingerprints']['bundle']
+        mesh = copy.deepcopy(data['static_mesh_resources'][0])
+        mesh['id'] = f'mesh:{map_name}:{map_hash}:{bundle_hash}:genxgoodscrateb'
+        mesh['name'] = 'GENxGOODScrateB'
+        data['static_mesh_resources'].append(mesh)
+        actor = copy.deepcopy(data['mesh_instances'][0])
+        actor.update(id=f'actor:{map_name}:{map_hash}:D_1224__21', resource_id=mesh['id'])
+        data['mesh_instances'].append(actor)
+        raw, manifest = catalog.export(json.dumps(data).encode(), static_meshes=True, bedroom_props=True)
+        self.assertEqual(raw[:8], b'T3LCAT07')
+        self.assertEqual(manifest['version'], 7)
+        self.assertEqual(self.load(raw).split()[-3:], ['static_mesh_candidates', '4', '3'])
+        def reject(body):
+            self.assertEqual(self.load(bytes(body) + hashlib.sha256(body).digest()), 'rejected')
+        old = bytearray(raw[:-32]);old[:8] = b'T3LCAT04';reject(old)
+        wrong = bytearray(raw[:-32]);where = wrong.rfind(b'D_1224__21')
+        self.assertGreater(where, 0);wrong[where + len(b'D_1224__2')] = ord('2');reject(wrong)
+        cabinet_mesh = copy.deepcopy(mesh)
+        cabinet_mesh['id'] = f'mesh:{map_name}:{map_hash}:{bundle_hash}:seainfurncabinetc1'
+        cabinet_mesh['name'] = 'SEAinFURNcabinetC1'
+        data['static_mesh_resources'].append(cabinet_mesh)
+        cabinet_actor = copy.deepcopy(actor)
+        cabinet_actor.update(id=f'actor:{map_name}:{map_hash}:D_443__1', resource_id=cabinet_mesh['id'])
+        data['mesh_instances'].append(cabinet_actor)
+        body, _ = catalog.export(json.dumps(data).encode(), static_meshes=True, bedroom_props=True)
+        self.assertEqual(self.load(body).split()[-3:], ['static_mesh_candidates', '5', '4'])
+        wrong = bytearray(body[:-32]);where = wrong.rfind(b'D_443__1')
+        self.assertGreater(where, 0);wrong[where + len(b'D_443__')] = ord('2');reject(wrong)
+        for suffix, name in (('D_125__3', 'GENiFOODbreadA1'), ('D_548__0', 'GENxGOODSarchtarg')):
+            prop_mesh = copy.deepcopy(mesh)
+            prop_mesh['id'] = f'mesh:{map_name}:{map_hash}:{bundle_hash}:{name.lower()}'
+            prop_mesh['name'] = name
+            data['static_mesh_resources'].append(prop_mesh)
+            prop_actor = copy.deepcopy(actor)
+            prop_actor.update(id=f'actor:{map_name}:{map_hash}:{suffix}', resource_id=prop_mesh['id'])
+            data['mesh_instances'].append(prop_actor)
+        body, _ = catalog.export(json.dumps(data).encode(), static_meshes=True, bedroom_props=True)
+        self.assertEqual(self.load(body).split()[-3:], ['static_mesh_candidates', '7', '6'])
+        for suffix in (b'D_125__3', b'D_548__0'):
+            wrong = bytearray(body[:-32]);where = wrong.rfind(suffix)
+            self.assertGreater(where, 0);wrong[where + len(suffix)-1] = ord('9');reject(wrong)
+        data['mesh_instances'].pop();data['mesh_instances'].pop()
+        data['mesh_instances'].pop()
+        with self.assertRaisesRegex(ValueError, 'require static meshes'):
+            catalog.export(json.dumps(data).encode(), bedroom_props=True)
+        data['mesh_instances'].pop()
+        with self.assertRaisesRegex(ValueError, 'bedroom crate'):
+            catalog.export(json.dumps(data).encode(), static_meshes=True, bedroom_props=True)
+
+    def test_door_crates_are_bounded_candidates(self):
+        data = static_fixture()
+        source = data['source']
+        map_name, map_hash, bundle_hash = source['map'], source['fingerprints']['map'], source['fingerprints']['bundle']
+        mesh = copy.deepcopy(data['static_mesh_resources'][0])
+        mesh['id'] = f'mesh:{map_name}:{map_hash}:{bundle_hash}:genxgoodscrateb'
+        mesh['name'] = 'GENxGOODScrateB'
+        data['static_mesh_resources'].append(mesh)
+        for suffix in (0, 21, 22, 23, 24):
+            actor = copy.deepcopy(data['mesh_instances'][0])
+            actor.update(id=f'actor:{map_name}:{map_hash}:D_1224__{suffix}', resource_id=mesh['id'])
+            data['mesh_instances'].append(actor)
+        raw, manifest = catalog.export(json.dumps(data).encode(), static_meshes=True, bedroom_props=True)
+        self.assertEqual(self.load(raw).split()[-3:], ['static_mesh_candidates', '7', '3'])
+        self.assertNotIn(b'D_1224__24', raw)
+        wrong = bytearray(raw[:-32]);where = wrong.rfind(b'D_1224__23')
+        self.assertGreater(where, 0);wrong[where + len(b'D_1224__2')] = ord('4')
+        self.assertEqual(self.load(bytes(wrong) + hashlib.sha256(wrong).digest()), 'rejected')
+
+    def test_bed_textiles_are_optional_and_bound_to_the_generated_bed(self):
+        data = static_fixture();data['conventions']['meters_per_unit'] = .01905
+        source = data['source'];map_name = source['map'];map_hash = source['fingerprints']['map']
+        mesh = copy.deepcopy(data['static_mesh_resources'][0])
+        mesh['id'] = f"mesh:{map_name}:{map_hash}:{source['fingerprints']['bundle']}:genxgoodscrateb"
+        mesh['name'] = 'GENxGOODScrateB';data['static_mesh_resources'].append(mesh)
+        actor = copy.deepcopy(data['mesh_instances'][0])
+        actor.update(id=f'actor:{map_name}:{map_hash}:D_1224__21', resource_id=mesh['id'])
+        data['mesh_instances'].append(actor)
+        raw = json.dumps(data).encode();high = bed_tests.glb(scene_ir.SceneSnapshot.from_dict(data))
+        packed, manifest = catalog.export(raw, high, TinyTextures(), True, bedroom_props=True, bed_textiles=True)
+        self.assertEqual((packed[:8], manifest['version']), (b'T3LCAT08', 8))
+        self.assertIn('bed_textiles 2', self.load(packed))
+        self.assertEqual(set(manifest['bedroom_materials']['sources_sha256']),
+                         {'stone_wall_v2', 'wood_floor_v2', 'bed_wool_v2', 'pillow_linen'})
+        for kwargs in ({'bedroom_props': True}, {'bedroom_props': True, 'bedroom_materials': TinyTextures()},
+                       {'bed_high': high, 'bedroom_materials': TinyTextures()}):
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, 'bed textiles require'):
+                catalog.export(raw, static_meshes=True, bed_textiles=True, **kwargs)
+        def reject(body):
+            self.assertEqual(self.load(bytes(body) + hashlib.sha256(body).digest()), 'rejected')
+        bad = bytearray(packed[:-32]);bad[:8] = b'T3LCAT07';reject(bad)
+        bad = bytearray(packed[:-32]);marker = bad.rfind(b'remaster:material:bed_high:textured:PillowLinen')
+        self.assertGreater(marker, 0);bad[marker + len(b'remaster:material:bed_high:textured:')] = ord('X');reject(bad)
+
+    def test_bedroom_originals_round_trip_and_reject_invalid_assets(self):
+        data = static_fixture();data['conventions']['meters_per_unit'] = .01905
+        source = data['source'];map_name = source['map'];map_hash = source['fingerprints']['map']
+        mesh = copy.deepcopy(data['static_mesh_resources'][0])
+        mesh['id'] = f"mesh:{map_name}:{map_hash}:{source['fingerprints']['bundle']}:genxgoodscrateb"
+        mesh['name'] = 'GENxGOODScrateB';data['static_mesh_resources'].append(mesh)
+        actor = copy.deepcopy(data['mesh_instances'][0])
+        actor.update(id=f'actor:{map_name}:{map_hash}:D_1224__21', resource_id=mesh['id'])
+        data['mesh_instances'].append(actor)
+        for index, name in enumerate(catalog.BEDROOM_ORIGINAL_NAMES, start=10):
+            identifier = f'material:original:{name}'
+            data['materials'].append({'id': identifier, 'name': name})
+            block = copy.deepcopy(data['bsp_blocks'][0])
+            block['source_index'] = index;block['source_offset'] = index * 10
+            block['id'] = f'bsp:{map_name}:{map_hash}:{index}:{index*10}'
+            block['geometry']['sections'][0]['material_id'] = identifier
+            data['bsp_blocks'].append(block)
+        raw = json.dumps(data).encode();high = bed_tests.glb(scene_ir.SceneSnapshot.from_dict(data))
+        packed, manifest = catalog.export(raw, high, TinyTextures(), True, bedroom_props=True,
+                                          bed_textiles=True, bedroom_originals=TinyOriginals())
+        self.assertEqual((packed[:8], manifest['version']), (b'T3LCAT09', 9))
+        self.assertTrue(self.load(packed).startswith('accepted '))
+        self.assertEqual(set(manifest['bedroom_original_albedo']), set(catalog.BEDROOM_ORIGINAL_NAMES))
+        packed10, manifest10 = catalog.export(raw, high, TinyTextures(), True, bedroom_props=True,
+                                              bed_textiles=True, bedroom_originals=TinyOriginals(), candlestick_metal=True)
+        self.assertEqual((packed10[:8], manifest10['version']), (b'T3LCAT10', 10))
+        self.assertTrue(self.load(packed10).startswith('accepted '))
+        self.assertEqual(manifest10['candlestick_metal_albedo_sha256'],
+                         hashlib.sha256(b'candlestick_metal_v2albedo').hexdigest())
+        self.assertEqual(manifest10['candlestick_wax_albedo']['appearance'], 'original_luminance_tinted_opaque_preview')
+        readable, readable_manifest = catalog.export(raw, high, TinyTextures(), True, bedroom_props=True,
+            bed_textiles=True, bedroom_originals=TinyOriginals(), candlestick_metal=True, readable_bed_wool=True)
+        self.assertTrue(self.load(readable).startswith('accepted '))
+        self.assertNotEqual(readable, packed10)
+        self.assertEqual(readable_manifest['bedroom_materials']['bed_wool_albedo_linear_gain'], 5)
+        with self.assertRaisesRegex(ValueError, 'candlestick metal requires'):
+            catalog.export(raw, high, TinyTextures(), True, bedroom_props=True, bed_textiles=True, candlestick_metal=True)
+        with self.assertRaisesRegex(ValueError, 'readable bed wool requires'):
+            catalog.export(raw, readable_bed_wool=True)
+        def reject(body):
+            self.assertEqual(self.load(bytes(body) + hashlib.sha256(body).digest()), 'rejected')
+        bad = bytearray(packed[:-32]);bad[:8] = b'T3LCAT08';reject(bad)
+        bad = bytearray(packed10[:-32]);bad[:8] = b'T3LCAT09';reject(bad)
+        bad = bytearray(packed10[:-32]);marker = bad.find(b'remaster:material:candlestick_metal_v2')
+        self.assertGreater(marker, 0);bad[marker+len(b'remaster:material:')] = ord('X');reject(bad)
+        bad = bytearray(packed[:-32]);marker = bad.rfind(b'material:original:GENtarget_D')
+        self.assertGreater(marker, 0)
+        bad[marker + len(b'material:original:')] = ord('X');reject(bad)
+        bad = bytearray(packed[:-32]);marker = bad.rfind(b'material:original:GENtarget_D')
+        pixel = marker + len(b'material:original:GENtarget_D') + 4 + 64 + 12
+        bad[pixel+3] = 0;reject(bad)
+        class Transparent(TinyOriginals):
+            def resolve(self, name):
+                value = super().resolve(name);value['mips'][0] = b'\0' * 8;return value
+        with self.assertRaisesRegex(ValueError, 'nonopaque'):
+            catalog.export(raw, high, TinyTextures(), True, bedroom_props=True,
+                           bed_textiles=True, bedroom_originals=Transparent())
+
+    def test_candle_wax_preserves_surface_variation_with_opaque_warm_tint(self):
+        class Wax:
+            def resolve(self, name):
+                if name != 'GENcandlewax_ON':
+                    raise ValueError('unexpected material')
+                return {'name': 'gencandlewax_d', 'bundle': 'fixture.ibt', 'width': 2, 'height': 1,
+                        'mips': [bytes((80, 100, 70, 0, 160, 180, 140, 200)), bytes((120, 140, 100, 100))]}
+        data, info = catalog._candlestick_wax(Wax())
+        first, second, mip1 = data[-12:-8], data[-8:-4], data[-4:]
+        self.assertEqual((first[3], second[3], mip1[3]), (255, 255, 255))
+        self.assertTrue(first[0] >= first[1] > first[2] and second[0] >= second[1] > second[2])
+        self.assertTrue(all(second[i] > first[i] for i in range(3)))
+        self.assertEqual(info['appearance'], 'original_luminance_tinted_opaque_preview')
+
+    def test_wool_preview_lifts_dark_rgb_without_changing_source_or_alpha(self):
+        source = bytes((20, 30, 50, 255, 0, 0, 0, 255))
+        result = catalog._readable_wool_mips([source])[0]
+        self.assertTrue(all(result[i] > source[i] for i in range(3)))
+        self.assertEqual(result[3:], source[3:])
+        self.assertEqual(source, bytes((20, 30, 50, 255, 0, 0, 0, 255)))
 
     def test_general_map_round_trip_without_bed_and_with_number_1520(self):
         data = general_fixture()

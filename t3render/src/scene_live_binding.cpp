@@ -181,24 +181,32 @@ bool ObservedBspComplete(const ProbeBspBlock& block) {
     return true;
 }
 bool MeshMetadata(const BindingCatalog& catalog,const Resource& resource,
-                  const std::vector<std::optional<std::string>>& materials,const ProbeMeshNode& node) {
+                  const std::vector<std::optional<std::string>>& materials,const ProbeMeshNode& node,
+                  StaticMeshMatchStage* diagnostic_stage=nullptr) {
+    auto stage=[&](StaticMeshMatchStage value) {if (diagnostic_stage) *diagnostic_stage=value;};
+    stage(StaticMeshMatchStage::NodeHeader);
     if (resource.kind != ResourceKind::StaticMesh || !node.stable || !node.pool_scan_complete ||
         !Value(node.vtable,0x10e49d14) || !node.name_address.available || !node.name_address.value ||
         node.pool_scan_truncated || node.occurrences != 1 || !node.name_available ||
         !EqualAscii(resource.name,node.name,sizeof(node.name)) || !node.counts_available || !node.bounds_available ||
         !node.sections_available || node.sections_truncated) return false;
     const auto& geometry=resource.geometry;
+    stage(StaticMeshMatchStage::NodeCounts);
     if (node.vertex_count != geometry.positions.size() || node.index_count != geometry.indices.size() ||
         node.triangle_count != geometry.indices.size()/3 || node.section_count != geometry.sections.size() ||
         node.sections_copied != geometry.sections.size() || node.sections_copied > kMaxMeshNodeSections ||
-        (!materials.empty() && materials.size() != geometry.sections.size()) ||
-        !BoundsMatch(geometry,node.bounds_bits)) return false;
+        (!materials.empty() && materials.size() != geometry.sections.size())) return false;
+    stage(StaticMeshMatchStage::NodeBounds);
+    if (!BoundsMatch(geometry,node.bounds_bits)) return false;
     for (std::size_t i=0;i<geometry.sections.size();++i) {
         const auto& section=geometry.sections[i]; const auto& observed=node.sections[i];
         const auto& mat=materials.empty() ? section.material_id : materials[i];
-        if (!observed.name_available || !EqualAscii(section.name,observed.name,sizeof(observed.name)) ||
-            !MaterialMatches(catalog,mat,observed.material_name,sizeof(observed.material_name),observed.material_name_available) ||
-            !SectionMatches(geometry,section,observed)) return false;
+        stage(StaticMeshMatchStage::NodeSectionName);
+        if (!observed.name_available || !EqualAscii(section.name,observed.name,sizeof(observed.name))) return false;
+        stage(StaticMeshMatchStage::NodeSectionMaterial);
+        if (!MaterialMatches(catalog,mat,observed.material_name,sizeof(observed.material_name),observed.material_name_available)) return false;
+        stage(StaticMeshMatchStage::NodeSectionLayout);
+        if (!SectionMatches(geometry,section,observed)) return false;
     }
     return true;
 }
@@ -288,54 +296,77 @@ bool ResolveBed(const BindingCatalog& catalog, const scene_bridge::ProbeSnapshot
 
 bool ResolveStaticMesh(const BindingCatalog& catalog,const scene_bridge::ProbeSnapshot& snapshot,
                        const scene_bridge::SubmissionSample& before,const scene_bridge::ProbeStaticMesh& observed,
-                       std::uint32_t section,std::uint64_t generation,MeshSelection& output) {
+                       std::uint32_t section,std::uint64_t generation,MeshSelection& output,
+                       StaticMeshMatchStage* diagnostic_stage) {
+    auto stage=[&](StaticMeshMatchStage value) {if (diagnostic_stage) *diagnostic_stage=value;};
+    stage(StaticMeshMatchStage::Probe);
     const auto number=before.owner_fname>>16;
+    const auto prop=observed.entry.owner_name_available && std::memchr(observed.entry.owner_name,'\0',sizeof(observed.entry.owner_name)) &&
+        catalog.map=="SouthQuarter1_int1" ?
+        IdentifyBedroomProp(number,observed.entry.owner_name) : BedroomProp::None;
     if (!generation || !number || !observed.list_stable || !observed.object_table_complete || observed.name_occurrences!=1 ||
         !General(snapshot,before,OuterMatches(catalog,observed.outer)) ||
         (snapshot.target.entry_available && !TargetMapMatches(catalog,snapshot)) ||
         before.type!=4 || before.vtable!=kMeshVtable || snapshot.entries_truncated ||
         !snapshot.count.available || !snapshot.array.available || !snapshot.array.value ||
         snapshot.count.value!=snapshot.entries_attempted || snapshot.entries_attempted>kMaxProbeEntries) return false;
+    stage(StaticMeshMatchStage::Candidate);
     std::uint32_t occurrences=0;
     for (std::uint32_t i=0;i<snapshot.entries_attempted;++i)
         if (Value(snapshot.entries[i].address,before.element)) ++occurrences;
     if (occurrences!=1) return false;
-    const auto id="actor:"+catalog.map+":"+catalog.map_sha256+":StaticMeshActor__"+std::to_string(number-1);
+    const auto id="actor:"+catalog.map+":"+catalog.map_sha256+":"+
+                  (prop!=BedroomProp::None ? std::string(BedroomPropSuffix(prop)) : "StaticMeshActor__"+std::to_string(number-1));
     const auto candidate=catalog.static_mesh_actors.find(id);
     if (candidate==catalog.static_mesh_actors.end() || candidate->second.instance_id!=id || !candidate->second.resource) return false;
     const auto& entry=observed.entry;const auto& cls=observed.owner_class;
     const auto& node=observed.mesh_node;const auto& asset=observed.asset;const auto& resource=*candidate->second.resource;
+    if ((IsBedroomCrate(prop) && !EqualAscii("genxgoodscrateb",resource.name.c_str(),resource.name.size()+1)) ||
+        (prop==BedroomProp::Cabinet && !EqualAscii("seainfurncabinetc1",resource.name.c_str(),resource.name.size()+1)) ||
+        (prop==BedroomProp::Bread && !EqualAscii("genifoodbreada1",resource.name.c_str(),resource.name.size()+1)) ||
+        (prop==BedroomProp::Target && !EqualAscii("genxgoodsarchtarg",resource.name.c_str(),resource.name.size()+1))) return false;
+    stage(StaticMeshMatchStage::Identity);
     if (entry.list_index>=snapshot.entries_attempted ||
         !Value(snapshot.entries[entry.list_index].address,before.element) ||
         !Value(snapshot.entries[entry.list_index].vtable,before.vtable) ||
         !Value(snapshot.entries[entry.list_index].type,before.type) ||
         !entry.owner_table_member || !entry.owner_stable || !entry.owner_name_available ||
-        !EqualAscii("StaticMeshActor",entry.owner_name,sizeof(entry.owner_name)) || !entry.object_matrix_available ||
+        !EqualAscii(BedroomPropName(prop),entry.owner_name,sizeof(entry.owner_name)) || !entry.object_matrix_available ||
         !Value(entry.address,before.element) || !Value(entry.vtable,before.vtable) || !Value(entry.type,before.type) ||
         !Value(entry.owner_candidate,before.owner) || !Value(entry.owner_object_index,before.owner_index) ||
         !Value(entry.owner_fname,before.owner_fname) || !Value(entry.owner_backlink,before.backlink) ||
         before.backlink!=before.element || std::memcmp(entry.object_matrix_bits,before.matrix,sizeof(before.matrix)) ||
         !cls.member || !cls.stable || !cls.name_available || !cls.fname.available || (cls.fname.value>>16)!=0 ||
-        !EqualAscii("StaticMeshActor",cls.name,sizeof(cls.name)) || !entry.owner_class.available ||
+        (prop==BedroomProp::None && !EqualAscii("StaticMeshActor",cls.name,sizeof(cls.name))) || !cls.name[0] || !entry.owner_class.available ||
         !Value(cls.address,entry.owner_class.value) || !observed.owner_outer.available || !observed.owner_outer.value ||
         !Value(observed.outer.address,observed.owner_outer.value) || !observed.outer.fname.available ||
         (observed.outer.fname.value>>16)!=0 || !observed.outer.outer.available || observed.outer.outer.value ||
-        !Value(node.address,before.mesh_node) || asset.status!=AssetStatus::Candidate || !asset.stable ||
-        !asset.name_available || !asset.audit.available || !asset.descriptor_match || !asset.local_property_found ||
-        !asset.proxy_live_member || !asset.proxy_vtable_match || !asset.resource_vtable_match ||
-        asset.audit.chain_count>kMaxAssetAuditSlots || !before.owner || !before.mesh_node || !before.asset_available ||
-        !before.asset_proxy || !before.asset_resource || before.asset_proxy!=asset.audit.proxy ||
-        before.asset_resource!=asset.audit.resource || !Digest(resource.source_sha256) || !MeshKey(catalog,resource) ||
+        !Value(node.address,before.mesh_node) || !before.owner || !before.mesh_node) return false;
+    stage(StaticMeshMatchStage::Geometry);
+    if (!Digest(resource.source_sha256) || !MeshKey(catalog,resource) ||
         candidate->second.material_ids.size()!=resource.geometry.sections.size() ||
-        !GeometryComplete(catalog,resource,&candidate->second.material_ids) ||
-        !EqualAscii(resource.name,asset.name,sizeof(asset.name)) || !EqualAscii(resource.name,before.asset_name,sizeof(before.asset_name)) ||
-        !MeshMetadata(catalog,resource,candidate->second.material_ids,node) || section>=resource.geometry.sections.size()) return false;
+        !GeometryComplete(catalog,resource,&candidate->second.material_ids) || section>=resource.geometry.sections.size()) return false;
+    if (!MeshMetadata(catalog,resource,candidate->second.material_ids,node,diagnostic_stage)) return false;
+    stage(StaticMeshMatchStage::Asset);
+    const bool asset_matches=asset.status==AssetStatus::Candidate && asset.stable && asset.name_available &&
+        asset.audit.available && asset.descriptor_match && asset.local_property_found && asset.proxy_live_member &&
+        asset.proxy_vtable_match && asset.resource_vtable_match && asset.audit.chain_count<=kMaxAssetAuditSlots &&
+        before.asset_available && before.asset_proxy && before.asset_resource &&
+        before.asset_proxy==asset.audit.proxy && before.asset_resource==asset.audit.resource &&
+        EqualAscii(resource.name,asset.name,sizeof(asset.name)) && EqualAscii(resource.name,before.asset_name,sizeof(before.asset_name));
+    // These explicit actors can inherit their mesh property. In that case, only current
+    // mesh-node metadata and matched draw are candidate evidence; no asset or
+    // GPU binding is asserted. Other missing or malformed property reads fail.
+    const bool inherited_prop=prop!=BedroomProp::None && asset.status==AssetStatus::LocalPropertyMissing &&
+        !before.asset_available && !before.asset_proxy && !before.asset_resource && !before.asset_name[0];
+    if (!asset_matches && !inherited_prop) return false;
+    stage(StaticMeshMatchStage::Transform);
     MeshSelection result;result.instance_id=id;result.resource_id=resource.id;result.generation=generation;
     result.binding=BindingEvidence::Candidate;result.identity_scope=IdentityScope::VisibleList;
     result.material_ids=candidate->second.material_ids;result.matched_resource=candidate->second.resource;
     for (const auto& material:result.material_ids) result.matched_material_names.push_back(catalog.materials.at(*material).name);
     if (!ReadFloats(before.matrix,result.transform.data(),16)) return false;
-    result.sections.push_back(section);output=std::move(result);return true;
+    result.sections.push_back(section);output=std::move(result);stage(StaticMeshMatchStage::Matched);return true;
 }
 
 bool ResolveBsp(const BindingCatalog& catalog, const scene_bridge::ProbeSnapshot& snapshot,

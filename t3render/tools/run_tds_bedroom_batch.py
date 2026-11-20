@@ -183,7 +183,7 @@ def validate_paths(engine, bottle, system, proxy, output):
 def env_for(engine, bottle, output, frames, scene_bridge=False, submission_scope=False, live_catalog=None,
             live_only=False, live_static_meshes=False, live_lights=False, gpu_metrics=False, preview_pbr=False,
             preview_candle=False, candle_link_diagnostics=False, wall_displacement=False, preview_gi=False,
-            sample_interval_ms=None, remaster_toggle=False):
+            sample_interval_ms=None, remaster_toggle=False, candle_left=False):
     capture = {"T3RENDER_CAPTURE_PATH": windows_path(output / "bedroom.jsonl"),
                "T3RENDER_CAPTURE_TRIGGER_PATH": windows_path(output / "capture.ready"),
                "T3RENDER_CAPTURE_FRAMES": str(frames), "T3RENDER_CAPTURE_BUFFERS": "1",
@@ -216,7 +216,7 @@ def env_for(engine, bottle, output, frames, scene_bridge=False, submission_scope
                         "T3RENDER_SCENE_LIVE_DIAGNOSTIC_DIR": windows_path(output)})
     if live_static_meshes:
         if live_catalog is None:
-                raise BatchError("static mesh sampling requires an offline v4, v5 or static-enabled v6 live catalog")
+            raise BatchError("static mesh sampling requires an offline v4, v5, v7 or static-enabled v6 live catalog")
         capture["T3RENDER_SCENE_LIVE_STATIC_MESHES"] = "1"
     if live_lights:
         if live_catalog is None:
@@ -238,6 +238,10 @@ def env_for(engine, bottle, output, frames, scene_bridge=False, submission_scope
         if live_catalog is None or not live_lights:
             raise BatchError("candle link diagnostics require the live light sampler")
         capture["T3RENDER_SCENE_LIVE_CANDLE_LINK"] = "1"
+    if candle_left:
+        if not preview_candle or not candle_link_diagnostics:
+            raise BatchError("left candle requires candle preview and candle-link diagnostics")
+        capture["T3RENDER_SCENE_LIVE_CANDLE_NUMBER"] = "14"
     if wall_displacement:
         if live_catalog is None:
             raise BatchError("wall displacement requires a height-enabled live catalog")
@@ -392,7 +396,7 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
             manual_trigger=False, steam_launch=False, resume_bedroom=False, readonly_saves=False,
             isolated_saves=False, gpu_metrics=False, preview_pbr=False, preview_candle=False,
             candle_link_diagnostics=False, wall_displacement=False, preview_gi=False, sample_interval_ms=None,
-            remaster_toggle=False):
+            remaster_toggle=False, candle_left=False):
     if submission_scope and not scene_bridge:
         raise BatchError("submission scope requires the scene bridge probe")
     if live_only and (live_catalog is None or not terminate):
@@ -406,7 +410,7 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
     if isolated_saves and (not steam_launch or not terminate or readonly_saves):
         raise BatchError("isolated saves require Steam launch and termination, without the read-only option")
     if live_static_meshes and live_catalog is None:
-        raise BatchError("static mesh sampling requires an offline v4, v5 or static-enabled v6 live catalog")
+        raise BatchError("static mesh sampling requires an offline v4, v5, v7 or static-enabled v6 live catalog")
     if live_lights and live_catalog is None:
         raise BatchError("light candidate sampling requires a live catalog")
     if gpu_metrics and live_catalog is None:
@@ -417,6 +421,8 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
         raise BatchError("candle preview requires the live light sampler and excludes the headlight preview")
     if candle_link_diagnostics and (live_catalog is None or not live_lights):
         raise BatchError("candle link diagnostics require the live light sampler")
+    if candle_left and (not preview_candle or not candle_link_diagnostics):
+        raise BatchError("left candle requires candle preview and candle-link diagnostics")
     if wall_displacement and live_catalog is None:
         raise BatchError("wall displacement requires a height-enabled live catalog")
     if preview_gi and live_catalog is None:
@@ -439,7 +445,7 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
         raise BatchError("distributed sampling requires a 1000–10000 ms interval, live viewer and manual trigger")
     if remaster_toggle and (not isolated_saves or not manual_trigger or not preview_candle or
                             not candle_link_diagnostics or sample_interval_ms is not None or live_only or
-                            preview_pbr or wall_displacement or preview_gi or live_static_meshes or frames != 3):
+                            preview_pbr or wall_displacement or preview_gi or frames != 3):
         raise BatchError("remaster toggle requires isolated saves, manual capture and the candle-link preview only")
     if (not math.isfinite(delay) or not math.isfinite(timeout) or delay < 0 or timeout <= delay or
             type(frames) is not int or not (2 if sample_interval_ms else 1) <= frames <= (15 if sample_interval_ms else 3)):
@@ -461,9 +467,9 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
         if live_static_meshes:
             with live_catalog.open("rb") as stream:
                 magic = stream.read(8)
-                if magic not in (b"T3LCAT04", b"T3LCAT05") and not (
+                if magic not in (b"T3LCAT04", b"T3LCAT05", b"T3LCAT07", b"T3LCAT08", b"T3LCAT09", b"T3LCAT10") and not (
                         magic == b"T3LCAT06" and stream.read(4) == b"\x01\x00\x00\x00"):
-                    raise BatchError("static mesh sampling requires a v4, v5 or static-enabled v6 live catalog")
+                    raise BatchError("static mesh sampling requires a v4, v5, v7–v10 or static-enabled v6 live catalog")
     if fixture is not None:
         fixture, replay = Path(fixture), Path(replay)
         if not fixture.is_absolute() or not replay.is_absolute():
@@ -485,7 +491,8 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
                            live_static_meshes=live_static_meshes, live_lights=live_lights, gpu_metrics=gpu_metrics,
                            preview_pbr=preview_pbr, preview_candle=preview_candle,
                            candle_link_diagnostics=candle_link_diagnostics, wall_displacement=wall_displacement,
-                           preview_gi=preview_gi, sample_interval_ms=sample_interval_ms, remaster_toggle=remaster_toggle)
+                           preview_gi=preview_gi, sample_interval_ms=sample_interval_ms, remaster_toggle=remaster_toggle,
+                           candle_left=candle_left)
     executable = "C:\\" + str((system / "T3Main.exe").relative_to((bottle / "drive_c").resolve())).replace("/", "\\")
     deployment = {"schema": 1, "proxy": str(target), "sha256": digest(proxy),
                   "capture_config": capture, "proxy_installed": False, "temporary_proxy_removed": None}
@@ -658,6 +665,7 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
                   "preview_pbr_requested": preview_pbr,
                   "preview_candle_requested": preview_candle,
                   "candle_link_diagnostics_requested": candle_link_diagnostics,
+                  "candle_actor_number": 14 if candle_left else 6,
                   "live_only": live_only,
                   "manual_trigger": manual_trigger, "steam_launch": steam_launch, "resume_bedroom": resume_bedroom,
                   "sample_interval_ms": sample_interval_ms,
@@ -713,12 +721,13 @@ def main(argv=None):
     run.add_argument("--submission-scope", action="store_true", help="tag draws inside the verified section callsite; requires --scene-bridge")
     run.add_argument("--live-catalog", help="enable the experimental D3D12 viewer with this offline catalog; requires bridge and submission scope")
     run.add_argument("--live-only", action="store_true", help="timed viewer test without the heavy D3D8 trace; requires catalog and termination")
-    run.add_argument("--live-static-meshes", action="store_true", help="enable expensive experimental static mesh sampling; requires a v4, v5 or static-enabled v6 catalog")
+    run.add_argument("--live-static-meshes", action="store_true", help="enable expensive experimental mesh sampling; requires a v4, v5, v7 or static-enabled v6 catalog")
     run.add_argument("--live-lights", action="store_true", help="sample candidate visible lights; requires a live catalog")
     run.add_argument("--gpu-metrics", action="store_true", help="sample optional viewer GPU timing and memory; requires a live catalog")
     run.add_argument("--preview-pbr", action="store_true", help="use a viewer-only headlight for PBR preview; requires a live catalog")
     run.add_argument("--preview-candle", action="store_true", help="use the sampled candle candidate with artistic lighting; requires --live-lights")
     run.add_argument("--candle-link-diagnostics", action="store_true", help="sample the bedroom candle's visual actor link; requires --live-lights")
+    run.add_argument("--candle-left", action="store_true", help="use the bedroom's left candlestick; requires candle preview and link diagnostics")
     run.add_argument("--wall-displacement", action="store_true", help="use experimental displaced head-wall geometry; requires a v6 catalog")
     run.add_argument("--preview-gi", action="store_true", help="use experimental screen-space wall-to-bed bounce; requires a v6 catalog")
     run.add_argument("--manual-trigger", action="store_true", help="wait for output-dir/capture.request before recording")
@@ -744,7 +753,7 @@ def main(argv=None):
                     args.live_catalog, args.live_only, args.live_static_meshes, args.live_lights,
                     args.manual_trigger, args.steam_launch, args.resume_bedroom, args.readonly_saves, args.isolated_saves,
                     args.gpu_metrics, args.preview_pbr, args.preview_candle, args.candle_link_diagnostics, args.wall_displacement,
-                    args.preview_gi, args.sample_interval_ms, args.remaster_toggle)
+                    args.preview_gi, args.sample_interval_ms, args.remaster_toggle, args.candle_left)
     except (BatchError, SandboxError, OSError, ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

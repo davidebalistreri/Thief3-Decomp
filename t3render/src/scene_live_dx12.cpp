@@ -21,6 +21,8 @@ constexpr UINT kShadowSize=256, kMaxShadowLights=4, kShadowFaces=kMaxShadowLight
 constexpr std::size_t kMaxShadowDrawCalls=16384;
 constexpr DWORD kFenceTimeoutMs = 10000;
 constexpr std::size_t kMaxMaterialGpuBytes = 128u*1024u*1024u;
+// Preserve the existing HDR, shadow and optional GI descriptor positions.
+constexpr unsigned MaterialDescriptor(unsigned index) { return index<2 ? index*5 : 17+(index-2)*5; }
 struct PackedVertex { Vec3 position; Vec2 uv; Vec3 normal; };
 static_assert(sizeof(PackedVertex)==sizeof(float)*8,"unexpected resident vertex layout");
 struct LightingConstants {
@@ -51,10 +53,12 @@ bool Valid(const Frame& f) {
     return true;
 }
 bool ValidMaterials(const BedroomMaterialLibrary& library) {
-    static constexpr const char* ids[]{"remaster:material:stone_wall_v2", "remaster:material:wood_floor_v2"};
+    static constexpr const char* ids[]{"remaster:material:stone_wall_v2", "remaster:material:wood_floor_v2",
+        "remaster:material:bed_high:textured:GENiFABRICwoolA2_D", "remaster:material:bed_high:textured:PillowLinen"};
     std::uint32_t expected_size=0;
-    for (unsigned i=0;i<2;++i) {
-        const auto& material=library.materials[i];
+    const unsigned count=library.bed_textiles ? 4u : 2u;
+    for (unsigned i=0;i<count;++i) {
+        const auto& material=i<2 ? library.materials[i] : (*library.bed_textiles)[i-2];
         if (material.id!=ids[i]) return false;
         for (unsigned channel=0;channel<4;++channel) {
             const auto& hash=material.source_sha256[channel];const auto& mips=material.channels[channel].mips;
@@ -73,6 +77,30 @@ bool ValidMaterials(const BedroomMaterialLibrary& library) {
             }
         }
     }
+    auto valid_albedo=[](const BedroomOriginalMaterial& material) {
+            const auto& hash=material.source_sha256;const auto& mips=material.albedo.mips;
+            if (material.id.empty() || hash.size()!=64 || !std::all_of(hash.begin(),hash.end(),[](unsigned char c){
+                return (c>='0' && c<='9') || (c>='a' && c<='f');}) || mips.empty()) return false;
+            auto width=mips[0].width,height=mips[0].height;
+            if (!width || !height || width>1024 || height>1024 || (width&(width-1)) || (height&(height-1))) return false;
+            std::uint32_t levels=1;for (auto size=std::max(width,height);size>1;size>>=1) ++levels;
+            if (mips.size()!=levels) return false;
+            for (const auto& mip:mips) {
+                if (mip.width!=width || mip.height!=height || mip.rgba.size()!=std::size_t(width)*height*4) return false;
+                for (std::size_t n=3;n<mip.rgba.size();n+=4) if (mip.rgba[n]!=255) return false;
+                width=std::max(1u,width/2);height=std::max(1u,height/2);
+            }
+            return true;
+    };
+    if (library.original_materials) {
+        for (const auto& material:*library.original_materials) if (!valid_albedo(material)) return false;
+    }
+    if (library.candlestick_metal && (!library.original_materials ||
+        library.candlestick_metal->id!="remaster:material:candlestick_metal_v2" ||
+        !valid_albedo(*library.candlestick_metal))) return false;
+    if (library.candlestick_wax && (!library.candlestick_metal ||
+        library.candlestick_wax->id!="remaster:material:candlestick_wax_original" ||
+        !valid_albedo(*library.candlestick_wax))) return false;
     if (library.wall_height) {
         const auto& hash=library.wall_height_source_sha256;
         const auto& mips=library.wall_height->mips;
@@ -132,7 +160,8 @@ struct FlatD3D12::Impl {
     ComPtr<ID3D12PipelineState> pbr_gi_pipeline,pbr_texture_gi_pipeline,pbr_fixture_gi_pipeline,tone_gi_pipeline;
     ComPtr<ID3D12DescriptorHeap> rtv_heap, dsv_heap, albedo_heap;
     std::shared_ptr<const BedroomMaterialLibrary> materials;
-    std::array<std::array<GpuTexture,4>,2> material_textures;
+    std::array<std::array<GpuTexture,4>,4> material_textures;
+    std::array<GpuTexture,kBedroomOriginalNames.size()+2> original_textures;
     UINT albedo_descriptor_size=0;
     ComPtr<ID3D12Resource> target, hdr, depth, vertices, readback, backbuffer, lighting_buffer,shadow_map,shadow_depth;
     std::array<ComPtr<ID3D12Resource>,4> gbuffer;
@@ -401,7 +430,7 @@ struct FlatD3D12::Impl {
         if (!Check(device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(rtv_heap.put())), "CreateRtvHeap")) return false;
         heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;heap.NumDescriptors=2;
         if (!Check(device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(dsv_heap.put())), "CreateDsvHeap")) return false;
-        heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;heap.NumDescriptors=preview_gi ? 17 : 13;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;heap.NumDescriptors=27+5*(kBedroomOriginalNames.size()+2);heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (!Check(device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(albedo_heap.put())),"CreateMaterialHeap")) return false;
         albedo_descriptor_size=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         if (!albedo_descriptor_size) return false;
@@ -411,6 +440,11 @@ struct FlatD3D12::Impl {
         auto null_descriptor=albedo_heap->GetCPUDescriptorHandleForHeapStart();
         for (unsigned i=0;i<11;++i) {
             device->CreateShaderResourceView(nullptr,&null_srv,null_descriptor);null_descriptor.ptr+=albedo_descriptor_size;
+        }
+        auto textile_descriptor=albedo_heap->GetCPUDescriptorHandleForHeapStart();
+        textile_descriptor.ptr+=std::size_t(17)*albedo_descriptor_size;
+        for (unsigned i=0;i<10+5*(kBedroomOriginalNames.size()+2);++i) {
+            device->CreateShaderResourceView(nullptr,&null_srv,textile_descriptor);textile_descriptor.ptr+=albedo_descriptor_size;
         }
         null_srv.Format=DXGI_FORMAT_R32_FLOAT;null_srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
         null_srv.TextureCubeArray.MipLevels=1;null_srv.TextureCubeArray.NumCubes=kMaxShadowLights;
@@ -446,10 +480,12 @@ struct FlatD3D12::Impl {
     bool InitializeMaterials(bool pbr_channels) {
         if (!Check(allocator->Reset(),"ResetMaterialAllocator") ||
             !Check(list->Reset(allocator.p,pipeline.p),"ResetMaterialList")) return false;
-        for (unsigned i=0;i<2;++i) {
+        const unsigned count=materials->bed_textiles ? 4u : 2u;
+        for (unsigned i=0;i<count;++i) {
             const unsigned first=pbr_channels ? 1 : 0, end=pbr_channels ? 4 : 1;
             for (unsigned channel=first;channel<end;++channel) {
-                const auto& source=materials->materials[i].channels[channel];
+                const auto& material=i<2 ? materials->materials[i] : (*materials->bed_textiles)[i-2];
+                const auto& source=material.channels[channel];
                 scene::Texture packed;
                 const scene::Texture* texture_ptr=&source;
                 if (i==0 && channel==3 && materials->wall_height) {
@@ -477,11 +513,44 @@ struct FlatD3D12::Impl {
                 srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                 srv.Texture2D.MipLevels=static_cast<UINT>(texture.mips.size());
                 auto descriptor=albedo_heap->GetCPUDescriptorHandleForHeapStart();
-                descriptor.ptr+=std::size_t(i*5+1+channel)*albedo_descriptor_size;
+                descriptor.ptr+=std::size_t(MaterialDescriptor(i)+1+channel)*albedo_descriptor_size;
                 device->CreateShaderResourceView(gpu.texture.p,&srv,descriptor);
                 if (!channel) {
                     descriptor.ptr-=albedo_descriptor_size;srv.Format=kColor;
                     device->CreateShaderResourceView(gpu.texture.p,&srv,descriptor);
+                }
+            }
+        }
+        if (materials->original_materials) for (unsigned i=0;i<materials->original_materials->size()+(materials->candlestick_metal ? 1u : 0u)+(materials->candlestick_wax ? 1u : 0u);++i) {
+            const auto& texture=i<materials->original_materials->size() ? (*materials->original_materials)[i].albedo :
+                                i==materials->original_materials->size() ? materials->candlestick_metal->albedo :
+                                                                          materials->candlestick_wax->albedo;
+            const auto start=MaterialDescriptor(i+4);
+            auto descriptor=albedo_heap->GetCPUDescriptorHandleForHeapStart();
+            descriptor.ptr+=std::size_t(start)*albedo_descriptor_size;
+            if (!pbr_channels) {
+                const auto desc=Image(texture.mips[0].width,texture.mips[0].height,
+                    static_cast<UINT16>(texture.mips.size()),DXGI_FORMAT_R8G8B8A8_TYPELESS,D3D12_RESOURCE_FLAG_NONE);
+                const auto allocation=device->GetResourceAllocationInfo(0,1,&desc);
+                if (!allocation.SizeInBytes || allocation.SizeInBytes==UINT64_MAX ||
+                    allocation.SizeInBytes>kMaxMaterialGpuBytes-material_bytes) return false;
+                material_bytes+=static_cast<std::size_t>(allocation.SizeInBytes);
+                if (!UploadTexture(device.p,list.p,texture,original_textures[i],DXGI_FORMAT_R8G8B8A8_TYPELESS)) return false;
+                D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Format=kColor;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
+                srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                srv.Texture2D.MipLevels=static_cast<UINT>(texture.mips.size());
+                device->CreateShaderResourceView(original_textures[i].texture.p,&srv,descriptor);
+                descriptor.ptr+=albedo_descriptor_size;srv.Format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+                device->CreateShaderResourceView(original_textures[i].texture.p,&srv,descriptor);
+            } else {
+                // Diffuse-only maps reuse the wood auxiliary channels as an
+                // approximation; the normal channel is not enabled here.
+                for (unsigned channel=1;channel<4;++channel) {
+                    auto dest=descriptor;dest.ptr+=std::size_t(1+channel)*albedo_descriptor_size;
+                    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Format=kColor;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
+                    srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                    srv.Texture2D.MipLevels=static_cast<UINT>(materials->materials[1].channels[channel].mips.size());
+                    device->CreateShaderResourceView(material_textures[1][channel].texture.p,&srv,dest);
                 }
             }
         }
@@ -495,6 +564,7 @@ struct FlatD3D12::Impl {
             fence->GetCompletedValue()==UINT64_MAX || fence->GetCompletedValue()<fence_value) return false;
         pending=false;
         for (auto& material:material_textures) for (auto& item:material) Release(item.upload);
+        for (auto& item:original_textures) Release(item.upload);
         if (pbr_channels) pbr_materials_ready=true;
         return Check(device->GetDeviceRemovedReason(),"MaterialDeviceStatus");
     }
@@ -974,13 +1044,27 @@ struct FlatD3D12::Impl {
                 static_cast<UINT>(geometry.indices.size()*sizeof(std::uint32_t)),DXGI_FORMAT_R32_UINT};
             list->IASetVertexBuffers(0,1,&vb);list->IASetIndexBuffer(&ib);
             list->SetGraphicsRoot32BitConstants(2,16,draw.transform.data(),0);
-            unsigned texture_index=2;
-            if (materials && draw.material_id && geometry.uv0.size()==geometry.positions.size())
-                for (unsigned i=0;i<2;++i) if (*draw.material_id==materials->materials[i].id) texture_index=i;
-            const bool can_light=lighting && CanLight(gpu,draw.transform);
-            const bool wall_relief=can_light && texture_index==0 && materials && materials->wall_height && draw.wall_relief;
             static const std::string bed_mesh_prefix="remaster:mesh:bed_high:";
             static const std::string bed_material_prefix="remaster:material:bed_high:";
+            const unsigned no_texture=6+kBedroomOriginalNames.size();
+            unsigned texture_index=no_texture;
+            if (materials && draw.material_id && geometry.uv0.size()==geometry.positions.size()) {
+                for (unsigned i=0;i<2;++i) if (*draw.material_id==materials->materials[i].id) texture_index=i;
+                if (materials->bed_textiles && draw.resource->id.compare(0,bed_mesh_prefix.size(),bed_mesh_prefix)==0)
+                    for (unsigned i=0;i<2;++i)
+                    if (*draw.material_id==(*materials->bed_textiles)[i].id) texture_index=i+2;
+                if (f.bedroom_original_materials && materials->original_materials)
+                    for (unsigned i=0;i<materials->original_materials->size();++i)
+                        if (*draw.material_id==(*materials->original_materials)[i].id) texture_index=i+4;
+                if (materials->candlestick_metal && draw.resource->id=="preview:generated-candlestick" &&
+                    *draw.material_id==materials->candlestick_metal->id)
+                    texture_index=4+kBedroomOriginalNames.size();
+                if (materials->candlestick_wax && draw.resource->id=="preview:generated-candlestick" &&
+                    *draw.material_id==materials->candlestick_wax->id)
+                    texture_index=5+kBedroomOriginalNames.size();
+            }
+            const bool can_light=lighting && CanLight(gpu,draw.transform);
+            const bool wall_relief=can_light && texture_index==0 && materials && materials->wall_height && draw.wall_relief;
             const bool gi_bed=preview_gi && can_light && draw.material_id &&
                 draw.resource->id.compare(0,bed_mesh_prefix.size(),bed_mesh_prefix)==0 &&
                 draw.material_id->compare(0,bed_material_prefix.size(),bed_material_prefix)==0;
@@ -993,9 +1077,9 @@ struct FlatD3D12::Impl {
                 const float black[]{0,0,0,1};
                 list->SetGraphicsRoot32BitConstants(1,4,black,0);
                 list->SetPipelineState(preview_gi ? hdr_flat_gi_pipeline.p : hdr_flat_pipeline.p);
-            } else if (texture_index<2) {
+            } else if (texture_index<no_texture) {
                 auto handle=albedo_heap->GetGPUDescriptorHandleForHeapStart();
-                handle.ptr+=std::uint64_t(texture_index*5+(can_light ? 1 : 0))*albedo_descriptor_size;
+                handle.ptr+=std::uint64_t(MaterialDescriptor(texture_index)+(can_light ? 1 : 0))*albedo_descriptor_size;
                 list->SetPipelineState(can_light ? (preview_gi ? (synthetic_normal_map ? pbr_fixture_gi_pipeline.p : pbr_texture_gi_pipeline.p) :
                                                     (synthetic_normal_map ? pbr_fixture_pipeline.p : pbr_texture_pipeline.p)) :
                                        lighting ? (preview_gi ? hdr_texture_gi_pipeline.p : hdr_texture_pipeline.p) : texture_pipeline.p);
@@ -1170,29 +1254,45 @@ bool FlatD3D12::PreparePreviewLit(const Snapshot& snapshot,const ResidentFlatFra
     } catch (...) { if (impl_) impl_->failed=true;return false; }
 }
 bool FlatD3D12::PrepareCandlePreview(const Snapshot& snapshot,const RawLightFrame* raw,
-                                     const ResidentFlatFrame& frame,bool readback) noexcept {
+                                     const ResidentFlatFrame& frame,bool readback,const RawLightFrame* other_raw) noexcept {
     try {
         if (!impl_ || impl_->failed || impl_->pending || impl_->prepared || !FrameMatchesSnapshot(snapshot,frame) ||
             snapshot.conventions.length_unit!=LengthUnit::T3Unit || snapshot.conventions.axes!=Axes::T3Xyz ||
             snapshot.conventions.up_axis!=UpAxis::Z || !snapshot.conventions.meters_per_unit ||
             !std::isfinite(*snapshot.conventions.meters_per_unit) || *snapshot.conventions.meters_per_unit<=0) return false;
-        Vec3 camera{};RenderLight light;
-        if (!CameraPositionFromView(snapshot.camera.view,camera) || (raw && !CandlePreviewFromRaw(snapshot,*raw,light))) return false;
+        Vec3 camera{};std::array<RenderLight,2> lights{};std::size_t count=0;
+        if (!CameraPositionFromView(snapshot.camera.view,camera)) return false;
+        if (raw) {
+            if (!CandlePreviewFromRaw(snapshot,*raw,lights[count])) return false;
+            ++count;
+        }
+        if (other_raw) {
+            if (!other_raw->batch || (raw && raw->batch!=other_raw->batch)) return false;
+            const auto number=other_raw->batch->candle_actor_number==6 ? 14u : 6u;
+            if (RemasterCandleFromRaw(snapshot,*other_raw,lights[count],number)!=RemasterCandleState::On) return false;
+            ++count;
+        }
+        // Shadow slots correspond to the first lights; keep positive lights first.
+        if (count==2 && lights[0].intensity<=0 && lights[1].intensity>0) std::swap(lights[0],lights[1]);
         if (impl_->materials && !impl_->pbr_materials_ready && !impl_->InitializeMaterials(true)) {
             impl_->failed=true;return false;
         }
         LightingConstants constants;
         constants.camera_scale={camera[0],camera[1],camera[2],*snapshot.conventions.meters_per_unit};
-        const bool shadow=raw && light.intensity>0 && !frame.draws.empty() && frame.draws.size()<=kMaxShadowDrawCalls/6;
-        // Keep a dim, explicitly artistic ambient visible even when the
-        // candidate is missing; it is not sampled game illumination or GI.
-        constants.options={raw ? 1.0f : 0.0f,0,shadow ? 1.0f : 0.0f,0.03f};
-        if (raw) {
-            constants.position_range[0]={light.position[0],light.position[1],light.position[2],light.influence_radius_m};
-            constants.color_intensity[0]={light.color_linear[0],light.color_linear[1],light.color_linear[2],light.intensity};
-            constants.params[0]={light.source_radius_m,0,0,0};
+        const auto requested=frame.draws.empty() ? 0u : static_cast<unsigned>(std::count_if(lights.begin(),lights.begin()+count,
+            [](const RenderLight& light){return light.intensity>0;}));
+        const bool budget_exceeded=requested && frame.draws.size()>kMaxShadowDrawCalls/(requested*6);
+        const auto shadows=budget_exceeded ? 0u : requested;
+        // Keep an explicitly artistic ambient visible even when the candidate
+        // is missing; it is not sampled game illumination or GI. The level
+        // keeps the bedroom geometry inspectable with the candle switched off.
+        constants.options={static_cast<float>(count),0,static_cast<float>(shadows),0.12f};
+        for (std::size_t i=0;i<count;++i) {
+            const auto& light=lights[i];
+            constants.position_range[i]={light.position[0],light.position[1],light.position[2],light.influence_radius_m};
+            constants.color_intensity[i]={light.color_linear[0],light.color_linear[1],light.color_linear[2],light.intensity};
+            constants.params[i]={light.source_radius_m,0,0,0};
         }
-        const bool budget_exceeded=raw && light.intensity>0 && !frame.draws.empty() && !shadow;
         // A selected section without usable normals cannot respond to the
         // candle. Keep it dark instead of showing diagnostic material colors.
         if (impl_->PrepareResident(frame,readback,&constants,false,budget_exceeded,true)) return true;

@@ -28,11 +28,17 @@ struct RawLightItem {
 };
 struct RawLightBatch {
     std::uint32_t listed=0,skipped=0;
+    std::uint32_t candle_actor_number=6; // FName number: bedside=6, left=14
     bool truncated=false;
     scene_bridge::CandleLinkObservation candle_link;
+    // The other researched bedroom candle, independently sampled. Unknown is
+    // allowed and must never suppress the selected candle's evidence.
+    scene_bridge::CandleLinkObservation other_candle_link;
     std::vector<RawLightItem> items;
     bool operator==(const RawLightBatch& b) const {
-        return listed==b.listed && skipped==b.skipped && truncated==b.truncated && candle_link==b.candle_link && items==b.items;
+        return listed==b.listed && skipped==b.skipped && candle_actor_number==b.candle_actor_number &&
+               truncated==b.truncated && candle_link==b.candle_link &&
+               other_candle_link==b.other_candle_link && items==b.items;
     }
 };
 struct RawLightFrame {
@@ -48,13 +54,17 @@ struct RawLightFrame {
 inline std::shared_ptr<const RawLightBatch> BuildRawLightBatch(
         const scene_bridge::VisibleLightCandidates& source,const std::string& map,const std::string& map_sha256,
         std::uint64_t generation,const std::vector<VisualLight>& lights,
-        scene_bridge::CandleLinkObservation candle_link={}) noexcept {
+        scene_bridge::CandleLinkObservation candle_link={},std::uint32_t candle_actor_number=6,
+        scene_bridge::CandleLinkObservation other_candle_link={}) noexcept {
     try {
+        if (candle_actor_number!=6 && candle_actor_number!=14) return {};
         std::vector<VisualLight> expected;
         if (!BuildVisibleLightCandidates(source,map,map_sha256,generation,expected) || expected!=lights) return {};
         auto result=std::make_shared<RawLightBatch>();
         result->listed=source.listed;result->skipped=source.skipped;result->truncated=source.truncated;
         result->candle_link=candle_link;
+        result->other_candle_link=other_candle_link;
+        result->candle_actor_number=candle_actor_number;
         result->items.reserve(source.count);
         for (std::uint32_t i=0;i<source.count;++i) {
             const auto& words=source.items[i].words;RawLightItem item;item.candidate=lights[i];
@@ -72,21 +82,24 @@ inline std::shared_ptr<const RawLightBatch> BuildRawLightBatch(
     } catch (...) {return {};}
 }
 
-// Compare by value rather than vector order: SceneWindow sorts by semantic ID.
-inline bool RawLightBatchMatches(const RawLightBatch& batch,const std::vector<VisualLight>& lights) {
+inline bool ValidCandleLink(const scene_bridge::CandleLinkObservation& link) {
     using scene_bridge::CandleLinkStatus;
     using scene_bridge::CandleEnabledStatus;
-    if ((batch.candle_link.status!=CandleLinkStatus::Unknown && batch.candle_link.status!=CandleLinkStatus::NoLink &&
-         batch.candle_link.status!=CandleLinkStatus::Candidate) ||
-        (batch.candle_link.status!=CandleLinkStatus::Candidate && batch.candle_link.factor_8c_bits) ||
-        (batch.candle_link.status==CandleLinkStatus::Unknown && batch.candle_link.transform_available) ||
-        (batch.candle_link.enabled.status!=CandleEnabledStatus::Unknown &&
-         batch.candle_link.enabled.status!=CandleEnabledStatus::On && batch.candle_link.enabled.status!=CandleEnabledStatus::Off) ||
-        (batch.candle_link.enabled.status==CandleEnabledStatus::Unknown && batch.candle_link.enabled.inherited) ||
-        (batch.candle_link.status==CandleLinkStatus::Unknown &&
-         batch.candle_link.enabled.status!=CandleEnabledStatus::Unknown) ||
-        (!batch.candle_link.transform_available && std::any_of(batch.candle_link.transform_bits.begin(),
-             batch.candle_link.transform_bits.end(),[](std::uint32_t word){return word!=0;}))) return false;
+    return (link.status==CandleLinkStatus::Unknown || link.status==CandleLinkStatus::NoLink ||
+            link.status==CandleLinkStatus::Candidate) &&
+        (link.status==CandleLinkStatus::Candidate || !link.factor_8c_bits) &&
+        (link.status!=CandleLinkStatus::Unknown || !link.transform_available) &&
+        (link.enabled.status==CandleEnabledStatus::Unknown || link.enabled.status==CandleEnabledStatus::On ||
+         link.enabled.status==CandleEnabledStatus::Off) &&
+        (link.enabled.status!=CandleEnabledStatus::Unknown || !link.enabled.inherited) &&
+        (link.status!=CandleLinkStatus::Unknown || link.enabled.status==CandleEnabledStatus::Unknown) &&
+        (link.transform_available || std::none_of(link.transform_bits.begin(),link.transform_bits.end(),
+             [](std::uint32_t word){return word!=0;}));
+}
+
+// Compare by value rather than vector order: SceneWindow sorts by semantic ID.
+inline bool RawLightBatchMatches(const RawLightBatch& batch,const std::vector<VisualLight>& lights) {
+    if ((batch.candle_actor_number!=6 && batch.candle_actor_number!=14) || !ValidCandleLink(batch.candle_link)) return false;
     if (batch.items.size()!=lights.size() || batch.items.size()>scene_bridge::kMaxVisibleLightCandidates ||
         batch.listed>scene_bridge::kMaxVisibleLightEntries ||
         batch.items.size()+batch.skipped!=batch.listed) return false;

@@ -11,6 +11,10 @@
 #include <limits>
 #include <atomic>
 #include <thread>
+#if defined(_WIN32) && (defined(__i386__) || defined(_M_IX86))
+#include "../src/scene_live_stack_win.hpp"
+#include <csetjmp>
+#endif
 
 using namespace t3render::live;
 using namespace t3render::scene_bridge;
@@ -231,6 +235,191 @@ bool static_mesh_matching() {
     auto changed=before;changed.owner_fname=(3u<<16)|7;CHECK(!ResolveStaticMesh(c,p,changed,observed,0,1,result));
     CHECK(!ResolveStaticMesh(c,p,before,observed,1,1,result));CHECK(!ResolveStaticMesh(c,p,before,observed,0,0,result));
     CHECK(result.instance_id==actor_id && result.transform[12]==3.25f); // rejections leave output untouched
+    return true;
+}
+
+bool bedroom_prop_matching_and_scope(BedroomProp prop) {
+    const std::string map="SouthQuarter1_int1";
+    const std::string actor_id="actor:"+map+":"+map_hash+":"+BedroomPropSuffix(prop);
+    const std::string mesh_name=prop==BedroomProp::Cabinet ? "seainfurncabinetc1" :
+                                prop==BedroomProp::Bread ? "genifoodbreada1" :
+                                prop==BedroomProp::Target ? "genxgoodsarchtarg" : "genxgoodscrateb";
+    const std::uint32_t number=prop==BedroomProp::Cabinet ? 2u : prop==BedroomProp::Bread ? 4u :
+        prop==BedroomProp::Target || prop==BedroomProp::DoorCrate0 ? 1u :
+        prop==BedroomProp::DoorCrate22 ? 23u : prop==BedroomProp::DoorCrate23 ? 24u : 22u;
+    const std::string mesh_id="mesh:"+map+":"+map_hash+":"+bundle_hash+":"+mesh_name;
+    LoadedCatalog loaded;CHECK(prepared_catalog(loaded,map,map_hash));
+    auto mesh=resource(mesh_id,ResourceKind::StaticMesh);mesh.name=mesh_name;
+    const auto epoch=loaded.residency->epochs();CHECK(loaded.residency->AddResource(epoch.map,mesh));
+    auto resident=loaded.residency->FindSceneResource(epoch.map,mesh_id);CHECK(resident);
+    loaded.binding.static_mesh_actors.emplace(actor_id,StaticMeshCandidate{actor_id,resident,{"mat:stone"}});
+    auto p=without_bed();text(p.map_witness.outer.name,"LOADGAME:SouthQuarter1_int1");
+    auto before=bed_scope();before.element=before.backlink=0x3100;before.owner=0x4100;before.owner_index=3;
+    before.owner_fname=(number<<16)|9;before.mesh_node=0x8200;before.asset_available=false;
+    before.asset_proxy=before.asset_resource=0;std::memset(before.asset_name,0,sizeof(before.asset_name));
+    ProbeStaticMesh observed;observed.list_stable=observed.object_table_complete=true;observed.name_occurrences=1;
+    observed.entry=p.map_witness.entry;observed.entry.list_index=2;observed.entry.address={before.element,true};
+    observed.entry.owner_candidate={before.owner,true};observed.entry.owner_object_index={before.owner_index,true};
+    observed.entry.owner_fname={before.owner_fname,true};observed.entry.owner_backlink={before.element,true};
+    text(observed.entry.owner_name,BedroomPropName(prop));p.entries[2]=observed.entry;p.entries_attempted=p.count.value=3;
+    observed.owner_class=p.map_witness.owner_class;text(observed.owner_class.name,"LootClass");
+    observed.owner_outer=p.map_witness.owner_outer;observed.outer=p.map_witness.outer;
+    observed.asset.status=AssetStatus::LocalPropertyMissing;observed.mesh_node=probe().target.mesh_node;
+    observed.mesh_node.address={before.mesh_node,true};text(observed.mesh_node.name,mesh_name.c_str());
+    observed.diagnostic_stage=StaticMeshSampleStage::Complete;
+    StaticMeshMatchStage stage=StaticMeshMatchStage::Probe;
+    MeshSelection result;CHECK(ResolveStaticMesh(loaded.binding,p,before,observed,0,1,result,&stage));
+    CHECK(stage==StaticMeshMatchStage::Matched);
+    CHECK(result.instance_id==actor_id && result.matched_resource==resident && result.binding==BindingEvidence::Candidate);
+    auto bad=observed;bad.asset.status=AssetStatus::Unreadable;
+    CHECK(!ResolveStaticMesh(loaded.binding,p,before,bad,0,1,result,&stage) && stage==StaticMeshMatchStage::Asset);
+    bad=observed;text(bad.entry.owner_name,"D_1225");CHECK(!ResolveStaticMesh(loaded.binding,p,before,bad,0,1,result));
+    auto missing=loaded.binding;missing.static_mesh_actors.erase(actor_id);
+    CHECK(!ResolveStaticMesh(missing,p,before,observed,0,1,result,&stage) && stage==StaticMeshMatchStage::Candidate);
+    CHECK(!ResolveStaticMesh(loaded.binding,p,before,observed,1,1,result,&stage) && stage==StaticMeshMatchStage::Geometry);
+    bad=observed;bad.mesh_node.stable=false;
+    CHECK(!ResolveStaticMesh(loaded.binding,p,before,bad,0,1,result,&stage) && stage==StaticMeshMatchStage::NodeHeader);
+    bad=observed;++bad.mesh_node.vertex_count;
+    CHECK(!ResolveStaticMesh(loaded.binding,p,before,bad,0,1,result,&stage) && stage==StaticMeshMatchStage::NodeCounts);
+    bad=observed;bad.mesh_node.bounds_bits[0]=bits(-1);
+    CHECK(!ResolveStaticMesh(loaded.binding,p,before,bad,0,1,result,&stage) && stage==StaticMeshMatchStage::NodeBounds);
+    bad=observed;text(bad.mesh_node.sections[0].name,"Other");
+    CHECK(!ResolveStaticMesh(loaded.binding,p,before,bad,0,1,result,&stage) && stage==StaticMeshMatchStage::NodeSectionName);
+    bad=observed;text(bad.mesh_node.sections[0].material_name,"Other");
+    CHECK(!ResolveStaticMesh(loaded.binding,p,before,bad,0,1,result,&stage) && stage==StaticMeshMatchStage::NodeSectionMaterial);
+    bad=observed;++bad.mesh_node.sections[0].first_index;
+    CHECK(!ResolveStaticMesh(loaded.binding,p,before,bad,0,1,result,&stage) && stage==StaticMeshMatchStage::NodeSectionLayout);
+    bad=observed;bad.owner_class.stable=false;
+    CHECK(!ResolveStaticMesh(loaded.binding,p,before,bad,0,1,result,&stage) && stage==StaticMeshMatchStage::Identity);
+    bad=observed;text(bad.outer.name,"LOADGAME:other");
+    CHECK(!ResolveStaticMesh(loaded.binding,p,before,bad,0,1,result,&stage) && stage==StaticMeshMatchStage::Probe);
+    auto invalid_transform=before;invalid_transform.matrix[0]=bits(std::numeric_limits<float>::infinity());
+    bad=observed;bad.entry.object_matrix_bits[0]=invalid_transform.matrix[0];
+    CHECK(!ResolveStaticMesh(loaded.binding,p,invalid_transform,bad,0,1,result,&stage) && stage==StaticMeshMatchStage::Transform);
+    FrameProvenance source;source.origin=FrameOrigin::Synthetic;source.session_id="bedroom-prop-scope";
+    auto driver=SceneDriver::Create(std::move(loaded),source,0,1);CHECK(driver);
+    const ThreadToken thread{17,123};const IndexedDraw args{true,true,0,1,0,3};
+    DrawObservation state;state.available=true;state.view=state.projection=state.world=identity;
+    state.viewport={0,0,64,64,0,.5f};
+    auto present=[&] {auto t=driver->BeginPresent(thread);return driver->EndPresent(t,thread,true);};
+    auto sample=[&] {auto t=driver->BeginProbe(thread);if(!t)return false;driver->EndProbe(t,thread,p);return true;};
+    auto submit=[&](const ProbeStaticMesh* end) {
+        auto scope=driver->BeginScope(thread,1,0);if(!scope || !driver->GenericProbe(scope,thread,before))return false;
+        if(!driver->SetScopeSample(scope,thread,before,&observed,prop))return false;
+        auto draw=driver->BeginDraw(thread,scope,args);if(!draw.ticket || !draw.needs_state)return false;
+        driver->EndDraw(draw.ticket,thread,true,state,state);driver->EndScope(scope,thread,before,end);return true;
+    };
+    CHECK(present()==WindowResult::Primed);CHECK(sample());CHECK(submit(&observed));
+    CHECK(present()==WindowResult::Published && driver->current()->meshes.size()==1);
+    CHECK(sample());bad=observed;bad.mesh_node.bounds_bits[0]=bits(-2);
+    CHECK(submit(&bad));CHECK(present()==WindowResult::Rejected && !driver->current());
+    CHECK(sample());CHECK(submit(nullptr));CHECK(present()==WindowResult::Rejected && !driver->current());
+    if (prop==BedroomProp::Bread) {
+        auto stats=driver->stats();
+        CHECK(stats.bread_sample_stages[static_cast<std::size_t>(StaticMeshSampleStage::Complete)]==3 &&
+              stats.bread_match_stages[static_cast<std::size_t>(StaticMeshMatchStage::Matched)]==3 &&
+              stats.bread_asset_statuses[static_cast<std::size_t>(AssetStatus::LocalPropertyMissing)]==3 &&
+              stats.bread_scopes_opened==3 && stats.bread_rechecks_ok==1 && stats.bread_rechecks_failed==2 &&
+              stats.bread_draws_ok==3 && stats.bread_draws_failed==0);
+        CHECK(sample());auto incomplete=observed;incomplete.list_stable=false;
+        incomplete.diagnostic_stage=StaticMeshSampleStage::Unique;
+        const auto scope=driver->BeginScope(thread,1,0);CHECK(scope && driver->GenericProbe(scope,thread,before));
+        CHECK(driver->SetScopeSample(scope,thread,before,&incomplete,prop));driver->EndScope(scope,thread,before);
+        stats=driver->stats();
+        CHECK(stats.bread_sample_stages[static_cast<std::size_t>(StaticMeshSampleStage::Unique)]==1 &&
+              stats.bread_match_stages[static_cast<std::size_t>(StaticMeshMatchStage::Probe)]==1);
+        CHECK(sample());bad=observed;bad.asset.status=AssetStatus::Unreadable;
+        const auto rejected=driver->BeginScope(thread,1,0);CHECK(rejected && driver->GenericProbe(rejected,thread,before));
+        CHECK(driver->SetScopeSample(rejected,thread,before,&bad,prop));driver->EndScope(rejected,thread,before);
+        stats=driver->stats();
+        CHECK(stats.bread_match_stages[static_cast<std::size_t>(StaticMeshMatchStage::Asset)]==1 &&
+              stats.bread_asset_statuses[static_cast<std::size_t>(AssetStatus::Unreadable)]==1 &&
+              stats.bread_asset_statuses[static_cast<std::size_t>(AssetStatus::LocalPropertyMissing)]==3);
+    }
+    return true;
+}
+
+bool bedroom_preview_material_scope() {
+    const std::string map="SouthQuarter1_int1";
+    const std::string hash="ed7d475b1efdc713d28b2a978e11fb0f662bdb17c5c2769d77c96e1f74b7ceba";
+    const auto prefix="actor:"+map+":"+hash+":";
+    auto bed=std::make_shared<Resource>(resource("mesh:"+map+":"+hash+":"+bundle_hash+":innbed1a1",ResourceKind::StaticMesh));
+    Snapshot s;s.map=map;s.map_sha256=hash;s.map_epoch=s.device_epoch=s.continuity=1;s.frame_id=1;
+    s.camera.view=s.camera.projection=identity;s.camera.width=s.camera.height=64;s.camera.max_depth=.5f;
+    s.conventions.length_unit=LengthUnit::T3Unit;s.conventions.axes=Axes::T3Xyz;s.conventions.up_axis=UpAxis::Z;
+    s.conventions.meters_per_unit=.01905f;
+    MeshSelection bed_selection;bed_selection.instance_id=prefix+"StaticMeshActor__1520";bed_selection.resource_id=bed->id;
+    bed_selection.generation=1;bed_selection.binding=BindingEvidence::Candidate;bed_selection.sections={0};bed_selection.transform=identity;
+    s.meshes.push_back({bed_selection,bed});
+    auto replacement=std::make_shared<Resource>(*bed);replacement->id="remaster:fixture:bedroom";
+    replacement->geometry.sections={{"wood",0,3,"remaster:material:bed_high:BedTrimWood"},
+                                    {"pillow",0,3,"remaster:material:bed_high:PillowLinen"}};
+    MeshOverride rule{map,hash,bed_selection.instance_id,bed,replacement};
+    auto prop=[&](const std::string& actor_id,const std::string& resource_name,const std::string& material_name) {
+        const auto material_id="mat:"+actor_id;
+        s.materials.emplace(material_id,Material{material_id,material_name});
+        auto mesh=std::make_shared<Resource>(resource("mesh:"+actor_id,ResourceKind::StaticMesh));
+        mesh->name=resource_name;mesh->geometry.sections[0].material_id=material_id;mesh->geometry.uv0.resize(mesh->geometry.positions.size());
+        MeshSelection selected;selected.instance_id=prefix+actor_id;selected.resource_id=mesh->id;selected.generation=1;
+        selected.binding=BindingEvidence::Candidate;selected.sections={0};selected.transform=identity;
+        s.meshes.push_back({std::move(selected),std::move(mesh)});
+    };
+    prop("D_443__1","SEAinFURNcabinetC1","HSEGoodnessA_D");
+    prop("D_443__2","SEAinFURNcabinetC1","HSEGoodnessA_D"); // different actor must remain untouched
+    prop("D_125__3","GENiFOODbreadA1","GENbreadcrust_D");
+    prop("StaticMeshActor__58","GENsknDOORFRMarc4x10half","STMwall512D_D");
+    prop("StaticMeshActor__59","GENsknDOORFRMarc4x10half","STMwall512D_D");
+    prop("StaticMeshActor__57","GENsknDOORFRMarc4x10half","STMwall512D_D"); // outside the captured pair
+    auto far_wall=std::make_shared<Resource>(resource("bsp:"+map+":"+hash+":19:190995",ResourceKind::BspBlock));
+    far_wall->geometry.positions={{-400,0,0},{-400,1,0},{-400,0,1}};
+    far_wall->geometry.uv0.resize(far_wall->geometry.positions.size());
+    far_wall->geometry.sections[0].material_id="mat:far";s.materials.emplace("mat:far",Material{"mat:far","STMwall512D_D"});
+    BspSelection bsp;bsp.resource_id=far_wall->id;bsp.binding=BindingEvidence::Candidate;bsp.sections={0};s.bsp.push_back({bsp,far_wall});
+    ResidentFlatFrame remaster,plain;
+    const std::array<float,4> linen{.75f,.70f,.60f,1},bread{.62f,.38f,.19f,1};
+    CHECK(BuildResidentFlatFrame(s,remaster,&rule,true));
+    CHECK(remaster.draws.size()==9 && remaster.draws[0].material_id=="remaster:material:wood_floor_v2" &&
+          remaster.draws[1].material_id=="remaster:material:bed_high:textured:PillowLinen" && remaster.draws[1].color==linen &&
+          remaster.draws[2].material_id=="remaster:material:wood_floor_v2" &&
+          remaster.draws[3].material_id=="mat:D_443__2" &&
+          remaster.draws[4].color==bread &&
+          remaster.draws[5].material_id=="remaster:material:stone_wall_v2" &&
+          remaster.draws[6].material_id=="remaster:material:stone_wall_v2" &&
+          remaster.draws[7].material_id=="mat:StaticMeshActor__57" &&
+          remaster.draws[8].material_id=="remaster:material:stone_wall_v2");
+    CHECK(BuildResidentFlatFrame(s,plain,&rule,true,false,nullptr,true));
+    CHECK(plain.bedroom_original_materials && plain.draws[2].material_id=="mat:D_443__1" &&
+          plain.draws[5].material_id=="remaster:material:stone_wall_v2" &&
+          plain.draws[8].material_id=="remaster:material:stone_wall_v2");
+    CHECK(BuildResidentFlatFrame(s,plain,&rule,false));
+    CHECK(plain.draws[0].material_id=="remaster:material:bed_high:BedTrimWood" &&
+          plain.draws[1].material_id=="remaster:material:bed_high:PillowLinen" &&
+          plain.draws[2].material_id=="mat:D_443__1" && plain.draws[5].material_id=="mat:StaticMeshActor__58" &&
+          plain.draws[8].material_id=="mat:far");
+    auto decoration=s;decoration.materials.at("mat:StaticMeshActor__58").name="CIVGoodness_D";
+    CHECK(BuildResidentFlatFrame(decoration,plain,&rule,true));
+    CHECK((plain.draws[5].color==std::array<float,4>{.30f,.28f,.24f,1}));
+    auto other_map=s;other_map.map_sha256[0]='f';
+    CHECK(BuildResidentFlatFrame(other_map,plain,&rule,true));
+    CHECK(plain.override_instances==0 && plain.draws[1].material_id=="mat:D_443__1" &&
+          plain.draws.back().material_id=="mat:far");
+    CHECK(BuildResidentFlatFrame(s,plain,nullptr,true));
+    CHECK(plain.override_instances==0 && plain.draws[1].material_id=="mat:D_443__1" &&
+          plain.draws.back().material_id=="mat:far");
+    auto wrong_rule=rule;wrong_rule.instance_id=prefix+"StaticMeshActor__1521";
+    CHECK(BuildResidentFlatFrame(s,plain,&wrong_rule,true));
+    CHECK(plain.override_instances==0 && plain.draws[1].material_id=="mat:D_443__1" &&
+          plain.draws.back().material_id=="mat:far");
+    auto no_uv=s;
+    auto cabinet_no_uv=std::make_shared<Resource>(*no_uv.meshes[1].resource);cabinet_no_uv->geometry.uv0.clear();
+    no_uv.meshes[1].resource=cabinet_no_uv;
+    auto arch_no_uv=std::make_shared<Resource>(*no_uv.meshes[4].resource);arch_no_uv->geometry.uv0.clear();
+    no_uv.meshes[4].resource=arch_no_uv;
+    auto wall_no_uv=std::make_shared<Resource>(*no_uv.bsp[0].resource);wall_no_uv->geometry.uv0.clear();
+    no_uv.bsp[0].resource=wall_no_uv;
+    CHECK(BuildResidentFlatFrame(no_uv,plain,&rule,true));
+    CHECK(plain.draws[2].material_id=="mat:D_443__1" &&
+          plain.draws[5].material_id=="mat:StaticMeshActor__58" && plain.draws.back().material_id=="mat:far");
     return true;
 }
 
@@ -580,6 +769,124 @@ bool driver_pending_draw_diagnostics() {
     return true;
 }
 
+bool driver_unwound_up_recovery() {
+    const ThreadToken thread{17,123},other{18,456};
+    const StackCursor draw_stack{0x4000,0x1000,0x9000};
+    const StackCursor unwound_stack{0x5000,0x1000,0x9000};
+    auto make_driver=[]() {
+        LoadedCatalog loaded;
+        if (!prepared_catalog(loaded)) return std::unique_ptr<SceneDriver>{};
+        FrameProvenance source;source.origin=FrameOrigin::Synthetic;source.session_id="unwound-up";
+        return SceneDriver::Create(std::move(loaded),source,0,1);
+    };
+    auto exercise=[&](ObservedDrawKind kind,ThreadToken draw_thread,StackCursor before,StackCursor after,bool retires) {
+        auto driver=make_driver();if(!driver)return false;
+        auto present=[&] {auto ticket=driver->BeginPresent(thread,nullptr,{},after);return driver->EndPresent(ticket,thread,true);};
+        if(present()!=WindowResult::Primed)return false;
+        auto draw=driver->BeginDraw(draw_thread,0,{},kind,before);if(!draw.ticket)return false;
+        for (int i=0;i<4;++i)(void)present();
+        const auto stats=driver->stats();
+        return retires ? stats.unwound_primitive_up_draws==1 && !stats.present_pending_draws && stats.primed>=2 :
+                         stats.unwound_primitive_up_draws==0 && stats.present_pending_draws==1;
+    };
+    CHECK(exercise(ObservedDrawKind::PrimitiveUP,thread,draw_stack,unwound_stack,true));
+    CHECK(exercise(ObservedDrawKind::PrimitiveUP,thread,draw_stack,{0x3000,0x1000,0x9000},false)); // nested
+    CHECK(exercise(ObservedDrawKind::PrimitiveUP,thread,draw_stack,{0x5000,0x1000,0xa000},false)); // other stack
+    CHECK(exercise(ObservedDrawKind::PrimitiveUP,thread,draw_stack,{},false));
+    CHECK(exercise(ObservedDrawKind::PrimitiveUP,other,draw_stack,unwound_stack,false));
+    CHECK(exercise(ObservedDrawKind::IndexedPrimitive,thread,draw_stack,unwound_stack,false));
+
+    auto scoped=make_driver();CHECK(scoped);
+    const auto scope=scoped->BeginScope(thread,1,0);CHECK(scope);
+    const auto scoped_draw=scoped->BeginDraw(thread,scope,{},ObservedDrawKind::PrimitiveUP,draw_stack);CHECK(scoped_draw.ticket);
+    for (int i=0;i<4;++i) {
+        const auto ticket=scoped->BeginPresent(thread,nullptr,{},unwound_stack);
+        CHECK(scoped->EndPresent(ticket,thread,true)==WindowResult::Rejected);
+    }
+    CHECK(scoped->stats().unwound_primitive_up_draws==0 && scoped->stats().present_pending_draws==1);
+    scoped->EndDraw(scoped_draw.ticket,thread,true,{},{});scoped->EndScope(scope,thread,{});
+
+    auto multiple=make_driver();CHECK(multiple);
+    const auto first=multiple->BeginDraw(thread,0,{},ObservedDrawKind::PrimitiveUP,draw_stack);CHECK(first.ticket);
+    const auto second=multiple->BeginDraw(thread,0,{},ObservedDrawKind::Primitive,draw_stack);CHECK(second.ticket);
+    for (int i=0;i<4;++i) {
+        const auto ticket=multiple->BeginPresent(thread,nullptr,{},unwound_stack);
+        CHECK(multiple->EndPresent(ticket,thread,true)==WindowResult::Rejected);
+    }
+    CHECK(multiple->stats().unwound_primitive_up_draws==0 && multiple->stats().present_pending_draws==2);
+    multiple->EndDraw(first.ticket,thread,true,{},{});multiple->EndDraw(second.ticket,thread,true,{},{});
+
+    // No retirement before the age threshold or while any other callback is
+    // outstanding. A late completion of a retired ticket invalidates the new
+    // window rather than modifying a newer draw.
+    auto driver=make_driver();CHECK(driver);
+    auto present=[&] {auto ticket=driver->BeginPresent(thread,nullptr,{},unwound_stack);
+                      return driver->EndPresent(ticket,thread,true);};
+    CHECK(present()==WindowResult::Primed);
+    const auto old=driver->BeginDraw(thread,0,{},ObservedDrawKind::PrimitiveUP,draw_stack);CHECK(old.ticket);
+    CHECK(present()==WindowResult::Rejected);CHECK(present()==WindowResult::Rejected);
+    CHECK(driver->stats().unwound_primitive_up_draws==0);
+    const auto probe_ticket=driver->BeginProbe(thread);CHECK(probe_ticket);
+    CHECK(present()==WindowResult::Rejected);
+    CHECK(driver->stats().unwound_primitive_up_draws==0);
+    driver->EndProbe(probe_ticket,thread,probe());
+    CHECK(present()==WindowResult::Primed);
+    CHECK(driver->stats().unwound_primitive_up_draws==1);
+    const auto new_draw=driver->BeginDraw(thread,0,{},ObservedDrawKind::Primitive,draw_stack);CHECK(new_draw.ticket);
+    const auto losses=driver->stats().loss_invalidations;
+    driver->EndDraw(old.ticket,thread,true,{},{});
+    CHECK(driver->stats().loss_invalidations==losses+1 && !driver->current());
+    driver->EndDraw(new_draw.ticket,thread,true,{},{});
+    CHECK(present()==WindowResult::Primed);
+    return true;
+}
+
+#if defined(_WIN32) && (defined(__i386__) || defined(_M_IX86))
+#if defined(_MSC_VER)
+#define FIXTURE_NOINLINE __declspec(noinline)
+#else
+#define FIXTURE_NOINLINE __attribute__((noinline))
+#endif
+FIXTURE_NOINLINE WindowResult stack_present(SceneDriver& driver,ThreadToken thread) {
+    volatile char marker=0;
+    const auto ticket=driver.BeginPresent(thread,nullptr,{},CaptureStackCursor(&marker));
+    const auto result=driver.EndPresent(ticket,thread,true);
+    (void)marker;
+    return result;
+}
+FIXTURE_NOINLINE bool stack_draw_then_jump(SceneDriver& driver,ThreadToken thread,std::jmp_buf& jump,
+                                            std::uint64_t* old_ticket) {
+    volatile char marker=0;
+    const auto draw=driver.BeginDraw(thread,0,{},ObservedDrawKind::PrimitiveUP,CaptureStackCursor(&marker));
+    if (!draw.ticket) return false;
+    *old_ticket=draw.ticket;
+    for (int i=0;i<4;++i) (void)stack_present(driver,thread);
+    if (driver.stats().unwound_primitive_up_draws!=0) return false;
+    (void)marker;
+    std::longjmp(jump,1);
+}
+bool driver_x86_stack_unwind() {
+    LoadedCatalog loaded;CHECK(prepared_catalog(loaded));
+    FrameProvenance source;source.origin=FrameOrigin::Synthetic;source.session_id="x86-stack-unwind";
+    auto driver=SceneDriver::Create(std::move(loaded),source,0,1);CHECK(driver);
+    auto old_ticket=std::make_unique<std::uint64_t>(0);
+    const ThreadToken thread{17,123};std::jmp_buf jump;
+    CHECK(stack_present(*driver,thread)==WindowResult::Primed);
+    if (setjmp(jump)==0) {
+        CHECK(stack_draw_then_jump(*driver,thread,jump,old_ticket.get()));
+        return false; // the simulated nonlocal exit must have jumped
+    }
+    CHECK(*old_ticket);
+    CHECK(stack_present(*driver,thread)==WindowResult::Primed);
+    CHECK(driver->stats().unwound_primitive_up_draws==1);
+    const auto losses=driver->stats().loss_invalidations;
+    driver->EndDraw(*old_ticket,thread,true,{},{});
+    CHECK(driver->stats().loss_invalidations==losses+1);
+    CHECK(stack_present(*driver,thread)==WindowResult::Primed);
+    return true;
+}
+#endif
+
 bool driver_present_timing() {
     LoadedCatalog loaded;CHECK(prepared_catalog(loaded));
     FrameProvenance source;source.origin=FrameOrigin::Synthetic;source.session_id="timing-fixture";
@@ -901,7 +1208,17 @@ bool driver_gpu_pipeline() {
 #endif
 } // namespace
 int main() {
-    if(!matching() || !static_mesh_matching() || !static_mesh_driver_lifecycle() || !delivery() || !driver_map_transition() || !driver_without_bed() || !driver_camera_only() || !driver_pending_draw_diagnostics() || !driver_present_timing() || !driver_delivery())return 1;
+    if(!matching() || !static_mesh_matching() || !bedroom_prop_matching_and_scope(BedroomProp::Crate) ||
+       !bedroom_prop_matching_and_scope(BedroomProp::DoorCrate0) ||
+       !bedroom_prop_matching_and_scope(BedroomProp::DoorCrate22) ||
+       !bedroom_prop_matching_and_scope(BedroomProp::DoorCrate23) ||
+       !bedroom_prop_matching_and_scope(BedroomProp::Cabinet) || !bedroom_prop_matching_and_scope(BedroomProp::Bread) ||
+       !bedroom_prop_matching_and_scope(BedroomProp::Target) || !bedroom_preview_material_scope() || !static_mesh_driver_lifecycle() || !delivery() ||
+       !driver_map_transition() || !driver_without_bed() || !driver_camera_only() || !driver_pending_draw_diagnostics() ||
+       !driver_unwound_up_recovery() || !driver_present_timing() || !driver_delivery())return 1;
+#if defined(_WIN32) && (defined(__i386__) || defined(_M_IX86))
+    if (!driver_x86_stack_unwind()) return 1;
+#endif
 #ifdef T3RENDER_TEST_LIVE_DX12_DRIVER
     if (!driver_gpu_pipeline()) return 1;
 #endif

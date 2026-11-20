@@ -81,12 +81,13 @@ bool ResourceData(Reader& reader, ResourceKind kind, Resource& output) {
         !Digest(resource.source_sha256) || !GeometryData(reader,resource.geometry)) return false;
     output=std::move(resource);return true;
 }
-bool MaterialTextureData(Reader& reader, bool opaque, std::string& fingerprint, scene::Texture& output) {
+bool MaterialTextureData(Reader& reader, bool opaque, std::string& fingerprint, scene::Texture& output, bool square=true) {
     std::uint32_t width=0,height=0,count=0;
     if (!Text(reader,fingerprint) || !Digest(fingerprint) || !reader.u32(width) || !reader.u32(height) ||
-        !reader.u32(count) || !width || width>1024 || width!=height || (width&(width-1))) return false;
+        !reader.u32(count) || !width || width>1024 || !height || height>1024 ||
+        (square && width!=height) || (width&(width-1)) || (height&(height-1))) return false;
     std::uint32_t levels=1;
-    for (auto size=width;size>1;size>>=1) ++levels;
+    for (auto size=std::max(width,height);size>1;size>>=1) ++levels;
     if (count!=levels) return false;
     scene::Texture texture;texture.mips.reserve(count);
     for (std::uint32_t level=0;level<count;++level) {
@@ -244,12 +245,17 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
     const bool version_three=std::memcmp(magic,"T3LCAT03",8)==0;
     const bool version_four=std::memcmp(magic,"T3LCAT04",8)==0;
     const bool version_six=std::memcmp(magic,"T3LCAT06",8)==0;
-    std::uint32_t has_static=version_four ? 1u : 0u;
+    const bool version_ten=std::memcmp(magic,"T3LCAT10",8)==0;
+    const bool version_nine=std::memcmp(magic,"T3LCAT09",8)==0 || version_ten;
+    const bool version_eight=std::memcmp(magic,"T3LCAT08",8)==0 || version_nine;
+    const bool version_seven=std::memcmp(magic,"T3LCAT07",8)==0 || version_eight;
+    std::uint32_t has_static=(version_four || version_seven) ? 1u : 0u;
     if (version_six && (!reader.u32(has_static) || has_static>1)) return false;
-    if ((!version_two && !version_three && !version_four && !version_six && std::memcmp(magic,"T3LCAT01",8)) || !Text(reader,map) || map.size()>128 || map.find(':')!=std::string::npos ||
+    if ((!version_two && !version_three && !version_four && !version_six && !version_seven && std::memcmp(magic,"T3LCAT01",8)) || !Text(reader,map) || map.size()>128 || map.find(':')!=std::string::npos ||
         !Text(reader,map_sha) || !Digest(map_sha) || !Text(reader,loaded.offline_scene_sha256) ||
         !Digest(loaded.offline_scene_sha256) || !Text(reader,actor) ||
         actor!="actor:"+map+":"+map_sha+":StaticMeshActor__1520") return false;
+    if (version_seven && map!="SouthQuarter1_int1") return false;
     std::uint32_t handed=0,winding=0,uv=0,clip=0,has_scale=0;
     if (!reader.u32(handed) || handed>2 || !reader.u32(winding) || winding>2 ||
         !reader.u32(uv) || uv>2 || !reader.u32(clip) || clip>1 || !reader.u32(has_scale) || has_scale>1) return false;
@@ -273,8 +279,8 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
         if (!Text(reader,material.id) || !Text(reader,material.name) || catalog.materials.count(material.id) ||
             override_materials.count(material.id)) return false;
         const auto id=material.id;
-        if ((version_three || version_four || version_six) && (id=="remaster:material:stone_wall_v2" || id=="remaster:material:wood_floor_v2")) return false;
-        if ((version_two || version_three || version_four || version_six) && id.compare(0,override_prefix.size(),override_prefix)==0)
+        if ((version_three || version_four || version_six || version_seven) && (id=="remaster:material:stone_wall_v2" || id=="remaster:material:wood_floor_v2")) return false;
+        if ((version_two || version_three || version_four || version_six || version_seven) && id.compare(0,override_prefix.size(),override_prefix)==0)
             override_materials.emplace(id,std::move(material));
         else {
             if (!residency->AddMaterial(epoch.map,material)) return false;
@@ -319,10 +325,11 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
         catalog.bsp.push_back(std::move(resource));
     }
     std::uint32_t has_override=version_two ? 1u : 0u;
-    if ((version_three || version_four || version_six) && (!reader.u32(has_override) || has_override>1)) return false;
+    if ((version_three || version_four || version_six || version_seven) && (!reader.u32(has_override) || has_override>1)) return false;
     std::uint32_t has_materials=version_three ? 1u : 0u;
-    if ((version_four || version_six) && (!reader.u32(has_materials) || has_materials>1)) return false;
+    if ((version_four || version_six || version_seven) && (!reader.u32(has_materials) || has_materials>1)) return false;
     if (version_six && !has_materials) return false;
+    if (version_eight && (!has_materials || !has_override)) return false;
     if (has_materials && (map!="SouthQuarter1_int1" || !loaded.conventions.meters_per_unit ||
                           std::fabs(*loaded.conventions.meters_per_unit-0.01905f)>1e-9f)) return false;
     if (has_override) {
@@ -336,12 +343,14 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
     } else if (!override_materials.empty()) return false;
     if (has_materials) {
         std::uint32_t count=0;
-        if (!reader.u32(count) || count!=2) return false;
+        if (!reader.u32(count) || count!=(version_eight ? 4u : 2u)) return false;
         auto library=std::make_shared<BedroomMaterialLibrary>();
-        static constexpr const char* ids[]{"remaster:material:stone_wall_v2", "remaster:material:wood_floor_v2"};
+        static constexpr const char* ids[]{"remaster:material:stone_wall_v2", "remaster:material:wood_floor_v2",
+            "remaster:material:bed_high:textured:GENiFABRICwoolA2_D", "remaster:material:bed_high:textured:PillowLinen"};
+        if (version_eight) library->bed_textiles.emplace();
         std::uint32_t size=0;
-        for (unsigned i=0;i<2;++i) {
-            auto& material=library->materials[i];
+        for (unsigned i=0;i<count;++i) {
+            auto& material=i<2 ? library->materials[i] : (*library->bed_textiles)[i-2];
             if (!Text(reader,material.id) || material.id!=ids[i]) return false;
             for (unsigned channel=0;channel<4;++channel) {
                 if (!MaterialTextureData(reader,channel==0,material.source_sha256[channel],material.channels[channel])) return false;
@@ -355,6 +364,29 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
             if (!MaterialTextureData(reader,false,library->wall_height_source_sha256,height) ||
                 height.mips.front().width!=size || height.mips.front().height!=size) return false;
             library->wall_height=std::move(height);
+        }
+        if (version_nine) {
+            std::uint32_t original_count=0;
+            if (!reader.u32(original_count) || original_count!=kBedroomOriginalNames.size()) return false;
+            library->original_materials.emplace();
+            for (std::size_t i=0;i<original_count;++i) {
+                auto& material=(*library->original_materials)[i];
+                if (!Text(reader,material.id)) return false;
+                const auto found=catalog.materials.find(material.id);
+                if (found==catalog.materials.end() || found->second.name!=kBedroomOriginalNames[i] ||
+                    !MaterialTextureData(reader,true,material.source_sha256,material.albedo,false)) return false;
+            }
+        }
+        if (version_ten) {
+            library->candlestick_metal.emplace();
+            auto& metal=*library->candlestick_metal;
+            if (!Text(reader,metal.id) || metal.id!="remaster:material:candlestick_metal_v2" ||
+                !MaterialTextureData(reader,true,metal.source_sha256,metal.albedo) ||
+                metal.albedo.mips.front().width!=size) return false;
+            library->candlestick_wax.emplace();
+            auto& wax=*library->candlestick_wax;
+            if (!Text(reader,wax.id) || wax.id!="remaster:material:candlestick_wax_original" ||
+                !MaterialTextureData(reader,true,wax.source_sha256,wax.albedo,false)) return false;
         }
         loaded.bedroom_materials=std::move(library);
     }
@@ -397,13 +429,27 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
         std::uint32_t actor_count=0;
         if (!reader.u32(actor_count) || !actor_count || actor_count>8192) return false;
         const auto actor_prefix="actor:"+map+":"+map_sha+":StaticMeshActor__";
+        const auto crate_id="actor:"+map+":"+map_sha+":D_1224__21";
+        const std::array<std::string,4> crate_ids{crate_id,"actor:"+map+":"+map_sha+":D_1224__0",
+            "actor:"+map+":"+map_sha+":D_1224__22","actor:"+map+":"+map_sha+":D_1224__23"};
+        const auto cabinet_id="actor:"+map+":"+map_sha+":D_443__1";
+        const auto bread_id="actor:"+map+":"+map_sha+":D_125__3";
+        const auto target_id="actor:"+map+":"+map_sha+":D_548__0";
         std::unordered_set<std::string> used_resources;
         for (std::uint32_t i=0;i<actor_count;++i) {
             StaticMeshCandidate candidate;std::string resource_id;std::uint32_t count=0;
-            if (!Text(reader,candidate.instance_id) || !StaticActorKey(candidate.instance_id,actor_prefix) ||
+            if (!Text(reader,candidate.instance_id)) return false;
+            const bool crate=std::find(crate_ids.begin(),crate_ids.end(),candidate.instance_id)!=crate_ids.end();
+            if ((!StaticActorKey(candidate.instance_id,actor_prefix) &&
+                 !(version_seven && (crate || candidate.instance_id==cabinet_id ||
+                                      candidate.instance_id==bread_id || candidate.instance_id==target_id))) ||
                 !Text(reader,resource_id) || !reader.u32(count) || !count || count>kMaxSections) return false;
             const auto found=resources.find(resource_id);
             if (found==resources.end() || count!=found->second->geometry.sections.size()) return false;
+            if (crate && name_key(found->second->name)!="genxgoodscrateb") return false;
+            if (candidate.instance_id==cabinet_id && name_key(found->second->name)!="seainfurncabinetc1") return false;
+            if (candidate.instance_id==bread_id && name_key(found->second->name)!="genifoodbreada1") return false;
+            if (candidate.instance_id==target_id && name_key(found->second->name)!="genxgoodsarchtarg") return false;
             candidate.resource=found->second;candidate.material_ids.reserve(count);
             for (std::uint32_t section=0;section<count;++section) {
                 std::string material;
@@ -416,6 +462,7 @@ bool LoadCatalog(const std::uint8_t* bytes, std::size_t size, CatalogDigest dige
         }
         const auto target=catalog.static_mesh_actors.find(actor);
         if (target==catalog.static_mesh_actors.end() || target->second.resource!=catalog.bed) return false;
+        if (version_seven && !catalog.static_mesh_actors.count(crate_id)) return false;
         for (std::size_t i=0;i<catalog.bed->geometry.sections.size();++i) {
             const auto& expected=catalog.bed_materials.empty() ? catalog.bed->geometry.sections[i].material_id : catalog.bed_materials[i];
             if (target->second.material_ids[i]!=expected) return false;

@@ -62,8 +62,11 @@ public:
     bool PreparePreviewLit(const Snapshot& snapshot, const ResidentFlatFrame& frame, bool readback = false) noexcept;
     // Explicit artistic candle preview. A null sample renders no candle
     // contribution; a null sample never asserts a verified disabled state.
+    // other_raw is restricted to the other researched bedroom candle and,
+    // when raw is also supplied, must refer to the same raw batch.
     bool PrepareCandlePreview(const Snapshot& snapshot, const RawLightFrame* raw,
-                              const ResidentFlatFrame& frame, bool readback = false) noexcept;
+                              const ResidentFlatFrame& frame, bool readback = false,
+                              const RawLightFrame* other_raw = nullptr) noexcept;
     bool Submit() noexcept;
     bool Finish(std::vector<std::uint8_t>* pixels = nullptr) noexcept;
     // Present is deliberately outside the scene lock: a driver or windowing

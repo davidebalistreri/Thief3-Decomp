@@ -61,6 +61,11 @@ int main(int argc,char** argv) {
         const auto& wall=catalog.bedroom_materials->materials[0];
         std::cout<<" bedroom_materials "<<catalog.bedroom_materials->materials.size()<<" "
                  <<wall.channels[0].mips[0].width<<" "<<wall.channels[0].mips.size();
+        if (catalog.bedroom_materials->bed_textiles) {
+            for (const auto& material:*catalog.bedroom_materials->bed_textiles)
+                for (const auto& texture:material.channels) if (texture.mips.empty()) return 7;
+            std::cout<<" bed_textiles "<<catalog.bedroom_materials->bed_textiles->size();
+        }
         if (catalog.bedroom_materials->wall_height) {
             const auto& height=*catalog.bedroom_materials->wall_height;
             if (height.mips.empty() || height.mips[0].rgba.empty()) return 7;

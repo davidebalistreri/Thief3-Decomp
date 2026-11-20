@@ -48,9 +48,14 @@ bool ResolveBed(const BindingCatalog& catalog, const scene_bridge::ProbeSnapshot
                 std::uint64_t instance_generation, MeshSelection& output);
 // Requires a bounded same-scope sample plus the offline actor/resource/skin
 // candidate. Success is Candidate evidence, not proof of the GPU payload.
+enum class StaticMeshMatchStage : std::uint32_t {
+    Matched, Probe, Candidate, Identity, Geometry, NodeHeader, NodeCounts, NodeBounds,
+    NodeSectionName, NodeSectionMaterial, NodeSectionLayout, Asset, Transform
+};
 bool ResolveStaticMesh(const BindingCatalog& catalog,const scene_bridge::ProbeSnapshot& snapshot,
                        const scene_bridge::SubmissionSample& before,const scene_bridge::ProbeStaticMesh& observed,
-                       std::uint32_t section,std::uint64_t instance_generation,MeshSelection& output);
+                       std::uint32_t section,std::uint64_t instance_generation,MeshSelection& output,
+                       StaticMeshMatchStage* diagnostic_stage = nullptr);
 bool ResolveBsp(const BindingCatalog& catalog, const scene_bridge::ProbeSnapshot& snapshot,
                 const scene_bridge::SubmissionSample& before, std::uint32_t section, BspSelection& output);
 struct IndexedDraw {

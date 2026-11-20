@@ -45,7 +45,7 @@ struct FNameEntry {
     uint16_t MaxNumber;
     uint16_t Pad;
     TArray<uint32_t> NumberFlags;
-    char Name[64];  // verified: ANSI text at +0x1C
+    char Name[64];  // ANSI text starts at +0x1C; allocation may end before 64 bytes
 };
 
 static_assert(offsetof(FNameEntry, Name) == 0x1C);

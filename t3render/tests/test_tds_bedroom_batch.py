@@ -365,6 +365,16 @@ class CaptureBatchTests(unittest.TestCase):
         _, static = batch.env_for(self.root / "engine", self.root / "bottle", self.root / "output", 3,
                                   scene_bridge=True, submission_scope=True, live_catalog=catalog, live_static_meshes=True)
         self.assertEqual(static["T3RENDER_SCENE_LIVE_STATIC_MESHES"], "1")
+        _, combined = batch.env_for(self.root / "engine", self.root / "bottle", self.root / "output", 3,
+                                    scene_bridge=True, submission_scope=True, live_catalog=catalog,
+                                    live_static_meshes=True, live_lights=True, preview_candle=True,
+                                    candle_link_diagnostics=True, remaster_toggle=True, candle_left=True)
+        self.assertEqual(combined["T3RENDER_SCENE_LIVE_STATIC_MESHES"], "1")
+        self.assertIn("T3RENDER_SCENE_LIVE_REMASTER_TOGGLE", combined)
+        self.assertEqual(combined["T3RENDER_SCENE_LIVE_CANDLE_NUMBER"], "14")
+        with self.assertRaisesRegex(batch.BatchError, "left candle"):
+            batch.env_for(self.root / "engine", self.root / "bottle", self.root / "output", 3,
+                          scene_bridge=True, submission_scope=True, live_catalog=catalog, candle_left=True)
         with self.assertRaises(batch.BatchError):
             batch.env_for(self.root / "engine", self.root / "bottle", self.root / "output", 3, live_lights=True)
         _, lights = batch.env_for(self.root / "engine", self.root / "bottle", self.root / "output", 3,
@@ -414,7 +424,7 @@ class CaptureBatchTests(unittest.TestCase):
         system.mkdir(parents=True)
         proxy, catalog = self.root / "proxy.dll", self.root / "catalog.bin"
         proxy.write_bytes(b"fixture proxy")
-        for version in (b"04", b"05"):
+        for version in (b"04", b"05", b"07"):
             with self.subTest(version=version):
                 output = self.root / ("result-" + version.decode())
                 catalog.write_bytes(b"T3LCAT" + version + b"fixture catalog")
@@ -688,6 +698,46 @@ class CaptureBatchTests(unittest.TestCase):
                                   scene_bridge=True, submission_scope=True, live_catalog=str(catalog), live_static_meshes=True)
             popen.assert_not_called()
             self.assertFalse(output.exists())
+
+    def test_remaster_toggle_allows_mesh_sampling_before_launch(self):
+        bottle = self.root / "bottle"
+        steam = bottle / "drive_c/Program Files (x86)/Steam/steam.exe"
+        system = steam.parent / "steamapps/common/Thief Deadly Shadows/System"
+        system.mkdir(parents=True);steam.write_bytes(b"fixture")
+        proxy, catalog = self.root / "proxy.dll", self.root / "catalog.bin"
+        proxy.write_bytes(b"fixture");catalog.write_bytes(b"T3LCAT07fixture")
+        resolved = tuple(p.resolve() for p in (self.root / "engine", bottle, system, proxy, self.root / "result"))
+        original_is_file = Path.is_file
+        def is_file(path):
+            return str(path) == "/usr/bin/sandbox-exec" or original_is_file(path)
+        with mock.patch.object(batch, "validate_paths", return_value=resolved), \
+             mock.patch.object(batch.sys, "platform", "darwin"), \
+             mock.patch.object(Path, "is_file", autospec=True, side_effect=is_file), \
+             mock.patch.object(batch, "wine_or_steam_pids", return_value=[]), \
+             mock.patch.object(batch.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(batch.BatchError, "invalid delay"):
+                batch.execute(*map(str, resolved), delay=-1, timeout=10, frames=3, terminate=True,
+                              scene_bridge=True, submission_scope=True, live_catalog=str(catalog),
+                              live_static_meshes=True, live_lights=True, manual_trigger=True, steam_launch=True,
+                              isolated_saves=True, preview_candle=True, candle_link_diagnostics=True,
+                              remaster_toggle=True, candle_left=True)
+            popen.assert_not_called()
+
+    def test_static_mesh_sampling_accepts_v8_to_v10_before_launch(self):
+        engine, bottle = self.root / "engine", self.root / "bottle"
+        system = bottle / "drive_c/Steam/Thief/System";system.mkdir(parents=True)
+        proxy, catalog, output = self.root / "proxy.dll", self.root / "catalog.bin", self.root / "result"
+        proxy.write_bytes(b"fixture proxy")
+        resolved = tuple(p.resolve() for p in (engine, bottle, system, proxy, output))
+        for magic in (b"T3LCAT08", b"T3LCAT09", b"T3LCAT10"):
+            catalog.write_bytes(magic + b"fixture")
+            with self.subTest(magic=magic), mock.patch.object(batch, "validate_paths", return_value=resolved), \
+                 mock.patch.object(batch, "game_pids", return_value=[42]), \
+                 mock.patch.object(batch.subprocess, "Popen") as popen:
+                with self.assertRaisesRegex(batch.BatchError, "TDS is already running"):
+                    batch.execute(*map(str, resolved), delay=0, timeout=10, frames=1, terminate=True,
+                                  scene_bridge=True, submission_scope=True, live_catalog=str(catalog), live_static_meshes=True)
+                popen.assert_not_called()
 
     def test_displacement_rejects_catalog_without_height_before_launch(self):
         engine, bottle = self.root / "engine", self.root / "bottle"

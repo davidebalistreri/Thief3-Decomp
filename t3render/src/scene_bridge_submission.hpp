@@ -4,6 +4,65 @@
 
 namespace t3render::scene_bridge {
 
+// Explicitly bounded bedroom actors whose local mesh property may be inherited.
+enum class BedroomProp { None, Crate, DoorCrate0, DoorCrate22, DoorCrate23, Cabinet, Bread, Target };
+inline bool IsBedroomCrate(BedroomProp prop) noexcept {
+    return prop==BedroomProp::Crate || prop==BedroomProp::DoorCrate0 ||
+           prop==BedroomProp::DoorCrate22 || prop==BedroomProp::DoorCrate23;
+}
+inline BedroomProp IdentifyBedroomProp(std::uint32_t number,const char* name) noexcept {
+    if (!name) return BedroomProp::None;
+    if (number==22 && std::strcmp(name,"D_1224")==0) return BedroomProp::Crate;
+    if (number==1 && std::strcmp(name,"D_1224")==0) return BedroomProp::DoorCrate0;
+    if (number==23 && std::strcmp(name,"D_1224")==0) return BedroomProp::DoorCrate22;
+    if (number==24 && std::strcmp(name,"D_1224")==0) return BedroomProp::DoorCrate23;
+    if (number==2 && std::strcmp(name,"D_443")==0) return BedroomProp::Cabinet;
+    if (number==4 && std::strcmp(name,"D_125")==0) return BedroomProp::Bread;
+    if (number==1 && std::strcmp(name,"D_548")==0) return BedroomProp::Target;
+    return BedroomProp::None;
+}
+inline const char* BedroomPropName(BedroomProp prop) noexcept {
+    return IsBedroomCrate(prop) ? "D_1224" : prop==BedroomProp::Cabinet ? "D_443" :
+           prop==BedroomProp::Bread ? "D_125" : prop==BedroomProp::Target ? "D_548" : "StaticMeshActor";
+}
+inline const char* BedroomPropSuffix(BedroomProp prop) noexcept {
+    return prop==BedroomProp::Crate ? "D_1224__21" : prop==BedroomProp::DoorCrate0 ? "D_1224__0" :
+           prop==BedroomProp::DoorCrate22 ? "D_1224__22" : prop==BedroomProp::DoorCrate23 ? "D_1224__23" :
+           prop==BedroomProp::Cabinet ? "D_443__1" :
+           prop==BedroomProp::Bread ? "D_125__3" : prop==BedroomProp::Target ? "D_548__0" : "";
+}
+
+// When a full 64-byte name read fails, exclude an unrelated name only if a
+// stable readable prefix already differs from the specific bread name. This
+// cannot establish equality, uniqueness outside the list, or prevent ABA.
+inline bool BreadNameDefinitelyDifferent(const ProbeReader& reader,std::uint32_t fname) noexcept {
+    constexpr char expected[]="D_125";
+    constexpr std::uint32_t names_address=0x10f7af1c;
+    ProbeArray32 names{},after{};
+    if (!ReadProbe(reader,names_address,&names,sizeof(names)) || !ValidProbeArray(names,65536)) return false;
+    const auto index=fname & 0xffffu;
+    if (index>=names.count) return false;
+    std::uint32_t slot=0,text=0;
+    if (!ProbeOffset(names.data,index*4,slot)) return false;
+    const auto entry=ReadProbeU32(reader,slot);
+    if (!entry.available || !entry.value || !ProbeOffset(entry.value,0x1c,text)) return false;
+    char prefix[sizeof(expected)]{};
+    for (std::size_t i=0;i<sizeof(expected);++i) {
+        if (!ReadProbeBytesOffset(reader,text,static_cast<std::uint32_t>(i),&prefix[i],1)) return false;
+        if (prefix[i]==expected[i]) continue;
+        const auto c=static_cast<unsigned char>(prefix[i]);
+        if ((!c && !i) || (c && (c<0x20 || c>0x7e))) return false;
+        for (std::size_t j=0;j<=i;++j) {
+            char check=0;
+            if (!ReadProbeBytesOffset(reader,text,static_cast<std::uint32_t>(j),&check,1) || check!=prefix[j]) return false;
+        }
+        if (!ReadProbe(reader,names_address,&after,sizeof(after)) || !SameProbeArray(names,after)) return false;
+        const auto again=ReadProbeU32(reader,slot);
+        return again.available && again.value==entry.value;
+    }
+    return false;
+}
+
 // Short-lived evidence at the actual per-section virtual draw call. It is not
 // a durable identity: repeated reads cannot exclude ABA or unseen writes.
 struct SubmissionSample {
@@ -91,11 +150,13 @@ inline SubmissionSample SampleSubmission(const ProbeReader& r, std::uint32_t ele
 // This bounded, opt-in scope sample is expensive: it performs membership and
 // mesh-pool scans. Same-read checks are candidate evidence, not an ABA proof.
 inline ProbeStaticMesh SampleVisibleStaticMesh(const ProbeReader& reader,const ProbeSnapshot& snapshot,
-                                                const SubmissionSample& submission) noexcept {
+                                                const SubmissionSample& submission,BedroomProp prop=BedroomProp::None) noexcept {
     ProbeStaticMesh result;
     if (!submission.valid || submission.vtable!=0x10e4e8c0 || submission.type!=4 ||
+        (prop!=BedroomProp::None && IdentifyBedroomProp(submission.owner_fname>>16,BedroomPropName(prop))!=prop) ||
         !snapshot.count.available || !snapshot.array.available || !snapshot.array.value || snapshot.entries_truncated ||
         snapshot.count.value!=snapshot.entries_attempted || snapshot.entries_attempted>kMaxProbeEntries) return result;
+    result.diagnostic_stage=StaticMeshSampleStage::Header;
     auto stable_list=[&]() noexcept {
         std::uint32_t slots[kMaxProbeEntries]{};
         if (snapshot.entries_attempted && !ReadProbe(reader,snapshot.array.value,slots,snapshot.entries_attempted*4)) return false;
@@ -108,6 +169,7 @@ inline ProbeStaticMesh SampleVisibleStaticMesh(const ProbeReader& reader,const P
         return count.available && count.value==snapshot.count.value && array.available && array.value==snapshot.array.value;
     };
     if (!stable_list()) return result;
+    result.diagnostic_stage=StaticMeshSampleStage::List;
     std::uint32_t selected=0,element_occurrences=0;
     for (std::uint32_t i=0;i<snapshot.entries_attempted;++i) {
         const auto& item=snapshot.entries[i];
@@ -127,12 +189,16 @@ inline ProbeStaticMesh SampleVisibleStaticMesh(const ProbeReader& reader,const P
             if (!fname.available) return false;
             if ((fname.value>>16)!=(submission.owner_fname>>16)) continue;
             char name[64]{};
-            if (!ReadProbeName(reader,fname.value,name)) return false;
-            if (std::strcmp(name,"StaticMeshActor")==0) ++count;
+            if (!ReadProbeName(reader,fname.value,name)) {
+                if (prop==BedroomProp::Bread && BreadNameDefinitelyDifferent(reader,fname.value)) continue;
+                return false;
+            }
+            if (std::strcmp(name,BedroomPropName(prop))==0) ++count;
         }
         return count==1;
     };
     if (element_occurrences!=1 || !unique_name()) return result;
+    result.diagnostic_stage=StaticMeshSampleStage::Unique;
     ProbeSnapshot one;one.self=snapshot.self;one.count=snapshot.count;one.array=snapshot.array;
     one.entries_attempted=1;one.entries[0]=snapshot.entries[selected];
     ReadProbeOwners(reader,one);
@@ -140,7 +206,8 @@ inline ProbeStaticMesh SampleVisibleStaticMesh(const ProbeReader& reader,const P
     if (!one.object_table_complete || !entry.owner_stable || !entry.owner_table_member ||
         !entry.owner_candidate.available || entry.owner_candidate.value!=submission.owner ||
         !entry.owner_fname.available || entry.owner_fname.value!=submission.owner_fname ||
-        !entry.owner_name_available || std::strcmp(entry.owner_name,"StaticMeshActor")!=0) return result;
+        !entry.owner_name_available || std::strcmp(entry.owner_name,BedroomPropName(prop))!=0) return result;
+    result.diagnostic_stage=StaticMeshSampleStage::Owner;
     ProbeArray32 table{};
     if (!ReadProbe(reader,0x10f3e4a0,&table,sizeof(table)) ||
         !ValidProbeArray(table,static_cast<std::uint32_t>(kMaxTargetObjects))) return result;
@@ -148,13 +215,15 @@ inline ProbeStaticMesh SampleVisibleStaticMesh(const ProbeReader& reader,const P
     ProbeNamedObject cls,outer;
     if (!ReadNamedProbePair(reader,table,entry.owner_class,outer_pointer,cls,outer)) return result;
     if (!cls.member || !cls.stable || !cls.name_available || !cls.fname.available ||
-        (cls.fname.value>>16)!=0 || std::strcmp(cls.name,"StaticMeshActor")!=0 ||
+        (cls.fname.value>>16)!=0 || !cls.name[0] || (prop==BedroomProp::None && std::strcmp(cls.name,"StaticMeshActor")!=0) ||
         !outer_pointer.available || !outer_pointer.value || !outer.member || !outer.stable ||
         !outer.name_available || !outer.fname.available || (outer.fname.value>>16)!=0 ||
         !outer.outer.available || outer.outer.value) return result;
+    result.diagnostic_stage=StaticMeshSampleStage::Names;
     const AssetReader asset_reader{reader.context,reader.read};
     const auto asset=InspectAssetCandidate(asset_reader,entry.owner_candidate.value);
     ProbeMeshNode node;ReadProbeMeshNode(reader,submission.element,node);
+    result.diagnostic_stage=StaticMeshSampleStage::Assets;
     one.entries[0]=snapshot.entries[selected];one.object_table_complete=false;ReadProbeOwners(reader,one);
     const auto& later=one.entries[0];
     const auto outer_after=ReadProbeOffset(reader,entry.owner_candidate.value,0x18);
@@ -174,6 +243,7 @@ inline ProbeStaticMesh SampleVisibleStaticMesh(const ProbeReader& reader,const P
         std::memcmp(later.object_matrix_bits,entry.object_matrix_bits,sizeof(entry.object_matrix_bits)) ||
         !stable_list() || !unique_name() || !stable_list()) return result;
     result.list_stable=true;result.object_table_complete=true;result.name_occurrences=1;
+    result.diagnostic_stage=StaticMeshSampleStage::Complete;
     result.entry=entry;result.owner_outer=outer_pointer;result.owner_class=cls;result.outer=outer;
     result.asset=asset;result.mesh_node=node;
     return result;

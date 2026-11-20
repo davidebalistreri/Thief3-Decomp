@@ -137,16 +137,17 @@ inline VisibleLightCandidates SampleVisibleLightCandidates(const ProbeReader& re
     return result;
 }
 
-// Find D_384__5 through the current visual list rather than the renderer's
+// Find either researched bedroom candlestick through the current visual list rather than the renderer's
 // partial light list. The caller brackets this in the selected Present
 // interval and checks the executable and catalog fingerprint. No pointer is
 // cached or returned. The list and selected identity are rechecked; these
 // checks cannot eliminate ABA or establish global actor-name uniqueness.
 inline CandleLinkObservation SampleBedroomCandleLink(const ProbeReader& reader,
-                                                      const ProbeSnapshot& snapshot,const char* map) noexcept {
+                                                      const ProbeSnapshot& snapshot,const char* map,
+                                                      std::uint32_t actor_number=6) noexcept {
     using namespace visible_light_detail;
     CandleLinkObservation unknown;
-    if (!reader.read || !map || !EqualAscii(map,"SouthQuarter1_int1") || !snapshot.self ||
+    if (!reader.read || !map || !EqualAscii(map,"SouthQuarter1_int1") || (actor_number!=6 && actor_number!=14) || !snapshot.self ||
         !snapshot.count.available || !snapshot.array.available || !snapshot.array.value ||
         snapshot.entries_truncated || snapshot.count.value!=snapshot.entries_attempted ||
         snapshot.entries_attempted>kMaxProbeEntries) return unknown;
@@ -161,7 +162,7 @@ inline CandleLinkObservation SampleBedroomCandleLink(const ProbeReader& reader,
         if (!item_owner.available || !item_owner.value) return unknown;
         const auto fname=ReadProbeOffset(reader,item_owner.value,0x20);
         if (!fname.available) return unknown;
-        if ((fname.value>>16)!=6) continue;
+        if ((fname.value>>16)!=actor_number) continue;
         char name[64]{};
         if (!ReadProbeName(reader,fname.value,name)) return unknown;
         if (std::strcmp(name,"D_384")==0) {selected=i;owner=item_owner.value;++matches;}
@@ -172,7 +173,7 @@ inline CandleLinkObservation SampleBedroomCandleLink(const ProbeReader& reader,
     if (!ReadProbe(reader,0x10f3e4a0,&table,sizeof(table)) || !ValidProbeArray(table,65536)) return unknown;
     const auto actor=ReadMember(reader,table,owner);
     if (!actor.member || !actor.stable || !actor.name_available || std::strcmp(actor.name,"D_384") ||
-        !actor.fname.available || (actor.fname.value>>16)!=6 || !actor.outer.available || !actor.outer.value)
+        !actor.fname.available || (actor.fname.value>>16)!=actor_number || !actor.outer.available || !actor.outer.value)
         return unknown;
     const auto outer=ReadMember(reader,table,actor.outer.value);
     if (!outer.member || !outer.stable || !outer.name_available || !outer.fname.available ||

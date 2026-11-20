@@ -283,6 +283,23 @@ first two can indicate missing UVs. The separate `T3RENDER_SCENE_LIVE_BEDROOM_MA
 flag enables only the partition/ID diagnostic with an older catalog. A v3
 catalog enables the material selection in the viewer automatically.
 
+With `--bed-textiles --bedroom-originals-game-dir <game directory>`, the v9
+catalog additionally packs a fixed set of twelve fingerprinted-bundle original
+diffuse candidates for this bedroom pose. They are used in the remaster view
+for matching semantic materials not already overridden; the flat view remains
+unchanged. Auxiliary PBR channels reuse the wood preview. This does not cover
+transparent materials, missing UVs or other material names and does not prove
+the game's active texture bindings. The export requires `--static-meshes`,
+`--bedroom-props`, `--bed-high` and `--bedroom-materials` as for v8.
+
+With those inputs, `--candlestick-metal` exports v10 with the existing
+generated metal albedo and original-derived wax luminance for the generated
+candlestick; its GLB UVs are embedded in the viewer geometry. Wax is tinted
+to the generated material and made opaque. Both albedos reuse the wood
+preview's auxiliary channels. `--readable-bed-wool` lifts the existing wool
+albedo fivefold in linear light in the catalog, not in the source PNG. These
+are visual preview choices and remain unverified in TDS.
+
 For the experimental head-wall relief, export the bedroom catalog with
 `--wall-height` as well. This creates version 6, retaining the source PNG's
 hash and mip chain separately; old catalogs do not implicitly enable relief.
@@ -344,18 +361,38 @@ missing-indirect-light limits described below.
 The separate opt-in `--live-lights --preview-candle` uses a same-frame raw
 candidate for the bedroom `D_384__5` position and normalized color, with
 an artistic 1 cd intensity at factor one and a 3 m range. These are not
-measured game values. It casts one bounded shadow using only selected
+measured game values. It casts bounded shadows using only selected
 geometry; it does not prove that the game light is enabled. It multiplies the artistic intensity by the candidate
-`+0x8c` factor. A missing or stale sample falls back to a dim artistic ambient,
-labelled `preview_candle_unknown`, rather than reusing another frame's light;
+`+0x8c` factor. A missing or stale selected sample is labelled
+`preview_candle_unknown` rather than reusing another frame's light;
 this does not prove the light is disabled. The [live report](../../build/t3render-captures/scene-live-m3-preview-20261117-mac-v1/M3-live-report.md)
 records the earlier preview and the [toggle report](../../build/t3render-captures/scene-live-m3-toggle-20261118-mac-v1/M3-toggle-report.md)
 records the subsequent experiment and offscreen fallback correction.
 
+For the specific left-side bedroom candlestick `D_384__13`, the batch option
+`--candle-left` selects its FName number 14 instead of the bedside number 6.
+The selected light, visual transform, enabled candidate and flame follow that
+choice; the log records `candle_link.actor_number`. The comparison rejects a
+different selected actor between ON and OFF. A TDS capture observed ON and
+OFF for this candidate, and the player confirmed switching the left candle off.
+The other specific bedroom candlestick is sampled separately and rendered only
+with its own same-frame evidence. It can remain lit when the selected candle
+is off. The two-candle path has synthetic host and D3D12 coverage, but has not
+been verified in TDS. Toggle diagnostics expose separate projected bounds for
+the other holder and flame so the comparison can require both in frame; bounds
+and submitted draws are not proof that they are unoccluded.
+
+The artistic candle preview keeps a constant 0.12 ambient term, in both ON
+and OFF states, to make geometry inspectable. This term is not runtime game
+lighting, does not determine the candle state, and is not GI.
+
 With `--candle-link-diagnostics` the viewer can also draw the generated
 metal and wax candlestick (4,328 triangles) at the same-frame visual actor
 transform, including when its sampled factor is zero. The untextured materials
-use artistic colors. A stable actor transform can also retain the candlestick
+in older catalogs use artistic colors; v10 supplies the metal and wax albedos
+described above. The holder and flame are also enabled in the remaster
+side of `--remaster-toggle`; the holder remains in the off state, while the
+flame requires the same-frame on candidate. A stable actor transform can also retain the candlestick
 when the actor has no light link; this does not establish whether the light is
 disabled. It can also draw the generated `CandleFlame` mesh
 (248 triangles) at the same actor transform.
@@ -369,24 +406,25 @@ Fully occluded emission produces no glow; visible glow can spill over foreground
 edges. This is an artistic approximation, not measured TDS bloom; its live
 cost has not been measured.
 No earlier transform or
-light is reused. A zero actor factor without a listed light keeps the dim
-ambient and is labelled `preview_candle_zero_candidate`, not verified off.
+light is reused. A zero selected actor factor without a listed light is
+labelled `preview_candle_zero_candidate`, not verified off; the other candle
+may still illuminate the scene when its own observation is on.
 If an actor-link observation conflicts with a listed light, the viewer uses
 the unknown-light fallback instead of rendering the conflicting light value.
-`preview_flame_draws` and `preview_candlestick_draws` count the additional
-draws. The geometry, shader and zero label were checked offscreen; the new
-candlestick, flame and zero label have not been checked in TDS. The live [link report](../../build/t3render-captures/scene-live-m3-candle-link-20261118-mac-v1/M3-link-report.md)
+`preview_flame_draws` and `preview_candlestick_draws` count all preview
+draws; `preview_selected_*` and `preview_other_*` distinguish the two actors.
+The lighting mode still describes the selected candle, not the total light in
+the room. The live [link report](../../build/t3render-captures/scene-live-m3-candle-link-20261118-mac-v1/M3-link-report.md)
 records the earlier actor-link experiment and synchronized dim fallback. An
 [offscreen reconstruction](../../build/t3render-captures/scene-live-m3-glow-replay-20261118-v1/M3-glow-report.md)
 uses a captured bedroom pose, showing the generated candlestick and flame;
 it also documents its synthetic link sample, artistic calibration and simulated zero state.
 
-The [same captured pose](../../build/t3render-captures/scene-live-m3-crate-analysis-20261118/analysis.md)
-also contains a submission for `D_1224__21` whose observed transform and
-offline candidate mesh project onto the crate underneath the candlestick.
-The generic live sampler only accepts `StaticMeshActor`, so it does not select
-this object. The projection does not establish the crate's runtime asset binding
-or visibility under occlusion; a stored offline pose cannot track gameplay.
+The captured frame 4308 also contains a submission for `D_1224__21`; its
+transform and the offline `GENxGOODScrateB` candidate project onto the crate
+under the candlestick. Its draw arguments match 216 vertices and 108 triangles.
+The projection does not establish its runtime asset binding or visibility
+under occlusion; a stored offline pose cannot track gameplay.
 
 The embedded geometry is derived from the generated project asset, not from
 a game binary. To regenerate both headers after changing that asset:
@@ -472,7 +510,19 @@ ambiguous. Missing material bindings, unsupported section/geometry sizes and
 unqualified identities are also excluded and listed in the manifest. Versions
 1–3 remain readable. The local `SouthQuarter1_int1` export contains 325 actor
 candidates and 46 extra resources (plus the bed); five actors with unresolved
-materials are excluded. Other actor classes and attachments are not covered.
+materials are excluded. Other actor classes and attachments are not covered by v4.
+
+For this bedroom only, add `--static-meshes --bedroom-props` to export v7.
+It adds the specific `D_1224__21 / GENxGOODScrateB` crate, without copying
+an offline transform. The opt-in sampler verifies the current visible-list
+identity, map, owner, class membership, mesh-node metadata, skin and scoped
+draw. It resamples the crate after the draw before publishing. If its local
+mesh property is absent, the result uses mesh-node and draw evidence only;
+it does not resolve the inherited property or prove a GPU binding. Missing,
+ambiguous or unstable evidence rejects the candidate. The crate and generic
+static mesh paths are not yet validated in TDS, and can be expensive. Their
+material IDs currently use placeholder colors, not the original textures or
+new prop overrides. This is not a complete reconstruction of every room object.
 
 For maps without the researched bed, `--general-map` exports a v5 catalog
 containing BSP blocks and eligible generic static mesh candidates. Either
@@ -502,10 +552,10 @@ corrupted copy of each. These are synthetic subsets of an offline fixture, not
 observations of another TDS level. The generic matcher and lifecycle signal
 still need real-game validation.
 
-With a v4 or v5 catalog, explicitly set `T3RENDER_SCENE_LIVE_STATIC_MESHES=1` to
+With a v4, v5 or v7 catalog, explicitly set `T3RENDER_SCENE_LIVE_STATIC_MESHES=1` to
 enable the new path. The bedroom batch runner clears inherited `T3RENDER_`
 variables, so its equivalent is `--live-static-meshes` together with
-`--live-catalog`; it rejects catalog headers other than v4/v5 before starting a game.
+`--live-catalog`; v6 is also accepted when it contains static candidates.
 It samples one candidate inside its existing submission
 scope and requires a unique visible-list name, owner/table/class/map checks,
 local asset-property audit, mesh-node counts/bounds/sections and material
@@ -530,11 +580,32 @@ retaining independent slot and stability checks. A synthetic 16,005-slot table
 still needs five complete sweeps (630 reads of 128-slot chunks, including the
 last partial chunks) per generic observation, down from seven before the
 change. These are read counts, not frame-rate results. The path stays off by
-default; live coverage and the reported lag require a later coordinated TDS test.
+default. One coordinated TDS capture selected 22 meshes including the crate;
+the frame is still incomplete and has placeholder prop materials.
 Host fixtures reject ambiguous identity/materials and exercise transform,
 visibility, reappearance and Reset. A Highball GPU fixture used offline
 `StaticMeshActor__258 / GENrafters1` geometry with a synthetic camera and
 selection; it is not proof that the runtime actor was observed.
+
+The subsequent bedroom-specific catalog may also include `D_443__1 /
+SEAinFURNcabinetC1`, the cabinet under the left candle. Its offline mesh
+projected over the frame 1084 D3D8 capture agrees with the cabinet silhouette,
+and its draw was present in that trace. The new explicit candidate uses the
+same guarded inherited-property path and rechecks its mesh metadata after the
+draw. It has not been observed through this matcher in TDS; its materials are
+still placeholders. This does not prove runtime GPU resource identity.
+The same explicit candidate path also covers `D_125__3 / GENiFOODbreadA1`
+and `D_548__0 / GENxGOODSarchtarg`, whose draws are present in that trace.
+Neither new path has been verified live.
+
+For that fingerprinted bedroom and its bed anchor, the remaster preview reuses
+the existing wood and stone materials on a bounded set of named furniture,
+beams, doorway and bed wood sections; other listed details use preview colors.
+This affects neither the source scene nor the ordinary flat view. The material
+choices are approximations, not claims about original texture bindings. An
+offline reconstruction from frame 1084 selected 25 candidate meshes and four
+BSP blocks; its ON and simulated OFF images differed, while the flat image was
+unchanged. It does not prove that the new prop bindings occur in live TDS.
 
 ## Opt-in D3D12 live viewer
 
@@ -597,6 +668,17 @@ TDS; keep the feature disabled during normal gameplay.
 Driver telemetry also records callback counts pending at the most recent
 Present entry. Nonzero counts identify overlap but do not prove that an old
 callback has ended or is safe to discard.
+
+An experimental x86 recovery handles only one unscoped `DrawPrimitiveUP`
+pending for at least two Presents on the same thread, with no other outstanding
+callbacks. It checks local stack markers within the same TIB stack bounds,
+invalidates the old window and primes a new one only when the Present marker
+indicates the draw frame has unwound. Missing or contradictory evidence keeps
+the window rejected; a late completion invalidates the new window. The fixture
+exercises nested calls, other threads and stacks, other pending callbacks and an
+actual x86 nonlocal exit under Highball. This does not establish the cause of
+the observed game stall or prove recovery in TDS, and relies on conventional
+downward stack behavior and valid thread/fiber TIB bounds.
 
 When capture and live output run together, the trace header records the same
 session ID. The combined observer adds `scene_live_frame` to a successfully

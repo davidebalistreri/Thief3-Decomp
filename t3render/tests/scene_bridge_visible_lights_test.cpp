@@ -107,6 +107,12 @@ int main() {
     auto candle=SampleBedroomCandleLink(reader,candle_snapshot,"SouthQuarter1_int1");
     assert(candle.status==CandleLinkStatus::Candidate && candle.factor_8c_bits==0x3f800000 &&
            candle.transform_available && candle.transform_bits[0]==0x3f800000);
+    m.put<std::uint32_t>(0x5020,14u<<16);
+    candle=SampleBedroomCandleLink(reader,candle_snapshot,"SouthQuarter1_int1",14);
+    assert(candle.status==CandleLinkStatus::Candidate && candle.transform_available);
+    assert(SampleBedroomCandleLink(reader,candle_snapshot,"SouthQuarter1_int1",6).status==CandleLinkStatus::Unknown);
+    assert(SampleBedroomCandleLink(reader,candle_snapshot,"SouthQuarter1_int1",15).status==CandleLinkStatus::Unknown);
+    m.put<std::uint32_t>(0x5020,6u<<16);
     m.put<std::uint32_t>(0x408c,0);
     candle=SampleBedroomCandleLink(reader,candle_snapshot,"SouthQuarter1_int1");
     assert(candle.status==CandleLinkStatus::Candidate && candle.factor_8c_bits==0);

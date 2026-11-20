@@ -2,7 +2,9 @@
 #include "scene_live_dx12.hpp"
 #include "scene_live_flat.hpp"
 #include "scene_live_lighting.hpp"
+#include "scene_live_materials.hpp"
 #include "scene_live_light_diagnostics.hpp"
+#include "scene_live_framing.hpp"
 #include "scene_live_wall_displacement.hpp"
 
 #include <algorithm>
@@ -110,6 +112,15 @@ struct Diagnostics {
            <<",\"selected_probe_bad\":"<<s.selected_probe_bad<<",\"bed_scopes\":"<<s.bed_scopes
            <<",\"static_mesh_samples\":"<<s.static_mesh_samples<<",\"static_mesh_scopes\":"<<s.static_mesh_scopes
            <<",\"static_mesh_rejected\":"<<s.static_mesh_rejected
+           <<",\"bread_sample_stages\":[";
+        for (std::size_t i=0;i<s.bread_sample_stages.size();++i) {if (i) out<<',';out<<s.bread_sample_stages[i];}
+        out<<"],\"bread_match_stages\":[";
+        for (std::size_t i=0;i<s.bread_match_stages.size();++i) {if (i) out<<',';out<<s.bread_match_stages[i];}
+        out<<"],\"bread_asset_statuses\":[";
+        for (std::size_t i=0;i<s.bread_asset_statuses.size();++i) {if (i) out<<',';out<<s.bread_asset_statuses[i];}
+        out<<"],\"bread_scopes_opened\":"<<s.bread_scopes_opened
+           <<",\"bread_rechecks_ok\":"<<s.bread_rechecks_ok<<",\"bread_rechecks_failed\":"<<s.bread_rechecks_failed
+           <<",\"bread_draws_ok\":"<<s.bread_draws_ok<<",\"bread_draws_failed\":"<<s.bread_draws_failed
            <<",\"map_witness_conflicts\":"<<s.map_witness_conflicts
            <<",\"unscoped_viewport_attempts\":"<<s.unscoped_viewport_attempts
            <<",\"map_transitions\":"<<s.map_transitions
@@ -119,6 +130,7 @@ struct Diagnostics {
            <<",\"draw_viewport_bad\":"<<s.draw_viewport_bad<<",\"scope_unstable\":"<<s.scope_unstable
            <<",\"scope_rejected\":"<<s.scope_rejected<<",\"losses\":"<<s.losses
            <<",\"loss_invalidations\":"<<s.loss_invalidations
+           <<",\"unwound_primitive_up_draws\":"<<s.unwound_primitive_up_draws
            <<",\"primed\":"<<s.primed<<",\"published\":"<<s.published<<",\"rejected\":"<<s.rejected
            <<",\"last_rejection\":"<<s.last_rejection
            <<",\"present_pending_probes\":"<<s.present_pending_probes
@@ -203,7 +215,7 @@ struct Diagnostics {
         return ok;
     }
     void Frame(const Snapshot& snapshot, const ResidentFlatFrame& frame, const FlatCacheStats& cache, bool image,
-               const RawLightFrame* raw, ULONGLONG presented_at, const char* lighting_mode,
+               const RawLightFrame* raw, const MeshOverride* bed, ULONGLONG presented_at, const char* lighting_mode,
                bool toggle_mode, bool remaster, bool off_capture) {
         if (log==INVALID_HANDLE_VALUE || entries>=kMaxEntries) return;
         if (snapshot.provenance.origin==FrameOrigin::LiveProcess && snapshot.provenance.session_id!=session_id) return;
@@ -224,13 +236,49 @@ struct Diagnostics {
             else ++incomplete_lights;
         }
         std::uint64_t triangles=0,head_wall_triangles=0;
+        BedroomAnchor bed_anchor;
+        const bool bed_source=FindBedroomAnchor(snapshot,bed_anchor);
+        const auto crate_id="actor:"+snapshot.map+":"+snapshot.map_sha256+":D_1224__21";
+        const auto crate_instances=std::count_if(snapshot.meshes.begin(),snapshot.meshes.end(),[&](const auto& mesh) {
+            return mesh.selection.instance_id==crate_id;
+        });
+        std::size_t door_crates=0;
+        for (const auto* suffix:{"D_1224__0","D_1224__22","D_1224__23"}) {
+            const auto id="actor:"+snapshot.map+":"+snapshot.map_sha256+":"+suffix;
+            if (std::any_of(snapshot.meshes.begin(),snapshot.meshes.end(),[&](const auto& mesh) {
+                    return mesh.selection.instance_id==id;
+                })) ++door_crates;
+        }
+        const auto cabinet_id="actor:"+snapshot.map+":"+snapshot.map_sha256+":D_443__1";
+        const auto cabinet_instances=std::count_if(snapshot.meshes.begin(),snapshot.meshes.end(),[&](const auto& mesh) {
+            return mesh.selection.instance_id==cabinet_id;
+        });
+        const auto bread_id="actor:"+snapshot.map+":"+snapshot.map_sha256+":D_125__3";
+        const auto target_id="actor:"+snapshot.map+":"+snapshot.map_sha256+":D_548__0";
+        const auto bread_instances=std::count_if(snapshot.meshes.begin(),snapshot.meshes.end(),[&](const auto& mesh) {
+            return mesh.selection.instance_id==bread_id;
+        });
+        const auto target_instances=std::count_if(snapshot.meshes.begin(),snapshot.meshes.end(),[&](const auto& mesh) {
+            return mesh.selection.instance_id==target_id;
+        });
         std::size_t flame_draws=0,candlestick_draws=0,stone_wall_draws=0,wood_floor_draws=0;
+        std::size_t selected_flames=0,selected_holders=0,other_flames=0,other_holders=0;
         for (const auto& draw:frame.draws) triangles+=draw.index_count/3;
         for (const auto& draw:frame.draws) if (draw.wall_relief==2) head_wall_triangles+=draw.index_count/3;
         for (const auto& draw:frame.draws) if (draw.emission>0) ++flame_draws;
         for (const auto& draw:frame.draws)
             if (draw.resource && draw.resource->id=="preview:generated-candlestick") ++candlestick_draws;
-        for (const auto& draw:frame.draws) if (draw.material_id) {
+        if (raw && raw->batch) for (const auto& draw:frame.draws) {
+            const auto selected=draw.preview_candle_actor==raw->batch->candle_actor_number;
+            const auto other=draw.preview_candle_actor && !selected;
+            const bool holder=draw.resource && draw.resource->id=="preview:generated-candlestick";
+            if (holder && selected) ++selected_holders;
+            if (holder && other) ++other_holders;
+            if (draw.emission>0 && selected) ++selected_flames;
+            if (draw.emission>0 && other) ++other_flames;
+        }
+        for (const auto& draw:frame.draws) if (draw.material_id && draw.resource &&
+                                              draw.resource->kind==ResourceKind::BspBlock) {
             if (*draw.material_id=="remaster:material:stone_wall_v2") ++stone_wall_draws;
             else if (*draw.material_id=="remaster:material:wood_floor_v2") ++wood_floor_draws;
         }
@@ -245,7 +293,11 @@ struct Diagnostics {
            <<",\"width\":"<<snapshot.camera.width<<",\"height\":"<<snapshot.camera.height
            <<",\"min_depth\":"<<snapshot.camera.min_depth<<",\"max_depth\":"<<snapshot.camera.max_depth
            <<",\"source\":\""<<viewport_source<<"\"}"
-           <<",\"mesh_instances\":"<<snapshot.meshes.size()<<",\"bsp_blocks\":"<<snapshot.bsp.size()
+           <<",\"mesh_instances\":"<<snapshot.meshes.size()<<",\"bed_source_instances\":"<<(bed_source ? 1 : 0)
+           <<",\"bedroom_crate_instances\":"<<crate_instances<<",\"bedroom_door_crate_instances\":"<<door_crates
+           <<",\"bedroom_cabinet_instances\":"<<cabinet_instances
+           <<",\"bedroom_bread_instances\":"<<bread_instances<<",\"bedroom_target_instances\":"<<target_instances
+           <<",\"bsp_blocks\":"<<snapshot.bsp.size()
            <<",\"light_coverage\":\""<<light_coverage<<"\",\"visual_lights\":"<<snapshot.lights.size()
            <<",\"lighting_mode\":\""<<lighting_mode<<"\""
            <<",\"ready_lights\":"<<ready_lights<<",\"disabled_lights\":"<<disabled_lights
@@ -253,6 +305,10 @@ struct Diagnostics {
            <<",\"draws\":"<<frame.draws.size()<<",\"triangles\":"<<triangles<<",\"resident_resources\":"<<cache.resources
            <<",\"preview_flame_draws\":"<<flame_draws
            <<",\"preview_candlestick_draws\":"<<candlestick_draws
+           <<",\"preview_selected_flame_draws\":"<<selected_flames
+           <<",\"preview_selected_candlestick_draws\":"<<selected_holders
+           <<",\"preview_other_flame_draws\":"<<other_flames
+           <<",\"preview_other_candlestick_draws\":"<<other_holders
            <<",\"candidate_head_wall_triangles\":"<<head_wall_triangles
            <<",\"wall_displacement_source_triangles\":"<<frame.wall_source_triangles
            <<",\"wall_displacement_triangles\":"<<frame.wall_displaced_triangles
@@ -283,6 +339,21 @@ struct Diagnostics {
         out<<",\"image\":"<<(image?"true":"false");
         if (toggle_mode) out<<",\"remaster_mode\":"<<(remaster?"true":"false")
                            <<",\"diagnostic_variant\":\""<<(!remaster ? "flat" : off_capture ? "remaster_off" : "remaster")<<"\"";
+        if (toggle_mode) {
+            auto write_bounds=[&out](const char* name, bool available, const BedroomFramingBounds& bounds) {
+                out<<",\""<<name<<"\":";
+                if (!available) out<<"null";
+                else out<<"["<<bounds.left<<","<<bounds.top<<","<<bounds.right<<","<<bounds.bottom<<"]";
+            };
+            BedroomFramingBounds bed_bounds,candle_bounds,other_candle_bounds;
+            const bool bed_available=bed && BedroomBedFraming(snapshot,*bed,bed_bounds);
+            const bool candle_available=raw && BedroomCandleFraming(snapshot,*raw,candle_bounds);
+            const bool other_candle_available=raw && raw->batch &&
+                BedroomCandleFraming(snapshot,*raw,other_candle_bounds,raw->batch->candle_actor_number==6 ? 14u : 6u);
+            write_bounds("bed_framing",bed_available,bed_bounds);
+            write_bounds("candle_framing",candle_available,candle_bounds);
+            write_bounds("other_candle_framing",other_candle_available,other_candle_bounds);
+        }
         out<<",\"view\":[";
         for (unsigned i=0;i<16;++i) { if (i) out<<',';out<<snapshot.camera.view[i]; }
         out<<"],\"projection\":[";
@@ -404,6 +475,7 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
                 !state->provider.visual_assets(state->provider.context.get(),current,assets)) {
                 std::lock_guard<std::mutex> lock(state->mutex);++state->stats.dropped;continue;
             }
+            const auto diagnostic_bed=assets.bed_override;
             if (!remaster) {assets.bed_override.reset();assets.bedroom_materials.reset();}
             if (assets.bedroom_materials!=active_materials) {
                 // Texture descriptors are immutable for a backend. Rebuild on
@@ -421,7 +493,8 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
             if (!BuildResidentFlatFrame(*current,frame,assets.bed_override.get(),
                                         state->provider.bedroom_material_ids || bool(assets.bedroom_materials),
                                         assets.bedroom_materials && bool(assets.bedroom_materials->wall_height),
-                                        anchor_source==BedroomAnchorSource::Retained ? &retained_anchor : nullptr)) {
+                                        anchor_source==BedroomAnchorSource::Retained ? &retained_anchor : nullptr,
+                                        assets.bedroom_materials && bool(assets.bedroom_materials->original_materials))) {
                 failed=true;break;
             }
             if (state->provider.wall_displacement &&
@@ -449,24 +522,14 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
                 candle_state=RemasterCandleFromRaw(*current,*candle_raw,candle_light);
             const bool candle=!lit && preview_conventions && candle_requested && candle_raw &&
                 (toggle_mode ? candle_state==RemasterCandleState::On : CandlePreviewFromRaw(*current,*candle_raw,candle_light));
-            std::size_t triangles=0;
-            for (const auto& draw:frame.draws) triangles+=draw.index_count/3;
-            std::array<ResidentFlatDraw,2> candlestick;
-            bool candlestick_drawn=false;
-            if (!toggle_mode && !lit && preview_conventions && candle_requested && candle_raw &&
-                frame.draws.size()+candlestick.size()<=scene::kMaxDraws &&
-                CandlePreviewCandlestick(*current,*candle_raw,candlestick)) {
-                const auto added=(candlestick[0].index_count+candlestick[1].index_count)/3;
-                if (triangles<=scene::kMaxTriangles && added<=scene::kMaxTriangles-triangles) {
-                    triangles+=added;
-                    for (auto& draw:candlestick) frame.draws.push_back(std::move(draw));
-                    candlestick_drawn=true;
-                }
+            auto other_state=RemasterCandleState::Unknown;
+            if (!lit && preview_conventions && candle_requested && candle_raw && candle_raw->batch) {
+                const auto other_number=candle_raw->batch->candle_actor_number==6 ? 14u : 6u;
+                RenderLight other_light;
+                other_state=RemasterCandleFromRaw(*current,*candle_raw,other_light,other_number);
+                AppendCandlePreview(*current,*candle_raw,candle,frame);
+                AppendCandlePreview(*current,*candle_raw,other_state==RemasterCandleState::On,frame,other_number);
             }
-            ResidentFlatDraw flame;
-            if (candle && candlestick_drawn && frame.draws.size()<scene::kMaxDraws &&
-                CandlePreviewFlame(*current,*candle_raw,flame) && triangles<=scene::kMaxTriangles &&
-                flame.index_count/3<=scene::kMaxTriangles-triangles) frame.draws.push_back(std::move(flame));
             const bool candle_zero=!lit && preview_conventions && candle_requested && !candle && candle_raw &&
                 (toggle_mode ? candle_state==RemasterCandleState::Off : CandlePreviewDirectZero(*current,*candle_raw));
             const bool candle_unknown=!lit && preview_conventions && candle_requested && !candle && !candle_zero;
@@ -478,7 +541,8 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
             const bool wants_image=image_state_ready && diagnostics.WantsImage(*current,state->provider.diagnostic_capture_frame,
                                                           state->provider.context.get(),toggle_mode,remaster,off_capture);
             if (!(lit ? gpu->PrepareLit(*current,frame,wants_image) : candle || candle_zero || candle_unknown ?
-                  gpu->PrepareCandlePreview(*current,candle ? candle_raw.get() : nullptr,frame,wants_image) : preview ?
+                  gpu->PrepareCandlePreview(*current,candle ? candle_raw.get() : nullptr,frame,wants_image,
+                                            other_state==RemasterCandleState::On ? candle_raw.get() : nullptr) : preview ?
                   gpu->PreparePreviewLit(*current,frame,wants_image) : gpu->PrepareResident(frame,wants_image))) {
                 failed=true;break;
             }
@@ -512,7 +576,7 @@ DWORD WINAPI SceneViewer::Run(void* context) noexcept {
             const auto light_raw=candle_raw ? candle_raw :
                 diagnostics.log!=INVALID_HANDLE_VALUE && state->provider.light_diagnostics ?
                 state->provider.light_diagnostics(state->provider.context.get(),current) : nullptr;
-            diagnostics.Frame(*current,frame,gpu->cache_stats(),wrote_image,light_raw.get(),presented_at,lighting_mode,
+            diagnostics.Frame(*current,frame,gpu->cache_stats(),wrote_image,light_raw.get(),diagnostic_bed.get(),presented_at,lighting_mode,
                               toggle_mode,remaster,off_capture);
             last = current; last_frame = std::move(frame.camera);
             if (window) {

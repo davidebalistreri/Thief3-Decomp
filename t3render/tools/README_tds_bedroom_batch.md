@@ -75,11 +75,119 @@ the runner; use `--manual-trigger --frames 3 --steam-launch --isolated-saves
 The watcher requests original and flat images after a moving-to-stationary
 bedroom pose, enables the viewer-only remaster, and waits for an image with the
 candle on and another after it is switched off. It records the numerical pose
-difference. Run `compare_live_v01.py "$T3RENDER_OUTPUT"` after the runner
+difference. In toggle mode, the viewer logs `bed_framing` and `candle_framing`
+as normalized projected bounds for the replacement bed and both candles;
+each lit candle includes its flame. The watcher requires all bounds to remain
+inside a 2% margin on all sides throughout the stationary gate and on each
+selected flat, ON and OFF image. Missing or invalid bounds block capture.
+These are conservative transformed AABB bounds, not a visibility, occlusion,
+interaction-range or UV check; the image must still be inspected. The final
+comparator enforces the gate when the selected frames contain framing fields,
+but preserves support for historical logs that contain none. All three camera
+positions must be less than 0.5 T3 units apart and their three orientation axes
+must match at recorded float32 precision (signed zero is treated alike).
+Run `compare_live_v01.py "$T3RENDER_OUTPUT"` after the runner
 finishes to verify the original/flat Present link and build the three-way
-image. Candle position and enabled/modulation fields are same-frame candidates;
+image, or the four-way image when the off frame is present. The off frame
+must also match the original pose. Candle position and enabled/modulation fields are same-frame candidates;
 the user action and images still need inspection. Intensity and range are
 artistic, and missing samples do not establish that the candle is off.
+
+Use `--candle-left` with `--preview-candle --candle-link-diagnostics` to
+select the reachable left candlestick `D_384__13` rather than the bedside
+`D_384__5`. Frame 1139 of the earlier session projected these actors onto
+the left and right candlesticks respectively, with the bed and floor in view.
+The left selection and ON/OFF candidate were observed in a four-panel live
+capture; the player confirmed switching it off. The viewer now independently
+samples the other researched bedroom candlestick and can render both. Each
+light and flame requires its own same-frame evidence; missing evidence is not
+filled from the selected candle. The two-candle path is synthetic-tested, not
+yet observed in TDS. A new comparison requires both candidates lit and both
+holders/flames drawn for ON. For OFF it requires the selected flame absent and
+the other candidate and flame still on; all three selected frames must frame
+both holders. These checks do not establish visible pixels or interaction.
+The watcher also requires exactly one selected candidate for the bedside
+crate, left cabinet, bread and target, plus all three recorded doorway crate
+candidates, in each comparison frame. Selection counts do not prove
+visibility, GPU binding or completeness of the scene. The new doorway count
+is required for new captures; comparisons of older logs remain readable.
+Older captures remain readable, but the comparison labels their two-candle
+evidence unverified when the separate framing and states were not recorded.
+`preview_selected_*` and `preview_other_*` report their holder and flame
+draws separately; the total fields include both. The OFF label describes the
+selected candle, so the other candle can still light the room.
+Start `trigger_live_v01.py` with `--speak` on macOS to announce the framing
+instruction, capture start, OFF action and completion without shifting focus
+away from the game. After a sustained stationary observation it can also
+announce whether the bed is not detected, the candle is off or its data are
+missing, or the framing is too close to an edge. Such cues are rate-limited;
+a new cue interrupts any previous speech. If the framing gate never passes,
+the watcher times out; there is no claim that the selected candle is reachable
+from a given pose.
+
+For the additional bedroom geometry, a v7 catalog can be generated from the
+local offline scene with `--static-meshes --bedroom-props`, together with the
+same `--bed-high` and `--bedroom-materials` inputs. Use that catalog with
+`--live-static-meshes` alongside `--remaster-toggle`. This samples the
+catalogued static actors and four specific props (crate, left cabinet, bread
+and target) in the selected draw scope;
+it does not fill in every object and may be slow. A later live frame selected
+the crate, cabinet and target, while bread was absent. Prop
+colors and selective reuse of the existing wood/stone materials are preview
+approximations, not the original textures. The generated bed wood sections use
+`wood_floor_v2`; v7 catalogs use approximate wool and pillow colors. The
+optional `--bed-textiles`, together with `--bedroom-props`, `--bed-high` and
+`--bedroom-materials`, exports a v8 catalog with the generated wool and linen
+textures for those two bed sections. Pillow roughness and textile AO use
+constants; generated normal maps are included but not applied by the ordinary
+live PBR path. Older catalogs keep the color fallback. In an offline
+reconstruction the wool remains very dark, and the new catalog has not been
+tested in the game. The candle preview also uses an artistic ambient level to
+keep geometry visible when off.
+
+`--bedroom-originals-game-dir <game directory>` adds twelve original diffuse
+texture candidates for the captured bedroom pose to a v9 catalog. The game
+bundle fingerprints must match the offline scene. The original maps apply
+only in the remaster preview when no bedroom override was selected; the flat
+comparison is unchanged. They cover, among others, the target, bread, books,
+ceiling and cabinet. Furniture and beams keep their original diffuse maps
+instead of reusing the floor material. Their PBR auxiliary channels reuse the
+wood preview and are not original game materials. Transparent materials,
+missing UVs, unsampled actors and any materials outside this fixed set are not
+covered. These are offline candidates, not observed GPU bindings; v9 has not
+been tested in TDS. The runner accepts v8–v10 with `--live-static-meshes`.
+
+`--candlestick-metal` adds the generated candlestick metal albedo and a wax
+preview derived from the original wax texture's luminance. Wax is tinted to
+the generated material's warm color and made opaque; both materials reuse
+the wood-preview auxiliary PBR channels. The generated holder now carries
+its existing GLB UVs. `--readable-bed-wool` applies a fivefold linear-light
+gain to the existing wool albedo in the exported catalog only, so the blanket
+is readable under the artistic candle preview. Both are explicit preview
+adjustments, not measurements of the game. The combination produces v10;
+it has not been tested in TDS.
+The viewer now logs `bed_source_instances` independently of `mesh_instances`,
+so the capture watcher can require the bed while other meshes are selected.
+`bedroom_crate_instances` counts the selected crate candidate.
+`bedroom_cabinet_instances` counts the selected left-cabinet candidate.
+`bedroom_bread_instances` and `bedroom_target_instances` count the other two.
+The driver telemetry also reports aggregate, address-free bread diagnostics.
+`bread_sample_stages` counts the last sampling checkpoint in the order
+`initial, header, list, unique, owner, names, assets, complete`;
+`bread_match_stages` counts `matched, probe, candidate, identity, geometry,
+node_header, node_counts, node_bounds, node_section_name,
+node_section_material, node_section_layout, asset, transform`.
+For complete samples, `bread_asset_statuses` counts `unknown, unreadable,
+descriptor_unsupported, local_property_missing, property_malformed,
+object_not_unique, proxy_mismatch, resource_mismatch, candidate`. The scope,
+draw and recheck counters distinguish later
+rejection from an accepted candidate. These counters begin only after the
+adapter identifies `D_125__3` and obtains a generic probe; zero does not prove
+that no bread was drawn. These counters do not prove GPU bindings. If another
+name cannot be fully read, the bread-only sampler can exclude it when a
+stable, readable prefix proves that it differs from `D_125`; unknown or equal
+prefixes still reject the candidate. This fallback is fixture-tested, but has
+not been exercised in the game.
 
 `--replay LOG --start-frame N --end-frame N` evaluates a saved log without
 writing a marker. On the earlier TDS log, frames 1314–2444 met the gate in

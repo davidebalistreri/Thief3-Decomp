@@ -4,6 +4,7 @@
 #include "scene_live_light_raw.hpp"
 #include "scene_live_present_timing.hpp"
 
+#include <array>
 #include <memory>
 
 namespace t3render::live {
@@ -21,9 +22,18 @@ struct DrawStart {
 };
 enum class ObservedDrawKind : std::uint32_t { Unknown, Clear, Primitive, IndexedPrimitive, PrimitiveUP, IndexedPrimitiveUP };
 enum class ThreadRelation : std::uint32_t { Unknown, Same, Different };
+// Transient stack bounds and a caller-owned frame marker. These addresses are
+// never included in diagnostics or SceneIR and are not durable identities.
+struct StackCursor { std::uintptr_t marker=0, low=0, high=0; };
 struct DriverStats {
     std::uint64_t probes = 0, selected_probes = 0, selected_probe_bad = 0, bed_scopes = 0, bsp_scopes = 0, bsp_cache_hits = 0;
     std::uint64_t static_mesh_samples = 0, static_mesh_scopes = 0, static_mesh_rejected = 0;
+    // Aggregate diagnostics for the one bedroom bread candidate; no addresses.
+    std::array<std::uint64_t,8> bread_sample_stages{};
+    std::array<std::uint64_t,13> bread_match_stages{};
+    std::array<std::uint64_t,9> bread_asset_statuses{};
+    std::uint64_t bread_scopes_opened=0,bread_rechecks_ok=0,bread_rechecks_failed=0;
+    std::uint64_t bread_draws_ok=0,bread_draws_failed=0;
     std::uint64_t map_witness_conflicts = 0;
     std::uint64_t unscoped_viewport_attempts = 0;
     std::uint64_t map_transitions = 0;
@@ -35,11 +45,15 @@ struct DriverStats {
     std::uint32_t present_pending_probes = 0, present_pending_light_samples = 0, present_pending_scopes = 0;
     std::uint32_t present_pending_draws = 0, present_pending_presents = 0, present_pending_resets = 0;
     std::uint64_t loss_invalidations = 0, oldest_pending_draw_presents = 0;
+    std::uint64_t unwound_primitive_up_draws = 0;
     ObservedDrawKind oldest_pending_draw_kind = ObservedDrawKind::Unknown;
     ThreadRelation oldest_pending_draw_thread = ThreadRelation::Unknown;
     bool oldest_pending_draw_scoped = false;
     PresentTimingStats present_timing;
 };
+static_assert(static_cast<std::size_t>(scene_bridge::StaticMeshSampleStage::Complete)+1 == 8);
+static_assert(static_cast<std::size_t>(StaticMeshMatchStage::Transform)+1 == 13);
+static_assert(static_cast<std::size_t>(scene_bridge::AssetStatus::Candidate)+1 == 9);
 struct VisualAssets {
     std::shared_ptr<const MeshOverride> bed_override;
     std::shared_ptr<const BedroomMaterialLibrary> bedroom_materials;
@@ -79,16 +93,18 @@ public:
                         const scene_bridge::SubmissionSample& before) noexcept;
     bool SetScopeSample(std::uint64_t ticket, ThreadToken thread,
                         const scene_bridge::SubmissionSample& before,
-                        const scene_bridge::ProbeStaticMesh* generic = nullptr) noexcept;
-    void EndScope(std::uint64_t ticket, ThreadToken thread, const scene_bridge::SubmissionSample& after) noexcept;
+                        const scene_bridge::ProbeStaticMesh* generic = nullptr,
+                        scene_bridge::BedroomProp diagnostic_prop = scene_bridge::BedroomProp::None) noexcept;
+    void EndScope(std::uint64_t ticket, ThreadToken thread, const scene_bridge::SubmissionSample& after,
+                  const scene_bridge::ProbeStaticMesh* after_crate = nullptr) noexcept;
     DrawStart BeginDraw(ThreadToken thread, std::uint64_t enclosing_scope, const IndexedDraw& draw,
-                        ObservedDrawKind kind = ObservedDrawKind::Unknown) noexcept;
+                        ObservedDrawKind kind = ObservedDrawKind::Unknown, StackCursor stack = {}) noexcept;
     void EndDraw(std::uint64_t ticket, ThreadToken thread, bool succeeded,
                  const DrawObservation& before, const DrawObservation& after) noexcept;
     // When supplied, frame_id receives the window's ID for this very Present,
     // or UINT64_MAX if it could not be attached to a window.
     std::uint64_t BeginPresent(ThreadToken thread, std::uint64_t* frame_id = nullptr,
-                               PresentClockSample clock = {}) noexcept;
+                               PresentClockSample clock = {}, StackCursor stack = {}) noexcept;
     WindowResult EndPresent(std::uint64_t ticket, ThreadToken thread, bool succeeded) noexcept;
     std::uint64_t BeginReset(ThreadToken thread) noexcept;
     void EndReset(std::uint64_t ticket, ThreadToken thread, bool succeeded) noexcept;

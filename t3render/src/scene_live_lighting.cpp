@@ -42,18 +42,31 @@ bool CameraPosition(const Matrix& m,Vec3& output) {
     }
     output=result;return true;
 }
+bool SelectCandle(const RawLightFrame& raw,std::uint32_t requested,std::uint32_t& number,
+                  const scene_bridge::CandleLinkObservation*& link) {
+    if (!raw.batch || (raw.batch->candle_actor_number!=6 && raw.batch->candle_actor_number!=14)) return false;
+    const auto selected=requested ? requested : raw.batch->candle_actor_number;
+    if (selected!=6 && selected!=14) return false;
+    const auto* candidate=selected==raw.batch->candle_actor_number ? &raw.batch->candle_link : &raw.batch->other_candle_link;
+    if (!ValidCandleLink(*candidate)) return false;
+    number=selected;link=candidate;return true;
+}
 } // namespace
 
 bool CameraPositionFromView(const Matrix& view,Vec3& output) noexcept {
     return CameraPosition(view,output);
 }
 
-bool CandlePreviewFromRaw(const Snapshot& snapshot,const RawLightFrame& raw,RenderLight& output) noexcept {
+bool CandlePreviewFromRaw(const Snapshot& snapshot,const RawLightFrame& raw,RenderLight& output,
+                          std::uint32_t actor_number) noexcept {
     try {
         constexpr char map[]="SouthQuarter1_int1";
         constexpr char hash[]="ed7d475b1efdc713d28b2a978e11fb0f662bdb17c5c2769d77c96e1f74b7ceba";
         if (snapshot.map!=map || snapshot.map_sha256!=hash || !RawLightFrameMatches(raw,snapshot)) return false;
-        const std::string id=std::string("light-actor:")+map+":"+hash+":D_384:6";
+        std::uint32_t number=0;const scene_bridge::CandleLinkObservation* link=nullptr;
+        if (!SelectCandle(raw,actor_number,number,link)) return false;
+        if (number!=raw.batch->candle_actor_number && link->status!=scene_bridge::CandleLinkStatus::Candidate) return false;
+        const std::string id=std::string("light-actor:")+map+":"+hash+":D_384:"+std::to_string(number);
         const RawLightItem* found=nullptr;
         for (const auto& item:raw.batch->items) if (item.candidate.id==id) {
             if (found) return false;
@@ -63,9 +76,8 @@ bool CandlePreviewFromRaw(const Snapshot& snapshot,const RawLightFrame& raw,Rend
             return false;
         // The actor-link sample is taken after the partial light list. If they
         // disagree, neither light value is a reliable current-frame preview.
-        const auto& link=raw.batch->candle_link;
-        if (link.status==scene_bridge::CandleLinkStatus::NoLink ||
-            (link.status==scene_bridge::CandleLinkStatus::Candidate && link.factor_8c_bits!=found->field_8c))
+        if (link->status==scene_bridge::CandleLinkStatus::NoLink ||
+            (link->status==scene_bridge::CandleLinkStatus::Candidate && link->factor_8c_bits!=found->field_8c))
             return false;
         Vec3 color{};float maximum=0;
         for (unsigned i=0;i<3;++i) {
@@ -87,59 +99,64 @@ bool CandlePreviewFromRaw(const Snapshot& snapshot,const RawLightFrame& raw,Rend
     } catch (...) {return false;}
 }
 
-bool CandlePreviewDirectZero(const Snapshot& snapshot,const RawLightFrame& raw) noexcept {
+bool CandlePreviewDirectZero(const Snapshot& snapshot,const RawLightFrame& raw,std::uint32_t actor_number) noexcept {
     try {
         constexpr char map[]="SouthQuarter1_int1";
         constexpr char hash[]="ed7d475b1efdc713d28b2a978e11fb0f662bdb17c5c2769d77c96e1f74b7ceba";
-        if (snapshot.map!=map || snapshot.map_sha256!=hash || !RawLightFrameMatches(raw,snapshot) ||
-            raw.batch->candle_link.status!=scene_bridge::CandleLinkStatus::Candidate) return false;
-        const std::string id=std::string("light-actor:")+map+":"+hash+":D_384:6";
+        if (snapshot.map!=map || snapshot.map_sha256!=hash || !RawLightFrameMatches(raw,snapshot)) return false;
+        std::uint32_t number=0;const scene_bridge::CandleLinkObservation* link=nullptr;
+        if (!SelectCandle(raw,actor_number,number,link) || link->status!=scene_bridge::CandleLinkStatus::Candidate) return false;
+        const std::string id=std::string("light-actor:")+map+":"+hash+":D_384:"+std::to_string(number);
         // If both samplers saw the light, do not override an inconsistent or
         // malformed list candidate with a later actor-only observation.
         for (const auto& item:raw.batch->items) if (item.candidate.id==id) return false;
-        float factor=0;std::memcpy(&factor,&raw.batch->candle_link.factor_8c_bits,sizeof(factor));
+        float factor=0;std::memcpy(&factor,&link->factor_8c_bits,sizeof(factor));
         return std::isfinite(factor) && factor==0;
     } catch (...) {return false;}
 }
 
-RemasterCandleState RemasterCandleFromRaw(const Snapshot& snapshot,const RawLightFrame& raw,RenderLight& output) noexcept {
+RemasterCandleState RemasterCandleFromRaw(const Snapshot& snapshot,const RawLightFrame& raw,RenderLight& output,
+                                         std::uint32_t actor_number) noexcept {
     try {
         using scene_bridge::CandleEnabledStatus;
         using scene_bridge::CandleLinkStatus;
         if (snapshot.map!="SouthQuarter1_int1" ||
             snapshot.map_sha256!="ed7d475b1efdc713d28b2a978e11fb0f662bdb17c5c2769d77c96e1f74b7ceba" ||
-            !RawLightFrameMatches(raw,snapshot) || !raw.batch ||
-            raw.batch->candle_link.status==CandleLinkStatus::Unknown) return RemasterCandleState::Unknown;
-        const auto enabled=raw.batch->candle_link.enabled.status;
+            !RawLightFrameMatches(raw,snapshot)) return RemasterCandleState::Unknown;
+        std::uint32_t number=0;const scene_bridge::CandleLinkObservation* link=nullptr;
+        if (!SelectCandle(raw,actor_number,number,link) || link->status==CandleLinkStatus::Unknown)
+            return RemasterCandleState::Unknown;
+        const auto enabled=link->enabled.status;
         if (enabled==CandleEnabledStatus::Off) return RemasterCandleState::Off;
         if (enabled==CandleEnabledStatus::On) {
-            if (CandlePreviewFromRaw(snapshot,raw,output))
+            if (CandlePreviewFromRaw(snapshot,raw,output,number))
                 return output.intensity>0 ? RemasterCandleState::On : RemasterCandleState::Off;
-            if (CandlePreviewDirectZero(snapshot,raw)) return RemasterCandleState::Off;
+            if (CandlePreviewDirectZero(snapshot,raw,number)) return RemasterCandleState::Off;
         }
         if (enabled==CandleEnabledStatus::Unknown) {
-            if (CandlePreviewFromRaw(snapshot,raw,output))
+            if (CandlePreviewFromRaw(snapshot,raw,output,number))
                 return output.intensity>0 ? RemasterCandleState::On : RemasterCandleState::Off;
-            if (CandlePreviewDirectZero(snapshot,raw)) return RemasterCandleState::Off;
+            if (CandlePreviewDirectZero(snapshot,raw,number)) return RemasterCandleState::Off;
         }
         return RemasterCandleState::Unknown;
     } catch (...) {return RemasterCandleState::Unknown;}
 }
 
 namespace {
-bool CandleActorTransform(const Snapshot& snapshot,const RawLightFrame& raw,Matrix& output) {
+bool CandleActorTransform(const Snapshot& snapshot,const RawLightFrame& raw,Matrix& output,std::uint32_t actor_number) {
         constexpr char map[]="SouthQuarter1_int1";
         constexpr char hash[]="ed7d475b1efdc713d28b2a978e11fb0f662bdb17c5c2769d77c96e1f74b7ceba";
         if (snapshot.map!=map || snapshot.map_sha256!=hash || !RawLightFrameMatches(raw,snapshot) ||
             !snapshot.conventions.meters_per_unit || !std::isfinite(*snapshot.conventions.meters_per_unit) ||
             std::fabs(*snapshot.conventions.meters_per_unit-0.01905f)>1e-8f ||
             snapshot.conventions.length_unit!=LengthUnit::T3Unit || snapshot.conventions.axes!=Axes::T3Xyz ||
-            snapshot.conventions.up_axis!=UpAxis::Z ||
-            (raw.batch->candle_link.status!=scene_bridge::CandleLinkStatus::Candidate &&
-             raw.batch->candle_link.status!=scene_bridge::CandleLinkStatus::NoLink) ||
-            !raw.batch->candle_link.transform_available) return false;
+            snapshot.conventions.up_axis!=UpAxis::Z) return false;
+        std::uint32_t number=0;const scene_bridge::CandleLinkObservation* link=nullptr;
+        if (!SelectCandle(raw,actor_number,number,link) ||
+            (link->status!=scene_bridge::CandleLinkStatus::Candidate &&
+             link->status!=scene_bridge::CandleLinkStatus::NoLink) || !link->transform_available) return false;
         Matrix transform{};
-        std::memcpy(transform.data(),raw.batch->candle_link.transform_bits.data(),sizeof(float)*transform.size());
+        std::memcpy(transform.data(),link->transform_bits.data(),sizeof(float)*transform.size());
         if (!std::all_of(transform.begin(),transform.end(),[](float v){return std::isfinite(v) && std::fabs(v)<=1000000;}) ||
             std::fabs(transform[3])>1e-6f || std::fabs(transform[7])>1e-6f ||
             std::fabs(transform[11])>1e-6f || std::fabs(transform[15]-1)>1e-6f) return false;
@@ -155,27 +172,28 @@ bool CandleActorTransform(const Snapshot& snapshot,const RawLightFrame& raw,Matr
 } // namespace
 
 bool CandlePreviewCandlestick(const Snapshot& snapshot,const RawLightFrame& raw,
-                              std::array<ResidentFlatDraw,2>& output) noexcept {
+                              std::array<ResidentFlatDraw,2>& output,std::uint32_t actor_number) noexcept {
     try {
-        Matrix transform{};if (!CandleActorTransform(snapshot,raw,transform)) return false;
+        Matrix transform{};if (!CandleActorTransform(snapshot,raw,transform,actor_number)) return false;
         const auto mesh=[]() -> std::shared_ptr<const Resource> {
             static const auto resource=[]() {
                 using namespace candlestick_geometry;
                 auto result=std::make_shared<Resource>();result->id="preview:generated-candlestick";
                 result->name="Candlestick";result->kind=ResourceKind::StaticMesh;result->source_sha256=source_sha256;
-                auto append=[&](const auto& positions,const auto& normals,const auto& indices,const char* name) {
+                auto append=[&](const auto& positions,const auto& normals,const auto& uv,const auto& indices,const char* name) {
                     const auto base=static_cast<std::uint32_t>(result->geometry.positions.size());
                     const auto first=static_cast<std::uint32_t>(result->geometry.indices.size());
                     for (const auto& p:positions) result->geometry.positions.push_back({p[0]/0.01905f,p[2]/0.01905f,p[1]/0.01905f});
                     for (const auto& n:normals) result->geometry.normals.push_back({n[0],n[2],n[1]});
+                    for (const auto& texcoord:uv) result->geometry.uv0.push_back({texcoord[0],texcoord[1]});
                     for (std::size_t i=0;i<std::size(indices);i+=3) {
                         result->geometry.indices.push_back(base+indices[i]);result->geometry.indices.push_back(base+indices[i+2]);
                         result->geometry.indices.push_back(base+indices[i+1]);
                     }
                     result->geometry.sections.push_back({name,first,static_cast<std::uint32_t>(std::size(indices)),std::nullopt});
                 };
-                append(metal_positions_m,metal_normals,metal_indices,"metal");
-                append(wax_positions_m,wax_normals,wax_indices,"wax");
+                append(metal_positions_m,metal_normals,metal_uv,metal_indices,"metal");
+                append(wax_positions_m,wax_normals,wax_uv,wax_indices,"wax");
                 return std::shared_ptr<const Resource>(std::move(result));
             }();
             return resource;
@@ -186,22 +204,26 @@ bool CandlePreviewCandlestick(const Snapshot& snapshot,const RawLightFrame& raw,
             draws[i].index_count=mesh->geometry.sections[i].index_count;draws[i].transform=transform;
         }
         draws[0].color={0.35f,0.31f,0.28f,1};draws[1].color={0.85f,0.75f,0.55f,1};
+        draws[0].material_id="remaster:material:candlestick_metal_v2";
+        draws[1].material_id="remaster:material:candlestick_wax_original";
         output=std::move(draws);return true;
     } catch (...) {return false;}
 }
 
-bool CandlePreviewFlame(const Snapshot& snapshot,const RawLightFrame& raw,ResidentFlatDraw& output) noexcept {
+bool CandlePreviewFlame(const Snapshot& snapshot,const RawLightFrame& raw,ResidentFlatDraw& output,
+                        std::uint32_t actor_number) noexcept {
     try {
         RenderLight light;Matrix transform{};
-        if (!raw.batch || raw.batch->candle_link.status!=scene_bridge::CandleLinkStatus::Candidate ||
-            !CandlePreviewFromRaw(snapshot,raw,light) || light.intensity<=0 ||
-            !CandleActorTransform(snapshot,raw,transform)) return false;
+        std::uint32_t number=0;const scene_bridge::CandleLinkObservation* link=nullptr;
+        if (!SelectCandle(raw,actor_number,number,link) || link->status!=scene_bridge::CandleLinkStatus::Candidate ||
+            !CandlePreviewFromRaw(snapshot,raw,light,number) || light.intensity<=0 ||
+            !CandleActorTransform(snapshot,raw,transform,number)) return false;
         const RawLightItem* listed=nullptr;
         for (const auto& item:raw.batch->items) if (item.candidate.id==light.id) {
             if (listed) return false;
             listed=&item;
         }
-        if (!listed || listed->field_8c!=raw.batch->candle_link.factor_8c_bits) return false;
+        if (!listed || listed->field_8c!=link->factor_8c_bits) return false;
         double distance2=0;
         for (unsigned i=0;i<3;++i) {
             const double delta=(double(light.position[i])-transform[12+i])*0.01905;
@@ -230,6 +252,25 @@ bool CandlePreviewFlame(const Snapshot& snapshot,const RawLightFrame& raw,Reside
         draw.color={1,0.4f,0.08f,1};draw.emission=light.intensity*8.0f;
         output=std::move(draw);return true;
     } catch (...) {return false;}
+}
+
+void AppendCandlePreview(const Snapshot& snapshot,const RawLightFrame& raw,bool candle_on,ResidentFlatFrame& frame,
+                         std::uint32_t actor_number) {
+    std::size_t triangles=0;
+    for (const auto& draw:frame.draws) triangles+=draw.index_count/3;
+    std::array<ResidentFlatDraw,2> holder;
+    if (frame.draws.size()+holder.size()>scene::kMaxDraws ||
+        !CandlePreviewCandlestick(snapshot,raw,holder,actor_number)) return;
+    const auto added=(holder[0].index_count+holder[1].index_count)/3;
+    if (triangles>scene::kMaxTriangles || added>scene::kMaxTriangles-triangles) return;
+    triangles+=added;
+    const auto number=actor_number ? actor_number : raw.batch->candle_actor_number;
+    for (auto& draw:holder) {draw.preview_candle_actor=number;frame.draws.push_back(std::move(draw));}
+    ResidentFlatDraw flame;
+    if (candle_on && frame.draws.size()<scene::kMaxDraws && CandlePreviewFlame(snapshot,raw,flame,number) &&
+        flame.index_count/3<=scene::kMaxTriangles-triangles) {
+        flame.preview_candle_actor=number;frame.draws.push_back(std::move(flame));
+    }
 }
 
 LightingResult BuildVerifiedLighting(const Snapshot& snapshot,VerifiedLighting& output) {

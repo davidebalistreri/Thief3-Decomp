@@ -198,6 +198,12 @@ std::shared_ptr<const RawLightFrame> viewer_light(void* context,const std::share
 std::shared_ptr<const Snapshot> viewer_current(void* context) noexcept {
     try { return static_cast<ViewerFixture*>(context)->scene.current(); } catch (...) { return {}; }
 }
+DriverStats viewer_fixture_stats(void*) noexcept {
+    DriverStats result;result.bread_sample_stages[6]=4;result.bread_match_stages[4]=2;
+    result.bread_asset_statuses[3]=7;
+    result.bread_scopes_opened=3;result.bread_rechecks_ok=2;result.bread_rechecks_failed=1;
+    result.bread_draws_ok=5;result.bread_draws_failed=1;return result;
+}
 bool viewer_submit(void* context, const std::shared_ptr<const Snapshot>& snapshot,
                    SubmitOperation submit, void* argument) noexcept {
     try {
@@ -240,7 +246,10 @@ bool viewer_pipeline(const std::wstring& diagnostic_directory) {
     CHECK(scene.AddResource(epoch.map,quad("bsp:wall",ResourceKind::BspBlock,0.9f,0.8f,"mat:wall")));
     ViewerProvider provider; provider.context=fixture; provider.current=viewer_current; provider.submit_if_current=viewer_submit;
     provider.diagnostic_directory=diagnostic_directory;
-    if (!diagnostic_directory.empty()) provider.diagnostic_capture_trigger=diagnostic_directory+L"\\fixture-capture.ready";
+    if (!diagnostic_directory.empty()) {
+        provider.diagnostic_capture_trigger=diagnostic_directory+L"\\fixture-capture.ready";
+        provider.driver_stats=viewer_fixture_stats;
+    }
     provider.diagnostic_session_id="synthetic:"+std::to_string(GetCurrentProcessId());
     auto viewer=SceneViewer::Start(std::move(provider),false); CHECK(viewer && await_viewer(*viewer,0));
     auto frame=input(epoch,1); fixture->discard_before_submit.store(true);
@@ -340,6 +349,35 @@ bool synthetic_textures() {
     const auto left=(32u*64+27)*4,right=(32u*64+37)*4;
     CHECK(int(pattern_image[left])-int(pattern_image[left+1])>80 &&
           int(pattern_image[right+1])-int(pattern_image[right])>80);
+    auto textiles=std::make_shared<BedroomMaterialLibrary>(*library);
+    textiles->bed_textiles.emplace();
+    const char* textile_ids[]{"remaster:material:bed_high:textured:GENiFABRICwoolA2_D",
+                              "remaster:material:bed_high:textured:PillowLinen"};
+    const std::uint8_t textile_colors[][4]={{45,55,135,255},{215,210,195,255}};
+    for (unsigned i=0;i<2;++i) {
+        auto& material=(*textiles->bed_textiles)[i];material.id=textile_ids[i];
+        for (unsigned channel=0;channel<4;++channel) {
+            material.source_sha256[channel]=fingerprint;
+            material.channels[channel].mips.push_back({1,1,{textile_colors[i][0],textile_colors[i][1],textile_colors[i][2],255}});
+        }
+    }
+    auto invalid_textiles=std::make_shared<BedroomMaterialLibrary>(*textiles);
+    (*invalid_textiles->bed_textiles)[1].channels[0].mips[0].rgba[3]=0;
+    CHECK(!FlatD3D12::Create(nullptr,128u*1024u*1024u,invalid_textiles));
+    auto textile_gpu=FlatD3D12::Create(nullptr,128u*1024u*1024u,textiles);CHECK(textile_gpu);
+    auto textile_bed=std::make_shared<Resource>(*resident.draws[0].resource);
+    textile_bed->id="remaster:mesh:bed_high:"+fingerprint;resident.draws[0].resource=textile_bed;
+    std::vector<std::uint8_t> wool,linen,wrong_mesh;
+    auto render_textile=[&](std::vector<std::uint8_t>& pixels) {
+        return textile_gpu->PrepareResident(resident,true) && textile_gpu->Submit() && textile_gpu->Finish(&pixels);
+    };
+    resident.draws[0].material_id=textile_ids[0];CHECK(render_textile(wool) && textile_gpu->cache_stats().textured_draws==1);
+    const float wool_color[]{45.0f/255,55.0f/255,135.0f/255,1};CHECK(pixel_is(wool,64,32,32,wool_color));
+    resident.draws[0].material_id=textile_ids[1];CHECK(render_textile(linen) && textile_gpu->cache_stats().textured_draws==1);
+    const float linen_color[]{215.0f/255,210.0f/255,195.0f/255,1};CHECK(pixel_is(linen,64,32,32,linen_color) && linen!=wool);
+    auto wrong=std::make_shared<Resource>(*textile_bed);wrong->id="mesh:not-the-bed";resident.draws[0].resource=wrong;
+    CHECK(render_textile(wrong_mesh) && textile_gpu->cache_stats().textured_draws==0 && wrong_mesh!=linen);
+    std::cout<<"scene_live_bed_textiles_fixture=ok wool=sampled linen=sampled wrong_mesh=fallback\n";
     std::cout<<"scene_live_textures_fixture=ok source=synthetic albedo=sampled uv=varies switch=ok missing_uv=fallback reset=ok\n";
     return true;
 }
@@ -441,7 +479,7 @@ bool synthetic_pbr(HWND window) {
     return true;
 }
 
-bool synthetic_candle_preview() {
+bool synthetic_candle_preview(const std::wstring& diagnostic_directory) {
     const std::string map="SouthQuarter1_int1";
     const std::string hash="ed7d475b1efdc713d28b2a978e11fb0f662bdb17c5c2769d77c96e1f74b7ceba";
     SceneResidency scene;CHECK(scene.BeginMap(0,map,hash));const auto epoch=scene.epochs();
@@ -470,6 +508,38 @@ bool synthetic_candle_preview() {
     std::vector<std::uint8_t> warm_image,green_image;
     CHECK(gpu->PrepareCandlePreview(*snapshot,&raw,resident,true) && gpu->Submit() && gpu->Finish(&warm_image));
     CHECK(gpu->cache_stats().pbr_draws==1 && gpu->cache_stats().shadowed_lights==1);
+    auto left_snapshot=*snapshot;left_snapshot.lights[0].id="light-actor:"+map+":"+hash+":D_384:14";
+    auto left_batch=std::make_shared<RawLightBatch>(*batch);
+    left_batch->candle_actor_number=14;left_batch->items[0].candidate=left_snapshot.lights[0];
+    auto left_raw=raw;left_raw.batch=left_batch;
+    std::vector<std::uint8_t> left_image;
+    CHECK(gpu->PrepareCandlePreview(left_snapshot,&left_raw,resident,true) && gpu->Submit() && gpu->Finish(&left_image));
+    CHECK(left_image==warm_image); // same values, different selected runtime actor
+    left_batch->candle_actor_number=6;
+    CHECK(!gpu->PrepareCandlePreview(left_snapshot,&left_raw,resident,true)); // never substitute the other light
+    {
+        auto both_snapshot=*snapshot;auto other=candidate;
+        other.id="light-actor:"+map+":"+hash+":D_384:14";
+        other.position={Vec3{.4f,0,-1},BindingEvidence::Candidate};both_snapshot.lights.push_back(other);
+        auto both_batch=std::make_shared<RawLightBatch>(*batch);auto other_item=item;other_item.candidate=other;
+        const float other_position[]{.4f,0,-1},other_color[]{.25f,1,.25f};
+        std::memcpy(other_item.field_34.data(),other_position,sizeof(other_position));
+        std::memcpy(other_item.field_68.data(),other_color,sizeof(other_color));
+        both_batch->items.push_back(other_item);both_batch->listed=2;
+        both_batch->other_candle_link.status=t3render::scene_bridge::CandleLinkStatus::Candidate;
+        both_batch->other_candle_link.factor_8c_bits=other_item.field_8c;
+        both_batch->other_candle_link.enabled.status=t3render::scene_bridge::CandleEnabledStatus::On;
+        auto both_raw=raw;both_raw.batch=both_batch;
+        std::vector<std::uint8_t> both_pixels,other_pixels,selected_pixels;
+        CHECK(gpu->PrepareCandlePreview(both_snapshot,&both_raw,resident,true,&both_raw) && gpu->Submit() && gpu->Finish(&both_pixels));
+        CHECK(gpu->cache_stats().shadowed_lights==2);
+        CHECK(gpu->PrepareCandlePreview(both_snapshot,nullptr,resident,true,&both_raw) && gpu->Submit() && gpu->Finish(&other_pixels));
+        CHECK(gpu->cache_stats().shadowed_lights==1);
+        CHECK(gpu->PrepareCandlePreview(both_snapshot,&both_raw,resident,true) && gpu->Submit() && gpu->Finish(&selected_pixels));
+        CHECK(selected_pixels==warm_image && both_pixels!=selected_pixels && both_pixels!=other_pixels && other_pixels!=selected_pixels);
+        both_batch->other_candle_link.enabled.status=t3render::scene_bridge::CandleEnabledStatus::Off;
+        CHECK(!gpu->PrepareCandlePreview(both_snapshot,&both_raw,resident,true,&both_raw));
+    }
     const auto unlit_corner=(5u*64+5)*4;
     CHECK(warm_image[unlit_corner]==0 && warm_image[unlit_corner+1]==0 && warm_image[unlit_corner+2]==0);
     // The embedded generated flames use the actor's same-frame transform and
@@ -550,6 +620,45 @@ bool synthetic_candle_preview() {
     viewer->Stop();const auto deadline=GetTickCount64()+20000;
     while (!viewer->stats().stopped && GetTickCount64()<deadline) Sleep(10);
     CHECK(viewer->stats().stopped && !viewer->stats().failed);
+    for (bool selected_on:{true,false}) {
+        auto pair=std::make_shared<ViewerFixture>();CHECK(pair->scene.BeginMap(0,map,hash));
+        const auto pair_epoch=pair->scene.epochs();CHECK(pair->scene.AddMaterial(pair_epoch.map,{"mat:bed","bed"}));
+        auto pair_surface=quad("mesh:bed",ResourceKind::StaticMesh,.8f,.2f,"mat:bed");
+        pair_surface.geometry.normals.assign(4,Vec3{0,0,-1});CHECK(pair->scene.AddResource(pair_epoch.map,std::move(pair_surface)));
+        auto other=candidate;other.id="light-actor:"+map+":"+hash+":D_384:14";
+        other.position={Vec3{.4f,0,-1},BindingEvidence::Candidate};
+        auto pair_frame=input(pair_epoch,1);pair_frame.bsp.clear();pair_frame.conventions.meters_per_unit=.01905f;
+        pair_frame.light_coverage=LightCoverage::Partial;pair_frame.lights={other};
+        if (selected_on) pair_frame.lights.push_back(candidate);
+        CHECK(pair->scene.Publish(pair_frame));const auto current=pair->scene.current();
+        auto pair_batch=std::make_shared<RawLightBatch>();auto second=item;second.candidate=other;
+        const float second_position[]{.4f,0,-1};std::memcpy(second.field_34.data(),second_position,sizeof(second_position));
+        pair_batch->items.push_back(second);if (selected_on) pair_batch->items.push_back(item);
+        pair_batch->listed=static_cast<std::uint32_t>(pair_batch->items.size());
+        pair_batch->candle_link.status=t3render::scene_bridge::CandleLinkStatus::Candidate;
+        pair_batch->candle_link.factor_8c_bits=selected_on ? item.field_8c : 0;
+        pair_batch->candle_link.enabled.status=selected_on ? t3render::scene_bridge::CandleEnabledStatus::On :
+                                                           t3render::scene_bridge::CandleEnabledStatus::Off;
+        pair_batch->candle_link.transform_available=true;
+        std::memcpy(pair_batch->candle_link.transform_bits.data(),actor_transform,sizeof(actor_transform));
+        pair_batch->other_candle_link=pair_batch->candle_link;
+        pair_batch->other_candle_link.factor_8c_bits=second.field_8c;
+        pair_batch->other_candle_link.enabled.status=t3render::scene_bridge::CandleEnabledStatus::On;
+        std::memcpy(&pair_batch->other_candle_link.transform_bits[12],second_position,sizeof(float));
+        auto pair_raw=std::make_shared<RawLightFrame>();pair_raw->map_epoch=current->map_epoch;
+        pair_raw->device_epoch=current->device_epoch;pair_raw->continuity=current->continuity;pair_raw->frame_id=current->frame_id;
+        pair_raw->provenance=current->provenance;pair_raw->camera=current->camera;pair_raw->batch=pair_batch;pair->light_raw=pair_raw;
+        ViewerProvider pair_provider;pair_provider.context=pair;pair_provider.current=viewer_current;
+        pair_provider.submit_if_current=viewer_submit;pair_provider.light_diagnostics=viewer_light;pair_provider.preview_candle=true;
+        pair_provider.diagnostic_directory=diagnostic_directory;pair_provider.diagnostic_initial_images=false;
+        pair_provider.diagnostic_session_id=std::string("synthetic:candle")+(selected_on ? "on" : "off")+std::to_string(GetCurrentProcessId());
+        auto pair_viewer=SceneViewer::Start(std::move(pair_provider),false);CHECK(pair_viewer);
+        pair_viewer->Notify();CHECK(await_viewer(*pair_viewer,1));
+        CHECK(pair_viewer->stats().shadowed_lights==(selected_on ? 2u : 1u));
+        pair_viewer->Stop();const auto pair_deadline=GetTickCount64()+20000;
+        while (!pair_viewer->stats().stopped && GetTickCount64()<pair_deadline) Sleep(10);
+        CHECK(pair_viewer->stats().stopped && !pair_viewer->stats().failed);
+    }
     std::cout << "scene_live_candle_preview=ok source=synthetic stale=reject shadows=on color=changed zero=dark\n";
     return true;
 }
@@ -607,6 +716,57 @@ bool synthetic_pbr_materials() {
     CHECK(a->cache_stats().pbr_draws==1 && a->cache_stats().textured_draws==1 && !a->cache_stats().shadowed_lights);
     CHECK(glossy->PreparePreviewLit(preview,resident,true) && glossy->Submit() && glossy->Finish(&preview_glossy));
     CHECK(preview_rough!=preview_glossy && preview.lights.empty() && preview.light_coverage==LightCoverage::Unknown);
+    auto originals=library(179,{128,128,255,255});
+    originals->original_materials.emplace();
+    for (std::size_t i=0;i<originals->original_materials->size();++i) {
+        auto& material=(*originals->original_materials)[i];
+        material.id=i==0 ? "mat:bed" : "mat:original:"+std::to_string(i);
+        material.source_sha256=fingerprint;
+        material.albedo.mips.push_back({2,1,{220,30,20,255, 20,180,60,255}});
+        material.albedo.mips.push_back({1,1,{120,105,40,255}});
+    }
+    auto original_gpu=FlatD3D12::Create(nullptr,128u*1024u*1024u,originals);CHECK(original_gpu);
+    auto original_draw=resident;original_draw.draws[0].material_id="mat:bed";
+    original_draw.bedroom_original_materials=false;
+    std::vector<std::uint8_t> original_flat,original_textured,original_restored,original_lit;
+    CHECK(original_gpu->PrepareResident(original_draw,true) && original_gpu->Submit() && original_gpu->Finish(&original_flat));
+    CHECK(original_gpu->cache_stats().textured_draws==0);
+    original_draw.bedroom_original_materials=true;
+    CHECK(original_gpu->PrepareResident(original_draw,true) && original_gpu->Submit() && original_gpu->Finish(&original_textured));
+    CHECK(original_gpu->cache_stats().textured_draws==1 && original_textured!=original_flat);
+    CHECK(original_gpu->PrepareLit(*scene.current(),original_draw,true,false) && original_gpu->Submit() && original_gpu->Finish(&original_lit));
+    CHECK(original_gpu->cache_stats().textured_draws==1 && original_lit!=original_flat);
+    original_draw.bedroom_original_materials=false;
+    CHECK(original_gpu->PrepareResident(original_draw,true) && original_gpu->Submit() && original_gpu->Finish(&original_restored));
+    CHECK(original_restored==original_flat && original_gpu->cache_stats().textured_draws==0);
+    std::cout<<"scene_live_original_material_fixture=ok flat=unchanged albedo=visible lit=ok rectangular=ok\n";
+    auto metal_library=std::make_shared<BedroomMaterialLibrary>(*originals);
+    metal_library->candlestick_metal.emplace();
+    auto& metal=*metal_library->candlestick_metal;metal.id="remaster:material:candlestick_metal_v2";
+    metal.source_sha256=fingerprint;metal.albedo.mips.push_back({1,1,{180,80,30,255}});
+    metal_library->candlestick_wax.emplace();
+    auto& wax=*metal_library->candlestick_wax;wax.id="remaster:material:candlestick_wax_original";
+    wax.source_sha256=fingerprint;wax.albedo.mips.push_back({1,1,{30,170,40,255}});
+    auto metal_gpu=FlatD3D12::Create(nullptr,128u*1024u*1024u,metal_library);CHECK(metal_gpu);
+    auto metal_draw=original_draw;auto metal_mesh=quad("preview:generated-candlestick",ResourceKind::StaticMesh,.8f,.2f,"mat:bed");
+    metal_mesh.geometry.normals.assign(4,Vec3{0,0,-1});
+    metal_draw.draws[0].resource=std::make_shared<const Resource>(std::move(metal_mesh));
+    metal_draw.draws[0].material_id=metal.id;
+    std::vector<std::uint8_t> metal_textured,metal_flat,metal_lit,wax_textured;
+    CHECK(metal_gpu->PrepareResident(metal_draw,true) && metal_gpu->Submit() && metal_gpu->Finish(&metal_textured));
+    CHECK(metal_gpu->cache_stats().textured_draws==1);
+    CHECK(metal_gpu->PrepareLit(*scene.current(),metal_draw,true,false) && metal_gpu->Submit() && metal_gpu->Finish(&metal_lit));
+    CHECK(metal_gpu->cache_stats().textured_draws==1);
+    metal_draw.draws[0].material_id=wax.id;
+    CHECK(metal_gpu->PrepareResident(metal_draw,true) && metal_gpu->Submit() && metal_gpu->Finish(&wax_textured));
+    CHECK(metal_gpu->cache_stats().textured_draws==1 && wax_textured!=metal_textured);
+    metal_draw.draws[0].material_id=metal.id;
+    auto wrong_mesh=quad("mesh:unrelated",ResourceKind::StaticMesh,.8f,.2f,"mat:bed");
+    wrong_mesh.geometry.normals.assign(4,Vec3{0,0,-1});
+    metal_draw.draws[0].resource=std::make_shared<const Resource>(std::move(wrong_mesh));
+    CHECK(metal_gpu->PrepareResident(metal_draw,true) && metal_gpu->Submit() && metal_gpu->Finish(&metal_flat));
+    CHECK(metal_gpu->cache_stats().textured_draws==0 && metal_flat!=metal_textured);
+    std::cout<<"scene_live_candlestick_material_fixture=ok metal=visible wax=visible lit=ok wrong_mesh=fallback\n";
     std::cout<<"scene_live_pbr_preview_fixture=ok source=viewer_headlight roughness=visible evidence=unchanged\n";
     std::cout<<"scene_live_pbr_material_fixture=ok source=synthetic srgb=ok roughness=ok normal=fixture_only\n";
     return true;
@@ -918,6 +1078,27 @@ bool catalog_override(const wchar_t* path) {
         CHECK(gpu->PrepareResident(plain,true) && gpu->Submit() && gpu->Finish(&before));
         CHECK(gpu->PrepareResident(remaster,true) && gpu->Submit() && gpu->Finish(&with_materials));
         CHECK(gpu->cache_stats().textured_draws==remaster.bedroom_material_runs && before!=with_materials);
+        ResidentFlatFrame textured_bed,flat_bed;
+        CHECK(BuildResidentFlatFrame(*scene.current(),textured_bed,catalog.bed_override.get(),true,false,nullptr,
+                                     bool(catalog.bedroom_materials->original_materials)));
+        CHECK(BuildResidentFlatFrame(*scene.current(),flat_bed,catalog.bed_override.get(),false));
+        const auto bed_wood=[&](const ResidentFlatFrame& value) {
+            return std::count_if(value.draws.begin(),value.draws.end(),[&](const auto& draw) {
+                return draw.resource==catalog.bed_override->replacement && draw.material_id &&
+                       *draw.material_id=="remaster:material:wood_floor_v2";
+            });
+        };
+        CHECK(bed_wood(textured_bed)==2 && bed_wood(flat_bed)==0);
+        const auto textile_draws=catalog.bedroom_materials->bed_textiles ? 2u : 0u;
+        CHECK(gpu->PrepareResident(textured_bed,true) && gpu->Submit() && gpu->Finish(&with_materials));
+        const auto original_draws=std::count_if(textured_bed.draws.begin(),textured_bed.draws.end(),[&](const auto& draw) {
+            if (!catalog.bedroom_materials->original_materials || !draw.material_id ||
+                draw.resource->geometry.uv0.size()!=draw.resource->geometry.positions.size()) return false;
+            return std::any_of(catalog.bedroom_materials->original_materials->begin(),
+                               catalog.bedroom_materials->original_materials->end(),
+                               [&](const auto& material){return material.id==*draw.material_id;});
+        });
+        CHECK(gpu->cache_stats().textured_draws==textured_bed.bedroom_material_runs+2+textile_draws+original_draws);
         std::cout<<"scene_live_bedroom_materials_fixture=ok source=offline camera=synthetic runs="
                  <<remaster.bedroom_material_runs<<"\n";
 
@@ -931,7 +1112,7 @@ bool catalog_override(const wchar_t* path) {
         auto viewer=SceneViewer::Start(std::move(provider),false);CHECK(viewer);
         viewer->Notify();CHECK(await_viewer(*viewer,1));
         auto stats=viewer->stats();CHECK(stats.frame_id==5 && stats.bedroom_material_runs>0 &&
-                                         stats.textured_draws==stats.bedroom_material_runs);
+                                         stats.textured_draws==stats.bedroom_material_runs+2+textile_draws+original_draws);
         if (catalog.bedroom_materials->wall_height)
             CHECK(stats.wall_displaced_triangles==9216 && !stats.wall_displacement_failed && stats.preview_gi_active);
         auto hidden=frame;hidden.frame_id=6;hidden.meshes.clear();CHECK(scene.Publish(hidden));
@@ -941,7 +1122,7 @@ bool catalog_override(const wchar_t* path) {
         const auto ticket=scene.BeginReset();CHECK(ticket);viewer->Notify();CHECK(await_viewer(*viewer,2,1));
         CHECK(scene.EndReset(ticket,true));frame.frame_id=7;frame.device_epoch=scene.epochs().device;CHECK(scene.Publish(frame));
         viewer->Notify();CHECK(await_viewer(*viewer,3,1));stats=viewer->stats();
-        CHECK(stats.frame_id==7 && stats.bedroom_material_runs>0 && stats.textured_draws==stats.bedroom_material_runs);
+        CHECK(stats.frame_id==7 && stats.bedroom_material_runs>0 && stats.textured_draws==stats.bedroom_material_runs+2+textile_draws+original_draws);
         if (catalog.bedroom_materials->wall_height)
             CHECK(stats.wall_displaced_triangles==9216 && !stats.wall_displacement_failed && stats.preview_gi_active);
         if (catalog.bedroom_materials->wall_height)
@@ -991,6 +1172,37 @@ bool catalog_override(const wchar_t* path) {
                  <<" mesh=GENrafters1 camera=synthetic movement=ok visibility=ok reset=ok candidates="
                  <<catalog.binding.static_mesh_actors.size()<<"\n";
     }
+    const std::array<std::pair<const char*,const char*>,3> props{{
+        {"D_443__1","SEAinFURNcabinetC1"}, {"D_125__3","GENiFOODbreadA1"}, {"D_548__0","GENxGOODSarchtarg"}}};
+    std::uint64_t prop_frame=12;
+    for (const auto& prop:props) {
+        const auto prop_id="actor:"+catalog.binding.map+":"+catalog.binding.map_sha256+":"+prop.first;
+        const auto found=catalog.binding.static_mesh_actors.find(prop_id);
+        if (found==catalog.binding.static_mesh_actors.end()) continue; // optional in older v7 catalogs
+        const auto& candidate=found->second;const auto& geometry=candidate.resource->geometry;
+        CHECK(candidate.resource->name==prop.second && !geometry.positions.empty());
+        Vec3 low=geometry.positions[0],high=low;
+        for (const auto& p:geometry.positions) for (unsigned i=0;i<3;++i) {
+            low[i]=std::min(low[i],p[i]);high[i]=std::max(high[i],p[i]);
+        }
+        const float dx=high[0]-low[0],dy=high[1]-low[1],dz=high[2]-low[2];CHECK(dx>0 && dy>0 && dz>0);
+        FrameInput input;input.map_epoch=epoch.map;input.device_epoch=scene.epochs().device;input.frame_id=prop_frame++;
+        input.provenance=frame.provenance;input.synchronized=true;input.conventions=catalog.conventions;
+        input.camera.width=128;input.camera.height=128;input.camera.view=identity;
+        input.camera.projection={1.0f/dx,0,0,0, 0,0,.8f/dy,0, 0,1.0f/dz,0,0,
+                                 -(low[0]+high[0])/(2*dx),-(low[2]+high[2])/(2*dz),.1f-.8f*low[1]/dy,1};
+        MeshSelection selection;selection.instance_id=prop_id;selection.resource_id=candidate.resource->id;
+        selection.matched_resource=candidate.resource;selection.generation=1;selection.binding=BindingEvidence::Candidate;
+        selection.identity_scope=IdentityScope::VisibleList;selection.material_ids=candidate.material_ids;selection.transform=identity;
+        for (std::uint32_t i=0;i<geometry.sections.size();++i) selection.sections.push_back(i);
+        input.meshes.push_back(selection);CHECK(scene.Publish(input));
+        ResidentFlatFrame draw;std::vector<std::uint8_t> visible,hidden;
+        CHECK(BuildResidentFlatFrame(*scene.current(),draw) && gpu->PrepareResident(draw,true) && gpu->Submit() && gpu->Finish(&visible));
+        input.frame_id=prop_frame++;input.meshes.clear();CHECK(scene.Publish(input));
+        CHECK(BuildResidentFlatFrame(*scene.current(),draw) && gpu->PrepareResident(draw,true) && gpu->Submit() && gpu->Finish(&hidden));
+        CHECK(visible!=hidden);
+        std::cout<<"scene_live_prop_catalog_fixture=ok source=offline actor="<<prop.first<<" camera=synthetic visibility=changed\n";
+    }
     std::cout << "scene_live_catalog_dx12_fixture=ok source=offline camera=synthetic original_override_restore=ok"
               << " movement=ok visibility=ok reset=ok vertices=" << catalog.bed_override->replacement->geometry.positions.size()
               << " indices=" << catalog.bed_override->replacement->geometry.indices.size()
@@ -1019,7 +1231,7 @@ int wmain(int argc, wchar_t** argv) {
         if (!hwnd) return 2;
     }
     const bool ok=run(hwnd) && viewer_pipeline(diagnostic_directory) && synthetic_textures() && synthetic_pbr(hwnd) &&
-                  synthetic_candle_preview() && synthetic_pbr_materials() && synthetic_wall_relief() &&
+                  synthetic_candle_preview(diagnostic_directory) && synthetic_pbr_materials() && synthetic_wall_relief() &&
                   synthetic_wall_to_bed_gi() && synthetic_shadows() &&
                   (catalog_path.empty() || catalog_override(catalog_path.c_str()));
     if (hwnd) DestroyWindow(hwnd);

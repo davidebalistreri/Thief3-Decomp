@@ -71,6 +71,9 @@ differs from stock Unreal Engine 2, where an FName is a plain index.
 `FNameEntry`: `+0x00` Index, `+0x04` HashNext, `+0x08` Flags, `+0x0C` WORD
 highest number, `+0x10` `TArray<DWORD>` per-number flags, `+0x1C` ANSI text
 (verified).
+The constructor at `0x10AF9D30` allocates `strlen(text) + 0x1d` bytes and
+copies the terminating byte at `+0x1c` (static); 64 readable text bytes are
+therefore not guaranteed for dynamically allocated entries.
 
 ## Objects (UObject)
 

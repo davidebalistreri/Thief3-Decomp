@@ -15,6 +15,13 @@ constexpr std::size_t kMaxPending=1024;
 bool SameThread(ThreadToken a, ThreadToken b) {
     return a.id && a.birth && a.id==b.id && a.birth==b.birth;
 }
+bool StackMarkerValid(StackCursor value) {
+    return value.low && value.low<value.marker && value.marker<value.high;
+}
+bool StackHasUnwound(StackCursor draw,StackCursor present) {
+    return StackMarkerValid(draw) && StackMarkerValid(present) && draw.high==present.high &&
+        present.low<draw.marker && draw.marker<present.high && present.marker>draw.marker;
+}
 bool SameViewport(const Viewport& a, const Viewport& b) {
     return a.x==b.x && a.y==b.y && a.width==b.width && a.height==b.height &&
         std::memcmp(&a.min_depth,&b.min_depth,sizeof(float))==0 &&
@@ -63,12 +70,13 @@ struct SceneDriver::Impl {
     struct Scope {
         ThreadToken thread;std::uint64_t window=0;scene_bridge::SubmissionSample before;
         std::shared_ptr<const Resource> resource;ProbeCamera camera;std::uint32_t stage=0,section=0;
-        bool sampled=false;
+        bool sampled=false,bread=false;std::string bedroom_prop_id;
     };
     struct Draw {
         ThreadToken thread;std::uint64_t window=0,scope=0,begin_frame=0;IndexedDraw arguments;
         std::shared_ptr<const Resource> resource;ProbeCamera camera;scene_bridge::SubmissionSample before;
-        std::uint32_t section=0;ObservedDrawKind kind=ObservedDrawKind::Unknown;bool unscoped_viewport=false;
+        std::uint32_t section=0;ObservedDrawKind kind=ObservedDrawKind::Unknown;bool unscoped_viewport=false,bread=false;
+        StackCursor stack;
     };
     struct Present { ThreadToken thread;std::uint64_t window=0,frame=0;PresentTimingMark timing; };
     struct Reset { ThreadToken thread;std::uint64_t residency=0; };
@@ -277,13 +285,25 @@ std::shared_ptr<const scene_bridge::ProbeSnapshot> SceneDriver::GenericProbe(
             before.vtable!=0x10e4e8c0 || !(before.owner_fname>>16)) return {};
         const auto id="actor:"+s.catalog.binding.map+":"+s.catalog.binding.map_sha256+
                       ":StaticMeshActor__"+std::to_string((before.owner_fname>>16)-1);
-        if (id==s.catalog.binding.bed_instance_id || !s.catalog.binding.static_mesh_actors.count(id)) return {};
+        const auto crate_prop=scene_bridge::IdentifyBedroomProp(before.owner_fname>>16,"D_1224");
+        const auto crate="actor:"+s.catalog.binding.map+":"+s.catalog.binding.map_sha256+":"+
+                         scene_bridge::BedroomPropSuffix(crate_prop);
+        const auto cabinet="actor:"+s.catalog.binding.map+":"+s.catalog.binding.map_sha256+":D_443__1";
+        const auto bread="actor:"+s.catalog.binding.map+":"+s.catalog.binding.map_sha256+":D_125__3";
+        const auto target="actor:"+s.catalog.binding.map+":"+s.catalog.binding.map_sha256+":D_548__0";
+        const bool crate_candidate=scene_bridge::IsBedroomCrate(crate_prop) && s.catalog.binding.static_mesh_actors.count(crate);
+        const bool cabinet_candidate=(before.owner_fname>>16)==2 && s.catalog.binding.static_mesh_actors.count(cabinet);
+        const bool bread_candidate=(before.owner_fname>>16)==4 && s.catalog.binding.static_mesh_actors.count(bread);
+        const bool target_candidate=(before.owner_fname>>16)==1 && s.catalog.binding.static_mesh_actors.count(target);
+        if (id==s.catalog.binding.bed_instance_id || (!s.catalog.binding.static_mesh_actors.count(id) &&
+            !crate_candidate && !cabinet_candidate && !bread_candidate && !target_candidate)) return {};
         return s.latest;
     } catch (...) {impl_->Disable();return {};}
 }
 bool SceneDriver::SetScopeSample(std::uint64_t ticket,ThreadToken thread,
                                  const scene_bridge::SubmissionSample& before,
-                                 const scene_bridge::ProbeStaticMesh* generic) noexcept {
+                                 const scene_bridge::ProbeStaticMesh* generic,
+                                 scene_bridge::BedroomProp diagnostic_prop) noexcept {
     try {
         auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
         if (s.disabled.load()) return false;
@@ -319,25 +339,51 @@ bool SceneDriver::SetScopeSample(std::uint64_t ticket,ThreadToken thread,
                 }
             } else {
                 bool matched=false;
+                const bool bread_hint=generic && diagnostic_prop==scene_bridge::BedroomProp::Bread;
+                StaticMeshMatchStage bread_stage=StaticMeshMatchStage::Probe;
+                bool bread_resolved=false;
+                if (bread_hint) {
+                    const auto index=static_cast<std::size_t>(generic->diagnostic_stage);
+                    if (index<s.diagnostics.bread_sample_stages.size()) ++s.diagnostics.bread_sample_stages[index];
+                    if (generic->diagnostic_stage==scene_bridge::StaticMeshSampleStage::Complete) {
+                        const auto asset=static_cast<std::size_t>(generic->asset.status);
+                        if (asset<s.diagnostics.bread_asset_statuses.size()) ++s.diagnostics.bread_asset_statuses[asset];
+                    }
+                }
                 if (generic) ++s.diagnostics.static_mesh_samples;
                 if (generic && (before.owner_fname>>16)) {
-                    const auto id="actor:"+s.catalog.binding.map+":"+s.catalog.binding.map_sha256+
-                                  ":StaticMeshActor__"+std::to_string((before.owner_fname>>16)-1);
+                    const auto prop=generic->entry.owner_name_available &&
+                        std::memchr(generic->entry.owner_name,'\0',sizeof(generic->entry.owner_name)) ?
+                        scene_bridge::IdentifyBedroomProp(before.owner_fname>>16,generic->entry.owner_name) : scene_bridge::BedroomProp::None;
+                    const auto id="actor:"+s.catalog.binding.map+":"+s.catalog.binding.map_sha256+":"+
+                        (prop!=scene_bridge::BedroomProp::None ? std::string(scene_bridge::BedroomPropSuffix(prop)) :
+                         "StaticMeshActor__"+std::to_string((before.owner_fname>>16)-1));
                     if (s.catalog.binding.static_mesh_actors.count(id) && id!=s.catalog.binding.bed_instance_id) {
                         auto& track=s.actor_tracks[id];auto generation=track.generation;
                         const bool changed=!track.known || !SameIdentity(track.identity,identity) ||
                             (track.last_seen<s.next_frame && s.next_frame-track.last_seen>1);
                         if (changed) {if (generation==UINT64_MAX) {s.Disable();return false;}++generation;}
                         MeshSelection selected;
-                        if (ResolveStaticMesh(s.catalog.binding,*s.latest,before,*generic,scope.section,generation,selected)) {
+                        const bool resolved=ResolveStaticMesh(s.catalog.binding,*s.latest,before,*generic,scope.section,generation,selected,
+                                                              bread_hint ? &bread_stage : nullptr);
+                        if (bread_hint) bread_resolved=true;
+                        if (resolved) {
                             scope.window=s.window->BeginMesh(thread,s.pass,scope.stage,selected);
                             if (scope.window) {
                                 matched=true;++s.diagnostics.static_mesh_scopes;
                                 scope.resource=selected.matched_resource;scope.camera=s.latest_camera;
+                                if (prop!=scene_bridge::BedroomProp::None) scope.bedroom_prop_id=id;
+                                scope.bread=prop==scene_bridge::BedroomProp::Bread;
+                                if (bread_hint && scope.bread) ++s.diagnostics.bread_scopes_opened;
                                 track.identity=identity;track.generation=generation;track.last_seen=s.next_frame;track.known=true;
                             }
                         }
                     }
+                }
+                if (bread_hint) {
+                    if (!bread_resolved && generic->list_stable) bread_stage=StaticMeshMatchStage::Candidate;
+                    const auto index=static_cast<std::size_t>(bread_stage);
+                    if (index<s.diagnostics.bread_match_stages.size()) ++s.diagnostics.bread_match_stages[index];
                 }
                 if (generic && !matched) ++s.diagnostics.static_mesh_rejected;
                 if (matched) return true;
@@ -359,7 +405,8 @@ bool SceneDriver::SetScopeSample(std::uint64_t ticket,ThreadToken thread,
         return true;
     } catch (...) { impl_->Disable();return false; }
 }
-void SceneDriver::EndScope(std::uint64_t ticket,ThreadToken thread,const scene_bridge::SubmissionSample& after) noexcept {
+void SceneDriver::EndScope(std::uint64_t ticket,ThreadToken thread,const scene_bridge::SubmissionSample& after,
+                           const scene_bridge::ProbeStaticMesh* after_crate) noexcept {
     try {
         auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
         if (s.disabled.load()) return;
@@ -369,27 +416,41 @@ void SceneDriver::EndScope(std::uint64_t ticket,ThreadToken thread,const scene_b
         if (!SameThread(thread,record.thread) || !record.sampled) { s.Lost();return; }
         for (const auto& draw:s.draws) if (draw.second.scope==ticket) { s.Lost();break; }
         if (record.window && s.window) {
-            const bool unchanged=ScopeUnchanged(record.before,after);
+            bool unchanged=ScopeUnchanged(record.before,after);
+            if (!record.bedroom_prop_id.empty()) {
+                MeshSelection rechecked;
+                unchanged=unchanged && after_crate && s.latest &&
+                    ResolveStaticMesh(s.catalog.binding,*s.latest,after,*after_crate,record.section,1,rechecked) &&
+                    rechecked.matched_resource==record.resource &&
+                    rechecked.instance_id==record.bedroom_prop_id;
+            }
             if (!unchanged) ++s.diagnostics.scope_unstable;
+            if (record.bread) {
+                if (unchanged) ++s.diagnostics.bread_rechecks_ok;
+                else ++s.diagnostics.bread_rechecks_failed;
+            }
             if (!s.window->EndScope(record.window,thread,unchanged)) ++s.diagnostics.scope_rejected;
         }
     } catch (...) { impl_->Disable(); }
 }
 
-DrawStart SceneDriver::BeginDraw(ThreadToken thread,std::uint64_t enclosing_scope,const IndexedDraw& draw,ObservedDrawKind kind) noexcept {
+DrawStart SceneDriver::BeginDraw(ThreadToken thread,std::uint64_t enclosing_scope,const IndexedDraw& draw,
+                                 ObservedDrawKind kind,StackCursor stack) noexcept {
     try {
         auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
         if (s.disabled.load()) return {};
         if (s.draws.size()>=kMaxPending) { s.Disable();return {}; }
         if (!s.draws.empty() || !s.probes.empty() || !s.light_samples.empty() || !s.presents.empty() || !s.resets.empty()) s.Lost();
         const auto id=s.Ticket();if (!id) { s.Disable();return {}; }
-        Impl::Draw record;record.thread=thread;record.scope=enclosing_scope;record.arguments=draw;record.kind=kind;record.begin_frame=s.next_frame;
+        Impl::Draw record;record.thread=thread;record.scope=enclosing_scope;record.arguments=draw;record.kind=kind;
+        record.begin_frame=s.next_frame;record.stack=stack;
         if (enclosing_scope) {
             const auto scope=s.scopes.find(enclosing_scope);
             if (scope==s.scopes.end() || !SameThread(thread,scope->second.thread)) s.Lost();
             else if (scope->second.window) {
                 record.resource=scope->second.resource;record.camera=scope->second.camera;
                 record.before=scope->second.before;record.section=scope->second.section;
+                record.bread=scope->second.bread;
             }
         } else if (!s.scopes.empty()) s.Lost();
         bool unscoped=false;
@@ -424,11 +485,15 @@ void SceneDriver::EndDraw(std::uint64_t ticket,ThreadToken thread,bool succeeded
             if (!world) ++s.diagnostics.draw_world_bad;
             if (!viewport) ++s.diagnostics.draw_viewport_bad;
         }
+        if (record.bread) {
+            if (succeeded && geometry && camera && world && viewport) ++s.diagnostics.bread_draws_ok;
+            else ++s.diagnostics.bread_draws_failed;
+        }
         (void)s.window->EndDraw(record.window,thread,succeeded,geometry,camera,world,viewport,before.viewport);
     } catch (...) { impl_->Disable(); }
 }
 
-std::uint64_t SceneDriver::BeginPresent(ThreadToken thread,std::uint64_t* frame_id,PresentClockSample clock) noexcept {
+std::uint64_t SceneDriver::BeginPresent(ThreadToken thread,std::uint64_t* frame_id,PresentClockSample clock,StackCursor stack) noexcept {
     if (frame_id) *frame_id=UINT64_MAX;
     try {
         auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
@@ -454,6 +519,19 @@ std::uint64_t SceneDriver::BeginPresent(ThreadToken thread,std::uint64_t* frame_
             if (thread.id && thread.birth && draw.thread.id && draw.thread.birth)
                 s.diagnostics.oldest_pending_draw_thread=SameThread(thread,draw.thread) ? ThreadRelation::Same : ThreadRelation::Different;
             s.diagnostics.oldest_pending_draw_scoped=draw.scope!=0;
+        }
+        // A same-thread unscoped UP draw can be abandoned by a nonlocal exit.
+        // On the conventional downward x86 stack, a later Present frame's local
+        // marker above the draw frame's local marker indicates it has unwound.
+        // No other outstanding callback is discarded and a fresh window is
+        // primed only after this invalidation. Missing stack evidence fails closed.
+        if (s.draws.size()==1 && s.probes.empty() && s.light_samples.empty() && s.scopes.empty() &&
+            s.presents.empty() && s.resets.empty()) {
+            const auto item=s.draws.begin();const auto& draw=item->second;
+            if (draw.kind==ObservedDrawKind::PrimitiveUP && !draw.scope && SameThread(thread,draw.thread) &&
+                s.next_frame>=draw.begin_frame && s.next_frame-draw.begin_frame>=2 && StackHasUnwound(draw.stack,stack)) {
+                s.Lost();s.draws.erase(item);++s.diagnostics.unwound_primitive_up_draws;
+            }
         }
         const bool quiescent=s.Empty();
         if (!s.transitioning && quiescent && (!s.window || s.window->needs_rebind())) (void)s.Rebind();

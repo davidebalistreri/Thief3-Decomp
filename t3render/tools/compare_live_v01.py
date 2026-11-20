@@ -68,17 +68,30 @@ def compare(directory):
         if len(result) != 1: raise ValueError(f'ambiguous viewer frame {frame}')
         return result[0]
     flat, on = one(flat_frame), one(on_frame)
+    # Old captures predate framing diagnostics. If any selected frame has
+    # them, every selected frame must pass the new gate.
+    uses_framing = any(k in row for row in (flat, on) for k in ('bed_framing', 'candle_framing'))
+    uses_two_candle_framing = any('other_candle_framing' in row for row in (flat, on))
+    uses_door_crates = any('bedroom_door_crate_instances' in row for row in (flat, on))
     pose = v01.same_pose(flat, on)
     state = v01.candle(on)
+    actor_number = batch.get('candle_actor_number', 6)
+    max_shadowed_lights = 2 if 'preview_selected_candlestick_draws' in on else 1
     if (pose is None or flat.get('remaster_mode') is not False or flat.get('image') is not True or
             on.get('diagnostic_variant') != 'remaster' or on.get('image') is not True or
             on.get('lighting_mode') != 'preview_candle_candidate' or not state or not state['enabled'] or
+            type(actor_number) is not int or actor_number not in (6, 14) or state['actor_number'] != actor_number or
             state['factor'] is None or state['factor'] <= 0 or on.get('bed_override_instances') != 1 or
             on.get('pbr_draws', 0) <= 0 or on.get('bedroom_material_runs', 0) <= 0 or
             on.get('stone_wall_override_draws', 0) <= 0 or on.get('wood_floor_override_draws', 0) <= 0 or
             on.get('preview_gi_enabled') is not False or on.get('wall_displacement_triangles') != 0 or
-            on.get('preview_candlestick_draws') != 0 or on.get('preview_flame_draws') != 0 or
-            type(on.get('shadowed_lights')) is not int or not 0 <= on['shadowed_lights'] <= 1):
+            (uses_framing and (not v01.framed(flat) or not v01.framed(on))) or
+            (uses_two_candle_framing and (not v01.framed(flat, require_other=True) or
+                 not v01.framed(on, require_other=True) or
+                 not v01.bedroom_props_ready(flat, uses_door_crates) or not v01.bedroom_props_ready(on, uses_door_crates) or
+                 not v01.both_candles(flat, True, require_geometry=False) or not v01.both_candles(on, True))) or
+            not v01.candle_geometry(on, True) or
+            type(on.get('shadowed_lights')) is not int or not 0 <= on['shadowed_lights'] <= max_shadowed_lights):
         raise ValueError('remaster image lacks the required pose, overrides or live candle candidate')
     prefix = viewer.stem
     original = directory/f"bedroom.jsonl.frame-{matched[0]['trace_frame']}.ppm"
@@ -95,6 +108,8 @@ def compare(directory):
     if not difference['different_pixels']:
         raise ValueError('flat and remaster images are identical')
     off = None
+    other_off = None
+    images = [original, base, remaster]
     complete_path = directory/'remaster.complete'
     if complete_path.is_file():
         complete = json.loads(complete_path.read_text())
@@ -102,36 +117,65 @@ def compare(directory):
                 complete.get('remaster_frame') != on_frame):
             raise ValueError('completed comparison marker contradicts the selected frames')
         off_row = one(complete['off_frame'])
+        uses_framing = uses_framing or any(k in off_row for k in ('bed_framing', 'candle_framing'))
+        uses_two_candle_framing = uses_two_candle_framing or 'other_candle_framing' in off_row
         off_state = v01.candle(off_row)
+        other_off = v01.candle(off_row, other=True) if uses_two_candle_framing else None
         off_image = directory/f"{prefix}-remaster-off-frame-{complete['off_frame']}.ppm"
+        off_pose = v01.same_pose(flat, off_row)
+        on_off_pose = v01.same_pose(on, off_row)
         if (off_row.get('diagnostic_variant') != 'remaster_off' or off_row.get('image') is not True or
-                off_row.get('lighting_mode') != 'preview_candle_zero_candidate' or not off_state or off_state['enabled']):
+                off_row.get('lighting_mode') != 'preview_candle_zero_candidate' or not off_state or off_state['enabled'] or
+                off_state['actor_number'] != actor_number or
+                off_pose is None or on_off_pose is None or not v01.candle_geometry(off_row, False) or
+                (uses_two_candle_framing and (not v01.framed(flat, require_other=True) or
+                 not v01.framed(on, require_other=True) or not v01.framed(off_row, require_other=True) or
+                 ('bedroom_door_crate_instances' in off_row) != uses_door_crates or
+                 not v01.bedroom_props_ready(flat, uses_door_crates) or not v01.bedroom_props_ready(on, uses_door_crates) or
+                 not v01.bedroom_props_ready(off_row, uses_door_crates) or
+                 not v01.both_candles(flat, True, require_geometry=False) or
+                 not v01.both_candles(on, True) or not v01.both_candles(off_row, False))) or
+                (uses_framing and (not v01.framed(flat) or not v01.framed(on) or not v01.framed(off_row)))):
             raise ValueError('candle off image lacks a matching runtime candidate')
         read_ppm(off_image)
-        off = {'frame': complete['off_frame'], 'candidate': off_state, 'image_sha256': digest(off_image)}
-    return {'status': 'images_verified' if off else 'images_verified_candle_off_missing',
+        off = {'frame': complete['off_frame'], 'candidate': off_state, 'image_sha256': digest(off_image),
+               'pose_delta': off_pose, 'on_to_off_pose': on_off_pose}
+        images.append(off_image)
+    status = ('images_verified_candle_off_missing' if not off else
+              'images_verified' if uses_two_candle_framing else 'images_verified_two_candles_unverified')
+    return {'status': status,
             'session_id': session, 'trace_frame': matched[0]['trace_frame'], 'flat_frame': flat_frame,
             'remaster_frame': on_frame, 'pose_delta': pose,
             'original_sha256': digest(original), 'flat_sha256': digest(base), 'remaster_sha256': digest(remaster),
             'remaster_counts': {k: on.get(k) for k in ('mesh_instances','bsp_blocks','draws','triangles',
                                                         'bed_override_instances','bedroom_material_runs','pbr_draws',
-                                                        'stone_wall_override_draws','wood_floor_override_draws')},
+                                                        'stone_wall_override_draws','wood_floor_override_draws',
+                                                        'bed_source_instances','bedroom_crate_instances','bedroom_door_crate_instances','bedroom_cabinet_instances',
+                                                        'bedroom_bread_instances','bedroom_target_instances',
+                                                        'preview_candlestick_draws','preview_flame_draws',
+                                                        'preview_selected_candlestick_draws','preview_selected_flame_draws',
+                                                        'preview_other_candlestick_draws','preview_other_flame_draws')},
             'candle_on': state, 'candle_off': off, 'flat_vs_remaster': difference,
+            'other_candle_on': v01.candle(on, other=True) if uses_two_candle_framing else None,
+            'other_candle_off': other_off,
+            'two_candles': ('candidate_states_and_draws_checked' if uses_two_candle_framing and off else
+                            'unverified'),
+            'framing': 'projected_bounds_checked' if uses_framing else 'unavailable_historical_capture',
             'cleanup': {k: batch.get(k) for k in ('status','error','original_saves_unchanged','sandbox_removed',
                                                    'temporary_proxy_removed')},
             'limitations': ['The candle identity and enabled property are runtime candidates; user action must be confirmed.',
                             'Flat and remaster images are different frames from the same session and their pose delta is reported.',
+                            'The D3D8 image is captured before Present; display color transformations are unknown.',
                             'The viewer is partial; screenshots do not prove GPU resource bindings or total scene parity.',
-                            'Candle intensity and range are artistic calibration.']}, (original, base, remaster)
+                            'Projected bounds do not establish visibility, occlusion, interaction range or correct UVs.',
+                            'Candle intensity and range are artistic calibration.']}, tuple(images)
 
 
 def write_sheet(images, output):
-    labels = ('Originale D3D8', 'D3D12 live flat', 'D3D12 live remaster + candela')
+    labels = ('Original D3D8', 'DX12 Flat', 'Remaster ON', 'Remaster + Candle OFF')
     command = ['magick']
-    for i, (path, label) in enumerate(zip(images, labels)):
+    for path, label in zip(images, labels):
         command += ['(', str(path)]
-        if i == 0:
-            command += ['-gamma', '1.818']
         command += ['-resize','640x480!', '-background','#202832','-gravity','north','-splice','0x30',
                     '-font','/System/Library/Fonts/Supplemental/Arial.ttf','-fill','white','-pointsize','18',
                     '-annotate','+0+5',label,')']

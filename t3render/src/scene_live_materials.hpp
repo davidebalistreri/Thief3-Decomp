@@ -32,8 +32,23 @@ struct BedroomMaterial {
     std::array<std::string,4> source_sha256;
     std::array<scene::Texture,4> channels;
 };
+// Original diffuse textures used only by the v0.1 bedroom preview.
+inline constexpr std::array<const char*,12> kBedroomOriginalNames{{
+    "BF", "CIVGoodness_D", "GENbeamA_D", "GENbreadcrust_D", "GENgoodnessA_D", "GENgoodnessBOOK1_D",
+    "GENtarget_D", "GENwindowint_D", "HSEfloorB_D", "HSEGoodnessA_D", "STMtrimA_D", "STMwallB_D"
+}};
+struct BedroomOriginalMaterial {
+    std::string id, source_sha256;
+    scene::Texture albedo;
+};
 struct BedroomMaterialLibrary {
     std::array<BedroomMaterial,2> materials;
+    // Optional, fixed to the generated bed's wool and linen sections.
+    std::optional<std::array<BedroomMaterial,2>> bed_textiles;
+    std::optional<std::array<BedroomOriginalMaterial,kBedroomOriginalNames.size()>> original_materials;
+    // Generated metal albedo and tinted original wax luminance for the preview candlestick.
+    std::optional<BedroomOriginalMaterial> candlestick_metal;
+    std::optional<BedroomOriginalMaterial> candlestick_wax;
     std::optional<scene::Texture> wall_height;
     std::string wall_height_source_sha256;
 };

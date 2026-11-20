@@ -157,7 +157,11 @@ struct ProbeMapWitness {
 
 // Transient evidence for one selected visible static mesh. It is sampled
 // inside its submission scope and never becomes a serialized engine pointer.
+enum class StaticMeshSampleStage : std::uint32_t {
+    Initial, Header, List, Unique, Owner, Names, Assets, Complete
+};
 struct ProbeStaticMesh {
+    StaticMeshSampleStage diagnostic_stage = StaticMeshSampleStage::Initial;
     bool list_stable = false, object_table_complete = false;
     std::uint32_t name_occurrences = 0;
     ProbeEntry entry;

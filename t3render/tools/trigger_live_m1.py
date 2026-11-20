@@ -39,13 +39,23 @@ def angle(a, b):
     return math.degrees(math.acos(max(-1.0, min(1.0, sum(x * y for x, y in zip(a, b))))))
 
 
+def bed_count(row):
+    meshes = row.get("mesh_instances")
+    if type(meshes) is not int or not 0 <= meshes <= 8192:
+        return None
+    if "bed_source_instances" not in row:
+        return meshes if meshes in (0, 1) else None
+    bed = row["bed_source_instances"]
+    return bed if type(bed) is int and bed in (0, 1) and bed <= meshes else None
+
+
 def sample(row, session):
     if (not isinstance(row, dict) or row.get("event") != "frame" or row.get("source") != "live_process" or
             row.get("session_id") != session or row.get("map") != MAP or row.get("map_sha256") != MAP_SHA or
             type(row.get("render_pass")) is not int or row["render_pass"] != 0 or
             type(row.get("stage")) is not int or row["stage"] != 1 or
             row.get("identity_scope") not in ("visible_list", "full_object_scan") or
-            type(row.get("mesh_instances")) is not int or row["mesh_instances"] not in (0, 1) or
+            bed_count(row) is None or
             type(row.get("bsp_blocks")) is not int or row["bsp_blocks"] <= 0 or
             not isinstance(row.get("viewport"), dict) or row["viewport"].get("source") != "scoped_draw"):
         return None
@@ -62,7 +72,7 @@ def sample(row, session):
     if position is None or direction is None:
         return None
     return {"frame": row["frame"], "elapsed_ms": row["elapsed_ms"], "position": position,
-            "forward": direction, "bed": row["mesh_instances"],
+            "forward": direction, "bed": bed_count(row),
             "epoch": (row["map_epoch"], row["device_epoch"], row["continuity"])}
 
 

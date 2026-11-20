@@ -938,8 +938,49 @@ bool synthetic_wall_to_bed_gi() {
     std::size_t wood_changed=0;
     for(std::size_t i=0;i<wood_off.size();i+=4)if(wood_on[i]>wood_off[i])++wood_changed;
     CHECK(wood_changed>0);
+    // Place the same visible source and receiver behind the actual bedroom
+    // doorway. The back wall at x < 3150 must contribute to the cool bounce.
+    auto doorway=*snapshot;doorway.map="SouthQuarter1_int1";
+    doorway.map_sha256="ed7d475b1efdc713d28b2a978e11fb0f662bdb17c5c2769d77c96e1f74b7ceba";
+    doorway.conventions.meters_per_unit=.01905f;doorway.light_coverage=LightCoverage::Partial;
+    const Vec3 center{3100,1500,400};const float units=1/.01905f;
+    doorway.camera.view=identity;for(unsigned i=0;i<3;++i)doorway.camera.view[12+i]=-center[i];
+    doorway.camera.projection=identity;
+    for(unsigned i:{0u,5u,10u})doorway.camera.projection[i]=.01905f;
+    auto doorway_draws=draws;doorway_draws.map=doorway.map;doorway_draws.map_sha256=doorway.map_sha256;
+    doorway_draws.bedroom_original_materials=true;
+    std::copy(doorway.camera.view.begin(),doorway.camera.view.end(),doorway_draws.camera.view);
+    std::copy(doorway.camera.projection.begin(),doorway.camera.projection.end(),doorway_draws.camera.projection);
+    for(auto& draw:doorway_draws.draws) {
+        auto shifted=std::make_shared<Resource>(*draw.resource);shifted->id+=":doorway-fixture";
+        for(auto& p:shifted->geometry.positions)for(unsigned i=0;i<3;++i)p[i]=p[i]*units+center[i];
+        draw.resource=std::move(shifted);
+    }
+    VisualLight cool_candidate;cool_candidate.id="light-actor:"+doorway.map+":"+doorway.map_sha256+":D_384:6";
+    cool_candidate.generation=1;cool_candidate.binding=BindingEvidence::Candidate;
+    const Vec3 cool_position{center[0]-.8f*units,center[1],center[2]-.5f*units};
+    cool_candidate.position={cool_position,BindingEvidence::Candidate};doorway.lights={cool_candidate};
+    RawLightItem cool_item;cool_item.candidate=cool_candidate;
+    std::memcpy(cool_item.field_34.data(),cool_position.data(),sizeof(float)*3);
+    const Vec3 cool_color{.2f,.5f,1};const float full_intensity=1;
+    std::memcpy(cool_item.field_68.data(),cool_color.data(),sizeof(float)*3);
+    std::memcpy(&cool_item.field_8c,&full_intensity,sizeof(float));
+    auto cool_batch=std::make_shared<RawLightBatch>();cool_batch->listed=1;cool_batch->items.push_back(cool_item);
+    RawLightFrame doorway_raw;doorway_raw.map_epoch=doorway.map_epoch;doorway_raw.device_epoch=doorway.device_epoch;
+    doorway_raw.continuity=doorway.continuity;doorway_raw.frame_id=doorway.frame_id;
+    doorway_raw.provenance=doorway.provenance;doorway_raw.camera=doorway.camera;doorway_raw.batch=cool_batch;
+    auto render_door=[&](unsigned sources,std::vector<std::uint8_t>& pixels) {
+        return gi->PrepareCandlePreview(doorway,&doorway_raw,doorway_draws,true,nullptr,false,sources) &&
+               gi->Submit() && gi->Finish(&pixels);
+    };
+    std::vector<std::uint8_t> no_door_bounce,door_bounce;
+    CHECK(render_door(0,no_door_bounce) && render_door(2,door_bounce));
+    std::size_t doorway_changed=0;
+    for(std::size_t i=0;i<no_door_bounce.size();i+=4)if(door_bounce[i+2]>no_door_bounce[i+2])++doorway_changed;
+    CHECK(doorway_changed>0);
     std::cout<<"scene_live_wall_bed_gi_fixture=ok warm_pixels="<<warmer<<" no_wall=unchanged"
-             <<" occluded=unchanged light_off=unchanged resize=ok cool=blue wood_pixels="<<wood_changed<<"\n";
+             <<" occluded=unchanged light_off=unchanged resize=ok cool=blue wood_pixels="<<wood_changed
+             <<" doorway_pixels="<<doorway_changed<<"\n";
     return true;
 }
 

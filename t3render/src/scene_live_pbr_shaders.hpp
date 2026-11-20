@@ -201,8 +201,10 @@ float4 main(float4 uv:TEXCOORD0,float3 worldpos:TEXCOORD1,float3 normal:TEXCOORD
     // sources; source masks allow independent tests of the two contributions.
     o.position=all(abs(relative)<60000)?float4(relative,(color.a==-3||color.a==-5||color.a==-9||color.a==-11)?2:1):0;
     bool wall_source=color.a==-10 || (color.a<0 && color.a>-2.5);
-    bool door_source=post_process.z>0 && worldpos.x>3150 && worldpos.x<3360 &&
-                     worldpos.y>1400 && worldpos.y<1600 && worldpos.z>260 && worldpos.z<500;
+    // Include the back wall and target visible through the doorway; limiting
+    // the source volume to the threshold leaves only floor and crate tops.
+    bool door_source=post_process.z>0 && worldpos.x>3000 && worldpos.x<3360 &&
+                     worldpos.y>1375 && worldpos.y<1625 && worldpos.z>260 && worldpos.z<550;
     uint source_mask=(uint)max(post_process.z-1,0);
     bool wall_selected=wall_source && (post_process.z<0.5 || (source_mask&1)!=0);
     bool door_selected=door_source && (source_mask&2)!=0;

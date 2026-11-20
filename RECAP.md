@@ -1,14 +1,24 @@
 # Thief: Deadly Shadows Remaster — stato al 20 novembre 2026
 
-## Remaster v0.2 — Visual Quality Pass (in corso)
+## Remaster v0.2 — Visual Quality Pass (scena acquisita)
 
 Il golden resta `23a32058` (T3SDK) + `50d833c` (Godot). La [tavola
-benchmark](build/remaster-v02/visual-quality-benchmark.png) confronta la posa
-registrata con il renderer aggiornato: i pannelli v0.2 sono ricostruzioni
-offline e lo spegnimento è simulato. Il generatore usa la camera del frame
-1411, distante 0,086 unità T3 dal frame originale/flat 1406; la stessa
-ricostruzione renderizzata dal golden riproduce il frame 1411 pixel per pixel.
-Non è ancora una cattura live v0.2.
+finale](build/t3render-captures/remaster-v02-live-20261120-0847utc/remaster-v0.2-final-comparison.png)
+mostra in alto i quattro frame acquisiti nella stessa sessione v0.2; sotto
+confronta v0.1 live con v0.2 ricostruito offline dalla stessa identica camera
+benchmark. Il golden ricostruito riproduce il frame live 1411 pixel per pixel.
+La posa della nuova sessione live differisce da quella benchmark di 1,343
+unità T3 e 1,668°: il confronto fra versioni usa quindi la ricostruzione,
+non i due frame live sovrapposti.
+
+Nella prova live originale e flat condividono il frame 3861; ON è il 3876 e
+OFF il 3902. La distanza massima fra le pose selezionate è 0,1381 unità T3,
+con orientamento identico a precisione float32. GI è attiva in ON e OFF; la
+candela sinistra passa da ON a OFF e l'altra resta accesa. L'utente conferma
+di aver spento la candela al segnale senza cambiare posa. I salvataggi originali
+sono invariati; copia isolata e proxy temporaneo sono stati rimossi. Il
+[report live](build/t3render-captures/remaster-v02-live-20261120-0847utc/remaster-v0.2-review.json)
+conserva impronte, conteggi e limiti.
 
 Le due candele mantengono posizione e modulazione candidate, con intensità
 riequilibrate; una luce fredda artistica è collocata oltre la porta. Le ombre
@@ -24,17 +34,19 @@ evidente della silhouette; per questa posa resta selezionato PBR.
 Il primo rimbalzo screen-space usa soltanto luce diffusa diretta e sorgenti
 visibili selezionate. Le [prove isolate](build/remaster-v02/benchmark-evidence.json)
 mostrano un contributo caldo della parete su letto e pavimento e uno freddo,
-molto più debole, dal vano porta. I guadagni sono artistici, le superfici
-fuori schermo non contribuiscono e i timestamp GPU non erano disponibili:
-nessun dato di prestazioni live è ancora dimostrato. Sono passati 51 test host
-(uno saltato) e la fixture D3D12 fuori schermo. Serve ancora una verifica live
-con GI e spegnimento per chiudere la v0.2.
+molto più debole, dal vano porta. Il volume delle sorgenti include ora anche la
+parete di fondo: la fixture D3D12 rileva il rimbalzo, mentre la versione
+precedente fallisce il controllo. I guadagni sono artistici, le superfici fuori
+schermo non contribuiscono e la prova live non ha isolato GI ON/OFF. I campioni
+del viewer durante la cattura diagnostica sono circa 7,38/s in flat e 6,80/s
+con GI; non sono misure GPU né prestazioni del gioco senza diagnostica. Sono
+passati 51 test host (uno saltato) e la fixture D3D12 fuori schermo.
 
 ## Obiettivo e stato
 
 La bedroom v0.1 è stata verificata live con `stone_wall_v2`, `wood_floor_v2`,
-`bed_high` e le candele runtime candidate. Il lavoro corrente è il passaggio
-visivo v0.2 descritto sopra; la relativa verifica live resta da fare.
+`bed_high` e le candele runtime candidate. Il passaggio visivo v0.2 e la sua
+verifica per la scena acquisita sono descritti sopra.
 
 ## Traguardi
 

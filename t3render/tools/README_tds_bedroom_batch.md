@@ -93,6 +93,14 @@ must also match the original pose. Candle position and enabled/modulation fields
 the user action and images still need inspection. Intensity and range are
 artistic, and missing samples do not establish that the candle is off.
 
+For the v0.2 visual-quality preview, the same capture can use the v10 catalog
+and `--preview-gi` with the remaster toggle. Run the comparator with
+`--version 0.2`; it requires the bounce to be active in both ON and OFF images
+and allows the additional artistic doorway light. This is still a same-session
+capture, not a guarantee that its pose matches a previous session. The offline
+[benchmark](README_visual_quality_benchmark.md) preserves the v0.1 camera for
+the version-to-version visual comparison.
+
 Use `--candle-left` with `--preview-candle --candle-link-diagnostics` to
 select the reachable left candlestick `D_384__13` rather than the bedside
 `D_384__5`. Frame 1139 of the earlier session projected these actors onto
@@ -139,8 +147,8 @@ approximations, not the original textures. The generated bed wood sections use
 optional `--bed-textiles`, together with `--bedroom-props`, `--bed-high` and
 `--bedroom-materials`, exports a v8 catalog with the generated wool and linen
 textures for those two bed sections. Pillow roughness and textile AO use
-constants; generated normal maps are included but not applied by the ordinary
-live PBR path. Older catalogs keep the color fallback. In an offline
+constants; at the time of v0.1 these generated normal maps were not applied by
+the ordinary live PBR path. The v0.2 bedroom preview samples them. Older catalogs keep the color fallback. In an offline
 reconstruction the wool remains very dark, and the new catalog has not been
 tested in the game. The candle preview also uses an artistic ambient level to
 keep geometry visible when off.

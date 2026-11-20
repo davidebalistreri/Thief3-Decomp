@@ -1,11 +1,40 @@
 # Thief: Deadly Shadows Remaster — stato al 20 novembre 2026
 
+## Remaster v0.2 — Visual Quality Pass (in corso)
+
+Il golden resta `23a32058` (T3SDK) + `50d833c` (Godot). La [tavola
+benchmark](build/remaster-v02/visual-quality-benchmark.png) confronta la posa
+registrata con il renderer aggiornato: i pannelli v0.2 sono ricostruzioni
+offline e lo spegnimento è simulato. Il generatore usa la camera del frame
+1411, distante 0,086 unità T3 dal frame originale/flat 1406; la stessa
+ricostruzione renderizzata dal golden riproduce il frame 1411 pixel per pixel.
+Non è ancora una cattura live v0.2.
+
+Le due candele mantengono posizione e modulazione candidate, con intensità
+riequilibrate; una luce fredda artistica è collocata oltre la porta. Le ombre
+usano il filtro morbido esistente e l'esposizione HDR viene applicata prima del
+tone mapping. Le normal generate di pietra, legno, lana e lino sono attive;
+la lana è schiarita in spazio lineare e il metallo ha una risposta propria.
+
+Il [confronto parete](build/remaster-v02/wall-comparison.png) usa una height
+map caricata soltanto in una copia in memoria del materiale. Nella posa
+benchmark il displacement porta 16 triangoli a 9.216 senza miglioramento
+evidente della silhouette; per questa posa resta selezionato PBR.
+
+Il primo rimbalzo screen-space usa soltanto luce diffusa diretta e sorgenti
+visibili selezionate. Le [prove isolate](build/remaster-v02/benchmark-evidence.json)
+mostrano un contributo caldo della parete su letto e pavimento e uno freddo,
+molto più debole, dal vano porta. I guadagni sono artistici, le superfici
+fuori schermo non contribuiscono e i timestamp GPU non erano disponibili:
+nessun dato di prestazioni live è ancora dimostrato. Sono passati 51 test host
+(uno saltato) e la fixture D3D12 fuori schermo. Serve ancora una verifica live
+con GI e spegnimento per chiudere la v0.2.
+
 ## Obiettivo e stato
 
-L'obiettivo immediato è una bedroom renderizzata dal consumer D3D12 live,
-seguita da un confronto nella stessa sessione fra originale D3D8, D3D12 flat
-e D3D12 con `stone_wall_v2`, `wood_floor_v2`, `bed_high` e una candela
-runtime. La fase successiva è in pausa fino alla verifica visiva di v0.1.
+La bedroom v0.1 è stata verificata live con `stone_wall_v2`, `wood_floor_v2`,
+`bed_high` e le candele runtime candidate. Il lavoro corrente è il passaggio
+visivo v0.2 descritto sopra; la relativa verifica live resta da fare.
 
 ## Traguardi
 
@@ -37,8 +66,8 @@ runtime. La fase successiva è in pausa fino alla verifica visiva di v0.1.
   **v0.1 DONE per la scena acquisita**. Le intensità restano artistiche e i
   campioni non dimostrano da soli i binding GPU.
 
-Displacement della parete e GI realtime vengono dopo una v0.1 visivamente
-convincente. Nessuna priorità attuale all'ottimizzazione delle prestazioni.
+La valutazione di displacement e GI segue la v0.1. Nessuna priorità attuale
+all'ottimizzazione delle prestazioni.
 
 ## Verifica live v0.1 — 20 novembre
 

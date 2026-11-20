@@ -25,7 +25,7 @@ struct ViewerProvider {
     bool preview_pbr = false;
     bool preview_candle = false; // explicit candidate-only, artistic preview
     bool wall_displacement = false; // opt-in viewer-only head-wall geometry
-    bool preview_gi = false; // experimental screen-space head-wall-to-bed bounce
+    bool preview_gi = false; // experimental screen-space bedroom bounce
     // Optional existing local directory; copied matrices, candidate light
     // words and flat images contain no engine-object addresses.
     std::wstring diagnostic_directory;

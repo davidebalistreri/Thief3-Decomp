@@ -64,9 +64,12 @@ public:
     // contribution; a null sample never asserts a verified disabled state.
     // other_raw is restricted to the other researched bedroom candle and,
     // when raw is also supplied, must refer to the same raw batch.
+    // The last two parameters isolate artistic sources for visual comparisons;
+    // normal viewer calls include both doorway light and bounce sources.
     bool PrepareCandlePreview(const Snapshot& snapshot, const RawLightFrame* raw,
                               const ResidentFlatFrame& frame, bool readback = false,
-                              const RawLightFrame* other_raw = nullptr) noexcept;
+                              const RawLightFrame* other_raw = nullptr,
+                              bool doorway_fill = true, unsigned bounce_sources = 3) noexcept;
     bool Submit() noexcept;
     bool Finish(std::vector<std::uint8_t>* pixels = nullptr) noexcept;
     // Present is deliberately outside the scene lock: a driver or windowing

@@ -723,6 +723,31 @@ class CaptureBatchTests(unittest.TestCase):
                               remaster_toggle=True, candle_left=True)
             popen.assert_not_called()
 
+    def test_remaster_toggle_accepts_v10_with_gi_before_launch(self):
+        bottle = self.root / "bottle"
+        steam = bottle / "drive_c/Program Files (x86)/Steam/steam.exe"
+        system = steam.parent / "steamapps/common/Thief Deadly Shadows/System"
+        system.mkdir(parents=True);steam.write_bytes(b"fixture")
+        proxy, catalog = self.root / "proxy.dll", self.root / "catalog.bin"
+        proxy.write_bytes(b"fixture");catalog.write_bytes(b"T3LCAT10fixture")
+        resolved = tuple(p.resolve() for p in (self.root / "engine", bottle, system, proxy, self.root / "result"))
+        original_is_file = Path.is_file
+        def is_file(path):
+            return str(path) == "/usr/bin/sandbox-exec" or original_is_file(path)
+        with mock.patch.object(batch, "validate_paths", return_value=resolved), \
+             mock.patch.object(batch.sys, "platform", "darwin"), \
+             mock.patch.object(Path, "is_file", autospec=True, side_effect=is_file), \
+             mock.patch.object(batch, "wine_or_steam_pids", return_value=[]), \
+             mock.patch.object(batch, "game_pids", return_value=[42]), \
+             mock.patch.object(batch.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(batch.BatchError, "TDS is already running"):
+                batch.execute(*map(str, resolved), delay=0, timeout=10, frames=3, terminate=True,
+                              scene_bridge=True, submission_scope=True, live_catalog=str(catalog),
+                              live_static_meshes=True, live_lights=True, manual_trigger=True, steam_launch=True,
+                              isolated_saves=True, preview_candle=True, candle_link_diagnostics=True,
+                              remaster_toggle=True, candle_left=True, preview_gi=True)
+            popen.assert_not_called()
+
     def test_static_mesh_sampling_accepts_v8_to_v10_before_launch(self):
         engine, bottle = self.root / "engine", self.root / "bottle"
         system = bottle / "drive_c/Steam/Thief/System";system.mkdir(parents=True)

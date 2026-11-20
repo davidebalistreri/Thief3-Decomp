@@ -414,6 +414,13 @@ class LiveV01Tests(unittest.TestCase):
                     dual_on['shadowed_lights'] = 3
                     with self.assertRaisesRegex(ValueError, 'remaster image'):
                         compare_v01.compare(root)
+                    dual_on['preview_gi_enabled'] = True
+                    dual_off.update(preview_gi_enabled=True, wall_displacement_triangles=0)
+                    self.assertEqual(compare_v01.compare(root, '0.2')[0]['status'],
+                                     'images_verified_two_candles_unverified')
+                    dual_off['preview_gi_enabled'] = False
+                    with self.assertRaisesRegex(ValueError, 'candle off image'):
+                        compare_v01.compare(root, '0.2')
                 flat2, on2, off2 = (add_bedroom_props(add_framing(copy.deepcopy(row))) for row in (flat, on, off))
                 flat2['light_raw_available'] = True
                 flat2['light_raw'] = copy.deepcopy(on2['light_raw'])

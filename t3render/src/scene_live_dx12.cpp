@@ -29,6 +29,7 @@ struct LightingConstants {
     std::array<float,4> camera_scale{}, options{};
     std::array<std::array<float,4>,kMaxRenderLights> position_range{}, color_intensity{}, direction_outer{}, params{};
     Matrix gi_view{}, gi_projection{};
+    std::array<float,4> post_process{};
 };
 
 template<class T> void Release(ComPtr<T>& value) {
@@ -1068,8 +1069,21 @@ struct FlatD3D12::Impl {
             const bool gi_bed=preview_gi && can_light && draw.material_id &&
                 draw.resource->id.compare(0,bed_mesh_prefix.size(),bed_mesh_prefix)==0 &&
                 draw.material_id->compare(0,bed_material_prefix.size(),bed_material_prefix)==0;
+            // Only the four generated materials have their own normal maps.
+            // Original albedos borrow wood auxiliary channels and must not
+            // accidentally inherit its normal map.
+            const bool material_normal=can_light && f.bedroom_original_materials && texture_index<4;
+            const bool bed_wool=material_normal && texture_index==2;
+            const bool gi_wood=preview_gi && material_normal && texture_index==1;
+            const bool gi_wall=preview_gi && material_normal && texture_index==0;
+            const bool candlestick_metal=can_light && f.bedroom_original_materials &&
+                texture_index==4+kBedroomOriginalNames.size();
             const float alpha=draw.emission>0 ? 1+draw.emission : wall_relief ? -static_cast<float>(draw.wall_relief) :
-                              gi_bed ? -3.0f : draw.color[3];
+                              gi_bed ? (bed_wool ? -9.0f : material_normal ? -5.0f : -3.0f) :
+                              gi_wood ? -11.0f :
+                              gi_wall ? -10.0f :
+                              bed_wool ? -8.0f :
+                              material_normal ? -4.0f : candlestick_metal ? -6.0f : draw.color[3];
             const float color[]{draw.color[0],draw.color[1],draw.color[2],alpha};
             list->SetGraphicsRoot32BitConstants(1,4,color,0);
             if (can_light) ++pbr_draws;
@@ -1254,13 +1268,14 @@ bool FlatD3D12::PreparePreviewLit(const Snapshot& snapshot,const ResidentFlatFra
     } catch (...) { if (impl_) impl_->failed=true;return false; }
 }
 bool FlatD3D12::PrepareCandlePreview(const Snapshot& snapshot,const RawLightFrame* raw,
-                                     const ResidentFlatFrame& frame,bool readback,const RawLightFrame* other_raw) noexcept {
+                                     const ResidentFlatFrame& frame,bool readback,const RawLightFrame* other_raw,
+                                     bool doorway_fill,unsigned bounce_sources) noexcept {
     try {
-        if (!impl_ || impl_->failed || impl_->pending || impl_->prepared || !FrameMatchesSnapshot(snapshot,frame) ||
+        if (!impl_ || impl_->failed || impl_->pending || impl_->prepared || bounce_sources>3 || !FrameMatchesSnapshot(snapshot,frame) ||
             snapshot.conventions.length_unit!=LengthUnit::T3Unit || snapshot.conventions.axes!=Axes::T3Xyz ||
             snapshot.conventions.up_axis!=UpAxis::Z || !snapshot.conventions.meters_per_unit ||
             !std::isfinite(*snapshot.conventions.meters_per_unit) || *snapshot.conventions.meters_per_unit<=0) return false;
-        Vec3 camera{};std::array<RenderLight,2> lights{};std::size_t count=0;
+        Vec3 camera{};std::array<RenderLight,3> lights{};std::size_t count=0;
         if (!CameraPositionFromView(snapshot.camera.view,camera)) return false;
         if (raw) {
             if (!CandlePreviewFromRaw(snapshot,*raw,lights[count])) return false;
@@ -1272,13 +1287,46 @@ bool FlatD3D12::PrepareCandlePreview(const Snapshot& snapshot,const RawLightFram
             if (RemasterCandleFromRaw(snapshot,*other_raw,lights[count],number)!=RemasterCandleState::On) return false;
             ++count;
         }
-        // Shadow slots correspond to the first lights; keep positive lights first.
-        if (count==2 && lights[0].intensity<=0 && lights[1].intensity>0) std::swap(lights[0],lights[1]);
+        // The two observed bedroom candles have different visual roles in
+        // this preview. Keep their runtime positions and modulation, while
+        // balancing the nearby table against the candle beside the bed.
+        if (frame.bedroom_original_materials) {
+            for (std::size_t i=0;i<count;++i) {
+                auto& light=lights[i];
+                if (light.id.size()>=3 && light.id.compare(light.id.size()-3,3,":14")==0)
+                    light.intensity*=0.4f;
+                else if (light.id.size()>=2 && light.id.compare(light.id.size()-2,2,":6")==0)
+                    light.intensity*=2.0f;
+                light.influence_radius_m=4.5f;
+                light.source_radius_m=0.20f;
+            }
+        }
+        if (doorway_fill && frame.bedroom_original_materials &&
+            std::fabs(*snapshot.conventions.meters_per_unit-0.01905f)<1e-8f) {
+            // Artistic fill placed beyond the bedroom doorway. This is not a
+            // sampled TDS light; it is independent of the candle switches.
+            auto& cool=lights[count++];
+            cool.position={3225,1500,410};cool.color_linear={0.25f,0.40f,1.0f};
+            cool.intensity=3.0f;cool.influence_radius_m=7.0f;cool.source_radius_m=0.35f;
+        }
+        // Shadow slots correspond to the first lights, including when a
+        // candidate candle reports zero and the doorway fill is still on.
+        std::stable_partition(lights.begin(),lights.begin()+count,
+                              [](const RenderLight& light){return light.intensity>0;});
         if (impl_->materials && !impl_->pbr_materials_ready && !impl_->InitializeMaterials(true)) {
             impl_->failed=true;return false;
         }
         LightingConstants constants;
         constants.camera_scale={camera[0],camera[1],camera[2],*snapshot.conventions.meters_per_unit};
+        // Exposure is applied to linear HDR after lighting and glow, before
+        // tone mapping. Other preview paths retain their existing exposure.
+        if (frame.bedroom_original_materials) {
+            constants.post_process[0]=1.35f;
+            // The first screen-space bounce sees only the captured subset of
+            // the room; this preview gain compensates for missing sources.
+            constants.post_process[1]=5.0f;
+            constants.post_process[2]=static_cast<float>(bounce_sources+1);
+        }
         const auto requested=frame.draws.empty() ? 0u : static_cast<unsigned>(std::count_if(lights.begin(),lights.begin()+count,
             [](const RenderLight& light){return light.intensity>0;}));
         const bool budget_exceeded=requested && frame.draws.size()>kMaxShadowDrawCalls/(requested*6);

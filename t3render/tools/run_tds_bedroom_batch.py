@@ -248,7 +248,7 @@ def env_for(engine, bottle, output, frames, scene_bridge=False, submission_scope
         capture["T3RENDER_SCENE_LIVE_WALL_DISPLACEMENT"] = "1"
     if preview_gi:
         if live_catalog is None:
-            raise BatchError("GI preview requires a height-enabled live catalog")
+            raise BatchError("GI preview requires a live catalog")
         capture["T3RENDER_SCENE_LIVE_PREVIEW_GI"] = "1"
     env = {k: v for k, v in os.environ.items() if not k.startswith("T3RENDER_") and
            k not in ("WINEDLLPATH", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH")}
@@ -426,7 +426,7 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
     if wall_displacement and live_catalog is None:
         raise BatchError("wall displacement requires a height-enabled live catalog")
     if preview_gi and live_catalog is None:
-        raise BatchError("GI preview requires a height-enabled live catalog")
+        raise BatchError("GI preview requires a live catalog")
     engine, bottle, system, proxy, output = validate_paths(engine, bottle, system, proxy, output)
     steam = bottle / "drive_c/Program Files (x86)/Steam/steam.exe"
     if steam_launch and (not steam.is_file() or system !=
@@ -445,7 +445,7 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
         raise BatchError("distributed sampling requires a 1000–10000 ms interval, live viewer and manual trigger")
     if remaster_toggle and (not isolated_saves or not manual_trigger or not preview_candle or
                             not candle_link_diagnostics or sample_interval_ms is not None or live_only or
-                            preview_pbr or wall_displacement or preview_gi or frames != 3):
+                            preview_pbr or wall_displacement or frames != 3):
         raise BatchError("remaster toggle requires isolated saves, manual capture and the candle-link preview only")
     if (not math.isfinite(delay) or not math.isfinite(timeout) or delay < 0 or timeout <= delay or
             type(frames) is not int or not (2 if sample_interval_ms else 1) <= frames <= (15 if sample_interval_ms else 3)):
@@ -460,10 +460,14 @@ def execute(engine, bottle, system, proxy, output, delay, timeout, frames, termi
                 or not live_catalog.is_file()):
             raise BatchError("live catalog must be an existing absolute local file")
         live_catalog = live_catalog.resolve()
-        if wall_displacement or preview_gi:
+        if wall_displacement:
             with live_catalog.open("rb") as stream:
                 if stream.read(8)!=b"T3LCAT06":
-                    raise BatchError("wall displacement and GI preview require a v6 height-enabled live catalog")
+                    raise BatchError("wall displacement requires a v6 height-enabled live catalog")
+        if preview_gi:
+            with live_catalog.open("rb") as stream:
+                if stream.read(8) not in (b"T3LCAT06", b"T3LCAT08", b"T3LCAT09", b"T3LCAT10"):
+                    raise BatchError("GI preview requires a v6 or v8–v10 material catalog")
         if live_static_meshes:
             with live_catalog.open("rb") as stream:
                 magic = stream.read(8)
@@ -729,7 +733,7 @@ def main(argv=None):
     run.add_argument("--candle-link-diagnostics", action="store_true", help="sample the bedroom candle's visual actor link; requires --live-lights")
     run.add_argument("--candle-left", action="store_true", help="use the bedroom's left candlestick; requires candle preview and link diagnostics")
     run.add_argument("--wall-displacement", action="store_true", help="use experimental displaced head-wall geometry; requires a v6 catalog")
-    run.add_argument("--preview-gi", action="store_true", help="use experimental screen-space wall-to-bed bounce; requires a v6 catalog")
+    run.add_argument("--preview-gi", action="store_true", help="use experimental screen-space bedroom bounce; requires a v6 or v8–v10 material catalog")
     run.add_argument("--manual-trigger", action="store_true", help="wait for output-dir/capture.request before recording")
     run.add_argument("--steam-launch", action="store_true", help="start the installed Steam game (app 6980) in the virtual desktop")
     run.add_argument("--resume-bedroom", action="store_true", help="pass the observed bedroom Current Save URL through Steam")

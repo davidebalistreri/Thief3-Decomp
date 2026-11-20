@@ -701,6 +701,13 @@ bool synthetic_pbr_materials() {
     std::vector<std::uint8_t> base,unknown_normal,mapped,low_roughness;
     CHECK(render(*a,false,base) && render(*b,false,unknown_normal) && base==unknown_normal);
     CHECK(render(*b,true,mapped) && mapped!=base);
+    // In the bedroom preview the generated material's own normal is active
+    // without enabling the synthetic-only normal-map switch.
+    resident.bedroom_original_materials=true;
+    std::vector<std::uint8_t> bedroom_flat_normal,bedroom_tilted_normal;
+    CHECK(render(*a,false,bedroom_flat_normal) && render(*b,false,bedroom_tilted_normal));
+    CHECK(bedroom_flat_normal!=bedroom_tilted_normal);
+    resident.bedroom_original_materials=false;
     CHECK(render(*glossy,false,low_roughness));const auto at=(32u*64+32)*4;
     std::cout<<"synthetic_pbr_material_sample="<<unsigned(base[at])<<","<<unsigned(low_roughness[at])<<"\n";
     CHECK(base[at]>=60 && base[at]<=70 && low_roughness[at]>base[at]+40); // sRGB albedo, linear roughness
@@ -736,6 +743,12 @@ bool synthetic_pbr_materials() {
     CHECK(original_gpu->cache_stats().textured_draws==1 && original_textured!=original_flat);
     CHECK(original_gpu->PrepareLit(*scene.current(),original_draw,true,false) && original_gpu->Submit() && original_gpu->Finish(&original_lit));
     CHECK(original_gpu->cache_stats().textured_draws==1 && original_lit!=original_flat);
+    auto tilted_originals=std::make_shared<BedroomMaterialLibrary>(*originals);
+    tilted_originals->materials[1].channels[1].mips[0].rgba={218,128,218,255};
+    auto tilted_original_gpu=FlatD3D12::Create(nullptr,128u*1024u*1024u,tilted_originals);CHECK(tilted_original_gpu);
+    std::vector<std::uint8_t> original_with_borrowed_normal;
+    CHECK(tilted_original_gpu->PrepareLit(*scene.current(),original_draw,true,false) && tilted_original_gpu->Submit() &&
+          tilted_original_gpu->Finish(&original_with_borrowed_normal) && original_with_borrowed_normal==original_lit);
     original_draw.bedroom_original_materials=false;
     CHECK(original_gpu->PrepareResident(original_draw,true) && original_gpu->Submit() && original_gpu->Finish(&original_restored));
     CHECK(original_restored==original_flat && original_gpu->cache_stats().textured_draws==0);
@@ -752,11 +765,18 @@ bool synthetic_pbr_materials() {
     metal_mesh.geometry.normals.assign(4,Vec3{0,0,-1});
     metal_draw.draws[0].resource=std::make_shared<const Resource>(std::move(metal_mesh));
     metal_draw.draws[0].material_id=metal.id;
+    metal_draw.bedroom_original_materials=true;
     std::vector<std::uint8_t> metal_textured,metal_flat,metal_lit,wax_textured;
     CHECK(metal_gpu->PrepareResident(metal_draw,true) && metal_gpu->Submit() && metal_gpu->Finish(&metal_textured));
     CHECK(metal_gpu->cache_stats().textured_draws==1);
     CHECK(metal_gpu->PrepareLit(*scene.current(),metal_draw,true,false) && metal_gpu->Submit() && metal_gpu->Finish(&metal_lit));
     CHECK(metal_gpu->cache_stats().textured_draws==1);
+    auto altered_wood=std::make_shared<BedroomMaterialLibrary>(*metal_library);
+    altered_wood->materials[1].channels[2].mips[0].rgba={20,20,20,255};
+    auto altered_metal_gpu=FlatD3D12::Create(nullptr,128u*1024u*1024u,altered_wood);CHECK(altered_metal_gpu);
+    std::vector<std::uint8_t> metal_with_changed_wood_roughness;
+    CHECK(altered_metal_gpu->PrepareLit(*scene.current(),metal_draw,true,false) && altered_metal_gpu->Submit() &&
+          altered_metal_gpu->Finish(&metal_with_changed_wood_roughness) && metal_with_changed_wood_roughness==metal_lit);
     metal_draw.draws[0].material_id=wax.id;
     CHECK(metal_gpu->PrepareResident(metal_draw,true) && metal_gpu->Submit() && metal_gpu->Finish(&wax_textured));
     CHECK(metal_gpu->cache_stats().textured_draws==1 && wax_textured!=metal_textured);
@@ -768,7 +788,7 @@ bool synthetic_pbr_materials() {
     CHECK(metal_gpu->cache_stats().textured_draws==0 && metal_flat!=metal_textured);
     std::cout<<"scene_live_candlestick_material_fixture=ok metal=visible wax=visible lit=ok wrong_mesh=fallback\n";
     std::cout<<"scene_live_pbr_preview_fixture=ok source=viewer_headlight roughness=visible evidence=unchanged\n";
-    std::cout<<"scene_live_pbr_material_fixture=ok source=synthetic srgb=ok roughness=ok normal=fixture_only\n";
+    std::cout<<"scene_live_pbr_material_fixture=ok source=synthetic srgb=ok roughness=ok normal=bedroom_scoped\n";
     return true;
 }
 
@@ -899,8 +919,27 @@ bool synthetic_wall_to_bed_gi() {
     std::vector<std::uint8_t> resized_pixels,restored;
     CHECK(render(*gi,resized,resized_draws,resized_pixels) && resized_pixels.size()==80u*40u*4u);
     CHECK(render(*gi,*snapshot,draws,restored) && restored==on);
+    // A separately coloured source must preserve its colour in the bounce.
+    auto cool=*snapshot;cool.lights[0].color_linear.value=Vec3{.2f,.5f,1};
+    std::vector<std::uint8_t> cool_off,cool_on;
+    CHECK(render(*base,cool,draws,cool_off) && render(*gi,cool,draws,cool_on));
+    std::int64_t red_bounce=0,blue_bounce=0;
+    for(std::size_t i=0;i<cool_off.size();i+=4) {
+        red_bounce+=int(cool_on[i])-int(cool_off[i]);
+        blue_bounce+=int(cool_on[i+2])-int(cool_off[i+2]);
+    }
+    CHECK(blue_bounce>red_bounce && blue_bounce>0);
+    // Wood on the floor is a receiver as well as the high-poly bed.
+    auto wood_draws=draws;auto wood=std::make_shared<Resource>(*wood_draws.draws[0].resource);
+    wood->id="fixture:gi-wood-receiver";wood_draws.draws[0].resource=wood;
+    wood_draws.draws[0].material_id=ids[1];wood_draws.bedroom_original_materials=true;
+    std::vector<std::uint8_t> wood_off,wood_on;
+    CHECK(render(*base,*snapshot,wood_draws,wood_off) && render(*gi,*snapshot,wood_draws,wood_on));
+    std::size_t wood_changed=0;
+    for(std::size_t i=0;i<wood_off.size();i+=4)if(wood_on[i]>wood_off[i])++wood_changed;
+    CHECK(wood_changed>0);
     std::cout<<"scene_live_wall_bed_gi_fixture=ok warm_pixels="<<warmer<<" no_wall=unchanged"
-             <<" occluded=unchanged light_off=unchanged resize=ok\n";
+             <<" occluded=unchanged light_off=unchanged resize=ok cool=blue wood_pixels="<<wood_changed<<"\n";
     return true;
 }
 

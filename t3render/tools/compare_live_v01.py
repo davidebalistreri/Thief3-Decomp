@@ -42,7 +42,9 @@ def image_difference(a, b):
     return {'width': wa, 'height': ha, 'different_pixels': changed, 'mean_absolute_rgb': mean}
 
 
-def compare(directory):
+def compare(directory, version='0.1'):
+    if version not in ('0.1', '0.2'):
+        raise ValueError('unsupported remaster comparison version')
     directory = Path(directory)
     enabled = json.loads((directory/'remaster.enable').read_text())
     on_ready = json.loads((directory/'remaster.on.ready').read_text())
@@ -76,7 +78,7 @@ def compare(directory):
     pose = v01.same_pose(flat, on)
     state = v01.candle(on)
     actor_number = batch.get('candle_actor_number', 6)
-    max_shadowed_lights = 2 if 'preview_selected_candlestick_draws' in on else 1
+    max_shadowed_lights = 3 if version == '0.2' else 2 if 'preview_selected_candlestick_draws' in on else 1
     if (pose is None or flat.get('remaster_mode') is not False or flat.get('image') is not True or
             on.get('diagnostic_variant') != 'remaster' or on.get('image') is not True or
             on.get('lighting_mode') != 'preview_candle_candidate' or not state or not state['enabled'] or
@@ -84,7 +86,7 @@ def compare(directory):
             state['factor'] is None or state['factor'] <= 0 or on.get('bed_override_instances') != 1 or
             on.get('pbr_draws', 0) <= 0 or on.get('bedroom_material_runs', 0) <= 0 or
             on.get('stone_wall_override_draws', 0) <= 0 or on.get('wood_floor_override_draws', 0) <= 0 or
-            on.get('preview_gi_enabled') is not False or on.get('wall_displacement_triangles') != 0 or
+            on.get('preview_gi_enabled') is not (version == '0.2') or on.get('wall_displacement_triangles') != 0 or
             (uses_framing and (not v01.framed(flat) or not v01.framed(on))) or
             (uses_two_candle_framing and (not v01.framed(flat, require_other=True) or
                  not v01.framed(on, require_other=True) or
@@ -127,6 +129,8 @@ def compare(directory):
         if (off_row.get('diagnostic_variant') != 'remaster_off' or off_row.get('image') is not True or
                 off_row.get('lighting_mode') != 'preview_candle_zero_candidate' or not off_state or off_state['enabled'] or
                 off_state['actor_number'] != actor_number or
+                (version == '0.2' and (off_row.get('preview_gi_enabled') is not True or
+                                       off_row.get('wall_displacement_triangles') != 0)) or
                 off_pose is None or on_off_pose is None or not v01.candle_geometry(off_row, False) or
                 (uses_two_candle_framing and (not v01.framed(flat, require_other=True) or
                  not v01.framed(on, require_other=True) or not v01.framed(off_row, require_other=True) or
@@ -186,11 +190,12 @@ def write_sheet(images, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
+    parser.add_argument('--version', choices=('0.1', '0.2'), default='0.1')
     args = parser.parse_args()
     try:
-        report, images = compare(args.directory)
-        image = args.directory/'remaster-v0.1-comparison.png'
-        data = args.directory/'remaster-v0.1-comparison.json'
+        report, images = compare(args.directory, args.version)
+        image = args.directory/f'remaster-v{args.version}-comparison.png'
+        data = args.directory/f'remaster-v{args.version}-comparison.json'
         if image.exists() or data.exists(): raise ValueError('comparison output already exists')
         write_sheet(images, image)
         data.write_text(json.dumps(report,indent=2,allow_nan=False)+'\n')
